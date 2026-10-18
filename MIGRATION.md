@@ -1,9 +1,9 @@
 # Desktop migration to hagency client
 
 Hagency Desktop development moved to
-[chrislearn/hagency-client](https://github.com/chrislearn/hagency-client) on
-2026-10-18 in [PR #2](https://github.com/chrislearn/hagency-client/pull/2), merged as
-[`0622ce8a`](https://github.com/chrislearn/hagency-client/commit/0622ce8aad384fc21efd98f1661552c5b96f979d).
+[hagency-org/hagency-client](https://github.com/hagency-org/hagency-client) on
+2026-10-18 in [PR #2](https://github.com/hagency-org/hagency-client/pull/2), merged as
+[`0622ce8a`](https://github.com/hagency-org/hagency-client/commit/0622ce8aad384fc21efd98f1661552c5b96f979d).
 
 The application and local Agent engine evolve together. A separate repository
 required matching their Git revisions for every shared identity, permission,
@@ -12,9 +12,9 @@ validate them together, and maintain one Cargo dependency lock and build configu
 It also provides a single home for platform CI and installer tooling.
 
 All 28 Rust packages now live under `crates/`. The native application is in
-[`crates/hagency-desktop`](https://github.com/chrislearn/hagency-client/tree/main/crates/hagency-desktop),
+[`crates/hagency-desktop`](https://github.com/hagency-org/hagency-client/tree/main/crates/hagency-desktop),
 with the Cargo package and executable name `rinx` retained. The engine is a local
-path dependency. Read the [workspace guide](https://github.com/chrislearn/hagency-client/blob/main/docs/workspace.md)
+path dependency. Read the [workspace guide](https://github.com/hagency-org/hagency-client/blob/main/docs/workspace.md)
 for the new layout and commands, including the Windows D: build-cache wrapper.
 
 The complete Desktop history through `52d88b2020a322d9c1883b412e74968c1a60ce01`

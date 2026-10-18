@@ -1,9 +1,9 @@
 # Hagency Desktop
 
-**Development has moved to [hagency-client](https://github.com/chrislearn/hagency-client).**
+**Development has moved to [hagency-client](https://github.com/hagency-org/hagency-client).**
 The native application now lives in
-[`crates/hagency-desktop`](https://github.com/chrislearn/hagency-client/tree/main/crates/hagency-desktop).
-[PR #2](https://github.com/chrislearn/hagency-client/pull/2) imported the complete
+[`crates/hagency-desktop`](https://github.com/hagency-org/hagency-client/tree/main/crates/hagency-desktop).
+[PR #2](https://github.com/hagency-org/hagency-client/pull/2) imported the complete
 Desktop history and organized all 28 Rust packages under one `crates/` workspace.
 
 Desktop and the local Agent engine share identity, Project, Room, policy and runtime
@@ -96,7 +96,7 @@ costs; restore the same owner's complete ledger when the recovery gate requires 
 ## Build and check
 
 Cargo fetches the owner engine from the `main` branch of
-[`chrislearn/hagency-client`](https://github.com/chrislearn/hagency-client).
+[`chrislearn/hagency-client`](https://github.com/hagency-org/hagency-client).
 The committed Cargo.lock records the exact revision used for a build; no sibling
 checkout is required. The repository pins Rust 1.98.0.
 Install CMake and the platform's native build dependencies, then run:
