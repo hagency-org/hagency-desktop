@@ -1,5 +1,18 @@
 # Hagency Desktop
 
+**Development has moved to [hagency-client](https://github.com/chrislearn/hagency-client).**
+The native application now lives in
+[`crates/hagency-desktop`](https://github.com/chrislearn/hagency-client/tree/main/crates/hagency-desktop).
+[PR #2](https://github.com/chrislearn/hagency-client/pull/2) imported the complete
+Desktop history and organized all 28 Rust packages under one `crates/` workspace.
+
+Desktop and the local Agent engine share identity, Project, Room, policy and runtime
+contracts. Maintaining them together lets one change update and test both sides,
+removes cross-repository revision pairing, and keeps dependencies, build configuration
+and installer workflows in one place. Please send new issues and pull requests to
+the client repository. This repository is retained for historical source, notices
+and existing release downloads; see [migration details](MIGRATION.md).
+
 0.5.0 is prepared but not published: the [release assessment](dev-vibe/release-0.5.0/assessment.zh.md) records outstanding upstream dependency security work. Existing downloads are on [GitHub Releases](https://github.com/hagency-org/hagency-desktop/releases).
 
 English | [简体中文](README.zh-CN.md)

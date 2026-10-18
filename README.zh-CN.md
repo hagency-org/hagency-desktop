@@ -1,5 +1,15 @@
 # Hagency Desktop
 
+**后续开发已迁移至 [hagency-client](https://github.com/chrislearn/hagency-client)。**
+原生程序位于 [`crates/hagency-desktop`](https://github.com/chrislearn/hagency-client/tree/main/crates/hagency-desktop)。
+[合仓 PR #2](https://github.com/chrislearn/hagency-client/pull/2) 保留了完整 Desktop 历史，
+并将全部 28 个 Rust package 统一整理到根 `crates/` 工作区。
+
+Desktop 与本地 Agent 引擎共同使用身份、Project、Room、权限和运行协议。
+合仓后可以在同一个改动中更新并验证界面与引擎，消除跨仓库提交配对和版本漂移，
+统一依赖锁定、构建配置及安装包流程。新的问题和 PR 请提交到 Client 仓库。
+本仓库仅保留历史源码、许可说明和已发布安装包，详见[迁移说明](MIGRATION.md)。
+
 0.5.0 已准备但尚未正式发布：[发布检查报告](dev-vibe/release-0.5.0/assessment.zh.md) 记录了待处理的上游依赖安全项。已发布版本见 [GitHub Releases](https://github.com/hagency-org/hagency-desktop/releases)。
 
 [English](README.md) | 简体中文
