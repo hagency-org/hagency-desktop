@@ -107,6 +107,20 @@ fn source_error(code: &str) -> NativeError {
     }
 }
 impl MatrixTokenSource for SdkTokens {
+    fn permits_explicit_reenrollment(&self) -> bool {
+        self.0.upgrade().is_some_and(|inner| {
+            inner.explicit_reenrollment.load(std::sync::atomic::Ordering::Acquire)
+                && Service(inner).check().is_ok()
+        })
+    }
+    fn consume_explicit_reenrollment(&self) -> bool {
+        self.0.upgrade().is_some_and(|inner| {
+            let service = Service(inner);
+            service.check().is_ok()
+                && service.0.explicit_reenrollment.swap(false, std::sync::atomic::Ordering::AcqRel)
+                && service.check().is_ok()
+        })
+    }
     fn access_token(
         &self,
     ) -> std::pin::Pin<
@@ -189,23 +203,66 @@ impl MatrixTokenSource for SdkTokens {
 }
 
 static CURRENT: LazyLock<Mutex<Option<Service>>> = LazyLock::new(|| Mutex::new(None));
+static PROCESS_CLOSING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+mod lifecycle;
+mod signin;
+#[cfg(feature = "resource-adoption")]
+mod adoption;
+#[cfg(feature = "resource-adoption")]
+mod allocation_worker;
+#[cfg(feature = "shared-execution")]
+mod shared_worker;
+#[cfg(feature = "shared-successors")]
+pub(crate) mod shared_successors;
+#[cfg(feature = "shared-intake")]
+mod shared_intake;
+#[cfg(feature="shared-budget-execution")]
+mod shared_budget;
+
 struct Inner {
     origin: String,
     owner: String,
     epoch: u64,
+    client_revision: u64,
+    // A completed OAuth sign-in permits one native registration. Restoring an
+    // active native session also discards it; it cannot authorize a later revoke.
+    explicit_reenrollment: std::sync::atomic::AtomicBool,
     state: PathBuf,
     native: tokio::sync::Mutex<Option<NativeOwner>>,
+    // Separate from the async initialization/cleanup lock: account transitions
+    // must revoke queued ledger work before awaiting SDK or native shutdown.
+    native_retirement: Mutex<Option<NativeOwner>>,
+    #[cfg(feature = "resource-adoption")]
+    adopted_initialization: Mutex<Option<::hagency::native_owner::AdoptedManagementSelection>>,
+    #[cfg(feature = "resource-adoption")]
+    adoption_pending: std::sync::atomic::AtomicBool,
+    #[cfg(feature = "resource-adoption")]
+    activation: tokio::sync::Mutex<adoption::ActivationTask>,
+    #[cfg(feature = "resource-adoption")]
+    allocations: allocation_worker::Worker,
+    #[cfg(feature = "shared-execution")]
+    shared: shared_worker::Worker,
     retired: std::sync::atomic::AtomicBool,
+    logout_requested: std::sync::atomic::AtomicBool,
     matrix_checked: tokio::sync::Mutex<Option<std::time::Instant>>,
 }
 #[derive(Clone)]
 pub struct Service(Arc<Inner>);
 impl Service {
+    fn state_for(origin: &str, owner: &str) -> Result<PathBuf, String> {
+        let identity = serde_json::to_vec(&(origin, owner)).map_err(|_| "invalid_account_identity")?;
+        Ok(crate::app_data_dir().join("native-owner").join(blake3::hash(&identity).to_hex().as_str()))
+    }
     pub fn for_current() -> Result<Self, String> {
-        if crate::logout::logout_state_machine::is_logout_in_progress() {
+        if PROCESS_CLOSING.load(std::sync::atomic::Ordering::Acquire)
+            || crate::logout::logout_state_machine::is_logout_in_progress()
+            || crate::sliding_sync::token_expired()
+            || crate::account_session::is_closing()
+        {
             return Err("matrix_account_changing".into());
         }
         let epoch = crate::account_session::epoch();
+        let client_revision = crate::sliding_sync::client_revision();
         let client = crate::sliding_sync::get_client().ok_or("matrix_sign_in_required")?;
         let owner = client
             .user_id()
@@ -216,37 +273,57 @@ impl Service {
             return Err("matrix_account_changing".into());
         }
         let mut current = CURRENT.lock().map_err(|_| "native_owner_unavailable")?;
+        if epoch != crate::account_session::epoch()
+            || PROCESS_CLOSING.load(std::sync::atomic::Ordering::Acquire)
+            || client_revision != crate::sliding_sync::client_revision()
+            || crate::sliding_sync::account_changing()
+            || crate::sliding_sync::token_expired()
+            || crate::logout::logout_state_machine::is_logout_in_progress()
+            || crate::account_session::is_closing()
+        {
+            return Err("matrix_account_changing".into());
+        }
         if let Some(service) = current.as_ref()
             && service.0.origin == origin
             && service.0.owner == owner
             && service.0.epoch == epoch
+            && service.0.client_revision == client_revision
             && !service.0.retired.load(std::sync::atomic::Ordering::Acquire)
         {
             return Ok(service.clone());
         }
         if let Some(old) = current.take() {
-            old.0
-                .retired
-                .store(true, std::sync::atomic::Ordering::Release);
+            old.retire();
             crate::sliding_sync::backend_runtime().spawn(async move {
-                old.shutdown().await;
+                if old.suspend().await.is_err() {
+                    makepad_widgets::warning!("Previous native owner drain requires recovery");
+                }
             });
         }
-        let digest = blake3::hash(
-            serde_json::to_string(&(&origin, &owner))
-                .map_err(|_| "invalid_account_identity")?
-                .as_bytes(),
-        )
-        .to_hex()
-        .to_string();
-        let state = crate::app_data_dir().join("native-owner").join(digest);
+        let state = Self::state_for(&origin, &owner)?;
         let service = Self(Arc::new(Inner {
             origin,
             owner,
             epoch,
+            client_revision,
+            explicit_reenrollment: std::sync::atomic::AtomicBool::new(
+                signin::consume(&client, epoch, client_revision),
+            ),
             state,
             native: tokio::sync::Mutex::new(None),
+            native_retirement: Mutex::new(None),
+            #[cfg(feature = "resource-adoption")]
+            adopted_initialization: Mutex::new(None),
+            #[cfg(feature = "resource-adoption")]
+            adoption_pending: std::sync::atomic::AtomicBool::new(false),
+            #[cfg(feature = "resource-adoption")]
+            activation: Default::default(),
+            #[cfg(feature = "resource-adoption")]
+            allocations: Default::default(),
+            #[cfg(feature = "shared-execution")]
+            shared: Default::default(),
             retired: std::sync::atomic::AtomicBool::new(false),
+            logout_requested: std::sync::atomic::AtomicBool::new(false),
             matrix_checked: tokio::sync::Mutex::new(None),
         }));
         *current = Some(service.clone());
@@ -256,21 +333,26 @@ impl Service {
         });
         Ok(service)
     }
-    /// Stable request pin: account epoch plus homeserver and exact Matrix ID.
+    /// Request pin includes SDK replacement even for the same Matrix account.
     /// The engine independently pins issuer/subject in every ledger/provider path.
     pub fn identity(&self) -> String {
-        serde_json::to_string(&(self.0.epoch, &self.0.origin, &self.0.owner)).unwrap_or_default()
+        serde_json::to_string(&(self.0.epoch, self.0.client_revision, &self.0.origin, &self.0.owner)).unwrap_or_default()
     }
     fn check(&self) -> Result<(), String> {
-        if self.0.retired.load(std::sync::atomic::Ordering::Acquire)
+        if PROCESS_CLOSING.load(std::sync::atomic::Ordering::Acquire)
+            || self.0.retired.load(std::sync::atomic::Ordering::Acquire)
             || self.0.epoch != crate::account_session::epoch()
+            || self.0.client_revision != crate::sliding_sync::client_revision()
             || crate::sliding_sync::account_changing()
+            || crate::sliding_sync::token_expired()
             || crate::logout::logout_state_machine::is_logout_in_progress()
+            || crate::account_session::is_closing()
         {
             return Err("matrix_account_changed".into());
         }
         let client = crate::sliding_sync::get_client().ok_or("matrix_sign_in_required")?;
-        if client.homeserver().as_str() != self.0.origin
+        if self.0.client_revision != crate::sliding_sync::client_revision()
+            || client.homeserver().as_str() != self.0.origin
             || client
                 .user_id()
                 .is_none_or(|id| id.as_str() != self.0.owner)
@@ -434,63 +516,164 @@ impl Service {
         if !matches!(command, Command::Logout) {
             self.verify_matrix(false).await?;
         }
+        let native = self.native_owner().await?;
+        self.check()?;
+        let result = native.execute(command).await.map_err(|e| e.code);
+        if let Err(e) = self.check() {
+            if self.suspend().await.is_err() {
+                return Err("native_owner_drain_required".into());
+            }
+            return Err(e);
+        }
+        result
+    }
+    async fn native_owner(&self) -> Result<NativeOwner, String> {
         let native = {
             let mut native = self.0.native.lock().await;
             self.check()?;
+            #[cfg(feature = "resource-adoption")]
+            self.drain_adoption_source(&mut native).await?;
             if native.is_none() {
-                let owner = NativeOwner::open_with_matrix(
-                    &self.0.state, &self.0.origin, &self.0.owner,
-                    Arc::new(SdkTokens(Arc::downgrade(&self.0))),
-                ).await.map_err(|e| {
-                    let code = recovery_error_code(&e.code);
-                    makepad_widgets::warning!("Native owner initialization failed: {code}");
-                    e.code
-                })?;
+                self.cleanup_unpublished_native_owner().await?;
+                self.check()?;
+                #[cfg(feature = "resource-adoption")]
+                let selected = self.load_adopted_initialization().await?;
+                #[cfg(feature = "resource-adoption")]
+                let opened = if let Some(selection) = &selected {
+                    selection.open_for_onboarding_with_matrix_guarded(
+                        &self.0.state, &self.0.origin, &self.0.owner,
+                        Arc::new(SdkTokens(Arc::downgrade(&self.0))),
+                        |owner| self.register_native_owner(owner).map_err(|code| source_error(&code)),
+                    ).await
+                } else {
+                    self.open_legacy_owner().await
+                };
+                #[cfg(not(feature = "resource-adoption"))]
+                let opened = self.open_legacy_owner().await;
+                let owner = match opened {
+                    Ok(owner) => owner,
+                    Err(error) => {
+                        self.cleanup_unpublished_native_owner().await?;
+                        let code = recovery_error_code(&error.code);
+                        makepad_widgets::warning!("Native owner initialization failed: {code}");
+                        return Err(error.code);
+                    }
+                };
                 if let Err(error) = self.check() {
-                    owner.shutdown().await;
+                    self.close_native_owner(&owner).await?;
                     return Err(error);
                 }
                 // Saved explicit consent is not authority: restoration invokes
                 // every fresh device/binding/provider/history startup gate.
                 // A failure leaves intent for review, never a blind takeover.
-                log_runtime_recovery(owner.restore_runtime_intents().await);
+                #[cfg(feature = "resource-adoption")]
+                let restore_legacy = selected.is_none();
+                #[cfg(not(feature = "resource-adoption"))]
+                let restore_legacy = true;
+                if restore_legacy {
+                    log_runtime_recovery(owner.restore_runtime_intents().await);
+                }
                 if let Err(error) = self.check() {
-                    owner.shutdown().await;
+                    self.close_native_owner(&owner).await?;
                     return Err(error);
+                }
+                #[cfg(feature = "onboarding-test-support")]
+                if selected.is_none() && std::env::args_os().any(|arg|arg=="--hagency-seed-empty-personal-fixture") {
+                    if let Err(error)=owner.seed_empty_personal_activation_fixture().await {
+                        self.close_native_owner(&owner).await?;return Err(error.code);
+                    }
                 }
                 *native = Some(owner);
             }
             native.as_ref().unwrap().clone()
         };
-        self.check()?;
-        let result = native.execute(command).await.map_err(|e| e.code);
-        if let Err(e) = self.check() {
-            native.shutdown().await;
-            return Err(e);
-        }
-        result
+        #[cfg(feature = "resource-adoption")]
+        self.start_allocation_worker(&native).await;
+        #[cfg(feature = "shared-execution")]
+        self.start_shared_worker(&native).await;
+        Ok(native)
     }
-    async fn shutdown(&self) {
+    async fn open_legacy_owner(&self) -> Result<NativeOwner, NativeError> {
+        NativeOwner::open_with_matrix_guarded(
+            &self.0.state, &self.0.origin, &self.0.owner,
+            Arc::new(SdkTokens(Arc::downgrade(&self.0))),
+            |owner| self.register_native_owner(owner).map_err(|code| source_error(&code)),
+        ).await
+    }
+    pub async fn shared_permissions(&self, command: ::hagency::native_owner::ManagementCommand) -> Result<Value,String> {
+        use ::hagency::native_owner::{ManagementCommand,ManagementPackage,ManagementPermission};
+        if !matches!(&command,ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..}) {return Err("invalid_permission_command".into());}
+        let manager=self.management(ManagementPackage{digest:blake3::hash(b"hagency-native-chat-permissions-v1").to_hex().to_string(),instance:1,account_epoch:1,permissions:vec![ManagementPermission::ReadAgentWork,ManagementPermission::DecideAgentRequests]}).await?;
+        let result=manager.central(command).await.map_err(|e|e.code)?;self.check()?;Ok(result)
+    }
+    pub async fn management(&self, mut package: ::hagency::native_owner::ManagementPackage) -> Result<Arc<::hagency::native_owner::NativeManagement>, String> {
+        self.check()?;
+        self.verify_matrix(false).await?;
+        package.account_epoch = self.0.epoch.checked_add(1).ok_or("matrix_account_changed")?;
+        let native = self.native_owner().await?;
+        self.check()?;
+        let management = native.management(package).await.map_err(|e| e.code)?;
+        if let Err(error) = self.check() {
+            management.retire();
+            return Err(error);
+        }
+        Ok(management)
+    }
+    // Caller holds the async native initialization lock with its slot empty.
+    async fn cleanup_unpublished_native_owner(&self) -> Result<(), String> {
+        let registered = self.0.native_retirement.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
+        if let Some(owner) = registered {
+            // Keep the registered handle until cleanup completes: cancellation
+            // during shutdown must leave it available to the next retry.
+            self.close_native_owner(&owner).await?;
+            self.0.native_retirement.lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner()).take();
+        }
+        Ok(())
+    }
+    fn register_native_owner(&self, owner: &NativeOwner) -> Result<(), String> {
+        // Invoked before Matrix authorization starts background workers. A
+        // late initializer becomes visible to retire(), or fences itself.
+        let mut handle = self.0.native_retirement.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if self.0.retired.load(std::sync::atomic::Ordering::Acquire) {
+            owner.retire();
+            if self.0.logout_requested.load(std::sync::atomic::Ordering::Acquire) {
+                owner.retire_and_revoke_resumption().map_err(|e| e.code)?;
+            }
+            return Err("matrix_account_changed".into());
+        }
+        *handle = Some(owner.clone());
+        Ok(())
+    }
+    fn retire(&self) {
         self.0
             .retired
             .store(true, std::sync::atomic::Ordering::Release);
-        if let Some(native) = self.0.native.lock().await.take() {
-            native.shutdown().await;
+        #[cfg(feature = "resource-adoption")]
+        self.0.allocations.retire();
+        #[cfg(feature = "shared-execution")]
+        self.0.shared.retire();
+        let handle = self.0.native_retirement.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if let Some(native) = handle.as_ref() {
+            native.retire();
         }
     }
-    /// Account transitions must call this before clearing SDK/UI state. It
-    /// revokes owner authority and drains runtime/provider work before return.
-    pub async fn stop_current() {
-        let service = CURRENT.lock().ok().and_then(|mut current| current.take());
+    /// Revoke the current native owner before any account-transition await.
+    /// Already queued SQLite work observes the same irreversible native fence.
+    pub fn retire_current() {
+        let service = CURRENT.lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()).clone();
         if let Some(service) = service {
-            service
-                .0
-                .retired
-                .store(true, std::sync::atomic::Ordering::Release);
-            service.shutdown().await;
+            service.retire();
         }
     }
 }
+
+#[cfg(test)]
+pub(crate) mod retirement_tests;
 
 #[cfg(test)]
 mod tests {

@@ -298,6 +298,7 @@ async fn sdk_oauth_dcr_pkce_callback_whoami_refresh_and_session_roundtrip() {
         restored_client.oauth().client_id().unwrap().as_str(),
         "desktop-fixture"
     );
+    ::hagency::test_support::initialize_resource_authority().unwrap();
     let state = std::env::temp_dir().join(format!(
         "hagency-sdk-oauth-native-{}",
         rand::random::<u64>()

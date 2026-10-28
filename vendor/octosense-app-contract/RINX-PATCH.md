@@ -38,3 +38,45 @@ filesystem components with `/`, matching the original Unix producer encoding
 without rewriting literal backslashes in Unix filenames. Manifest hashes and
 admission rules are unchanged. A fixed nested-bundle digest regression runs in
 every installer job. Preserve this repair until the shared release includes it.
+
+Embedded Hagency management (2026-10-15, work in progress): adds the exact
+`hagency.*` registry and required `hagency-management-v1` feature. No Palpo
+capability is upgraded or aliased. Desktop admits these services only for its
+verified compiled bundle. This local additive extension still needs upstream
+contract/harness synchronization before publishing a bundle to App Hub.
+
+Project plan operations (2026-10-16, work in progress): adds exact catalog and
+project read/request/decision/revocation capabilities. Resource admission
+permission does not imply project approval. Project approval records intent; it
+does not allocate tokens, create a Matrix project, or authorize agent execution.
+The native host preserves command custody and consults current server roles on
+recovery. Servers advertise `project-requests-v1` before the mini app enables it.
+
+Resource detail (2026-10-16, work in progress): `hagency.resources.get` is a
+separate read-only grant for bounded native configuration/budget/usage
+observations. It does not authorize configuration, publication or allocation.
+The built-in resource detail screen requests this grant. Editing remains disabled
+until durable native provenance or an amendment protocol establishes authority.
+
+The Hagency agent-admission slice adds six closed services: readiness, list, get,
+request, decide and cancel. Read, request, assigned-project-admin decision and
+manager cancellation have separate native grants. There is no execution, runtime,
+provider, room creation or arbitrary-URL command in this surface. The app hides
+these views unless the server advertises `agent-admission-v1`; current server
+roles and exact revisions remain authoritative at every mutation.
+
+Additional configurations (2026-10-18, work in progress): the exact
+`hagency.resources.create` capability requests native review and creates a new
+locally published configuration on the existing account/seat. It cannot supply
+account identity, account quota, paths, publication flags or server grants.
+Generic dispatch refuses it without native confirmation; original-command
+recovery preserves the returned new resource ID.
+
+Resource re-admission (2026-10-19, work in progress): exact history and reoffer
+grants are registered in both the service registry and manifest capability list.
+History remains read-only; reoffer creates a separate administrator decision for
+a rejected, withdrawn or expired connection. Neither grants capacity or provider
+execution. The existing exact-service policy test covers both grants and still
+requires `hagency-management-v1`; server feature discovery and current role/
+revision checks remain independent. This is an embedded Desktop extension, not
+a published App Hub contract.

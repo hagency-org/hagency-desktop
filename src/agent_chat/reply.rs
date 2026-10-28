@@ -8,6 +8,7 @@ use matrix_sdk::ruma::events::room::message::FormattedBody;
 use matrix_sdk_ui::timeline::EventTimelineItem;
 use unicode_segmentation::UnicodeSegmentation;
 use crate::shared::html_or_plaintext::HtmlOrPlaintextWidgetExt;
+use crate::shared::navigation_bar_button::NavigationBarButtonWidgetExt;
 
 const STALL: Duration = Duration::from_secs(300);
 
@@ -121,6 +122,12 @@ impl Reveal {
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+    let AnswerButton = NavigationBarButton {
+        width: 36 height: 36 padding: 0
+        tooltip_below: true
+        draw_bg +: {color_hover: RINX_HOVER color_active: RINX_SELECTED border_radius: 8}
+        icon := Icon {icon_walk: Walk{width: 18 height: 18} draw_icon.color: RINX_MUTED}
+    }
     mod.widgets.AgentReply = #(AgentReply::register_widget(vm)) {
         ..mod.widgets.View
         visible: false width: Fill height: Fit flow: Down spacing: 4
@@ -129,9 +136,14 @@ script_mod! {
             visible: false width: Fill height: Fit
             draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular{font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}
         }
-        agent_reply_fold := ButtonFlat {
-            visible: false width: Fit height: 32 padding: 4
-            draw_text +: {color: mod.widgets.RINX_ACCENT text_style: theme.font_regular{font_size: (11 * mod.widgets.RINX_TEXT_SCALE)}}
+        agent_reply_expand := AnswerButton {visible: false icon.draw_icon.svg: ICON_CHEVRON_DOWN}
+        agent_reply_collapse := AnswerButton {visible: false icon.draw_icon.svg: ICON_CHEVRON_UP}
+        answer_actions := View {
+            width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 6
+            answer_copy := AnswerButton {icon.draw_icon.svg: ICON_COPY}
+            answer_forward := AnswerButton {icon.draw_icon.svg: ICON_ANSWER_FORWARD}
+            answer_markdown := AnswerButton {icon.draw_icon.svg: ICON_MARKDOWN_FILE}
+            answer_pdf := AnswerButton {icon.draw_icon.svg: ICON_PDF_FILE}
         }
     }
 }
@@ -156,6 +168,18 @@ pub struct AgentReply {
 impl AgentReply {
     fn render(&mut self, cx: &mut Cx) {
         let active = self.reveal.active();
+        // Do not offer an unfinished streaming fragment as a completed answer.
+        self.view.view(cx, ids!(answer_actions)).set_visible(cx, !self.reveal.live && !self.reveal.target.is_empty());
+        for (path, label) in [
+            (ids!(answer_actions.answer_copy), "Copy"),
+            (ids!(answer_actions.answer_forward), "Forward answer"),
+            (ids!(answer_actions.answer_markdown), "Save Markdown"),
+            (ids!(answer_actions.answer_pdf), "Export PDF"),
+        ] {
+            if let Some(mut button) = self.view.navigation_bar_button(cx, path).borrow_mut() {
+                button.set_tooltip_text(crate::i18n::tr(label));
+            }
+        }
         let preview = (!active)
             .then(|| fold_preview(&self.reveal.target))
             .flatten();
@@ -173,11 +197,15 @@ impl AgentReply {
         let key = (body.to_owned(), rich);
         if self.rendered.as_ref() != Some(&key) {
             let content = self.view.html_or_plaintext(cx, ids!(agent_reply_body));
+            // Folded and incrementally revealed bodies are Markdown fragments,
+            // not raw text. Reparse the visible fragment (never slice HTML).
+            let fragment = (!rich && self.formatted.is_some())
+                .then(|| super::presentation::markdown_body(body)).flatten();
             crate::home::room_screen::populate_text_message_content(
                 cx,
                 &content,
                 body,
-                if rich { self.formatted.as_ref() } else { None },
+                if rich { self.formatted.as_ref() } else { fragment.as_ref() },
                 None,
                 None,
                 None,
@@ -185,12 +213,22 @@ impl AgentReply {
             );
             self.rendered = Some(key);
         }
-        let toggle = self.view.button(cx, ids!(agent_reply_fold));
-        toggle.set_visible(cx, preview.is_some());
-        toggle.set_text(
-            cx,
-            crate::i18n::tr(if folded { "Show more" } else { "Show less" }),
-        );
+        for (path, visible, label) in [
+            (ids!(agent_reply_expand), folded, "Show more"),
+            (ids!(agent_reply_collapse), preview.is_some() && !folded, "Show less"),
+        ] {
+            let toggle = self.view.navigation_bar_button(cx, path);
+            if toggle.visible() != visible {
+                if let Some(mut button) = toggle.borrow_mut() {
+                    button.animator_play(cx, ids!(hover.off));
+                    cx.widget_action(button.widget_uid(), TooltipAction::HoverOut);
+                }
+                toggle.set_visible(cx, visible);
+            }
+            if let Some(mut button) = toggle.borrow_mut() {
+                button.set_tooltip_text(crate::i18n::tr(label));
+            }
+        }
         let status = self.view.label(cx, ids!(stream_status));
         status.set_visible(cx, active || self.reveal.stalled);
         status.set_text(
@@ -222,10 +260,11 @@ impl Widget for AgentReply {
             self.redraw(cx);
         }
         if let Event::Actions(actions) = event {
-            if self
-                .view
-                .button(cx, ids!(agent_reply_fold))
-                .clicked(actions)
+            if self.view.visible() && [ids!(agent_reply_expand), ids!(agent_reply_collapse)]
+                .into_iter().any(|path| {
+                    let button = self.view.navigation_bar_button(cx, path);
+                    button.visible() && button.clicked(actions)
+                })
             {
                 let expanded = &mut cx.global::<ExpandedReplies>().0;
                 if !expanded.remove(&self.identity) {
@@ -245,6 +284,17 @@ impl Widget for AgentReply {
     }
 }
 impl AgentReplyRef {
+    /// Actions use the parent Message's current event binding, never the folded preview.
+    pub fn clicked_action(&self, cx: &mut Cx, actions: &Actions) -> Option<AnswerAction> {
+        let inner = self.borrow()?;
+        if !inner.view.visible() || inner.identity.is_empty() || inner.reveal.live || inner.reveal.target.is_empty() { return None; }
+        [
+            (ids!(answer_actions.answer_copy), AnswerAction::Copy),
+            (ids!(answer_actions.answer_forward), AnswerAction::Forward),
+            (ids!(answer_actions.answer_markdown), AnswerAction::Markdown),
+            (ids!(answer_actions.answer_pdf), AnswerAction::Pdf),
+        ].into_iter().find_map(|(path, action)| inner.view.navigation_bar_button(cx, path).clicked(actions).then_some(action))
+    }
     pub fn populate(
         &self,
         cx: &mut Cx,
@@ -293,9 +343,77 @@ impl AgentReplyRef {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AnswerAction { Copy, Forward, Markdown, Pdf }
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn answer_actions_survive_folding_and_stop_for_hidden_or_streaming_rows() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let reply = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.AgentReply {}});
+            let widget = WidgetRef::script_from_value(vm, value);
+            widget.register_as_ui_root(vm);
+            widget.as_agent_reply()
+        });
+        let body = format!("# 长答案\n{}\nFULL-END", "正文\n".repeat(100));
+        reply.populate(&mut cx, "account|room|first".into(), &body, None, false, false);
+        for (path, expected) in [
+            (ids!(answer_actions.answer_copy), AnswerAction::Copy),
+            (ids!(answer_actions.answer_forward), AnswerAction::Forward),
+            (ids!(answer_actions.answer_markdown), AnswerAction::Markdown),
+            (ids!(answer_actions.answer_pdf), AnswerAction::Pdf),
+        ] {
+            let uid = reply.borrow().unwrap().view.navigation_bar_button(&mut cx, path).widget_uid();
+            let actions = cx.capture_actions(|cx| cx.widget_action(uid, crate::shared::navigation_bar_button::NavigationBarButtonAction::Clicked));
+            assert_eq!(reply.clicked_action(&mut cx, &actions), Some(expected));
+        }
+        assert_eq!(reply.borrow().unwrap().reveal.target, body);
+        assert!(reply.borrow().unwrap().view.view(&mut cx, ids!(answer_actions)).visible());
+        let uid = reply.borrow().unwrap().view.navigation_bar_button(&mut cx, ids!(answer_actions.answer_pdf)).widget_uid();
+        let actions = cx.capture_actions(|cx| cx.widget_action(uid, crate::shared::navigation_bar_button::NavigationBarButtonAction::Clicked));
+        reply.populate(&mut cx, "account|other-room|stream".into(), "partial", None, true, true);
+        assert_eq!(reply.clicked_action(&mut cx, &actions), None);
+        assert!(!reply.borrow().unwrap().view.view(&mut cx, ids!(answer_actions)).visible());
+        reply.hide(&mut cx);
+        assert_eq!(reply.clicked_action(&mut cx, &actions), None);
+        reply.populate(&mut cx, "other-account|room|final".into(), "new answer", None, false, false);
+        assert_eq!(reply.borrow().unwrap().reveal.target, "new answer");
+        assert!(reply.borrow().unwrap().view.view(&mut cx, ids!(answer_actions)).visible());
+    }
+    #[test]
+    fn folded_and_expanded_agent_reply_both_use_rich_text() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let reply=cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            let value=script_eval!(vm,{mod.widgets.AgentReply {}});
+            let widget=WidgetRef::script_from_value(vm,value);
+            widget.register_as_ui_root(vm);
+            widget.as_agent_reply()
+        });
+        let body=format!("## 调研\n\n**结论**\n\n{}", "正文\n".repeat(12));
+        let rich=super::super::presentation::markdown_body(&body).unwrap();
+        reply.populate(&mut cx,"fixture".into(),&body,Some(&rich),false,false);
+        let mut inner=reply.borrow_mut().unwrap();
+        assert!(inner.view.navigation_bar_button(&mut cx,ids!(agent_reply_expand)).visible());
+        assert!(inner.view.view(&mut cx,ids!(agent_reply_body.html_view)).visible());
+        assert!(!inner.view.view(&mut cx,ids!(agent_reply_body.plaintext_view)).visible());
+        for (path, expanded) in [(ids!(agent_reply_expand), true), (ids!(agent_reply_collapse), false)] {
+            let uid = inner.view.navigation_bar_button(&mut cx, path).widget_uid();
+            let actions = cx.capture_actions(|cx| cx.widget_action(uid, crate::shared::navigation_bar_button::NavigationBarButtonAction::Clicked));
+            inner.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
+            assert_eq!(cx.global::<ExpandedReplies>().0.contains("fixture"), expanded);
+            assert_eq!(inner.view.navigation_bar_button(&mut cx, ids!(agent_reply_expand)).visible(), !expanded);
+            assert_eq!(inner.view.navigation_bar_button(&mut cx, ids!(agent_reply_collapse)).visible(), expanded);
+            assert!(inner.view.view(&mut cx,ids!(agent_reply_body.html_view)).visible());
+            assert_eq!(inner.reveal.target,body);
+        }
+    }
     #[test]
     fn folding_is_bounded_and_preserves_graphemes() {
         assert!(fold_preview("short 中文").is_none());

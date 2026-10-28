@@ -138,13 +138,14 @@ fn materialize_never_overwrites_an_existing_directory() {
 }
 
 #[test]
-fn shipped_catalog_preserves_native_editor_and_omits_palpo() {
+fn shipped_catalog_preserves_native_editor_and_admits_only_versioned_hagency() {
     let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let catalog = pack(&root).unwrap();
     assert!(catalog.apps.iter().any(|app| app.manifest.id == ARTICLE_ID));
+    let management = catalog.apps.iter().find(|app| app.manifest.id == "im.palpo.operations").unwrap();
+    assert!(management.manifest.requires.iter().any(|v| v == octosense_app_contract::hagency::FEATURE));
     assert!(catalog.apps.iter().all(|app| {
-        app.manifest.id != "im.palpo.operations"
-            && app
+        app
                 .manifest
                 .capabilities
                 .iter()
@@ -153,4 +154,13 @@ fn shipped_catalog_preserves_native_editor_and_omits_palpo() {
     let f = Fixture::new();
     f.manifest("im.palpo.operations");
     assert!(pack(&f.0).unwrap_err().contains("Palpo"));
+    let path = f.0.join("apps/test/bundle/manifest.json");
+    let mut m: Value = serde_json::from_slice(&fs::read(&path).unwrap()).unwrap();
+    m["requires"] = json!([octosense_app_contract::hagency::FEATURE]);
+    m["capabilities"] = json!(["hagency.session"]);
+    fs::write(&path, m.to_string()).unwrap();
+    assert!(pack(&f.0).is_ok());
+    m["id"] = json!("not.management");
+    fs::write(&path, m.to_string()).unwrap();
+    assert!(pack(&f.0).is_err());
 }

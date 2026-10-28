@@ -23,7 +23,22 @@ env:
   RUST_BACKTRACE: 1
 
 jobs:
+  regression:
+    name: Budget and chat regression gate
+    runs-on: macos-14
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - uses: Swatinem/rust-cache@v2
+      - run: brew install cmake
+      - run: python3 tools/check-hagency-regressions.py --output .run/release-regressions
   package:
+    needs: regression
     name: Installer (${{ matrix.platform }}-${{ matrix.arch }})
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 180
@@ -58,7 +73,6 @@ jobs:
       - uses: actions/checkout@v7
         with:
           persist-credentials: false
-      - uses: ./.github/actions/setup-hagency-client
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
@@ -67,6 +81,7 @@ jobs:
           TAG: ${{ github.ref_name }}
           IS_TAG: ${{ startsWith(github.ref, 'refs/tags/') }}
         run: |
+          python3 tools/check-release-icons.py
           python3 - <<'PY'
           import os, re, plistlib
           from pathlib import Path
@@ -198,6 +213,8 @@ jobs:
             printf 'macOS packages are unsigned development builds; Gatekeeper may block installation.\n' >> ../release-notes.md
           fi
           printf 'Windows packages are currently unsigned.\n' >> ../release-notes.md
+          printf '\n' >> ../release-notes.md
+          cat ../packaging/release-notes.md >> ../release-notes.md
       - name: Upload installers and publish release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -224,4 +241,8 @@ jobs:
             if [[ "$TAG" == *-* ]]; then args+=(--prerelease); fi
             gh release create "$TAG" release-assets/* "${args[@]}"
           fi
-          gh release edit "$TAG" --draft=false
+          if [[ "$TAG" == *-* ]]; then
+            gh release edit "$TAG" --draft=false
+          else
+            gh release edit "$TAG" --draft=false --latest
+          fi

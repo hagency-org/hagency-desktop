@@ -730,3 +730,19 @@ script_mod! {
 19. **WARNING: Hex colors containing the letter `e` in `script_mod!`**: The Rust tokenizer interprets `e` or `E` in hex color literals as a scientific notation exponent, causing parse errors like `expected at least one digit in exponent`. For example, `#2ecc71` fails because `2e` looks like the start of `2e<exponent>`. **Use the `#x` prefix** to escape this: write `#x2ecc71` instead of `#x2ecc71`. This applies to any hex color where a digit is immediately followed by `e`/`E` (e.g., `#1e1e2e`, `#4466ee`, `#7799ee`, `#bb99ee`). Colors without `e` (like `#ff4444`, `#44cc44`) work fine with plain `#`.
 
 20. **Shader enums**: Prefer `match` on enum values with `_ =>` as the catch-all arm, not `if/else` chains over integer-like values. If enum `match` fails in shader compilation, treat it as a compiler bug: add or extend a `platform/script/test` case and fix the shader compiler path instead of rewriting shader logic to `if/else`.
+
+## Hagency budget and chat release checks
+
+For changes to Hagency budgets, chat rendering, execution activity or answer actions,
+run `python3 tools/check-hagency-regressions.py --output .run/regressions --client ../hagency-client`
+from the Desktop root before promoting a build. The same Desktop checks run in CI.
+Keep Markdown, previews, activity and copy/forward/export checks together when fixing any
+one of them. A zero-test filtered run is not a passing check.
+
+Owner-funded capacity uses one explicit confirmation. Managers request; the resource
+owner approves. Never require owners to approve their own newly confirmed funding again.
+Keep old saved commands byte-compatible and retry their original IDs after uncertain responses.
+Treat authorization, execution-device application and task execution as separate evidence.
+Do not report unknown usage as consumed, release unknown reservations, or increase live
+budgets just to validate a product change. Use a disposable PostgreSQL database for server
+funding/role/replay/increased-budget execution tests; never point those fixtures at live data.

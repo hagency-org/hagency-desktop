@@ -562,6 +562,12 @@ impl MatchEvent for AccountSettings {
             }
         }
 
+        // Ending the SDK session must remain available while display-name or
+        // avatar lookup is unavailable. Only profile editing needs that cache.
+        if self.view.button(cx, ids!(logout_button)).clicked(actions) {
+            cx.action(LogoutConfirmModalAction::Open);
+        }
+
         let Some(own_profile) = &self.own_profile else { return };
 
         if upload_avatar_button.clicked(actions) {
@@ -637,9 +643,6 @@ impl MatchEvent for AccountSettings {
             }
         }
 
-        if self.view.button(cx, ids!(logout_button)).clicked(actions) {
-            cx.action(LogoutConfirmModalAction::Open);
-        }
     }
 }
 

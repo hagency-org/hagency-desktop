@@ -1,11 +1,9 @@
 //! Use the OS-provided PingFang faces on macOS and iOS, without shipping Apple fonts.
 //!
-//! Makepad's script FontMember currently assumes face zero. PingFang is a TTC, so
-//! resolve its installed URL with CoreText and register the matching collection
-//! face through Makepad's native font API before widgets inherit the theme.
+//! Declare the system face in the script font family itself. Overriding only
+//! the native loader cache is lost when Makepad reconciles script members on draw.
 
 use std::{
-    cell::RefCell,
     ffi::{CString, OsString, c_char, c_void},
     os::unix::ffi::OsStringExt,
     path::PathBuf,
@@ -14,21 +12,17 @@ use std::{
 };
 use makepad_widgets::{
     *,
-    makepad_draw::text::{
-        font::FontId,
-        font_face::FontFace,
-        fonts::Fonts,
-        loader::{FontDefinition, FontFamilyDefinition},
-    },
+    makepad_draw::text::{font_face::FontFace, loader::FontDefinition},
+    makepad_platform::script::res::{CxScriptResource, CxScriptResourceData, CxScriptResourceGc},
 };
 
 const REGULAR: &str = "PingFangSC-Regular";
 const SEMIBOLD: &str = "PingFangSC-Semibold";
 
 pub fn install(vm: &mut ScriptVm) {
-    // Resolve both weights before changing any families. A missing system asset
-    // leaves the existing cross-platform theme usable, including CJK and emoji.
-    let faces = [REGULAR, SEMIBOLD].map(load_system_face);
+    // Resolve both weights before changing any families. Missing system assets
+    // leave the existing cross-platform theme usable, including CJK and emoji.
+    let faces = [REGULAR, SEMIBOLD].map(|name| system_face_resource(vm, name));
     let [Ok(regular), Ok(semibold)] = faces else {
         log!(
             "PingFang unavailable; keeping bundled fonts: {:?}",
@@ -36,55 +30,155 @@ pub fn install(vm: &mut ScriptVm) {
         );
         return;
     };
-    vm.with_cx_mut(|cx| {
-        CxDraw::lazy_construct_fonts(cx);
-    });
-    let fonts = vm.with_cx_mut(|cx| cx.get_global::<Rc<RefCell<Fonts>>>().clone());
-    for (name, definition) in [(REGULAR, regular), (SEMIBOLD, semibold)] {
-        let mut fonts = fonts.borrow_mut();
-        let id = FontId::from(name);
-        if !fonts.is_font_known(id) {
-            fonts.define_font(id, definition);
+    // widgets_mod selects the light/dark base before registering widgets.
+    // Declare both bases so the chosen appearance inherits the same fonts.
+    // A stylesheet's later explicit font choice (e.g. mono) still wins.
+    let themes = [
+        script_eval!(vm, { mod.themes.light }),
+        script_eval!(vm, { mod.themes.dark }),
+        script_eval!(vm, { mod.theme }),
+    ];
+    let mut seen = Vec::new();
+    let family_proto = script_eval!(vm, { mod.text.FontFamily });
+    let member_proto = script_eval!(vm, { mod.text.FontMember });
+    for theme in themes {
+        let Some(theme) = theme.as_object() else {
+            continue;
+        };
+        if seen.contains(&theme) {
+            continue;
+        }
+        seen.push(theme);
+        let code = vm.bx.heap.value(theme, id!(font_code).into(), NoTrap);
+        let code = TextStyle::script_from_value(vm, code);
+        for (role, resource) in [
+            (id!(font_label), regular),
+            (id!(font_regular), regular),
+            (id!(font_bold), semibold),
+            (id!(font_italic), regular),
+            (id!(font_bold_italic), semibold),
+        ] {
+            let previous = vm.bx.heap.value(theme, role.into(), NoTrap);
+            let Some(previous_obj) = previous.as_object() else {
+                continue;
+            };
+            if TextStyle::script_from_value(vm, previous).font_family == code.font_family {
+                continue;
+            }
+            let previous_family = vm
+                .bx
+                .heap
+                .value(previous_obj, id!(font_family).into(), NoTrap);
+            let Some(previous_family) = previous_family.as_object() else {
+                continue;
+            };
+            let family = vm.bx.heap.new_with_proto(family_proto);
+            let primary = vm.bx.heap.new_with_proto(member_proto);
+            vm.bx
+                .heap
+                .set_value(primary, id!(res).into(), resource, NoTrap);
+            vm.bx
+                .heap
+                .vec_push(family, id_lut!(apple_system).into(), primary.into(), NoTrap);
+            // Keep the declared fallback members, including their lazy-load flags.
+            for i in 0..vm.bx.heap.vec_len(previous_family) {
+                let kv = vm.bx.heap.vec_key_value(previous_family, i, NoTrap);
+                if kv.key != id_lut!(apple_system).into() {
+                    vm.bx.heap.vec_push(family, kv.key, kv.value, NoTrap);
+                }
+            }
+            // Retain style metrics and keep the code family untouched.
+            let style = vm.bx.heap.new_with_proto(previous);
+            vm.bx
+                .heap
+                .set_value(style, id!(font_family).into(), family.into(), NoTrap);
+            vm.bx
+                .heap
+                .set_value(theme, role.into(), style.into(), NoTrap);
         }
     }
+    // PingFang has no italic face; prose uses the corresponding upright weight.
+    log!(
+        "Apple typography: PingFang SC Regular/Semibold declared in theme font families; bundled fallback retained"
+    );
+}
 
-    let styles = [
-        (script_eval!(vm, { mod.theme.font_label }), REGULAR),
-        (script_eval!(vm, { mod.theme.font_regular }), REGULAR),
-        (script_eval!(vm, { mod.theme.font_bold }), SEMIBOLD),
-        (script_eval!(vm, { mod.theme.font_italic }), REGULAR),
-        (script_eval!(vm, { mod.theme.font_bold_italic }), SEMIBOLD),
-    ];
-    for (value, name) in styles {
-        let style = TextStyle::script_from_value(vm, value);
-        vm.with_cx_mut(|cx| style.ensure_fonts_loaded(cx));
-        let family_id = style.font_family_id();
-        let mut fonts = fonts.borrow_mut();
-        let fallback = fonts.get_or_load_font_family(family_id);
-        let primary = FontId::from(name);
-        let font_ids: Vec<_> = std::iter::once(primary)
-            .chain(
-                fallback
-                    .fonts()
-                    .iter()
-                    .map(|font| font.id())
-                    .filter(|id| *id != primary),
-            )
-            .collect();
-        fonts.set_font_family_definition(
-            family_id,
-            FontFamilyDefinition {
-                expected_member_count: font_ids.len(),
-                font_ids,
-                diagnostics: Default::default(),
+fn system_face_resource(vm: &mut ScriptVm, name: &str) -> Result<ScriptValue, String> {
+    let path = format!("apple-system-font://{name}");
+    let heap_key = vm.bx.heap.heap_key();
+    if let Some(handle) = vm
+        .cx()
+        .script_data
+        .resources
+        .get_handle_by_abs_path(heap_key, &path)
+    {
+        return Ok(handle.into());
+    }
+    let data = if vm
+        .cx()
+        .script_data
+        .resources
+        .resources
+        .borrow()
+        .iter()
+        .any(|r| r.abs_path == path)
+    {
+        None
+    } else {
+        let face = load_system_face(name)?;
+        Some(Rc::new(face_at_index_zero(&face)?))
+    };
+    let resource_type = vm.handle_type(id_lut!(res));
+    let resources = &vm.cx().script_data.resources;
+    let gc = CxScriptResourceGc {
+        resources: resources.resources.clone(),
+        handles_by_abs_path: resources.handles_by_abs_path.clone(),
+        handle: ScriptHandle::ZERO,
+        heap_key,
+    };
+    let handle = vm.bx.heap.new_handle(resource_type, Box::new(gc));
+    let resources = &vm.cx().script_data.resources;
+    if !resources.attach_handle_for_path(heap_key, &path, handle) {
+        resources.insert_resource(
+            heap_key,
+            CxScriptResource {
+                abs_path: path,
+                dependency_path: None,
+                web_url: None,
+                data: CxScriptResourceData::Loaded(data.expect("new system font resource")),
+                handles: vec![(heap_key, handle)],
             },
         );
     }
-    // Code and icon families retain their specialized fonts. PingFang has no
-    // italic face; italic prose uses the corresponding upright PingFang weight.
-    log!(
-        "Apple typography: PingFang SC Regular/Semibold for English and Chinese; bundled fallback retained"
-    );
+    Ok(handle.into())
+}
+
+/// FontMember loads collection index zero. Point that TTC directory entry at
+/// the requested installed face; font tables and their checksums stay intact.
+/// This is an in-memory view of a local font, never a shipped or saved asset.
+fn face_at_index_zero(face: &FontDefinition) -> Result<Vec<u8>, String> {
+    let mut data = face.data.as_slice().to_vec();
+    if data.starts_with(b"ttcf") {
+        let count = data.get(8..12).ok_or("truncated font collection")?;
+        let count = u32::from_be_bytes(count.try_into().unwrap());
+        if face.index >= count {
+            return Err("font collection index out of range".into());
+        }
+        let start = 12 + usize::try_from(face.index).map_err(|_| "font index overflow")? * 4;
+        let offset: [u8; 4] = data
+            .get(start..start + 4)
+            .ok_or("truncated font collection directory")?
+            .try_into()
+            .unwrap();
+        data.get_mut(12..16)
+            .ok_or("truncated font collection directory")?
+            .copy_from_slice(&offset);
+    } else if face.index != 0 {
+        return Err("non-collection font has a nonzero index".into());
+    }
+    FontFace::from_data_and_index(SharedBytes::from_vec(data.clone()), 0)
+        .ok_or("invalid system font face")?;
+    Ok(data)
 }
 
 fn load_system_face(name: &str) -> Result<FontDefinition, String> {
@@ -240,11 +334,14 @@ mod tests {
 
     #[test]
     fn theme_prefers_pingfang_and_preserves_fallback_after_widget_registration() {
+        use makepad_draw::text::fonts::Fonts;
+        use std::cell::RefCell;
         let mut cx = Cx::new(Box::new(|_, _| {}));
         cx.with_vm(|vm| {
             makepad_widgets::theme_mod(vm);
             script_eval!(vm, { mod.theme = mod.themes.light });
             install(vm);
+            install(vm); // Repeated installation must not duplicate the primary.
             makepad_widgets::widgets_mod(vm);
             for (value, expected) in [
                 (script_eval!(vm, { mod.theme.font_regular }), REGULAR),
@@ -259,18 +356,70 @@ mod tests {
                 ),
             ] {
                 let style = TextStyle::script_from_value(vm, value);
-                vm.with_cx_mut(|cx| style.ensure_fonts_loaded(cx));
-                let fonts = vm.with_cx_mut(|cx| cx.get_global::<Rc<RefCell<Fonts>>>().clone());
-                let family = fonts
-                    .borrow_mut()
-                    .get_or_load_font_family(style.font_family_id());
-                assert_eq!(family.fonts()[0].id(), FontId::from(expected));
                 assert_eq!(
-                    family.fonts().len(),
-                    4,
-                    "PingFang plus Latin, CJK and emoji fallbacks"
+                    style
+                        .font_family
+                        .member_ids()
+                        .filter(|id| *id == "apple_system")
+                        .count(),
+                    1
                 );
+                // Several draws, including resource-generation changes, must
+                // keep the same declared primary and usable fallback chain.
+                for _ in 0..3 {
+                    vm.cx().script_data.resources.bump_generation();
+                    vm.with_cx_mut(|cx| style.ensure_fonts_loaded(cx));
+                    let fonts = vm.cx_mut().get_global::<Rc<RefCell<Fonts>>>().clone();
+                    let family = fonts
+                        .borrow_mut()
+                        .get_or_load_font_family(style.font_family_id());
+                    assert!(family.fonts().len() > 1);
+                    let shaped = family.get_or_shape("English 中文繁體 0123".into());
+                    for glyph in &shaped.glyphs {
+                        assert_ne!(glyph.id, 0);
+                        let face =
+                            FontFace::from_data_and_index(glyph.font.data().clone(), 0).unwrap();
+                        face.with_ttf_parser_face(|f| {
+                            assert!(
+                                f.names().into_iter().any(|n| n.name_id == 6
+                                    && n.to_string().as_deref() == Some(expected))
+                            )
+                        });
+                    }
+                }
             }
         });
+    }
+
+    #[test]
+    fn collection_view_preserves_selected_face_glyphs_and_tables() {
+        for name in [REGULAR, SEMIBOLD] {
+            let source = load_system_face(name).unwrap();
+            let original =
+                FontFace::from_data_and_index(source.data.clone(), source.index).unwrap();
+            let bytes = face_at_index_zero(&source).unwrap();
+            let view = FontFace::from_data_and_index(SharedBytes::from_vec(bytes), 0).unwrap();
+            original.with_ttf_parser_face(|a| {
+                view.with_ttf_parser_face(|b| {
+                    assert_eq!(a.units_per_em(), b.units_per_em());
+                    for ch in "English 中文繁體 0123".chars() {
+                        let glyph = a.glyph_index(ch).unwrap();
+                        assert_eq!(Some(glyph), b.glyph_index(ch));
+                        assert_eq!(a.glyph_hor_advance(glyph), b.glyph_hor_advance(glyph));
+                        assert_eq!(a.glyph_bounding_box(glyph), b.glyph_bounding_box(glyph));
+                    }
+                })
+            });
+        }
+    }
+
+    #[test]
+    fn collection_view_rejects_invalid_indices_and_truncated_directories() {
+        let mut face = load_system_face(REGULAR).unwrap();
+        face.index = u32::MAX;
+        assert!(face_at_index_zero(&face).is_err());
+        face.index = 0;
+        face.data = SharedBytes::from_vec(b"ttcf".to_vec());
+        assert!(face_at_index_zero(&face).is_err());
     }
 }

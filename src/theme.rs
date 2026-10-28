@@ -96,6 +96,19 @@ impl Selection {
     pub fn stylesheet(self, family: DesktopStyle) -> StyleSheet {
         let dark = self.appearance == Appearance::Dark;
         let mut sheet = StyleSheet::load_with_appearance(family, dark);
+        // Platform control geometry stays native. App surfaces need separate
+        // roles: macOS's stock page and container both resolve to #ececec.
+        let (page, panel, field, ink, border) = if dark {
+            ("101722", "1b2636", "253348", "edf2fa", "45546b")
+        } else {
+            ("eef2f7", "ffffff", "e3eaf3", "202b3c", "c9d3e0")
+        };
+        for (role, value) in [
+            ("bg_app", page), ("bg_container", panel), ("inset", field),
+            ("text", ink), ("bevel_outset_2", border),
+        ] {
+            sheet.theme.push_str(&format!("\nmod.theme.color_{role} = #x{value}\n"));
+        }
         let (accent, on_accent) = match (self.accent, dark) {
             (Accent::Teal, false) => ("09616f", "ffffff"),
             (Accent::Teal, true) => ("72d3df", "103239"),
@@ -353,6 +366,14 @@ pub fn script_mod(vm: &mut ScriptVm) {
     let accent_hover = mix(s.accent, away, 0.08);
     let accent_down = mix(s.accent, away, 0.16);
     let dark = luminance(s.page) < 0.5;
+    // An anchoring navigation surface derived from the active theme, so
+    // custom palettes and host-owned themes retain authority over its colors.
+    let nav_bg = if dark { s.page } else { mix(s.ink, s.accent, 0.12) };
+    let nav_ink = if dark { s.ink } else { s.surface };
+    let nav_muted = mix(nav_ink, nav_bg, 0.18);
+    let nav_hover = mix(nav_bg, nav_ink, 0.10);
+    let nav_selected = mix(nav_bg, s.accent, 0.28);
+    let nav_border = mix(nav_bg, nav_ink, 0.20);
     // TextFlow paints its selection rectangles over glyphs. Keep the highlight
     // translucent so selected text remains legible on both light and dark UI.
     let text_selection_bg = vec4(
@@ -366,6 +387,12 @@ pub fn script_mod(vm: &mut ScriptVm) {
         mod.widgets.RINX_SURFACE = #(s.surface)
         mod.widgets.RINX_FIELD = #(s.field)
         mod.widgets.RINX_INK = #(s.ink)
+        mod.widgets.RINX_NAV_BG = #(nav_bg)
+        mod.widgets.RINX_NAV_INK = #(nav_ink)
+        mod.widgets.RINX_NAV_MUTED = #(nav_muted)
+        mod.widgets.RINX_NAV_HOVER = #(nav_hover)
+        mod.widgets.RINX_NAV_SELECTED = #(nav_selected)
+        mod.widgets.RINX_NAV_BORDER = #(nav_border)
         mod.widgets.RINX_MUTED = #(s.muted)
         mod.widgets.RINX_ACCENT = #(s.accent)
         mod.widgets.RINX_ON_ACCENT = #(s.on_accent)
@@ -488,6 +515,9 @@ pub(crate) mod tests {
                         vm.with_reload(|vm| install(vm, Selection { appearance, accent }));
                     }
                     let s = snapshot_for_vm(vm);
+                    assert_ne!(s.page, s.surface, "Page and panel must remain distinct");
+                    assert_ne!(s.surface, s.field, "Panel and input must remain distinct");
+                    assert_ne!(s.page, s.field, "Page and input must remain distinct");
                     let contrast = |a, b| {
                         let (a, b) = (luminance(a), luminance(b));
                         (a.max(b) + 0.05) / (a.min(b) + 0.05)

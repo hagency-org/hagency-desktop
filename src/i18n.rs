@@ -73,6 +73,14 @@ pub fn text_for(language: Language, english: &str) -> &str {
 pub fn tr(english: &str) -> &str {
     text_for(language(), english)
 }
+/// Read-only locale preference for contained bundles with their own catalogs.
+pub fn script_mod(vm: &mut makepad_widgets::ScriptVm) {
+    use makepad_widgets::*;
+    let api = vm.new_module(id!(rinx_i18n));
+    vm.add_method(api, id_lut!(language), script_args_def!(), |vm, _| {
+        vm.bx.heap.new_string_from_str(match language() { Language::Chinese => "zh-CN", Language::English => "en" })
+    });
+}
 pub fn plural_suffix(count: usize) -> &'static str {
     if language() == Language::Chinese || count == 1 {
         ""

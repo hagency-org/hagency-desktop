@@ -6,6 +6,20 @@ use rinx::mini_app::{MiniAppCardWidgetRefExt, SharedMiniApp, WebMiniApp};
 use rinx::sliding_sync::TimelineKind;
 use rinx::shared::html_or_plaintext::HtmlOrPlaintextWidgetRefExt;
 use rinx::shared::avatar::AvatarWidgetRefExt;
+use rinx::agent_chat::reply::AgentReplyWidgetRefExt;
+
+fn shaped_font_names(cx: &mut Cx, style: &TextStyle) -> Vec<String> {
+    use makepad_widgets::makepad_draw::text::{fonts::Fonts, font_face::FontFace};
+    use std::{cell::RefCell, rc::Rc};
+    style.ensure_fonts_loaded(cx);
+    let fonts = cx.get_global::<Rc<RefCell<Fonts>>>().clone();
+    let family = fonts.borrow_mut().get_or_load_font_family(style.font_family_id());
+    family.get_or_shape("English 中文繁體 0123".into()).glyphs.iter().map(|glyph| {
+        let face = FontFace::from_data_and_index(glyph.font.data().clone(), 0).unwrap();
+        face.with_ttf_parser_face(|face| face.names().into_iter()
+            .find_map(|name| (name.name_id == 6).then(|| name.to_string()).flatten()).unwrap())
+    }).collect::<std::collections::BTreeSet<_>>().into_iter().collect()
+}
 
 app_main!(App);
 
@@ -44,6 +58,8 @@ script_mod! {
                         width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 8
                         replace := Button {text: "Replace links"}
                         narrow := Button {text: "Narrow card"}
+                        medium := Button {text: "Two columns"}
+                        wide := Button {text: "Three columns"}
                         empty := Button {text: "Empty preview"}
                         clear := Button {text: "Clear links"}
                         layouts := Button {text: "Message layouts"}
@@ -56,8 +72,11 @@ script_mod! {
                         group_update := Button {text: "Update members"}
                         group_single := Button {text: "Reuse for a user"}
                         group_photo := Button {text: "Reuse for a room photo"}
+                        answer := Button {text: "Foldable answer"}
+                        card_sizes := Button {text: "Card dimensions"}
                     }
                     result := Label {width: Fill height: Fit text: "Ready"}
+                    reply_fixture := AgentReply {width: 500}
                     font_cases := View {
                         visible: false width: Fill height: Fit flow: Right spacing: 20
                         font_desktop := Message {width: 500}
@@ -174,7 +193,7 @@ impl App {
             cache.insert(url, LinkPreviewData {
                 title: Some(if replacement { "Replacement card".into() } else { format!("Preview title {}", i + 1) }),
                 site_name: Some("Example site".into()),
-                description: Some("A readable description that wraps inside the card, including 中文 and a long line of text.".into()),
+                description: (i != 1).then(|| "A readable description that wraps inside the card, including 中文 and a long line of text.".into()),
                 image: (!replacement && i == 0).then(|| "mxc://example.org/fixture".into()),
                 url: Some("https://example.org/metadata-canonical-url".into()),
                 ..Default::default()
@@ -216,6 +235,29 @@ impl MatchEvent for App {
         }
     }
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(answer)).clicked(actions) {
+            let reply = self.ui.agent_reply(cx, ids!(reply_fixture));
+            if reply.visible() {
+                reply.hide(cx);
+            } else {
+                let body = "## 调研 Research\n\n**结论 Conclusion**\n\n正文 line 1\n\n正文 line 2\n\nFULL-END";
+                let formatted = ruma::events::room::message::FormattedBody::html(
+                    "<h2>调研 Research</h2><p><strong>结论 Conclusion</strong></p><p>正文 line 1</p><p>正文 line 2</p><p>FULL-END</p>");
+                reply.populate(cx, "offline|foldable-answer".into(), body, Some(&formatted), false, false);
+            }
+            self.ui.label(cx, ids!(result)).set_text(cx, "Answer fixture");
+            self.ui.redraw(cx);
+        }
+        if self.ui.button(cx, ids!(card_sizes)).clicked(actions) {
+            let previews = self.ui.view(cx, ids!(card.previews));
+            let children = previews.borrow().unwrap().children.clone();
+            let cards: Vec<_> = children.iter().filter(|(_, child)| child.visible()).map(|(_, child)| {
+                let rect = child.area().rect(cx);
+                let site = child.label(cx, ids!(site_name_label)).area().rect(cx);
+                serde_json::json!({"size": [rect.size.x, rect.size.y], "site_bottom": site.pos.y + site.size.y - rect.pos.y})
+            }).collect();
+            self.ui.label(cx, ids!(result)).set_text(cx, &serde_json::to_string(&cards).unwrap());
+        }
         if self.ui.button(cx, ids!(groups)).clicked(actions) { self.groups(cx, false); }
         if self.ui.button(cx, ids!(group_update)).clicked(actions) { self.groups(cx, true); }
         if self.ui.button(cx, ids!(group_single)).clicked(actions) {
@@ -249,6 +291,13 @@ impl MatchEvent for App {
             let mut card = self.ui.link_preview(cx, ids!(card));
             script_apply_eval!(cx, card, {width: 240});
             self.ui.redraw(cx);
+        }
+        for (path, width) in [(ids!(medium), 500.0), (ids!(wide), 760.0)] {
+            if self.ui.button(cx, path).clicked(actions) {
+                let mut card = self.ui.link_preview(cx, ids!(card));
+                script_apply_eval!(cx, card, {width: #(width)});
+                self.ui.redraw(cx);
+            }
         }
         if self.ui.button(cx, ids!(empty)).clicked(actions) {
             let link = "https://example.org/empty".parse().unwrap();
@@ -305,6 +354,11 @@ impl MatchEvent for App {
                 let sizes: Vec<_> = paths
                     .into_iter().map(|path| row.label(cx, path).borrow().map(|label| label.draw_text.text_style.font_size)).collect();
                 rects.insert(name.into(), serde_json::json!(sizes));
+                let selected_fonts: Vec<_> = paths.into_iter().map(|path| {
+                    let style = row.label(cx, path).borrow().map(|label| label.draw_text.text_style.clone());
+                    style.map(|style| shaped_font_names(cx, &style))
+                }).collect();
+                rects.insert(format!("{name}_selected_fonts"), serde_json::json!(selected_fonts));
             }
             let colors: Vec<_> = [ids!(alice), ids!(bob), ids!(carol), ids!(dave), ids!(erin), ids!(frank), ids!(alice_profile)]
                 .into_iter().map(|path| {

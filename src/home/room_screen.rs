@@ -1,8 +1,9 @@
 //! The `RoomScreen` widget is the UI view that displays a single room or thread's timeline
 //! of events (messages，state changes, etc.), along with an input bar at the bottom.
 
+use super::shared_permission_notice::SharedPermissionNoticeWidgetRefExt;
 use crate::theme::Snapshot as ThemeSnapshot;
-use super::agent_runtime_notice::AgentRuntimeNoticeWidgetExt;
+use super::agent_runtime_notice::AgentRuntimeNoticeWidgetRefExt;
 use crate::miniapps::action_room::ActionRoomBoardWidgetExt;
 use std::{
     borrow::Cow,
@@ -972,7 +973,17 @@ script_mod! {
             LineH { draw_bg.color: #x00000014 }
         }
 
-        agent_runtime_notice := mod.widgets.AgentRuntimeNotice {}
+        // Persistent widgets drawn as the final timeline row, not header children.
+        // Keeping them outside recycled list templates preserves pending approvals.
+        agent_status: View {
+            width: Fill height: Fit flow: Down
+            padding: Inset{left: 24 right: 24 top: 8 bottom: 16}
+            View {
+                width: Fill{max: mod.widgets.RINX_READING_WIDTH} height: Fit flow: Down spacing: 8
+                agent_runtime_notice := mod.widgets.AgentRuntimeNotice {}
+                shared_permission_notice := mod.widgets.SharedPermissionNotice {}
+            }
+        }
 
         actions_board := mod.widgets.ActionRoomBoard {}
 
@@ -1201,6 +1212,8 @@ pub(crate) fn index_of_event(
 #[derive(Script, Widget)]
 pub struct RoomScreen {
     #[deref] view: View,
+    #[find] #[live] agent_status: WidgetRef,
+    #[rust] agent_status_drawn: bool,
 
     /// The name and ID of the currently-shown room, if any.
     #[rust] room_name_id: Option<RoomNameId>,
@@ -1286,13 +1299,24 @@ impl Widget for RoomScreen {
         if self.tl_state.is_none() && self.room_name_id.is_none() {
             return;
         }
-        let notice=self.view.agent_runtime_notice(cx,ids!(agent_runtime_notice));
+        let had_agent_status = self.has_agent_status(cx);
+        let notice=self.agent_status.agent_runtime_notice(cx,ids!(agent_runtime_notice));
         if let Some(app)=_scope.data.get::<crate::app::AppState>() {
             let selected=app.selected_room.as_ref().is_some_and(|r|Some(r.room_id())==self.room_name_id.as_ref().map(|r|r.room_id()))
                 && matches!(app.selected_tab,crate::home::navigation_tab_bar::SelectedTab::Home | crate::home::navigation_tab_bar::SelectedTab::Space {..});
             notice.set_active(cx,selected);
+            self.agent_status.shared_permission_notice(cx,ids!(shared_permission_notice)).set_active(cx,selected);
+            if !selected {self.agent_status_drawn = false;}
         }
-        notice.handle_event(cx,event,&mut Scope::empty());
+        // Continue polling while scrolled into history, but do not let stale
+        // off-screen hit areas receive input. MouseUp still releases capture.
+        if self.agent_status_drawn || !event.requires_visibility() {
+            notice.handle_event(cx,event,&mut Scope::empty());
+            self.agent_status.shared_permission_notice(cx,ids!(shared_permission_notice)).handle_event(cx,event,&mut Scope::empty());
+        }
+        if had_agent_status != self.has_agent_status(cx) {
+            self.view.redraw(cx);
+        }
         let board = self.view.action_room_board(cx, ids!(actions_board));
         if let Event::Actions(actions) = event {
             for action in actions {
@@ -1814,12 +1838,14 @@ impl Widget for RoomScreen {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
-        self.view.agent_runtime_notice(cx,ids!(agent_runtime_notice)).set_room(cx,self.room_name_id.as_ref().map(|r|r.room_id().as_str()).unwrap_or(""));
+        self.agent_status.agent_runtime_notice(cx,ids!(agent_runtime_notice)).set_room(cx,self.room_name_id.as_ref().map(|r|r.room_id().as_str()).unwrap_or(""));
+        self.agent_status.shared_permission_notice(cx,ids!(shared_permission_notice)).set_room(cx,self.room_name_id.as_ref().map(|r|r.room_id().as_str()).unwrap_or(""),self.timeline_kind.as_ref().and_then(|k|k.thread_root_event_id()).map(|id|id.as_str()).unwrap_or(""));
         self.update_desktop_chat_header(cx);
         let available = cx.peek_walk_turtle(walk).size.x;
         self.layout_desktop_chat_info(cx, available);
         // If the room isn't loaded yet, we show the restore status label only.
         if !self.is_loaded {
+            self.agent_status_drawn = false;
             let Some(room_name) = &self.room_name_id else {
                 // No room selected yet, nothing to show.
                 return DrawStep::done();
@@ -1829,6 +1855,7 @@ impl Widget for RoomScreen {
             return restore_status_view.draw(cx, scope);
         }
         if self.tl_state.is_none() {
+            self.agent_status_drawn = false;
             // Tl_state may not be ready after dock loading.
             // If return DrawStep::done() inside self.view.draw_walk, turtle will misalign and panic.
             return DrawStep::done();
@@ -1836,6 +1863,7 @@ impl Widget for RoomScreen {
 
 
         let room_screen_widget_uid = self.widget_uid();
+        let has_agent_status = self.has_agent_status(cx);
         while let Some(subview) = self.view.draw_walk(cx, scope, walk).step() {
             // Here, we only need to handle drawing the portal list.
             let portal_list_ref = subview.as_portal_list();
@@ -1853,9 +1881,15 @@ impl Widget for RoomScreen {
             let cleared_through = super::chat_actions::cleared_through(tl_state.kind.room_id());
 
             let list = list_ref.deref_mut();
-            list.set_item_range(cx, 0, last_item_id);
+            list.set_item_range(cx, 0, last_item_id + usize::from(has_agent_status));
+            self.agent_status_drawn = false;
 
             while let Some(item_id) = list.next_visible_item(cx) {
+                if item_id == last_item_id && has_agent_status {
+                    self.agent_status.draw_all(cx, scope);
+                    self.agent_status_drawn = true;
+                    continue;
+                }
                 let item = {
                     let tl_idx = item_id;
                     let Some(timeline_item) = tl_items.get(tl_idx) else {
@@ -2115,6 +2149,11 @@ impl Widget for RoomScreen {
 }
 
 impl RoomScreen {
+    fn has_agent_status(&self, cx: &mut Cx) -> bool {
+        self.agent_status.widget(cx, ids!(agent_runtime_notice)).visible()
+            || self.agent_status.widget(cx, ids!(shared_permission_notice)).visible()
+    }
+
     fn room_id(&self) -> Option<&OwnedRoomId> {
         self.room_name_id.as_ref().map(|r| r.room_id())
     }
@@ -3186,6 +3225,15 @@ impl RoomScreen {
                         );
                     }
                 }
+                #[cfg(feature = "agent_chat")]
+                MessageAction::ExportAnswer { details, pdf } => {
+                    let Some(tl) = self.tl_state.as_ref() else { continue };
+                    if let Some(event) = Self::find_event_in_timeline(&tl.items, details) {
+                        crate::agent_chat::answer_export::save(plaintext_body_of_timeline_item(event), *pdf);
+                    } else {
+                        enqueue_popup_notification(crate::i18n::tr("Could not find the answer to export. Please try again."), PopupKind::Error, Some(5.0));
+                    }
+                }
                 MessageAction::CopyHtml(details) => {
                     let Some(tl) = self.tl_state.as_ref() else { return };
                     // The logic for getting the formatted body of a message is the same
@@ -4023,7 +4071,9 @@ impl RoomScreen {
         }
 
         self.hide_timeline();
-        self.chat_info_requested = true;
+        // Opening or restoring a conversation gives the timeline the full width.
+        // Information is shown only after an explicit click on its header icon.
+        self.chat_info_requested = false;
         self.chat_info_inline = true;
         self.view.mobile_chat_info(cx, ids!(desktop_chat_info)).clear();
         self.view.mobile_chat_info(cx, ids!(compact_chat_info)).clear();
@@ -7097,6 +7147,8 @@ pub enum MessageAction {
     Unpin(MessageDetails),
     /// The user clicked the "copy text" button on a message.
     CopyText(MessageDetails),
+    #[cfg(feature = "agent_chat")]
+    ExportAnswer { details: MessageDetails, pdf: bool },
     /// Copies a snapshot captured before the context menu takes keyboard focus.
     CopySelectedText(String),
     /// The user clicked the "copy HTML" button on a message.
@@ -7421,6 +7473,22 @@ impl Widget for Message {
                     }
                     _ => {}
                 }
+            }
+
+            #[cfg(feature = "agent_chat")]
+            if let Some(action) = {
+                use crate::agent_chat::reply::AgentReplyWidgetExt;
+                self.view.agent_reply(cx, ids!(content.agent_reply)).clicked_action(cx, actions)
+            } {
+                use crate::agent_chat::reply::AnswerAction;
+                let details = self.details.clone().unwrap();
+                let action = match action {
+                    AnswerAction::Copy => MessageAction::CopyText(details),
+                    AnswerAction::Forward => MessageAction::SelectForward(details),
+                    AnswerAction::Markdown => MessageAction::ExportAnswer { details, pdf: false },
+                    AnswerAction::Pdf => MessageAction::ExportAnswer { details, pdf: true },
+                };
+                cx.widget_action(room_screen_widget_uid, action);
             }
 
             // Handle clicks on an agent-chat approval card's decision buttons.
@@ -7779,6 +7847,10 @@ mod input_bar_focus {
 }
 
 #[cfg(test)]
+#[path = "room_screen/agent_status_tests.rs"]
+mod agent_chat_status_tests;
+
+#[cfg(test)]
 mod desktop_information_columns_tests {
     use super::*;
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
@@ -7923,29 +7995,30 @@ mod desktop_information_columns_tests {
         assert!(!screen.view.view(&mut cx,ids!(compact_chat_info_panel)).visible());
     }
     #[test]
-    fn first_narrow_room_selection_does_not_open_compact() {
-        let (mut cx, mut screen) = screen();
-        screen.room_name_id = Some(RoomNameId::empty(matrix_sdk::ruma::room_id!("!first:server").to_owned()));
-        // These are the fresh-room flags set by set_displayed_room before
-        // the first measured draw; no old 840px frame precedes this case.
-        screen.chat_info_requested = true;
-        screen.chat_info_inline = true;
-        draw(&mut cx, &mut screen, 500.0);
-        assert!(!screen.chat_info_requested);
-        assert!(!screen.view.view(&mut cx, ids!(compact_chat_info_panel)).visible());
-        assert_eq!(screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx).size.x, 500.0);
-        screen.set_desktop_chat_info_visible(&mut cx, true);
-        draw(&mut cx, &mut screen, 500.0);
-        assert!(screen.view.view(&mut cx, ids!(compact_chat_info_panel)).visible());
-        screen.chat_info_requested = true;
-        screen.chat_info_inline = true;
-        screen.room_name_id = Some(RoomNameId::empty(matrix_sdk::ruma::room_id!("!next:server").to_owned()));
-        draw(&mut cx, &mut screen, 500.0);
-        assert!(!screen.view.view(&mut cx, ids!(compact_chat_info_panel)).visible());
-        screen.chat_info_requested = true;
-        screen.chat_info_inline = true;
-        draw(&mut cx, &mut screen, 840.0);
-        assert!(screen.view.view(&mut cx, ids!(desktop_chat_info_panel)).visible());
+    fn room_selection_starts_collapsed_at_every_width_and_expands_only_on_request() {
+        for width in [500.0, 840.0, 1280.0] {
+            let (mut cx, mut screen) = screen();
+            for id in ["!first:server", "!next:server"] {
+                let room = RoomNameId::empty(matrix_sdk::ruma::RoomId::parse(id).unwrap());
+                // Exercise real room selection, including reuse after the previous
+                // room's information was opened. No Matrix session is needed.
+                screen.set_displayed_room(&mut cx, &room, None);
+                draw(&mut cx, &mut screen, width);
+                assert!(!screen.chat_info_requested);
+                assert!(!screen.view.view(&mut cx, ids!(desktop_chat_info_panel)).visible());
+                assert!(!screen.view.view(&mut cx, ids!(compact_chat_info_panel)).visible());
+                assert_eq!(screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx).size.x, width);
+
+                screen.set_desktop_chat_info_visible(&mut cx, true);
+                draw(&mut cx, &mut screen, width);
+                assert!(screen.chat_info_requested);
+                assert!(screen.view.view(&mut cx, screen.info_panel_id()).visible());
+                screen.set_desktop_chat_info_visible(&mut cx, false);
+                draw(&mut cx, &mut screen, width);
+                assert_eq!(screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx).size.x, width);
+                screen.set_desktop_chat_info_visible(&mut cx, true);
+            }
+        }
     }
 
 }

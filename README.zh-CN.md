@@ -1,5 +1,7 @@
 # Hagency Desktop
 
+0.5.0 已准备但尚未正式发布：[发布检查报告](dev-vibe/release-0.5.0/assessment.zh.md) 记录了待处理的上游依赖安全项。已发布版本见 [GitHub Releases](https://github.com/hagency-org/hagency-desktop/releases)。
+
 [English](README.md) | 简体中文
 
 Hagency Desktop 是原生 Rust/Makepad 客户端，将 Matrix 聊天、Project 工作区和
@@ -70,8 +72,7 @@ Agent 加密 Room 执行暂缓，这不等于删除 Matrix 聊天的加密能力
 
 ## 构建与开发
 
-当前 Cargo 清单依赖同目录旁的 `hagency-client` 主人引擎源码。使用配置好的
-两个 checkout，安装 CMake 和平台依赖后执行：
+Cargo 从 [`chrislearn/hagency-client`](https://github.com/chrislearn/hagency-client) 的 `main` 分支获取主人引擎，Cargo.lock 记录构建使用的具体提交，无需同级源码目录。安装 CMake 和平台依赖后执行：
 
 ```sh
 cargo run --locked --bin rinx

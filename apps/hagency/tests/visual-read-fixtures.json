@@ -1,0 +1,122 @@
+{
+  "hagency.session": {
+    "protocol": "hagency-management-v1",
+    "account": "@alex:studio.example",
+    "administrator": "@admin:studio.example",
+    "device": "visual-device",
+    "deviceGeneration": 1,
+    "canAdmitResources": true,
+    "features": [
+      "project-requests-v1"
+    ]
+  },
+  "hagency.intent.pending": {
+    "commands": []
+  },
+  "hagency.connections.list": {
+    "items": [],
+    "nextAfter": null,
+    "observedAtMs": 0
+  },
+  "hagency.resources.list": {
+    "resources": [
+      {
+        "id": "resource_visual_demo",
+        "model": "Codex · Product engineering",
+        "framework": "codex",
+        "reasoning": "high",
+        "capabilities": [
+          "coding",
+          "documentation"
+        ],
+        "published": false,
+        "budget": {
+          "remainingTokens": 72000,
+          "reserved": 16000,
+          "pool": {
+            "ceiling": 100000,
+            "period": "monthly",
+            "committed": 16000
+          }
+        },
+        "usage": {
+          "spent": 12000,
+          "spend_period_key": "2026-10"
+        }
+      },
+      {
+        "id": "resource_visual_docs",
+        "model": "Documentation & research",
+        "framework": "codex",
+        "reasoning": "high",
+        "capabilities": [
+          "documentation"
+        ],
+        "published": false,
+        "budget": {
+          "remainingTokens": null,
+          "reserved": 0,
+          "pool": {
+            "ceiling": 40000,
+            "period": "monthly",
+            "committed": 0
+          }
+        },
+        "usage": {
+          "spent": null,
+          "spend_period_key": null
+        }
+      }
+    ],
+    "nextAfter": null
+  },
+  "hagency.resources.get": {
+    "protocol": "hagency-management-v1",
+    "observedAtMs": 0,
+    "editing": {
+      "allowed": false,
+      "reason": "contribution_history_not_proven"
+    },
+    "resource": {
+      "id": "resource_visual_demo",
+      "model": "Codex · Product engineering",
+      "framework": "codex",
+      "reasoning": "high",
+      "capabilities": [
+        "coding",
+        "documentation"
+      ],
+      "published": false,
+      "budget": {
+        "remainingTokens": 72000,
+        "reserved": 16000,
+        "pool": {
+          "ceiling": 100000,
+          "period": "monthly",
+          "committed": 16000
+        }
+      },
+      "usage": {
+        "spent": 12000,
+        "spend_period_key": "2026-10"
+      },
+      "localName": {
+        "name": "",
+        "revision": 1
+      }
+    },
+    "choices": []
+  },
+  "hagency.projects.list": {
+    "items": [],
+    "nextAfter": null
+  },
+  "hagency.inbox.list": {
+    "items": [],
+    "nextAfter": null
+  },
+  "hagency.resources.catalog": {
+    "items": [],
+    "nextAfter": null
+  }
+}

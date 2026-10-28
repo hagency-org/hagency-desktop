@@ -234,6 +234,10 @@ pub fn resolve(manifest: &AppManifest, limits: &HostLimits) -> Result<AppPolicy,
         }
         capabilities.insert(capability.clone());
     }
+    if capabilities.iter().any(|cap| crate::hagency::SERVICES.contains(&cap.as_str()))
+        && !manifest.requires.iter().any(|feature| feature == crate::hagency::FEATURE) {
+        return Err("Hagency services require hagency-management-v1".into());
+    }
     if capabilities.contains("palpo.projects.select_room")
         && !manifest.requires.iter().any(|f| f == "palpo-project-room-picker-v1") {
         return Err("palpo.projects.select_room requires palpo-project-room-picker-v1".into());

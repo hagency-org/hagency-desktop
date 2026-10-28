@@ -34,6 +34,7 @@ use crate::agent_chat::ops::ui::{AgentOpsAction, AgentOpsPanelWidgetRefExt};
 use crate::moments::ui::{MomentsAction, MomentsPanelWidgetRefExt};
 use crate::octoscript_apps::{MiniAppsAction, MiniAppsPanelWidgetRefExt};
 use crate::miniapps::window::MiniAppsWindowHostWidgetRefExt;
+use crate::hagency::ui::{HagencyAction, HagencyPanelWidgetRefExt};
 use crate::settings::theme_studio::{ThemeStudioAction, ThemeStudioWidgetRefExt};
 use crate::article_app::{ArticleAction, ArticlePanelWidgetRefExt};
 use crate::mini_app::{MiniAppAction, MiniAppPanelWidgetRefExt};
@@ -71,6 +72,14 @@ mod embedded_content {
 
                 image_viewer_modal := Modal {
                     content := ImageViewer {}
+                }
+                appearance_modal := Modal {
+                    content := RoundedView {
+                        width: Fill{max: 420} height: Fit flow: Down padding: 24 spacing: 12
+                        draw_bg +: {color: RINX_SURFACE border_radius: 12}
+                        appearance := AppearanceSettings {}
+                        appearance_close := RinxButton {text: #(crate::i18n::tr("Close")) i18n_text: "Close"}
+                    }
                 }
                 theme_studio_modal := Modal {can_dismiss: false content := ThemeStudio {}}
                 web_browser_modal := Modal {can_dismiss: false content := WebBrowser {}}
@@ -126,6 +135,11 @@ mod embedded_content {
                 approval_inbox_modal := Modal {can_dismiss: false content := ApprovalInbox {}}
                 agent_access_modal := Modal {can_dismiss: false content := AgentAccessPanel {}}
                 space_management_modal := Modal {can_dismiss: false content := SpaceManagementPanel {}}
+                hagency_management_modal := Modal {can_dismiss: false content := View {
+                    width: Fill height: Fill flow: Down
+                    close := RinxBackButton {}
+                    management := HagencyPanel {}
+                }}
 
                 // A generic modal to confirm any positive action.
                 positive_confirmation_modal := Modal {
@@ -329,6 +343,9 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        if self.ui.button(cx, ids!(hagency_management_modal.content.close)).clicked(actions) {
+            cx.action(HagencyAction::Close);
+        }
         let invite_confirmation_modal_content = self.ui.confirmation_modal(cx, ids!(invite_confirmation_modal.content));
         if let Some(_accepted) = invite_confirmation_modal_content.closed(actions) {
             self.ui.modal(cx, ids!(invite_confirmation_modal)).close(cx);
@@ -344,6 +361,9 @@ impl MatchEvent for App {
             self.ui.modal(cx, ids!(positive_confirmation_modal)).close(cx);
         }
 
+        if self.ui.button(cx, ids!(appearance_close)).clicked(actions) {
+            self.ui.modal(cx, ids!(appearance_modal)).close(cx);
+        }
         for action in actions {
             if let Some(action) = action.downcast_ref::<crate::accounts::AccountAction>() {
                 if !crate::sliding_sync::account_changing() {
@@ -362,7 +382,12 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            if action.downcast_ref::<crate::settings::appearance::OpenAppearance>().is_some() {
+                self.ui.modal(cx, ids!(appearance_modal)).open(cx);
+                continue;
+            }
             if let Some(action) = action.downcast_ref::<ThemeStudioAction>() {
+                self.ui.modal(cx, ids!(appearance_modal)).close(cx);
                 let modal = self.ui.modal(cx, ids!(theme_studio_modal));
                 self.ui
                     .theme_studio(cx, ids!(theme_studio_modal.content))
@@ -568,7 +593,27 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            if let Some(action) = action.downcast_ref::<crate::hagency::ui::HagencyAction>() {
+                // Management opens beside chat; it never replaces the chat dock.
+                if !self.embedded && cfg!(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")))) {
+                    self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).hagency_action(cx, action);
+                } else {
+                    let modal = self.ui.modal(cx, ids!(hagency_management_modal));
+                    self.ui.hagency_panel(cx, ids!(hagency_management_modal.content.management)).action(cx, action);
+                    if matches!(action, HagencyAction::Close) {modal.close(cx);} else {modal.open(cx);}
+                }
+                continue;
+            }
             if let Some(action) = action.downcast_ref::<MiniAppsAction>() {
+                #[cfg(feature = "agent_chat")]
+                if let MiniAppsAction::OpenToolApprovals(target) = action {
+                    if current_user_id().as_ref() == Some(&target.account) {
+                        self.cancel_signup_navigation();
+                        self.close_mini_apps(cx);
+                        cx.action(ApprovalInboxAction::Open { project:Some(target.project_room_id.clone()) });
+                    }
+                    continue;
+                }
                 if let MiniAppsAction::OpenSignupApproval(target) = action {
                     if current_user_id().as_ref() == Some(&target.account) {
                         self.waiting_to_navigate_to_room = None;
@@ -1039,6 +1084,8 @@ impl App {
     }
 
     fn close_mini_apps(&mut self, cx: &mut Cx) {
+        self.ui.hagency_panel(cx, ids!(hagency_management_modal.content.management)).action(cx, &HagencyAction::Close);
+        self.ui.modal(cx, ids!(hagency_management_modal)).close(cx);
         self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).close(cx);
         let modal = self.ui.modal(cx, ids!(octoscript_apps_modal));
         self.ui.mini_apps_panel(cx, ids!(octoscript_apps_modal.content)).action(cx, modal, &MiniAppsAction::Close);
@@ -1179,6 +1226,7 @@ pub fn register_widgets(vm: &mut ScriptVm) {
     crate::verification_modal::script_mod(vm);
     crate::profile::script_mod(vm);
     crate::hagency::ui::script_mod(vm);
+    crate::miniapps::window::script_mod(vm);
     crate::home::script_mod(vm);
     crate::moments::script_mod(vm);
     crate::login::script_mod(vm);
@@ -1220,6 +1268,13 @@ impl AppMain for App {
             return;
         }
         if back_unhandled || matches!(event, Event::KeyDown(k) if k.key_code == KeyCode::Escape) {
+            let management = self.ui.modal(cx, ids!(hagency_management_modal));
+            if management.is_open() {
+                event.back_pressed();
+                self.ui.hagency_panel(cx, ids!(hagency_management_modal.content.management)).action(cx, &HagencyAction::Close);
+                management.close(cx);
+                return;
+            }
             // Let a nested destructive-action confirmation consume Back first.
             if !self.ui.modal(cx, ids!(delete_confirmation_modal)).is_open() && !self.ui.modal(cx, ids!(positive_confirmation_modal)).is_open() {
                 #[cfg(feature = "agent_chat")]
@@ -1669,16 +1724,19 @@ impl App {
             return;
         }
         self.lifecycle.shutdown_started = true;
+        crate::hagency::backend::Service::begin_process_shutdown();
 
         self.persist_runtime_state(cx, "shutdown");
 
-        // Drain the owned Agent subprocesses before the GUI/runtime disappears.
-        // Account transitions use the same barrier before opening another owner.
-        if crate::sliding_sync::block_on_async_with_timeout(
+        // Drain the owned Agent subprocesses, preserving the signed-in owner's
+        // exact native enrollment for a freshly verified restart.
+        match crate::sliding_sync::block_on_async_with_timeout(
             Some(Duration::from_secs(15)),
-            crate::hagency::backend::Service::stop_current(),
-        ).is_err() {
-            error!("Hagency owner shutdown timed out; pending execution remains recorded in its ledger.");
+            crate::hagency::backend::Service::suspend_current(),
+        ) {
+            Ok(Ok(())) => {},
+            Ok(Err(_)) => error!("Hagency owner drain requires recovery; pending execution remains recorded."),
+            Err(_) => error!("Hagency owner shutdown timed out; pending execution remains recorded in its ledger."),
         }
 
         // Standalone exit: release the assistant and stop only a runtime

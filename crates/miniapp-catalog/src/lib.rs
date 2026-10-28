@@ -131,8 +131,23 @@ pub fn is_retired_palpo(manifest: &AppManifest) -> bool {
 }
 
 pub fn admit_application(manifest: &AppManifest) -> Result<(), String> {
-    if is_retired_palpo(manifest) {
+    if is_retired_palpo(manifest) || manifest.capabilities.iter().any(|c| octosense_app_contract::hagency::SERVICES.contains(&c.as_str())) {
         return Err("Palpo administration mini-apps are no longer supported".into());
+    }
+    Ok(())
+}
+
+/// The host calls this only after verifying the frozen built-in bytes against
+/// its compiled catalog. Downloaded/imported bundles never enter this path.
+pub fn admit_builtin_management(manifest: &AppManifest, expected_digest: &str) -> Result<(), String> {
+    use octosense_app_contract::hagency;
+    if manifest.id != hagency::APP_ID
+        || !manifest.requires.iter().any(|f| f == hagency::FEATURE)
+        || manifest.integrity.bundle_blake3 != expected_digest
+        || expected_digest.len() != 64
+        || !expected_digest.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        || manifest.capabilities.iter().any(|cap| cap != "storage" && !hagency::SERVICES.contains(&cap.as_str())) {
+        return Err("This bundle is not the verified Hagency management application".into());
     }
     Ok(())
 }

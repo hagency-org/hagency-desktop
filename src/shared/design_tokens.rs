@@ -125,17 +125,17 @@ script_mod! {
     //    in this round). Kept explicit rather than as a full theme.
     // =========================================================================
     // Desktop left navigation rail background.
-    mod.widgets.RBX_NAV_BG             = mod.widgets.RINX_FIELD
+    mod.widgets.RBX_NAV_BG             = mod.widgets.RINX_NAV_BG
     // Nav item idle foreground.
-    mod.widgets.RBX_NAV_FG             = mod.widgets.RINX_MUTED
+    mod.widgets.RBX_NAV_FG             = mod.widgets.RINX_NAV_MUTED
     // Nav item active foreground.
-    mod.widgets.RBX_NAV_FG_ACTIVE      = mod.widgets.RINX_INK
+    mod.widgets.RBX_NAV_FG_ACTIVE      = mod.widgets.RINX_NAV_INK
     // Nav item hover background (between rail bg and active).
-    mod.widgets.RBX_NAV_ITEM_HOVER_BG  = mod.widgets.RINX_HOVER
+    mod.widgets.RBX_NAV_ITEM_HOVER_BG  = mod.widgets.RINX_NAV_HOVER
     // Nav item active / selected pill background.
-    mod.widgets.RBX_NAV_ITEM_ACTIVE_BG = mod.widgets.RINX_SELECTED
+    mod.widgets.RBX_NAV_ITEM_ACTIVE_BG = mod.widgets.RINX_NAV_SELECTED
     // Nav rail hairline / section divider.
-    mod.widgets.RBX_NAV_DIVIDER        = mod.widgets.RINX_BORDER
+    mod.widgets.RBX_NAV_DIVIDER        = mod.widgets.RINX_NAV_BORDER
     // Mobile login page background (deep navy).
     mod.widgets.RBX_LOGIN_BG           = mod.widgets.RINX_PAGE
     // Mobile login field / card surface on the dark page.

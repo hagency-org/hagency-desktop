@@ -16,6 +16,7 @@ use crate::{
     home::room_screen::TimelineUpdate,
     media_cache::MediaCache,
     shared::text_or_image::{TextOrImageRef, TextOrImageWidgetRefExt},
+    shared::navigation_bar_button::NavigationBarButtonWidgetExt,
     sliding_sync::{submit_async_request, MatrixRequest, UrlPreviewError},
 };
 
@@ -23,8 +24,12 @@ use crate::{
 const MAX_CACHE_ENTRIES_BEFORE_CLEANUP: usize = 100;
 /// Maximum age for cache entries in seconds (1 hour)
 const CACHE_ENTRY_MAX_AGE_SECS: u64 = 3600;
-/// How many previews we show before hiding the rest behind a "show more" button.
-const MAX_DEFAULT_VISIBLE_PREVIEWS: usize = 2;
+/// Keep a readable title beside the thumbnail, up to three cards per row.
+const MIN_PREVIEW_WIDTH: f64 = 232.0;
+const PREVIEW_GAP: f64 = 12.0;
+// Reserve the same space for two title lines, three summary lines and a footer,
+// regardless of which metadata the website supplies. Scale with the body font.
+const PREVIEW_HEIGHT: f64 = 196.0;
 
 /// An entry in the Link Preview cache with timestamp for cleanup.
 #[allow(clippy::large_enum_variant)]
@@ -49,13 +54,18 @@ script_mod! {
 
     mod.widgets.LINK_PREVIEW_MESSAGE_TEXT_STYLE = RBX_TEXT_BODY {}
 
+    let PreviewToggle = NavigationBarButton {
+        width: 36 height: 36 padding: 0 tooltip_below: true
+        draw_bg +: {color_hover: RINX_HOVER color_active: RINX_SELECTED border_radius: 8}
+        icon := Icon {icon_walk: Walk{width: 18 height: 18} draw_icon.color: RINX_MUTED}
+    }
     mod.widgets.LinkPreview = #(LinkPreview::register_widget(vm)) {
-        width: Fill{max: 440}, height: Fit,
+        width: Fill{max: RINX_READING_WIDTH}, height: Fit,
         flow: Down,
         font_size: mod.widgets.MESSAGE_FONT_SIZE
 
         previews := View {
-            width: Fill height: Fit flow: Down
+            width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: #(PREVIEW_GAP)
         }
 
         collapsible_buttons := View {
@@ -65,71 +75,13 @@ script_mod! {
             padding: Inset{top: 4},
             visible: false,
 
-            expand_button := RobrixIconButton {
-                width: Fit, height: Fit,
-                spacing: 4,
-                padding: Inset{top: 4, bottom: 4, left: 8, right: 8},
-                draw_icon +: {
-                    svg: (ICON_TRIANGLE_DOWN)
-                    color: mod.widgets.RINX_MUTED
-                }
-                icon_walk: Walk{width: 10, height: 10}
-                draw_text +: {
-                    text_style: mod.widgets.LINK_PREVIEW_MESSAGE_TEXT_STYLE {
-                        font_size: (10.0 * mod.widgets.RINX_TEXT_SCALE),
-                    },
-                    color: mod.widgets.RINX_MUTED,
-                    color_hover: mod.widgets.RINX_MUTED,
-                    color_down: mod.widgets.RINX_MUTED,
-                }
-                draw_bg +: {
-                    color: (COLOR_BG_PREVIEW)
-                    color_hover: (COLOR_BG_PREVIEW_HOVER)
-                    color_down: mod.widgets.RINX_PRESSED
-                    border_size: 1.0
-                    border_color: mod.widgets.RINX_BORDER
-                    border_color_hover: mod.widgets.RINX_BORDER
-                    border_color_down: mod.widgets.RINX_BORDER
-                    border_radius: 4.0
-                }
-                text: #(crate::i18n::tr("Show more links")) i18n_text: "Show more links"
-            }
-
-            collapse_button := RobrixIconButton {
-                visible: false,
-                width: Fit, height: Fit,
-                spacing: 4,
-                padding: Inset{top: 4, bottom: 4, left: 8, right: 8},
-                draw_icon +: {
-                    svg: (ICON_TRIANGLE_UP)
-                    color: mod.widgets.RINX_MUTED
-                }
-                icon_walk: Walk{width: 10, height: 10}
-                draw_text +: {
-                    text_style: mod.widgets.LINK_PREVIEW_MESSAGE_TEXT_STYLE {
-                        font_size: (10.0 * mod.widgets.RINX_TEXT_SCALE),
-                    },
-                    color: mod.widgets.RINX_MUTED,
-                    color_hover: mod.widgets.RINX_MUTED,
-                    color_down: mod.widgets.RINX_MUTED,
-                }
-                draw_bg +: {
-                    color: (COLOR_BG_PREVIEW)
-                    color_hover: (COLOR_BG_PREVIEW_HOVER)
-                    color_down: mod.widgets.RINX_PRESSED
-                    border_size: 1.0
-                    border_color: mod.widgets.RINX_BORDER
-                    border_color_hover: mod.widgets.RINX_BORDER
-                    border_color_down: mod.widgets.RINX_BORDER
-                    border_radius: 4.0
-                }
-                text: #(crate::i18n::tr("Show fewer links")) i18n_text: "Show fewer links"
-            }
+            expand_button := PreviewToggle {icon.draw_icon.svg: ICON_CHEVRON_DOWN}
+            collapse_button := PreviewToggle {visible: false icon.draw_icon.svg: ICON_CHEVRON_UP}
         }
 
         preview_template: RoundedView {
             cursor: MouseCursor.Hand
-            width: Fill height: Fit flow: Down spacing: 10
+            width: Fill height: #(PREVIEW_HEIGHT) flow: Down spacing: 10
             margin: Inset{top: 8}
             padding: 12
             show_bg: true
@@ -140,7 +92,7 @@ script_mod! {
                 border_radius: 8.0
             }
             summary := View {
-                width: Fill height: Fit flow: Right spacing: 12
+                width: Fill height: Fill flow: Right spacing: 12
                 content_view := View {
                     width: Fill height: Fit flow: Down spacing: 6
                     inner_content_view := View {
@@ -199,7 +151,11 @@ pub struct LinkPreview {
     #[rust]
     is_expanded: bool,
     #[rust]
-    num_hidden_links: usize,
+    columns: usize,
+    #[rust]
+    card_width: f64,
+    #[rust]
+    card_height: f64,
     /// The links that were last populated in this widget, to avoid unnecessary repopulation.
     #[rust]
     last_populated_links: Vec<Url>,
@@ -214,6 +170,7 @@ impl ScriptHook for LinkPreview {
         _value: ScriptValue,
     ) {
         if apply.is_script_reapply() {
+            self.card_width = 0.0;
             if let Some(template) = self.preview_template {
                 for child in &mut self.children {
                     let labels: Vec<_> = [
@@ -259,14 +216,13 @@ impl Widget for LinkPreview {
             for item in self.children.iter() {
                 reset_hover(cx, item);
             }
-            self.view.button(cx, ids!(collapsible_buttons.expand_button)).reset_hover(cx);
-            self.view.button(cx, ids!(collapsible_buttons.collapse_button)).reset_hover(cx);
+            self.reset_toggle_hover(cx);
         }
 
         // Handle collapsible button clicks
         if let Event::Actions(actions) = event {
-            let expand_btn = self.view.button(cx, ids!(collapsible_buttons.expand_button));
-            let collapse_btn = self.view.button(cx, ids!(collapsible_buttons.collapse_button));
+            let expand_btn = self.view.navigation_bar_button(cx, ids!(collapsible_buttons.expand_button));
+            let collapse_btn = self.view.navigation_bar_button(cx, ids!(collapsible_buttons.collapse_button));
             if expand_btn.clicked(actions) || collapse_btn.clicked(actions) {
                 self.is_expanded = !self.is_expanded;
                 self.update_button_and_visibility(cx);
@@ -307,6 +263,29 @@ impl Widget for LinkPreview {
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+        let available = cx.peek_walk_turtle(walk).size.x;
+        if available.is_finite() && available > 0.0 {
+            let scale = (f64::from(self.font_size) / 11.0).max(1.0);
+            let min_width = MIN_PREVIEW_WIDTH * scale;
+            let columns = (((available + PREVIEW_GAP) / (min_width + PREVIEW_GAP)).floor() as usize)
+                .clamp(1, 3);
+            let card_width = ((available - PREVIEW_GAP * (columns - 1) as f64) / columns as f64).floor();
+            let card_height = (PREVIEW_HEIGHT * scale).ceil();
+            if self.columns != columns || self.card_width != card_width || self.card_height != card_height {
+                self.columns = columns;
+                self.card_width = card_width;
+                self.card_height = card_height;
+                for child in &self.children {
+                    if let Some(mut child) = child.borrow_mut() {
+                        child.walk.width = Size::Fixed(card_width);
+                        child.walk.height = Size::Fixed(card_height);
+                    }
+                    child.redraw(cx);
+                }
+                self.update_button_and_visibility(cx);
+                self.view.redraw(cx);
+            }
+        }
         // Previews are instantiated outside the message's widget tree. Carry its
         // body size explicitly, including mobile overrides and live theme reloads.
         for child in &self.children {
@@ -323,24 +302,38 @@ impl Widget for LinkPreview {
 impl LinkPreview {
     fn update_button_and_visibility(&mut self, cx: &mut Cx) {
         for (index, child) in self.children.iter().enumerate() {
-            child.set_visible(cx, self.is_expanded || index < MAX_DEFAULT_VISIBLE_PREVIEWS);
+            child.set_visible(cx, self.is_expanded || index < self.columns.max(1));
         }
-        if self.num_hidden_links > 0 {
+        let hidden = self.children.len().saturating_sub(self.columns.max(1));
+        if hidden > 0 {
             self.view.view(cx, ids!(collapsible_buttons)).set_visible(cx, true);
-            let expand_btn = self.view.button(cx, ids!(collapsible_buttons.expand_button));
-            let collapse_btn = self.view.button(cx, ids!(collapsible_buttons.collapse_button));
+            let expand_btn = self.view.navigation_bar_button(cx, ids!(collapsible_buttons.expand_button));
+            let collapse_btn = self.view.navigation_bar_button(cx, ids!(collapsible_buttons.collapse_button));
             if self.is_expanded {
                 expand_btn.set_visible(cx, false);
                 collapse_btn.set_visible(cx, true);
             } else {
-                expand_btn.set_text(cx, &format!("Show {} more links", self.num_hidden_links));
+                if let Some(mut button) = expand_btn.borrow_mut() {
+                    button.set_tooltip_text(format!("{} ({hidden})", crate::i18n::tr("Show more links")));
+                }
                 expand_btn.set_visible(cx, true);
                 collapse_btn.set_visible(cx, false);
             }
-            expand_btn.reset_hover(cx);
-            collapse_btn.reset_hover(cx);
+            if let Some(mut button) = collapse_btn.borrow_mut() {
+                button.set_tooltip_text(crate::i18n::tr("Show fewer links"));
+            }
+            self.reset_toggle_hover(cx);
         } else {
             self.view.view(cx, ids!(collapsible_buttons)).set_visible(cx, false);
+        }
+    }
+
+    fn reset_toggle_hover(&self, cx: &mut Cx) {
+        for path in [ids!(collapsible_buttons.expand_button), ids!(collapsible_buttons.collapse_button)] {
+            if let Some(mut button) = self.view.navigation_bar_button(cx, path).borrow_mut() {
+                button.animator_play(cx, ids!(hover.off));
+                cx.widget_action(button.widget_uid(), TooltipAction::HoverOut);
+            }
         }
     }
 
@@ -367,7 +360,8 @@ impl LinkPreviewRef {
             inner.sync_children(cx);
             inner.last_populated_links.clear();
             inner.is_expanded = false;
-            inner.num_hidden_links = 0;
+            inner.columns = 0;
+            inner.card_width = 0.0;
             inner.update_button_and_visibility(cx);
             inner.redraw(cx);
         }
@@ -410,7 +404,9 @@ impl LinkPreviewRef {
                 }
                 inner.last_populated_links = accepted_links;
                 inner.is_expanded = false;
-                inner.num_hidden_links = num_links.saturating_sub(MAX_DEFAULT_VISIBLE_PREVIEWS);
+                // Newly added children must get the current grid dimensions even
+                // when the available width and column count did not change.
+                inner.card_width = 0.0;
                 inner.sync_children(cx);
                 inner.update_button_and_visibility(cx);
             }
@@ -681,6 +677,101 @@ fn insert_into_cache(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+
+    fn draw_preview(cx: &mut Cx, preview: &mut LinkPreview, width: f64) {
+        cx.redraw_all();
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, dvec2(width, 1800.0));
+        let mut list = DrawList2d::new(cx);
+        let event = DrawEvent {redraw_all: true, ..DrawEvent::default()};
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None); list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(dvec2(width, 1800.0), Layout::flow_down());
+        preview.draw_walk_all(&mut cx2d, &mut Scope::empty(), Walk {
+            width: Size::Fixed(width), height: Size::Fit {min: None, max: None}, ..Walk::default()
+        });
+        cx2d.end_pass_sized_turtle(); list.end(&mut cx2d); cx2d.end_pass(&pass);
+    }
+
+    #[test]
+    fn responsive_cards_keep_one_collapsed_row_and_reflow_expanded_links_without_recycling() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let widget = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm); crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.LinkPreview {}});
+            WidgetRef::script_from_value(vm, value)
+        });
+        let mut preview_ref = widget.as_link_preview();
+        let links: Vec<Url> = (0..7).map(|i| format!("https://example.org/{i}").parse().unwrap()).collect();
+        let mut cache = LinkPreviewCache::new(None);
+        for (i, link) in links.iter().enumerate() {
+            cache.insert(link, LinkPreviewData {
+                title: Some(format!("Article {i} {}", "Long title 中文 ".repeat(i % 3))),
+                description: (i % 3 != 0).then(|| "A readable preview description 中文 ".repeat(i % 3 + 1)),
+                site_name: (i % 2 == 0).then(|| "example.org".into()),
+                ..Default::default()
+            });
+        }
+        preview_ref.populate_below_message(&mut cx, &links, &mut MediaCache::new(None), &mut cache, &|_,_,_,_,_,_| true);
+        let mut preview = preview_ref.borrow_mut().unwrap();
+        let identities: Vec<_> = preview.children.iter().map(|c| c.widget_uid()).collect();
+        for expanded in [false, true, false] {
+            preview.is_expanded = expanded;
+            preview.update_button_and_visibility(&mut cx);
+            for (width, columns) in [(760.0, 3), (500.0, 2), (240.0, 1), (760.0, 3)] {
+                draw_preview(&mut cx, &mut preview, width);
+                let visible: Vec<_> = preview.children.iter().filter(|c| c.visible()).map(|c| c.area().rect(&cx)).collect();
+                assert_eq!(visible.len(), if expanded {7} else {columns});
+                for (index, rect) in visible.iter().enumerate() {
+                    assert!(rect.size.x > 0.0 && rect.pos.x >= 0.0 && rect.pos.x + rect.size.x <= width + 0.1, "{rect:?}");
+                    assert_eq!(rect.size, visible[0].size, "metadata must not change card size");
+                    let row_start = index / columns * columns;
+                    assert!((rect.pos.y - visible[row_start].pos.y).abs() < 0.1);
+                    if index % columns > 0 {
+                        let previous = visible[index - 1];
+                        assert!(rect.pos.x >= previous.pos.x + previous.size.x + PREVIEW_GAP - 0.1);
+                    }
+                    if row_start > 0 {
+                        let bottom = visible[row_start - columns..row_start].iter().map(|r| r.pos.y + r.size.y).fold(0.0, f64::max);
+                        assert!(rect.pos.y >= bottom, "rows must not overlap");
+                    }
+                    let container = preview.view.area().rect(&cx);
+                    assert!(rect.pos.y + rect.size.y <= container.pos.y + container.size.y + 0.1);
+                }
+                assert_eq!(preview.children.iter().map(|c| c.widget_uid()).collect::<Vec<_>>(), identities);
+                assert_eq!(preview.last_populated_links, links);
+            }
+        }
+        let grid_size = preview.children[0].area().rect(&cx).size;
+        drop(preview);
+        // Reusing a row for fewer links must not stretch its card, and adding
+        // links again at the same width must size every new child.
+        for count in [1, 7] {
+            preview_ref.populate_below_message(&mut cx, &links[..count], &mut MediaCache::new(None), &mut cache, &|_,_,_,_,_,_| true);
+            let mut preview = preview_ref.borrow_mut().unwrap();
+            draw_preview(&mut cx, &mut preview, 760.0);
+            for child in preview.children.iter().filter(|child| child.visible()) {
+                assert_eq!(child.area().rect(&cx).size, grid_size);
+            }
+        }
+        let mut preview = preview_ref.borrow_mut().unwrap();
+        preview.font_size = 16.5;
+        draw_preview(&mut cx, &mut preview, 760.0);
+        assert_eq!(preview.columns, 2);
+        for child in preview.children.iter().filter(|child| child.visible()) {
+            let card = child.area().rect(&cx);
+            assert_eq!(card.size.y, PREVIEW_HEIGHT * 1.5);
+            for path in [ids!(title_label), ids!(description_label), ids!(site_name_label)] {
+                let label = child.label(&mut cx, path);
+                if label.visible() {
+                    let text = label.area().rect(&cx);
+                    assert!(text.pos.y + text.size.y <= card.pos.y + card.size.y - 11.0, "{text:?} outside {card:?}");
+                }
+            }
+        }
+    }
 
     #[test]
     fn preview_urls_preserve_order_and_only_skip_actual_matrix_domains() {

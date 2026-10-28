@@ -6,6 +6,9 @@
     {
       "directory": "article-editor",
       "native": "article-editor"
+    },
+    {
+      "directory": "hagency"
     }
   ]
 }

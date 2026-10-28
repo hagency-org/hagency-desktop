@@ -298,7 +298,15 @@ impl Widget for SettingsScreen {
 impl SettingsScreen {
     /// Fetches the current user's profile and uses it to populate the settings screen.
     pub fn populate(&mut self, cx: &mut Cx, own_profile: Option<UserProfile>, app_state: &AppState) {
-        let Some(profile) = own_profile.or_else(|| get_own_profile(cx)) else {
+        let Some(profile) = own_profile.or_else(|| get_own_profile(cx)).or_else(|| {
+            // The SDK identity is already authenticated; optional profile
+            // metadata may still be loading or unavailable on the homeserver.
+            crate::sliding_sync::current_user_id().map(|user_id| UserProfile {
+                user_id,
+                username: None,
+                avatar_state: crate::shared::avatar::AvatarState::Unknown,
+            })
+        }) else {
             error!("Failed to get own profile for settings screen.");
             return;
         };

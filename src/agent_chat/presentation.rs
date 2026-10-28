@@ -13,6 +13,16 @@ use matrix_sdk::ruma::{events::room::message::FormattedBody, UserId};
 
 use super::agents::{is_agent_localpart, AgentRole};
 
+pub(crate) fn markdown_body(body: &str) -> Option<FormattedBody> {
+    FormattedBody::markdown(body).map(|mut formatted| {
+        formatted.sanitize_html(
+            matrix_sdk::ruma::html::HtmlSanitizerMode::Strict,
+            matrix_sdk::ruma::html::RemoveReplyFallback::No,
+        );
+        formatted
+    })
+}
+
 /// How the bridge tagged a relayed message.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AgentReplyKind {
@@ -166,6 +176,11 @@ impl AgentMessagePresentation {
                     body,
                 }),
             }
+        }).or_else(|| {
+            // Older Agent senders omitted Matrix's rich-text fields. Render their
+            // original Markdown locally; ordinary human /plain messages never
+            // enter this Agent-only presentation path. No event is edited/sent.
+            markdown_body(&body).map(Cow::Owned)
         });
         (body, formatted)
     }
@@ -229,5 +244,20 @@ mod tests {
         assert!(matches!(body, Cow::Borrowed(_)));
         assert!(formatted.is_none());
         assert_eq!(presentation.badge_text(), "reviewer");
+    }
+
+    #[test]
+    fn managed_agent_legacy_markdown_renders_without_changing_original_body() {
+        let sender = OwnedUserId::try_from("@_hagency_agt_01m5zm5ns4ecx3qmdwjaf5kkjp:example.org").unwrap();
+        let mut p = AgentMessagePresentation::for_sender(&sender).unwrap();
+        let source = "## 调研\n\n**结论**\n\n- 一\n\n| GPU | RAM |\n|---|---|\n| RTX | 96 |\n\n```rust\nlet n = 1;\n```\n\n[来源](https://example.org)\n<script>bad()</script>";
+        let (body, rich) = p.present(source, None);
+        assert_eq!(body, source);
+        let rich = rich.unwrap();
+        for tag in ["<h2>", "<strong>", "<ul>", "<table>", "<pre>", "<a href="] { assert!(rich.body.contains(tag), "missing {tag}"); }
+        assert!(!rich.body.contains("<script"));
+        let existing = FormattedBody::html("<p>Already formatted</p>");
+        assert_eq!(p.present(source, Some(&existing)).1.unwrap().body, existing.body);
+        assert!(AgentMessagePresentation::for_sender(&OwnedUserId::try_from("@edward:example.org").unwrap()).is_none());
     }
 }

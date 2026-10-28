@@ -4,7 +4,7 @@ use std::{
     future::Future,
     sync::{
         LazyLock, Mutex,
-        atomic::{AtomicU64, Ordering},
+        atomic::{AtomicBool, AtomicU64, Ordering},
     },
 };
 use tokio::{
@@ -13,6 +13,7 @@ use tokio::{
 };
 
 static EPOCH: AtomicU64 = AtomicU64::new(0);
+static CLOSING: AtomicBool = AtomicBool::new(false);
 static TASKS: LazyLock<Mutex<Tasks>> = LazyLock::new(|| {
     Mutex::new(Tasks {
         open: true,
@@ -33,6 +34,9 @@ impl Drop for Finished {
 }
 pub fn epoch() -> u64 {
     EPOCH.load(Ordering::Acquire)
+}
+pub fn is_closing() -> bool {
+    CLOSING.load(Ordering::Acquire)
 }
 
 pub(crate) fn spawn<F>(future: F) -> JoinHandle<F::Output>
@@ -62,6 +66,10 @@ where
 }
 
 pub(crate) async fn close() {
+    // Prevent a concurrent native-owner initializer from publishing a new
+    // service between synchronous retirement and the epoch transition.
+    CLOSING.store(true, Ordering::Release);
+    crate::hagency::backend::Service::retire_current();
     {
         // Serialize the epoch boundary against an OAuth session commit/refresh.
         // Persistence never takes TASKS while holding this lock.
@@ -85,6 +93,7 @@ pub(crate) async fn close() {
 }
 pub(crate) fn open() {
     TASKS.lock().unwrap().open = true;
+    CLOSING.store(false, Ordering::Release);
 }
 
 #[cfg(test)]
@@ -103,6 +112,7 @@ mod tests {
         });
         running.await.unwrap();
         close().await;
+        assert!(is_closing());
         assert!(old.await.unwrap_err().is_cancelled());
         assert!(result.try_recv().is_err());
         assert_ne!(epoch(), old_epoch);
@@ -110,6 +120,7 @@ mod tests {
         close().await;
         assert!(rejected.await.unwrap_err().is_cancelled());
         open();
+        assert!(!is_closing());
         assert_eq!(spawn(async { "new account" }).await.unwrap(), "new account");
     }
 }

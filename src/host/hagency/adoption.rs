@@ -1,0 +1,369 @@
+//! Native coordinator handoff into the existing Resources and grant UI.
+use super::*;
+use ::hagency::native_owner::AdoptedManagementSelection;
+
+impl Host {
+    /// Native-only: a mini-app cannot manufacture this sealed selection. Caller
+    /// must drop the completed migration/source handles before initialization.
+    pub(crate) async fn accept_adopted_management(
+        &self,
+        lease: &Lease,
+        selection: AdoptedManagementSelection,
+    ) -> Result<(), String> {
+        let account = self.check(lease)?;
+        lease.authorize(&account, REVIEW, None)?;
+        let _lane = self.0.initialising.lock().await;
+        self.check(lease)?;
+        let service = crate::hagency::backend::Service::for_current()?;
+        service.select_adopted_management(selection).await?;
+        self.clear_adoption_caches()?;
+        if lease
+            .authorize(&account, grants::REVIEW_GRANT, None)
+            .is_ok()
+        {
+            self.attach_adopted_grant_access(lease, &service).await
+        } else {
+            let manager = service
+                .management(ManagementPackage {
+                    digest: self.0.digest.clone(),
+                    instance: self.0.identity.generation,
+                    account_epoch: self.0.epoch + 1,
+                    permissions: vec![ManagementPermission::ReadResources],
+                })
+                .await?;
+            let result = manager
+                .resources(Default::default())
+                .await
+                .map_err(|e| e.code);
+            manager.retire();
+            self.check(lease)?;
+            result.map(|_| ())
+        }
+    }
+    /// A failed native confirmation retires its source owner. Recovery must
+    /// release the old package's Arc before Service reacquires that OS lock.
+    pub(super) fn evict_retired_adoption_caches(&self) -> Result<(), String> {
+        let mut manager = self
+            .0
+            .manager
+            .lock()
+            .map_err(|_| "management_unavailable")?;
+        let mut access = self
+            .0
+            .grant_access
+            .lock()
+            .map_err(|_| "management_unavailable")?;
+        if manager.as_ref().is_some_and(|v| v.is_retired()) {
+            manager.take();
+        }
+        if access.as_ref().is_some_and(|v| v.retired()) {
+            access.take();
+        }
+        Ok(())
+    }
+    fn clear_adoption_caches(&self) -> Result<(), String> {
+        if let Some(access) = self
+            .0
+            .grant_access
+            .lock()
+            .map_err(|_| "management_unavailable")?
+            .take()
+        {
+            access.retire();
+        }
+        if let Some(manager) = self
+            .0
+            .manager
+            .lock()
+            .map_err(|_| "management_unavailable")?
+            .take()
+        {
+            manager.retire();
+        }
+        Ok(())
+    }
+    async fn attach_adopted_grant_access(
+        &self,
+        lease: &Lease,
+        service: &crate::hagency::backend::Service,
+    ) -> Result<(), String> {
+        let package = || ManagementPackage {
+            digest: self.0.digest.clone(),
+            instance: self.0.identity.generation,
+            account_epoch: self.0.epoch + 1,
+            permissions: permissions(lease),
+        };
+        let manager = service.management(package()).await?;
+        // Canonical inventory must actually be readable before enabling consent.
+        if let Err(error) = manager.resources(Default::default()).await {
+            manager.retire();
+            return Err(error.code);
+        }
+        let access = match service.adopted_grant_access(package()).await {
+            Ok(access) => access,
+            Err(error) => {
+                manager.retire();
+                return Err(error);
+            }
+        };
+        if let Err(error) = self.check(lease) {
+            access.retire();
+            manager.retire();
+            return Err(error);
+        }
+        let mut cached = self
+            .0
+            .manager
+            .lock()
+            .map_err(|_| "management_unavailable")?;
+        let mut grants = self
+            .0
+            .grant_access
+            .lock()
+            .map_err(|_| "management_unavailable")?;
+        if let Err(error) = self.check(lease) {
+            access.retire();
+            manager.retire();
+            return Err(error);
+        }
+        if manager.is_retired() || access.retired() {
+            access.retire();
+            manager.retire();
+            return Err("management_scope_changed".into());
+        }
+        if let Some(old) = cached.replace(manager) {
+            old.retire();
+        }
+        if let Some(old) = grants.replace(access) {
+            old.retire();
+        }
+        Ok(())
+    }
+}
+
+pub(crate) const STATUS: &str = "hagency.onboarding.status";
+pub(crate) const REVIEW: &str = "hagency.onboarding.review";
+pub(crate) use ::hagency::native_owner::{
+    ResourceActivationContext as AdoptionContext, DeviceSetupReview as AdoptionReview, DeviceSetupKind,
+};
+
+#[derive(serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct AdoptionProgress {
+    pub state: String,
+    pub migration_id: Option<String>,
+    pub reason: Option<String>,
+}
+pub(crate) enum AdoptionResult {
+    Choose(AdoptionContext),
+    Review(Box<AdoptionReview>),
+    Progress(AdoptionProgress),
+}
+#[derive(Clone)]
+pub(crate) struct AdoptionFlow {
+    host: Host,
+    lease: Lease,
+}
+impl AdoptionFlow {
+    fn check(&self) -> Result<(), String> {
+        let account = self.host.check(&self.lease)?;
+        self.lease.authorize(&account, REVIEW, None)
+    }
+    pub fn account(&self) -> &str {
+        &self.lease.identity().account
+    }
+    pub fn active(&self) -> bool {
+        self.check().is_ok()
+    }
+    fn package(&self) -> ManagementPackage {
+        ManagementPackage {
+            digest: self.host.0.digest.clone(),
+            instance: self.host.0.identity.generation,
+            account_epoch: self.host.0.epoch + 1,
+            permissions: vec![
+                ManagementPermission::ReadResources,
+                ManagementPermission::ReadProviders,
+                ManagementPermission::ConnectProviders,
+                ManagementPermission::PrepareSourceQuiescence,
+            ],
+        }
+    }
+    pub async fn open(&self) -> Result<AdoptionResult, String> {
+        self.check()?;
+        self.host.evict_retired_adoption_caches()?;
+        let service = crate::hagency::backend::Service::for_current()?;
+        if let Some(selection) = service.recover_activation_task().await? {
+            self.host
+                .accept_adopted_management(&self.lease, selection)
+                .await?;
+            service.activation_handoff_complete().await;
+        }
+        self.check()?;
+        if service.activation_state().await? == "active" {
+            let manager = self.host.manager(&self.lease).await?;
+            manager
+                .resources(Default::default())
+                .await
+                .map_err(|e| e.code)?;
+            self.check()?;
+            return Ok(AdoptionResult::Progress(AdoptionProgress {
+                state: "active".into(),
+                migration_id: None,
+                reason: None,
+            }));
+        }
+        let context = service.activation_context(self.package()).await?;
+        self.check()?;
+        if context.kind == DeviceSetupKind::EmptyDevice {
+            let review = service.activation_review(self.package(), None).await?;
+            self.check()?;
+            Ok(AdoptionResult::Review(Box::new(review)))
+        } else if context.original_migration.is_some() {
+            let tokens = context
+                .original_monthly_tokens
+                .ok_or("source_adoption_original_ceiling_required")?;
+            let review = service.activation_review(self.package(), Some(tokens)).await?;
+            self.check()?;
+            Ok(AdoptionResult::Review(Box::new(review)))
+        } else {
+            Ok(AdoptionResult::Choose(context))
+        }
+    }
+    pub async fn prepare(&self, tokens: String) -> Result<AdoptionResult, String> {
+        self.check()?;
+        self.host.evict_retired_adoption_caches()?;
+        let tokens = tokens
+            .trim()
+            .parse::<u64>()
+            .ok()
+            .filter(|n| *n > 0 && *n <= 9_007_199_254_740_991)
+            .ok_or("invalid_adoption_ceiling")?;
+        let service = crate::hagency::backend::Service::for_current()?;
+        let review = service.activation_review(self.package(), Some(tokens)).await?;
+        self.check()?;
+        Ok(AdoptionResult::Review(Box::new(review)))
+    }
+    pub async fn confirm(&self, review: AdoptionReview) -> Result<AdoptionResult, String> {
+        self.check()?;
+        if review.expired() {
+            return Err("source_adoption_review_expired".into());
+        }
+        let service = crate::hagency::backend::Service::for_current()?;
+        let weak = Arc::downgrade(&self.host.0);
+        let lease = self.lease.clone();
+        let result = service
+            .confirm_activation(
+                self.package(),
+                review,
+                Arc::new(move || {
+                    weak.upgrade()
+                        .is_some_and(|h| Host(h).check(&lease).is_ok())
+                }),
+            )
+            .await;
+        self.host.evict_retired_adoption_caches()?;
+        let selection = result?;
+        self.check()?;
+        self.host
+            .accept_adopted_management(&self.lease, selection)
+            .await?;
+        service.activation_handoff_complete().await;
+        self.check()?;
+        Ok(AdoptionResult::Progress(AdoptionProgress {
+            state: "active".into(),
+            migration_id: None,
+            reason: None,
+        }))
+    }
+}
+impl Host {
+    pub(crate) fn onboarding_handoff(
+        &self,
+        lease: Lease,
+        args: Value,
+    ) -> Result<AdoptionFlow, String> {
+        let _: Empty = parse(args)?;
+        let flow = AdoptionFlow {
+            host: self.clone(),
+            lease,
+        };
+        flow.check()?;
+        Ok(flow)
+    }
+    pub(crate) async fn onboarding_status(&self, lease: &Lease) -> Result<Value, String> {
+        let account = self.check(lease)?;
+        lease.authorize(&account, STATUS, None)?;
+        self.evict_retired_adoption_caches()?;
+        let service = crate::hagency::backend::Service::for_current()?;
+        let state = service.activation_state().await?;
+        self.check(lease)?;
+        let mut can_review = state != "active";
+        let mut reason: Option<String> = None;
+        let mut setup_kind = None;
+        if matches!(state, "legacy" | "recovery_required" | "active") {
+            let package = ManagementPackage {
+                digest: self.0.digest.clone(),
+                instance: self.0.identity.generation,
+                account_epoch: self.0.epoch + 1,
+                permissions: vec![
+                    ManagementPermission::ReadResources,
+                    ManagementPermission::PrepareSourceQuiescence,
+                ],
+            };
+            match service.activation_context(package).await {
+                Ok(context) => setup_kind = Some(context.kind),
+                Err(error) => {
+                if matches!(
+                    error.as_str(),
+                    "source_adoption_inventory_unsupported"
+                        | "empty_device_history_not_empty"
+                        | "source_adoption_platform_unqualified"
+                ) {
+                    can_review = false;
+                    reason = Some(error);
+                } else {
+                    return Err(error);
+                }
+                }
+            }
+        }
+        let mut available = false;
+        let mut intents = Vec::new();
+        if state == "active" {
+            self.manager(lease).await?;
+            let access = self
+                .0
+                .grant_access
+                .lock()
+                .map_err(|_| "management_unavailable")?
+                .clone();
+            if let Some(access) = access {
+                for item in access.list_existing().await.map_err(|e| e.code)? {
+                    intents.push(json!({"intentId":item.intent_id,"contributionId":item.contribution_id,"resourceId":item.resource_id,"state":"saved"}));
+                }
+                available = !access.retired();
+            }
+        }
+        self.check(lease)?;
+        rinx_miniapp_core::bounded_reply(
+            json!({"state":state,"setupKind":setup_kind,"canReview":can_review,"reason":reason,"grantReviewAvailable":available,"grantIntents":intents}),
+        )
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn onboarding_contract_has_no_script_consent_or_identity_fields() {
+        for value in [
+            json!({"tokens":700}),
+            json!({"confirm":true}),
+            json!({"migrationId":"other"}),
+            json!({"path":"/tmp"}),
+            json!({"provider":"codex"}),
+        ] {
+            assert!(parse::<Empty>(value).is_err());
+        }
+        assert!(parse::<Empty>(json!({})).is_ok());
+    }
+}

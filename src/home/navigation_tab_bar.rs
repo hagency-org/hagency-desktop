@@ -291,10 +291,6 @@ script_mod! {
                 tooltip_text: "Mini apps"
                 icon.draw_icon.svg: ICON_SQUARES
             }
-            article_editor_button := mod.widgets.NavigationTabButton {
-                tooltip_text: #(crate::i18n::tr("Article editor"))
-                icon.draw_icon.svg: ICON_FILE
-            }
             CachedWidget {
                 add_room_button := mod.widgets.AddRoomButton {}
             }
@@ -309,6 +305,10 @@ script_mod! {
 
             // Bottom-left account menu button. The spaces bar above is height: Fill,
             // which pins this to the very bottom of the rail.
+            appearance_button := mod.widgets.NavigationTabButton {
+                tooltip_text: #(crate::i18n::tr("App appearance"))
+                icon.draw_icon.svg: ICON_APPEARANCE
+            }
             CachedWidget {
                 account_switcher_button := mod.widgets.AccountSwitcherButton {}
             }
@@ -685,8 +685,8 @@ impl Widget for NavigationTabBar {
                 cx.action(crate::moments::ui::MomentsAction::Open {author: None});
             }
             if self.view.navigation_bar_button(cx,ids!(octoscript_apps_button)).clicked(actions) {cx.action(crate::octoscript_apps::MiniAppsAction::Open);}
-            if self.view.navigation_bar_button(cx, ids!(article_editor_button)).clicked(actions) {
-                crate::system_apps::open_article(cx);
+            if self.view.navigation_bar_button(cx, ids!(appearance_button)).clicked(actions) {
+                cx.action(crate::settings::appearance::OpenAppearance);
             }
             if self.view.navigation_bar_button(cx, ids!(toggle_spaces_bar_button)).clicked(actions) {
                 self.is_spaces_bar_shown = !self.is_spaces_bar_shown;
@@ -731,7 +731,7 @@ impl Widget for NavigationTabBar {
         self.apply_selected_tab(cx, None);
         for (id, tooltip) in [
             (ids!(contacts_button), crate::i18n::tr("Contacts")),
-            (ids!(article_editor_button), crate::i18n::tr("Article editor")),
+            (ids!(appearance_button), crate::i18n::tr("App appearance")),
         ] {
             if let Some(mut button) = self.view.navigation_bar_button(cx, id).borrow_mut() {
                 button.set_tooltip_text(tooltip);

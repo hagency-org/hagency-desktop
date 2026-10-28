@@ -1,23 +1,51 @@
 //! Native credential export. The script receives only Save/Cancel, never bytes.
 use rinx_miniapp_core::Lease;
 
+/// Keep the default used by the signed-in admission flow. Named exports are
+/// trusted native artifacts; scripts cannot select a filename or destination.
+pub(super) async fn save(bytes: Vec<u8>, lease: Lease, account: String) -> Result<bool, String> {
+    save_named(bytes, lease, account, "hagency-registration.json".into()).await
+}
+
+fn validate_filename(name: &str) -> Result<(), String> {
+    if name.is_empty()
+        || name.len() > 128
+        || name.starts_with('.')
+        || !name
+            .bytes()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, b'-' | b'_' | b'.'))
+        || name.ends_with('.')
+        || name.contains("..")
+        || !name.ends_with(".json") && !name.ends_with(".yaml")
+    {
+        return Err("Invalid configuration filename".into());
+    }
+    Ok(())
+}
+
 #[cfg(any(target_env = "ohos", all(test, unix)))]
 #[path = "private_export_ohos.rs"]
 mod ohos;
 #[cfg(target_env = "ohos")]
-pub(super) use ohos::save;
+pub(super) use ohos::save_named;
 
 #[cfg(any(
     target_os = "macos",
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
-pub(super) async fn save(bytes: Vec<u8>, lease: Lease, account: String) -> Result<bool, String> {
+pub(super) async fn save_named(
+    bytes: Vec<u8>,
+    lease: Lease,
+    account: String,
+    filename: String,
+) -> Result<bool, String> {
+    validate_filename(&filename)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
     let choose = move || {
         let selected = std::panic::catch_unwind(|| {
             lease.check(&account)?;
-            choose_path()
+            choose_path(&filename)
         })
         .unwrap_or_else(|_| Err("Could not open the system save dialog".into()));
         // AppKit dialogs must run on the main queue. File IO must not block it.
@@ -43,7 +71,7 @@ pub(super) async fn save(bytes: Vec<u8>, lease: Lease, account: String) -> Resul
 }
 
 #[cfg(target_os = "macos")]
-fn choose_path() -> Result<Option<std::path::PathBuf>, String> {
+fn choose_path(filename: &str) -> Result<Option<std::path::PathBuf>, String> {
     use makepad_widgets::makepad_platform::os::{
         apple::apple_sys::*,
         apple_util::{str_to_nsstring, nsstring_to_string},
@@ -54,8 +82,7 @@ fn choose_path() -> Result<Option<std::path::PathBuf>, String> {
             return Err("Could not open the system save dialog".into());
         }
         let () = msg_send![panel, setCanCreateDirectories: YES];
-        let () =
-            msg_send![panel, setNameFieldStringValue: str_to_nsstring("hagency-registration.json")];
+        let () = msg_send![panel, setNameFieldStringValue: str_to_nsstring(filename)];
         let response: i64 = msg_send![panel, runModal];
         match response {
             0 => Ok(None),
@@ -79,14 +106,12 @@ fn choose_path() -> Result<Option<std::path::PathBuf>, String> {
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 ))]
-fn choose_path() -> Result<Option<std::path::PathBuf>, String> {
-    Ok(rfd::FileDialog::new()
-        .set_file_name("hagency-registration.json")
-        .save_file())
+fn choose_path(filename: &str) -> Result<Option<std::path::PathBuf>, String> {
+    Ok(rfd::FileDialog::new().set_file_name(filename).save_file())
 }
 
 #[cfg(target_os = "macos")]
-fn on_main_run_loop(choose: impl FnOnce() + Send + 'static) {
+pub(super) fn on_main_run_loop(choose: impl FnOnce() + Send + 'static) {
     use makepad_widgets::makepad_platform::{makepad_objc_sys::objc_block, os::apple::apple_sys::*};
     // Match Makepad's native document dialogs: NSOperationQueue schedules the
     // modal run loop outside the dispatch callback processing a UI event.
@@ -112,12 +137,18 @@ fn on_main_run_loop(choose: impl FnOnce() + Send + 'static) {
     target_os = "windows",
     all(target_os = "linux", not(target_env = "ohos"))
 )))]
-pub(super) async fn save(bytes: Vec<u8>, lease: Lease, account: String) -> Result<bool, String> {
+pub(super) async fn save_named(
+    bytes: Vec<u8>,
+    lease: Lease,
+    account: String,
+    filename: String,
+) -> Result<bool, String> {
+    validate_filename(&filename)?;
     lease.check(&account)?;
     let (tx, rx) = tokio::sync::oneshot::channel();
-    let dialog = robius_file_picker::FileDialog::new()
-        .set_file_name("hagency-registration.json");
-    let on_completion = move |result: robius_file_picker::Result<Option<robius_file_picker::PickedFile>>| {
+    let dialog = robius_file_picker::FileDialog::new().set_file_name(filename);
+    let on_completion =
+        move |result: robius_file_picker::Result<Option<robius_file_picker::PickedFile>>| {
             let _ = tx.send(
                 result
                     .map(|file| file.is_some())
@@ -128,7 +159,11 @@ pub(super) async fn save(bytes: Vec<u8>, lease: Lease, account: String) -> Resul
     let save = {
         let current_lease = lease.clone();
         let current_account = account.clone();
-        dialog.save_data_guarded(bytes, move || current_lease.check(&current_account).is_ok(), on_completion)
+        dialog.save_data_guarded(
+            bytes,
+            move || current_lease.check(&current_account).is_ok(),
+            on_completion,
+        )
     };
     #[cfg(not(target_os = "android"))]
     let save = dialog.save_data(bytes, on_completion);
@@ -205,6 +240,26 @@ mod tests {
         fs,
         os::unix::fs::{PermissionsExt, symlink},
     };
+
+    #[test]
+    fn named_exports_reject_paths_and_preserve_artifact_extension() {
+        for name in ["hagency-registration.json", "matrix-test-registration.yaml"] {
+            assert!(validate_filename(name).is_ok());
+        }
+        for name in [
+            "",
+            "../key.yaml",
+            "folder/key.yaml",
+            "folder\\key.json",
+            ".hidden.json",
+            "a..json",
+            "x.yaml/",
+            "x.exe",
+            "x.json\n",
+        ] {
+            assert!(validate_filename(name).is_err(), "{name:?}");
+        }
+    }
 
     #[test]
     fn private_export_replaces_public_inode_and_preserves_hard_link() {

@@ -1,0 +1,107 @@
+{
+  "date": "2026-10-28",
+  "scope": "Hagency role-first workspaces and shared widget refactor",
+  "review": {
+    "mean": 9.6,
+    "requested_threshold": ">9.5/10",
+    "kind": "Subjective author assessment of representative core journeys",
+    "scope_wide_target_verified": false,
+    "report": "author-review.json"
+  },
+  "native": {
+    "passed": 18,
+    "total": 18
+  },
+  "regressions": {
+    "categories": 24,
+    "rust_tests": 169,
+    "passed": true,
+    "report": "release-regressions/report.json"
+  },
+  "evidence_packet": ".run/hagency-widgets-20261028/validation.json",
+  "source_manifest": ".run/hagency-widgets-20261028/source-manifest.json",
+  "deployed": false,
+  "historical_reports": [
+    {
+      "date": "2026-10-23",
+      "scope": "Reviewed macOS Hagency management design and native interaction",
+      "independent_reviewer": "/root/hagency_ux_judge",
+      "baseline_score": 4.5,
+      "final_score": 9.5,
+      "dimensions": {
+        "orientation": 9.6,
+        "role_and_task_priority": 9.7,
+        "journey_continuity": 9.5,
+        "visual_hierarchy": 9.3,
+        "feedback_and_recovery": 9.4
+      },
+      "bundle_sha256": "da3604df5718f23c72359e1cafbfb3ab746fd9476dc4d2467de47e08b209662a",
+      "release_sha256": "f9cdf9ffad4ba73752c022103ff6ef856a65cf791da3cde5e4643be43c3aa8e0",
+      "evidence_packet": ".run/hagency-ux-redesign/final-packet.json",
+      "review": ".run/hagency-ux-redesign/judge-final-review.md",
+      "tests": {
+        "contract": {
+          "passed": 1,
+          "total": 1,
+          "report": ".run/hagency-ux-redesign/contract-final-pass.log"
+        },
+        "catalog": {
+          "passed": 8,
+          "total": 8,
+          "report": ".run/hagency-ux-redesign/catalog-current.log"
+        },
+        "journeys-authority": {
+          "passed": 40,
+          "total": 40,
+          "report": ".run/hagency-ux-redesign/journeys-authority/report.json"
+        },
+        "startup-zoom-regression": {
+          "passed": 1,
+          "total": 1,
+          "report": ".run/hagency-ux-redesign/zoom-regression.log"
+        },
+        "full-bundle": {
+          "passed": 2,
+          "total": 2,
+          "report": ".run/hagency-ux-redesign/full-bundle-authority/report.json"
+        },
+        "enrollment-current": {
+          "passed": 26,
+          "total": 26,
+          "report": ".run/hagency-ux-redesign/enrollment-current/report.json"
+        },
+        "refresh-current": {
+          "passed": 84,
+          "total": 84,
+          "report": ".run/hagency-ux-redesign/refresh-current/report.json"
+        }
+      },
+      "native_verification": [
+        "English and Chinese; light, dark and custom violet themes",
+        "Exact second-resource selection, project/agent review and latest decisions",
+        "Resource admission, verification, stale and reconnect states with explicit read fixtures",
+        "Saved drafts, restart, paginated list return position and theme reload",
+        "Tab, Enter and Space activation; disabled authorization state",
+        "Real loopback signed-in shell, separate window and native bridges",
+        "Three authenticated cold starts at100%,125%,100%; zero script registration errors"
+      ],
+      "feature_inventory": {
+        "original_service_names_retained": 157,
+        "removed_original_action_helpers": 0,
+        "new_service": "hagency.navigation.open"
+      },
+      "limits": [
+        "Real integration uses isolated loopback server and existing test account, not production mini1",
+        "No new provider OAuth or inference claimed; unchanged native semantics reference docs/design/hagency-web-client-parity.md",
+        "VoiceOver and non-macOS platforms not tested",
+        "No production contribution/approval was submitted in this UX validation",
+        "Expert review score is not a user-study measurement"
+      ],
+      "cleanup": ".run/hagency-ux-redesign/cleanup-report.json",
+      "remaining_polish": [
+        "Reduce repeated secondary explanation",
+        "Gradually align dense retained native forms"
+      ]
+    }
+  ]
+}

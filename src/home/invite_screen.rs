@@ -302,6 +302,10 @@ impl Widget for InviteScreen {
         // Handle any updates to this invite screen, e.g., it's been loaded or more inviter info has been fetched.
         if let Event::Actions(actions) = event {
             for action in actions {
+                if let Some(AppStateAction::RoomNameUpdated(room_name_id)) = action.downcast_ref() {
+                    self.update_displayed_name(cx, room_name_id);
+                    continue;
+                }
                 if let Some(AppStateAction::RoomLoadedSuccessfully { room_name_id, .. }) = action.downcast_ref() {
                     if self.room_name_id.as_ref().is_some_and(|current| current.room_id() == room_name_id.room_id()) {
                         self.set_displayed_invite(cx, room_name_id);
@@ -560,6 +564,25 @@ impl Widget for InviteScreen {
 }
 
 impl InviteScreen {
+    /// Refresh metadata without resetting an in-flight Join or Reject operation.
+    fn update_displayed_name(&mut self, cx: &mut Cx, room_name_id: &RoomNameId) {
+        if !self.room_name_id.as_ref().is_some_and(|current| current.room_id() == room_name_id.room_id()) {
+            return;
+        }
+        let invites = get_invited_rooms(cx);
+        let invites = invites.borrow();
+        let latest = invites.get(room_name_id.room_id());
+        let room_name_id = latest.map_or(room_name_id, |invite| &invite.room_name_id);
+        self.room_name_id = Some(room_name_id.clone());
+        if let Some(info) = self.info.as_mut() {
+            info.room_info = BasicRoomDetails::NameAndAvatar {
+                room_name_id: room_name_id.clone(),
+                room_avatar: latest.map_or_else(|| info.room_avatar().clone(), |invite| invite.room_avatar.clone()),
+            };
+        }
+        self.redraw(cx);
+    }
+
     /// Sets the ID of the invited room that will be displayed by this screen.
     pub fn set_displayed_invite(&mut self, cx: &mut Cx, room_name_id: &RoomNameId) {
         self.room_name_id = Some(room_name_id.clone());
@@ -567,9 +590,11 @@ impl InviteScreen {
             .borrow()
             .get(room_name_id.room_id())
         {
+            // Dock restoration and same-tab selections can carry an older name.
+            self.room_name_id = Some(invite.room_name_id.clone());
             self.info = Some(InviteDetails {
                 room_info: BasicRoomDetails::NameAndAvatar {
-                    room_name_id: room_name_id.clone(),
+                    room_name_id: invite.room_name_id.clone(),
                     room_avatar: invite.room_avatar.clone(),
                 },
                 inviter: invite.inviter_info.clone(),
@@ -643,5 +668,97 @@ impl InviteScreenRef {
         if let Some(mut inner) = self.borrow_mut() {
             inner.hide_displayed_invite(cx);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use super::super::rooms_list::InvitedRoomInfo;
+    use matrix_sdk::RoomDisplayName;
+
+    fn screen() -> (Cx, InviteScreen) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        get_invited_rooms(&mut cx).borrow_mut().clear();
+        let screen = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.InviteScreen {}});
+            InviteScreen::script_from_value(vm, value)
+        });
+        (cx, screen)
+    }
+
+    fn name(id: &str, name: &str) -> RoomNameId {
+        RoomNameId::new(RoomDisplayName::Named(name.into()), id.parse().unwrap())
+    }
+
+    fn remember(cx: &mut Cx, room: RoomNameId, is_space: bool) {
+        get_invited_rooms(cx).borrow_mut().insert(room.room_id().clone(), InvitedRoomInfo {
+            room_name_id: room,
+            canonical_alias: None,
+            alt_aliases: Vec::new(),
+            room_avatar: FetchedRoomAvatar::Text("D".into()),
+            inviter_info: None,
+            invite_state: InviteState::WaitingOnUserInput,
+            is_selected: false,
+            is_direct: false,
+            is_space,
+        });
+    }
+
+    fn rename_event(screen: &mut InviteScreen, cx: &mut Cx, room: RoomNameId) {
+        let actions = vec![Box::new(AppStateAction::RoomNameUpdated(room)) as Action];
+        screen.handle_event(cx, &Event::Actions(actions), &mut Scope::empty());
+    }
+
+    #[test]
+    fn invite_detail_tracks_late_room_name_without_resetting_pending_action() {
+        let (mut cx, mut screen) = screen();
+        let old = name("!project:example.test", "miniapp_manager");
+        remember(&mut cx, old.clone(), false);
+        screen.set_displayed_invite(&mut cx, &old);
+        screen.invite_state = InviteState::WaitingForJoinResult;
+        let latest = name("!project:example.test", "Project name from invite state");
+        remember(&mut cx, latest.clone(), false);
+        rename_event(&mut screen, &mut cx, latest.clone());
+        assert_eq!(screen.room_name_id.as_ref().unwrap().display(), latest.display());
+        let details = screen.info.as_ref().unwrap();
+        assert_eq!(details.room_name_id().display(), latest.display());
+        assert_eq!(details.room_id(), old.room_id(), "confirmation retains the original room");
+        assert_eq!(screen.invite_state, InviteState::WaitingForJoinResult);
+        assert!(screen.is_loaded);
+
+        rename_event(&mut screen, &mut cx, name("!other:example.test", "Other room"));
+        assert_eq!(screen.info.as_ref().unwrap().room_name_id().display(), latest.display());
+        assert_eq!(screen.invite_state, InviteState::WaitingForJoinResult);
+    }
+
+    #[test]
+    fn invite_detail_restoration_and_older_actions_use_latest_cached_name() {
+        let (mut cx, mut screen) = screen();
+        let old = name("!space:example.test", "miniapp_manager");
+        let latest = name("!space:example.test", "Project space");
+        remember(&mut cx, latest.clone(), true);
+        screen.set_displayed_invite(&mut cx, &old);
+        assert_eq!(screen.info.as_ref().unwrap().room_name_id().display(), latest.display());
+        assert_eq!(screen.room_name_id.as_ref().unwrap().display(), latest.display());
+        assert!(screen.is_space);
+        screen.invite_state = InviteState::WaitingForLeaveResult;
+        rename_event(&mut screen, &mut cx, old);
+        assert_eq!(screen.info.as_ref().unwrap().room_name_id().display(), latest.display());
+        assert_eq!(screen.invite_state, InviteState::WaitingForLeaveResult);
+    }
+
+    #[test]
+    fn invite_detail_waiting_for_room_tracks_name_without_inventing_loaded_state() {
+        let (mut cx, mut screen) = screen();
+        let old = RoomNameId::empty("!pending:example.test".parse().unwrap());
+        screen.set_displayed_invite(&mut cx, &old);
+        let latest = name("!pending:example.test", "Arriving project");
+        rename_event(&mut screen, &mut cx, latest.clone());
+        assert_eq!(screen.room_name_id.as_ref().unwrap().display(), latest.display());
+        assert!(!screen.is_loaded);
+        assert!(screen.info.is_none());
     }
 }

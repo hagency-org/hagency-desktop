@@ -16,7 +16,7 @@ fn manifest_with(body: &str) -> String {
 fn palpo_extension_preserves_schema_and_declares_its_host_feature() {
     assert_eq!(SCHEMA, 1);
     assert_eq!(SCHEMA_MINOR, 0);
-    assert_eq!(KNOWN_FEATURES, &["palpo-admin-v1", "palpo-account-navigation-v1", "palpo-agent-navigation-v1", "palpo-actions-room-v1", "palpo-project-room-picker-v1"]);
+    assert_eq!(KNOWN_FEATURES, &["hagency-management-v1", "palpo-admin-v1", "palpo-account-navigation-v1", "palpo-agent-navigation-v1", "palpo-actions-room-v1", "palpo-project-room-picker-v1"]);
 }
 
 #[test]

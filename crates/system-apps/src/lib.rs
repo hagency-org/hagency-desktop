@@ -146,13 +146,13 @@ pub fn pack(root: &Path) -> Result<PackedCatalog, String> {
             .ok_or("Missing manifest.json")?;
         let mut manifest =
             AppManifest::parse(std::str::from_utf8(&file.bytes).map_err(|e| e.to_string())?)?;
-        if manifest.id == "im.palpo.operations"
-            || manifest
-                .capabilities
-                .iter()
-                .any(|cap| cap.starts_with("palpo."))
+        let management = manifest.id == octosense_app_contract::hagency::APP_ID;
+        if manifest.capabilities.iter().any(|cap| cap.starts_with("palpo."))
+            || management && (!manifest.requires.iter().any(|f| f == octosense_app_contract::hagency::FEATURE)
+                || manifest.capabilities.iter().any(|cap| cap != "storage" && !octosense_app_contract::hagency::SERVICES.contains(&cap.as_str())))
+            || !management && manifest.capabilities.iter().any(|cap| octosense_app_contract::hagency::SERVICES.contains(&cap.as_str()))
         {
-            return Err("Palpo administration is not a supported system app".into());
+            return Err("Legacy Palpo and unscoped management bundles are not supported".into());
         }
         if !ids.insert(manifest.id.clone()) {
             return Err("Duplicate system app id".into());

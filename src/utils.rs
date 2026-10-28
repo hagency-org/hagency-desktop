@@ -818,7 +818,9 @@ pub fn linkify_get_urls<'t>(
         if is_html {
             Cow::from(text)
         } else {
-            htmlize::escape_text(text)
+            // Once a plain message is promoted to HTML for a URL, literal
+            // newlines would otherwise collapse into spaces in the Html widget.
+            Cow::Owned(htmlize::escape_text(text).replace('\n', "<br>"))
         }
     };
     // Closure to escape attributes if it's not HTML.
@@ -1339,6 +1341,15 @@ mod tests_human_readable_list {
 
 #[cfg(test)]
 mod tests_linkify {
+    #[test]
+    fn plaintext_linkification_preserves_linebreaks_and_escapes_html() {
+        let text="line one\nhttps://example.org\n\n<b>literal</b>";
+        let html=super::linkify(text,false);
+        assert!(html.contains("line one<br>"));
+        assert!(html.contains("</a><br><br>&lt;b&gt;literal&lt;/b&gt;"));
+        assert!(!html.contains("<b>"));
+    }
+
     use super::*;
 
     #[test]

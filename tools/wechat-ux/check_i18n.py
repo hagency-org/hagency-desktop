@@ -23,8 +23,17 @@ def main():
             sites+=1
             key=json.loads(match[1])
             if key not in en:missing.append((str(path.relative_to(root)),key))
+    # Mini-app consent translates these contract descriptions dynamically;
+    # scanning only literal i18n::tr calls misses newly added permissions.
+    contract=root/'vendor/octosense-app-contract/src/hagency.rs'
+    descriptions=contract.read_text().split('pub fn words(',1)[1]
+    permissions=0
+    for match in re.finditer(r'"[^"\\]+"\s*=>\s*("(?:\\.|[^"\\])*")', descriptions):
+        permissions+=1
+        key=json.loads(match[1])
+        if key not in en:missing.append((str(contract.relative_to(root)),key))
     assert not missing, 'Missing UI translations: '+repr(missing)
-    print(json.dumps({'catalog_entries':len(en),'translated_call_sites':sites,'missing':0},ensure_ascii=False))
+    print(json.dumps({'catalog_entries':len(en),'translated_call_sites':sites,'management_permissions':permissions,'missing':0},ensure_ascii=False))
 
 
 if __name__=='__main__':main()

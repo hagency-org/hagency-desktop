@@ -1,5 +1,7 @@
 # Hagency Desktop
 
+0.5.0 is prepared but not published: the [release assessment](dev-vibe/release-0.5.0/assessment.zh.md) records outstanding upstream dependency security work. Existing downloads are on [GitHub Releases](https://github.com/hagency-org/hagency-desktop/releases).
+
 English | [简体中文](README.zh-CN.md)
 
 Hagency Desktop is a native Rust/Makepad client for Hagency servers. It combines
@@ -80,8 +82,10 @@ costs; restore the same owner's complete ledger when the recovery gate requires 
 
 ## Build and check
 
-Use the configured checkout with the sibling `hagency-client` owner-engine source
-available; the Cargo manifest depends on it. The repository pins Rust 1.98.0.
+Cargo fetches the owner engine from the `main` branch of
+[`chrislearn/hagency-client`](https://github.com/chrislearn/hagency-client).
+The committed Cargo.lock records the exact revision used for a build; no sibling
+checkout is required. The repository pins Rust 1.98.0.
 Install CMake and the platform's native build dependencies, then run:
 
 ```sh

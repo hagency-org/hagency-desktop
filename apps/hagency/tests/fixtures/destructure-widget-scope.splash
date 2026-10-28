@@ -1,0 +1,14 @@
+use mod.std.assert
+let View={text:""}
+let state={state:"legacy"}
+let root=View{
+    View{
+        let p=state
+        let {reason=nil}=p
+        View{text:p.state}
+    }
+}
+assert(root.len()==1)
+assert(root[0].len()==1)
+assert(root[0][0].text=="legacy")
+true

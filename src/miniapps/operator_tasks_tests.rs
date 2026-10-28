@@ -1,0 +1,392 @@
+//! Real full-bundle widget construction, not pixel or live-account acceptance.
+use super::*;
+const OPEN: &str = r#"
+let task_fixture_open=fn(){
+    H.ready=true H.busy=false H.page="operator_tasks" H.command=nil H.task_filters_open=true
+    H.session={account:"@owner:test" features:[]}
+    H.task_page={supported:true tasks:[{id:"task_a" title:"Original A" status:"created" priority:"p1" assignee:nil updatedAt:"old"},{id:"task_b" title:"Original B" status:"blocked" priority:"p2" assignee:"Agent" updatedAt:"later"}] nextOffset:nil}
+    A.redraw()
+}
+"#;
+fn fixture(source: &str) -> (Cx, SplashRef) {
+    fixture_with_open(source, OPEN)
+}
+fn fixture_with_open(source: &str, open: &str) -> (Cx, SplashRef) {
+    // Test workers are distinct threads; the framework's isolate registrations
+    // are thread-local, unlike the app's process-wide startup Once.
+    makepad_widgets::widget_async::register_splash_isolate_mod(crate::theme::script_mod);
+    makepad_widgets::widget_async::register_splash_isolate_mod(crate::i18n::script_mod);
+    makepad_widgets::widget_async::register_splash_isolate_mod(|vm| {
+        crate::miniapps::design::script_mod(vm);
+    });
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let card = cx.with_vm(|vm| {
+        makepad_widgets::script_mod(vm);
+        crate::i18n::install(vm);
+        makepad_code_editor::script_mod(vm);
+        crate::shared::script_mod(vm);
+        crate::miniapps::script_mod(vm);
+        vm.bx.captured_errors = Some(Vec::new());
+        // The desktop mini-app host gives Splash a finite viewport. The default
+        // Fit root has no established height in this offscreen draw harness,
+        // which incorrectly clamps multiline inputs to zero through ancestors.
+        let value = vm.eval(script! {use mod.prelude.widgets.* use mod.widgets.* Splash{width:Fill height:Fill}});
+        let widget = WidgetRef::script_from_value(vm, value);
+        widget.register_as_ui_root(vm);
+        let card = widget.as_splash();
+        assert!(vm.take_errors().is_empty());
+        card
+    });
+    card.set_text(&mut cx, &format!("{source}\n{open}"));
+    // The app normally seeds this tree during its first frame. Materialize the
+    // real children before entering a callback that mutably borrows Splash.
+    assert!(!cx
+        .widget_tree()
+        .find_within(card.widget_uid(), ids!(heading))
+        .is_empty());
+    assert!(card.call_script_fn(&mut cx, id!(task_fixture_open), &[]));
+    // Script widget callbacks enqueue render work; drain the same public task
+    // pump used by the native event loop before inspecting widget instances.
+    makepad_widgets::makepad_platform::makepad_script_std::handle_script_tasks(&mut cx);
+    (cx, card)
+}
+
+fn count(widget: &WidgetRef, id: LiveId) -> usize {
+    let mut found = 0;
+    widget.children(&mut |child_id, child| {
+        if child_id == id {
+            found += 1;
+        }
+        found += count(&child, id);
+    });
+    found
+}
+#[test]
+fn operator_tasks_real_full_bundle_keeps_distinct_rows_and_all_status_controls() {
+    let (mut cx, card) = fixture(include_str!("../../apps/hagency/bundle/main.splash"));
+    let root = card.borrow().unwrap();
+    let mut opens = 0;
+    let mut statuses = 0;
+    root.view.children(&mut |_, child| {
+        opens += count(&child, id!(task_open));
+        statuses += count(&child, id!(task_status));
+    });
+    assert_eq!(opens, 2);
+    assert_eq!(statuses, 6);
+    drop(root);
+    card.set_text(&mut cx, "");
+}
+
+fn collect(widget: &WidgetRef, id: LiveId, result: &mut Vec<WidgetRef>) {
+    widget.children(&mut |child_id, child| {
+        if child_id == id {
+            result.push(child.clone());
+        }
+        collect(&child, id, result);
+    });
+}
+fn targets(card: &SplashRef, id: LiveId) -> Vec<WidgetRef> {
+    let mut result = Vec::new();
+    card.borrow()
+        .unwrap()
+        .view
+        .children(&mut |child_id, child| {
+            if child_id == id {
+                result.push(child.clone());
+            }
+            collect(&child, id, &mut result);
+        });
+    result
+}
+fn draw_card(cx: &mut Cx, card: &SplashRef) {
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+    let pass = DrawPass::new(cx);
+    pass.set_size(cx, dvec2(1000., 800.));
+    let mut list = DrawList2d::new(cx);
+    let event = DrawEvent::default();
+    let mut draw = CxDraw::new(cx, &event);
+    let mut cx2d = Cx2d::new(&mut draw);
+    cx2d.begin_pass(&pass, None);
+    list.begin_always(&mut cx2d);
+    cx2d.begin_root_turtle(dvec2(1000., 800.), Layout::flow_overlay());
+    card.borrow_mut()
+        .unwrap()
+        .draw_all(&mut cx2d, &mut Scope::empty());
+    cx2d.end_pass_sized_turtle();
+    list.end(&mut cx2d);
+    cx2d.end_pass(&pass);
+}
+const BOARD: &str = r#"
+let task_fixture_open=fn(){
+ H.ready=true H.busy=false H.page="operator_board" H.command=nil
+ H.session={account:"@owner:test" features:[]}
+ H.task_board={supported:true projectCount:0 agentCount:0 taskTotals:{created:0 accepted:0 in_progress:0 blocked:0 done:0} projects:[] nextAfter:nil}
+ A.redraw()
+}
+"#;
+#[test]
+fn operator_tasks_board_counter_bounds_preserve_all_five_values() {
+    for cn in [false, true] {
+        let base = include_str!("../../apps/hagency/bundle/main.splash");
+        let localized = if cn {
+            base.replace("if mod.rinx_i18n.language() == \"zh-CN\"", "if true")
+        } else {
+            base.into()
+        };
+        let (mut cx, card) = fixture_with_open(&localized, BOARD);
+        draw_card(&mut cx, &card);
+        let counters = targets(&card, id!(board_counter));
+        assert_eq!(counters.len(), 5);
+        for counter in counters {
+            let r = counter.area().rect(&cx);
+            assert!(
+                r.size.x > 20.
+                    && r.size.y > 0.
+                    && r.size.y < 70.
+                    && r.pos.x >= 0.
+                    && r.pos.x + r.size.x <= 1000.5
+                    && r.pos.y + r.size.y <= 800.5,
+                "counter {} {r:?}",
+                counter.text()
+            );
+        }
+        card.set_text(&mut cx, "");
+    }
+}
+#[test]
+fn operator_tasks_empty_results_and_create_are_in_initial_viewport() {
+    let source = include_str!("../../apps/hagency/bundle/main.splash");
+    let open = r#"
+let task_fixture_open=fn(){H.ready=true H.busy=false H.page="operator_tasks" H.command=nil H.task_filters_open=false H.session={account:"@owner:test" features:[]} H.task_page={supported:true writeSupported:true writeOperations:["create"] tasks:[] nextOffset:nil} A.redraw()}
+"#;
+    let (mut cx, card) = fixture_with_open(source, open);
+    draw_card(&mut cx, &card);
+    assert!(targets(&card, id!(task_status)).is_empty());
+    for id in [id!(task_create), id!(task_empty), id!(task_filters_toggle)] {
+        let items = targets(&card, id);
+        assert_eq!(items.len(), 1);
+        let r = items[0].area().rect(&cx);
+        assert!(
+            r.size.x > 0. && r.size.y > 0. && r.pos.y + r.size.y <= 800.5,
+            "{id:?} {r:?}"
+        );
+    }
+    card.set_text(&mut cx, "");
+}
+
+#[test]
+fn operator_tasks_original_fit_wrapper_reproduces_zero_width_counters() {
+    let source = include_str!("../../apps/hagency/bundle/main.splash").replace(
+        "board_counter := mod.widgets.HagencyCopy{width:Fit",
+        "board_counter := mod.widgets.HagencyCopy{",
+    );
+    let (mut cx, card) = fixture_with_open(&source, BOARD);
+    draw_card(&mut cx, &card);
+    let counters = targets(&card, id!(board_counter));
+    assert_eq!(counters.len(), 5);
+    assert!(
+        counters.iter().any(|v| v.area().rect(&cx).size.x < 1.),
+        "original Fit/Fill layout must reproduce zero-width counters"
+    );
+    card.set_text(&mut cx, "");
+}
+
+#[test]
+fn operator_tasks_editor_primary_action_precedes_optional_fields_in_viewport() {
+    for operation in ["create", "comment"] {
+        let open = format!(
+            r#"
+let task_fixture_open=fn(){{
+ H.ready=true H.busy=false H.command=nil H.task_phase="" H.session={{account:"@owner:test" features:[]}}
+ H.task_page={{supported:true writeSupported:true writeOperations:["create"] tasks:[] nextOffset:nil}}
+ H.task_id="task_original" H.task_detail={{supported:true writeSupported:true writeOperations:["comment"] revision:7 task:{{id:"task_original" title:"A useful task"}}}}
+ A.task_begin("{operation}","")
+}}
+"#
+        );
+        let (mut cx, card) =
+            fixture_with_open(include_str!("../../apps/hagency/bundle/main.splash"), &open);
+        draw_card(&mut cx, &card);
+        let buttons = targets(&card, id!(task_prepare));
+        assert_eq!(buttons.len(), 1);
+        let r = buttons[0].area().rect(&cx);
+        assert!(
+            r.size.x > 0. && r.size.y > 0. && r.pos.y + r.size.y <= 800.5,
+            "{operation} primary save bounds {r:?}"
+        );
+        assert!(targets(&card, id!(task_edit_priority)).is_empty());
+        assert!(targets(&card, id!(task_parent_input)).is_empty());
+        card.set_text(&mut cx, "");
+    }
+}
+
+#[test]
+fn readmission_form_constructs_real_text_inputs_and_freezes_during_submission() {
+    for cn in [false, true] {
+        for busy in [false, true] {
+            let source = include_str!("../../apps/hagency/bundle/main.splash");
+            let localized = if cn {
+                source.replace("if mod.rinx_i18n.language() == \"zh-CN\"", "if true")
+            } else {
+                source.into()
+            };
+            let open = format!(
+                r#"
+let task_fixture_open=fn(){{
+ H.ready=true H.busy={busy} H.command=nil H.page="connection_reoffer"
+ H.session={{account:"@owner:test" administrator:"@admin:test" features:["resource-readmission-v1"]}}
+ H.reoffer_draft={{resourceId:"original_resource" label:"Original resource" coordinatorMxid:"@coordinator:test" review:false resource:{{model:"test-model" framework:"codex"}}}}
+ A.redraw()
+}}
+"#
+            );
+            let (mut cx, card) = fixture_with_open(&localized, &open);
+            assert!(targets(&card, id!(reoffer_coordinator)).is_empty());
+            for id in [id!(reoffer_label)] {
+                let fields = targets(&card, id);
+                assert_eq!(
+                    fields.len(),
+                    1,
+                    "reoffer input failed real widget construction: {id:?}"
+                );
+                assert_eq!(fields[0].as_text_input().is_read_only(), busy);
+            }
+            assert_eq!(targets(&card, id!(reoffer_review)).len(), 1);
+            card.set_text(&mut cx, "");
+        }
+    }
+}
+
+fn stopped_decision_fixture(busy: bool, pending: bool) -> String {
+    format!(
+        r#"
+let task_fixture_open=fn(){{
+ H.ready=true H.busy=false H.command=nil H.session={{account:"@owner:test" features:[]}}
+ let row={{attempt:{{resourceId:"resource" engagementId:"engagement" dispatchId:"dispatch" agent:"Worker" projectId:"project" taskId:"task" fence:1 reason:"owned_runner_failure" inspectionAvailable:true sharedResourceAuthority:true}} taskTitle:"Inspect report" taskStatus:"blocked" revision:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" resolvable:true canContinue:true entryCount:0 entries:[] nextEntry:nil}}
+ A.stopped_review_received({{reviewCommandId:"review" inspectionId:"inspection" expiresAt:9999999999999 inspection:row}})
+ A.choose_stopped("continue")
+ H.stopped_note="Verified effects" H.stopped_instruction="Finish remaining work"
+ H.busy={busy}
+ if {pending} {{H.command={{service:"hagency.stopped.resolve" args:{{commandId:"resolve"}}}}}}
+ A.redraw()
+}}
+"#
+    )
+}
+
+#[test]
+fn stopped_decision_constructs_real_inputs_and_freezes_when_busy_or_pending() {
+    for cn in [false, true] {
+        for (busy, pending) in [(false, false), (true, false), (false, true)] {
+            let source = include_str!("../../apps/hagency/bundle/main.splash");
+            let localized = if cn {
+                source.replace("if mod.rinx_i18n.language() == \"zh-CN\"", "if true")
+            } else {
+                source.into()
+            };
+            let (mut cx, card) = fixture_with_open(&localized, &stopped_decision_fixture(busy, pending));
+            for id in [id!(stopped_note), id!(stopped_instruction)] {
+                let fields = targets(&card, id);
+                assert_eq!(fields.len(), 1, "Recovery text input did not construct: {id:?}");
+                assert_eq!(fields[0].as_text_input().is_read_only(), busy || pending);
+            }
+            assert_eq!(targets(&card, id!(stopped_confirm_review)).len(), 1);
+            card.set_text(&mut cx, "");
+        }
+    }
+}
+
+#[test]
+fn stopped_decision_original_enabled_property_reproduces_render_failure() {
+    let source = include_str!("../../apps/hagency/bundle/main.splash").replace(
+        "mod.widgets.HagencyInput{is_read_only:!A.stopped_can_decide()",
+        "mod.widgets.HagencyInput{enabled:A.stopped_can_decide()",
+    );
+    let (mut cx, card) = fixture_with_open(&source, &stopped_decision_fixture(false, false));
+    assert!(targets(&card, id!(stopped_note)).is_empty());
+    assert!(targets(&card, id!(stopped_instruction)).is_empty());
+    assert!(targets(&card, id!(stopped_confirm_review)).is_empty());
+    card.set_text(&mut cx, "");
+}
+
+#[test]
+fn recovery_ux_quarantined_workspace_prioritizes_inspection_over_waiting() {
+    fn has_text(widget: &WidgetRef, expected: &str) -> bool {
+        let mut found = widget.text() == expected;
+        widget.children(&mut |_, child| found |= has_text(&child, expected));
+        found
+    }
+    for cn in [false, true] {
+        for quarantined in [false, true] {
+            let source = include_str!("../../apps/hagency/bundle/main.splash");
+            let localized = if cn {
+                source.replace("if mod.rinx_i18n.language() == \"zh-CN\"", "if true")
+            } else {
+                source.into()
+            };
+            let block = if quarantined { "inspection_required" } else { "active_execution" };
+            let open = format!(r#"
+let task_fixture_open=fn(){{
+ H.ready=true H.busy=false H.command=nil H.session={{account:"@owner:test" features:[]}}
+ H.page="workspace" H.workspace_mode="detail" H.workspace_resource="resource" H.workspace_id="workspace"
+ H.workspace_detail={{resourceId:"resource" workspaceId:"workspace" dirty:true activeLeases:1 quarantined:{quarantined} sharedResourceCount:1 releaseBlock:"{block}" lastReleasedAt:nil revision:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}}
+ A.redraw()
+}}
+"#);
+            let (mut cx, card) = fixture_with_open(&localized, &open);
+            let inspection = if cn {
+                "有执行结果尚未确认。请先检查已停止的任务，再解除工作区标记。"
+            } else {
+                "An execution outcome is unresolved. Inspect the stopped task before releasing this workspace."
+            };
+            let waiting = if cn {
+                "任务仍占用此工作区，请等待任务结束后刷新。"
+            } else {
+                "A task still holds this workspace. Wait for it to finish, then refresh."
+            };
+            let mut inspected = false;
+            let mut waited = false;
+            card.borrow().unwrap().view.children(&mut |_, child| {
+                inspected |= has_text(&child, inspection);
+                waited |= has_text(&child, waiting);
+            });
+            assert_eq!(inspected, quarantined);
+            assert_eq!(waited, !quarantined);
+            assert_eq!(targets(&card, id!(workspace_stopped)).len(), usize::from(quarantined));
+            assert!(targets(&card, id!(workspace_review)).is_empty());
+            card.set_text(&mut cx, "");
+        }
+    }
+}
+
+#[test]
+fn recovery_ux_continue_form_reduces_height_without_losing_multiline_inputs() {
+    for cn in [false, true] {
+        let source = include_str!("../../apps/hagency/bundle/main.splash");
+        let localized = if cn {
+            source.replace("if mod.rinx_i18n.language() == \"zh-CN\"", "if true")
+        } else {
+            source.into()
+        };
+        let original = localized.replace("height:64 is_multiline:true", "height:80 is_multiline:true");
+        let mut bottoms = Vec::new();
+        for version in [&original, &localized] {
+            let (mut cx, card) = fixture_with_open(version, &stopped_decision_fixture(false, false));
+            draw_card(&mut cx, &card);
+            for id in [id!(stopped_note), id!(stopped_instruction)] {
+                let fields = targets(&card, id);
+                assert_eq!(fields.len(), 1);
+                let rect = fields[0].area().rect(&cx);
+                assert!(rect.size.x > 100. && rect.size.y >= 60., "{id:?} {rect:?}");
+                assert!(!fields[0].as_text_input().is_read_only());
+            }
+            let actions = targets(&card, id!(stopped_confirm_review));
+            assert_eq!(actions.len(), 1);
+            let rect = actions[0].area().rect(&cx);
+            assert!(rect.size.x > 0. && rect.size.y > 0., "{rect:?}");
+            bottoms.push(rect.pos.y + rect.size.y);
+            card.set_text(&mut cx, "");
+        }
+        assert!(bottoms[1] <= bottoms[0] - 31., "Expected 32px less form height: {bottoms:?}");
+    }
+}

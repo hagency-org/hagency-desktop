@@ -40,6 +40,7 @@ fn main() {
     }
 
     if target_os == "windows" {
+        println!("cargo:rerun-if-changed=resources/icon.ico");
         #[cfg(windows)]
         {
             let mut res = winresource::WindowsResource::new();
@@ -75,12 +76,21 @@ fn main() {
 
 /// Returns Rinx's own current git commit info as a commit hash and a permalink.
 fn read_rinx_git_info() -> (String, String) {
-    // Tell cargo to re-run when the git-tracked HEAD changes.
-    println!("cargo:rerun-if-changed=.git/HEAD");
+    // Source bundles may have no Git metadata. Watching a missing path makes
+    // Cargo rerun this script (and recompile the app) on every invocation.
+    if std::path::Path::new(".git/HEAD").is_file() {
+        println!("cargo:rerun-if-changed=.git/HEAD");
+    }
     if let Ok(head) = std::fs::read_to_string(".git/HEAD") {
         if let Some(branch_ref) = head.trim().strip_prefix("ref: ") {
-            println!("cargo:rerun-if-changed=.git/{branch_ref}");
+            let path = format!(".git/{branch_ref}");
+            if std::path::Path::new(&path).is_file() {
+                println!("cargo:rerun-if-changed={path}");
+            }
         }
+    }
+    if std::path::Path::new(".git/packed-refs").is_file() {
+        println!("cargo:rerun-if-changed=.git/packed-refs");
     }
 
     let Ok(output) = std::process::Command::new("git")

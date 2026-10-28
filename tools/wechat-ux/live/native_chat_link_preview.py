@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import socket
 import subprocess
+import sys
 import time
 import uuid
 from native_probe import NativeApp
@@ -48,12 +49,16 @@ def main():
         def titles():
             return [w for w in app.snap() if w["i"] == "title_label"]
 
+        def card_metrics():
+            app.click_id("card_sizes")
+            return json.loads(widget("result")["t"])
+
         def assert_inside(inner, outer):
             x, y, w, h = inner
             ox, oy, ow, oh = outer
             assert x >= ox - 1 and y >= oy - 1 and x + w <= ox + ow + 1 and y + h <= oy + oh + 1, (inner, outer)
 
-        assert [w["t"] for w in titles()] == ["Preview title 1", "Preview title 2"]
+        assert [w["t"] for w in titles()] == ["Preview title 1"]
         card = widget("card")["r"]
         for title in titles():
             assert_inside(title["r"], card)
@@ -68,13 +73,44 @@ def main():
         report["checks"].append("card_opens_original_url")
         app.click_id("expand_button")
         assert len(titles()) == 3
+        app.click_id("wide")
+        wide = titles()
+        assert len(wide) == 3 and max(w['r'][1] for w in wide) - min(w['r'][1] for w in wide) < 1
+        assert all(wide[i]['r'][0] + wide[i]['r'][2] <= wide[i+1]['r'][0] for i in range(2))
+        metrics = card_metrics()
+        assert len(metrics) == 3 and all(card["size"] == metrics[0]["size"] for card in metrics), metrics
+        assert max(card["site_bottom"] for card in metrics) - min(card["site_bottom"] for card in metrics) < 1, metrics
+        app.capture("three-columns")
+        app.click_id("medium")
+        medium = titles()
+        assert len(medium) == 3, "Resizing must retain expansion"
+        assert abs(medium[0]['r'][1] - medium[1]['r'][1]) < 1
+        assert medium[2]['r'][1] > medium[0]['r'][1] + medium[0]['r'][3]
+        assert widget("after")["r"][1] >= widget("card")["r"][1] + widget("card")["r"][3]
+        app.capture("two-columns-expanded")
         app.click_id("collapse_button")
         assert len(titles()) == 2
-        report["checks"].append("expand_collapse_updates_layout_and_hides_extra_cards")
+        app.click_id("wide")
+        assert len(titles()) == 3
+        assert not any(w['i'] in ('expand_button', 'collapse_button') for w in app.snap())
+        app.click_id("narrow")
+        assert len(titles()) == 1
+        assert widget("expand_button")["ty"] == "NavigationBarButton"
+        assert not widget("expand_button").get("t"), "Fold controls are SVG icons, not text pills"
+        app.capture("one-column-collapsed")
+        app.click_id("medium")
+        assert len(titles()) == 2
+        two_card_size = card_metrics()[0]["size"]
+        x,y,w,h=titles()[1]['r']
+        app.click(x+w/2,y+h/2)
+        app.wait_text("https://example.org/2")
+        report["checks"].append("one_two_three_columns_reflow_preserve_expansion_and_original_click_targets")
+        report["checks"].append("svg_expand_collapse_shows_one_row_or_all_links")
 
         app.click_id("replace")
         assert [w["t"] for w in titles()] == ["Replacement card"]
         assert not any(w["ty"] == "Image" for w in app.snap())
+        assert card_metrics()[0]["size"] == two_card_size, "A single card must retain the grid cell dimensions"
         app.click_id("title_label")
         app.wait_text("https://example.org/replacement")
         report["checks"].append("reused_card_updates_metadata_and_click_target")
@@ -84,20 +120,41 @@ def main():
             assert_inside(title["r"], widget("card")["r"])
         assert widget("card")["r"][2] == 240
         app.capture("narrow-card")
+        narrow_card_size = card_metrics()[0]["size"]
         report["checks"].append("narrow_card_keeps_text_inside_bounds")
 
         app.click_id("empty")
         assert [w["t"] for w in titles()] == ["example.org"]
-        assert widget("card")["r"][3] < 80
+        assert card_metrics()[0]["size"] == narrow_card_size
         assert not any(w["i"] in {"description_label", "site_name_label"} for w in app.snap())
         app.capture("empty-preview")
-        report["checks"].append("empty_metadata_uses_compact_hostname_without_blank_summary_or_thumbnail")
+        report["checks"].append("uniform_card_dimensions_and_footer_alignment_survive_sparse_metadata_and_row_reuse")
 
         app.click_id("clear")
         assert not titles()
         assert widget("after")["r"][1] < card[1] + card[3]
         report["checks"].append("clearing_links_removes_cards_and_reserved_height")
         app.capture("cleared")
+
+        app.click_id("answer")
+        expand = widget("agent_reply_expand")
+        assert expand["ty"] == "NavigationBarButton" and not expand.get("t")
+        assert any(w["i"] == "html_view" for w in app.snap())
+        folded_height = widget("reply_fixture")["r"][3]
+        app.capture("answer-folded-svg")
+        app.click_id("agent_reply_expand")
+        collapse = widget("agent_reply_collapse")
+        assert collapse["ty"] == "NavigationBarButton" and not collapse.get("t")
+        assert widget("reply_fixture")["r"][3] > folded_height
+        assert not any(w["i"] == "agent_reply_expand" for w in app.snap())
+        for action in ("answer_copy", "answer_forward", "answer_markdown", "answer_pdf"):
+            assert widget(action)["ty"] == "NavigationBarButton"
+        app.capture("answer-expanded-svg")
+        app.click_id("agent_reply_collapse")
+        assert abs(widget("reply_fixture")["r"][3] - folded_height) < 1
+        app.click_id("answer")
+        assert not any(w["i"] == "agent_reply_expand" for w in app.snap())
+        report["checks"].append("answer_svg_controls_expand_and_collapse_rich_text_with_export_actions_intact")
 
         app.click_id("layouts")
         app.request("/g")
@@ -128,8 +185,14 @@ def main():
             for name, expected in (("font_desktop", 11), ("font_mobile", 12.5)):
                 expected *= 1.15 if scaled else 1
                 assert all(abs(size - expected) < .001 for size in sizes[name]), (name, sizes[name])
+                if sys.platform == "darwin":
+                    selected = sizes[f"{name}_selected_fonts"]
+                    for glyph_fonts, expected_face in zip(selected, ("PingFangSC-Regular", "PingFangSC-Semibold", "PingFangSC-Regular")):
+                        assert glyph_fonts and all(font == expected_face for font in glyph_fonts), (name, expected_face, glyph_fonts)
             app.capture("scaled-preview-fonts" if scaled else "preview-fonts")
         report["checks"].append("desktop_and_mobile_preview_fonts_match_chat_before_and_after_theme_reload")
+        if sys.platform == "darwin":
+            report["checks"].append("actual_english_chinese_glyph_fonts_remain_pingfang_after_theme_reload")
 
         app.click_id("article")
         app.request("/g")

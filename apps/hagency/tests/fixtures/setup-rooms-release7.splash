@@ -1,0 +1,71 @@
+use mod.std.assert
+let base={text:"" draw_icon:{} draw_bg:{}}
+mod.widgets={}
+mod.widgets.HagencyCard=base
+mod.widgets.HagencyTitle=base
+mod.widgets.HagencyCopy=base
+mod.widgets.HagencyHint=base
+mod.widgets.HagencySection=base
+mod.widgets.HagencyDetailCard=base
+mod.widgets.HagencySectionTitle=base
+mod.widgets.HagencyDetailRow=base
+mod.widgets.HagencyFieldLabel=base
+mod.widgets.HagencyStatus=base
+mod.widgets.HagencyActions=base
+mod.widgets.HagencyInput=base
+mod.widgets.RinxButton=base
+mod.widgets.RinxPrimaryButton=base
+mod.widgets.RINX_ACCENT=1
+mod.rinx_icons={check:1 connection:2 back:3 refresh:4}
+let Icon=base
+let Walk={}
+let H={ready:true busy:false page:"project_setup" session:{features:["project-requests-v1","project-setup-v1"]} command:nil saved_commands:[] notice:"" confirm:"" project_selected:{id:"project" name:"Fixture"} setup_confirmation:nil setup_recover_hint:false setup_admin:"" setup_space:"" setup_room:""}
+H.setup_progress={readiness:{projectId:"project" setup:nil administrator:nil eligibleAllocation:nil matrixReady:false capacityReady:false canAssignAdministrator:false canBegin:false canConfirm:false canCancel:false canRebase:false blockingReason:"live_reservation_required"} localHistory:false space:nil room:nil pendingCommands:[] failedCommands:[] blocker:nil}
+let A={}
+A.t=fn(en,zh){return en}
+A.projects_enabled=fn(){return true}
+A.error_text=fn(code){return code}
+
+let p=H.setup_progress
+let r=p.readiness
+let section=mod.widgets.HagencySection{
+                    mod.widgets.HagencySectionTitle{text:A.t("Matrix rooms", "Matrix 房间")}
+                    if r.setup == nil {
+                        mod.widgets.HagencyCopy{text:A.t("Room creation has not begun", "尚未开始创建房间")}
+                    } else if !p.localHistory {
+                        mod.widgets.HagencyCopy{text:A.t("Creation history is on the original device", "创建历史保存在原设备上")}
+                        mod.widgets.HagencyHint{text:A.t("You can read the server result here. Continuing room creation requires the original device.", "可在此查看服务器结果；继续创建房间需要使用原设备。")}
+                        if r.setup.spaceId != nil {mod.widgets.HagencyDetailRow{mod.widgets.HagencyFieldLabel{text:A.t("Project space", "项目空间")} mod.widgets.HagencyCopy{text:r.setup.spaceId}}}
+                        if r.setup.roomId != nil {mod.widgets.HagencyDetailRow{mod.widgets.HagencyFieldLabel{text:A.t("Project room", "项目房间")} mod.widgets.HagencyCopy{text:r.setup.roomId}}}
+                    } else {
+                        mod.widgets.HagencyDetailRow{
+                            mod.widgets.HagencyFieldLabel{text:A.t("Project space", "项目空间")}
+                            mod.widgets.HagencyCopy{text:A.setup_stage_text(p.space)}
+                        }
+                        if p.space != nil && p.space.roomId != nil {mod.widgets.HagencyHint{text:p.space.roomId}}
+                        mod.widgets.HagencyDetailRow{
+                            mod.widgets.HagencyFieldLabel{text:A.t("Project room", "项目房间")}
+                            mod.widgets.HagencyCopy{text:A.setup_stage_text(p.room)}
+                        }
+                        if p.room != nil && p.room.roomId != nil {mod.widgets.HagencyHint{text:p.room.roomId}}
+                        if A.setup_stage_unknown(p.space) || A.setup_stage_unknown(p.room) {
+                            mod.widgets.HagencyHint{text:A.t("Optional: enter an existing room ID to locate the original marked room. These IDs cannot authorize a replacement room.", "可选：输入已有房间 ID，定位带有原始标记的房间。这些 ID 不能授权创建替代房间。")}
+                            if A.setup_stage_unknown(p.space) {
+                                mod.widgets.HagencyCopy{text:A.t("Existing space ID", "已有空间 ID")}
+                                setup_space_input := mod.widgets.HagencyInput{text:H.setup_space on_change:|text| {H.setup_space=text}}
+                            }
+                            if A.setup_stage_unknown(p.room) {
+                                mod.widgets.HagencyCopy{text:A.t("Existing room ID", "已有房间 ID")}
+                                setup_room_input := mod.widgets.HagencyInput{text:H.setup_room on_change:|text| {H.setup_room=text}}
+                            }
+                        }
+                    }
+                    mod.widgets.HagencyDetailRow{
+                        mod.widgets.HagencyFieldLabel{text:A.t("Verification", "验证结果")}
+                        mod.widgets.HagencyCopy{text:if r.matrixReady {A.t("Recorded by the server", "服务器已记录")} else {A.t("Not currently verified", "当前未验证")}}
+                    }
+                    if r.matrixReady {mod.widgets.HagencyHint{text:A.t("This is the last recorded Matrix check. Current reservation readiness is shown separately above.", "此处显示上一次已记录的 Matrix 检查，当前资源预留状态请见上方。")}}
+                }
+~section
+assert(section.len() == 3)
+true

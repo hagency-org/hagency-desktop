@@ -1,0 +1,155 @@
+//! One native confirmation surface for provider connection or resource enrollment.
+use super::*;
+pub(super) enum ProviderReview {
+    Connect(crate::host::hagency::ProviderConsent),
+    Retire(crate::host::hagency::retirement::RetirementConsent),
+    Enroll(crate::host::hagency::enrollment::ResourceConsent),
+    Edit(Box<resource_edit_ui::ResourceEditPrompt>),
+    Create(Box<resource_create_ui::ResourceCreatePrompt>),
+    Personal(Box<personal_configuration_ui::PersonalPrompt>),
+    Connection(Box<web_connections_ui::ConnectionPrompt>),
+}
+impl ProviderReview {
+    pub(super) fn account(&self)->&str {match self {Self::Connect(v)=>v.account(),Self::Retire(v)=>v.account(),Self::Enroll(v)=>v.account(),Self::Create(v)=>v.account(),Self::Edit(v)=>v.account(),Self::Personal(v)=>v.account(),Self::Connection(v)=>v.account()}}
+    pub(super) fn details(&self)->String {match self {Self::Connect(v)=>v.runtime_name().into(),Self::Retire(v)=>v.details(),Self::Enroll(v)=>v.details(),Self::Create(v)=>v.details(),Self::Edit(v)=>v.details(),Self::Personal(v)=>v.details(),Self::Connection(v)=>v.details()}}
+    pub(super) fn expired(&self)->bool {match self {Self::Connect(v)=>v.expired(),Self::Retire(v)=>v.expired(),Self::Enroll(v)=>v.expired(),Self::Create(v)=>v.expired(),Self::Edit(v)=>v.expired(),Self::Personal(v)=>v.expired(),Self::Connection(v)=>v.expired()}}
+    pub(super) fn cancelled(&self)->&'static str {match self {Self::Connect(_)=>"provider_connection_cancelled",Self::Retire(_)=>"account_retirement_cancelled",Self::Enroll(_)=>"resource_enrollment_cancelled",Self::Create(_)=>"resource_create_cancelled",Self::Edit(_)=>"resource_edit_cancelled",Self::Personal(_)=>"personal_configuration_cancelled",Self::Connection(_)=>"web_connection_cancelled"}}
+    pub(super) fn ready(&self)->bool {match self {Self::Create(v)=>v.ready(),Self::Edit(v)=>v.ready(),Self::Personal(v)=>v.ready(),Self::Connection(v)=>v.ready(),_=>!self.expired()}}
+    pub(super) fn poll(&mut self)->bool {match self {Self::Create(v)=>v.poll(),Self::Edit(v)=>v.poll(),Self::Personal(v)=>v.poll(),Self::Connection(v)=>v.poll(),_=>false}}
+    pub(super) fn words(&self)->(&'static str,&'static str,&'static str,&'static str){
+        match self {
+            Self::Personal(v)=>v.words(),
+            Self::Connection(v)=>v.words(),
+            Self::Connect(_)=>("Connect a provider account","Use the provider account already signed in on this device for Hagency. Credentials stay on this device; the mini app receives connection status and model choices.","Changing the provider connection can stop this owner's running agents. Connecting does not start an agent or publish resources.","Connect account"),
+            Self::Retire(_)=>("Retire this account space","Hagency will stop using this account space on this device. It must have no associated resources or sign-in in progress.","This cannot be undone here. Provider sign-out is not performed, and credentials are not deleted. Existing resources and agents are not removed.","Retire account space"),
+            Self::Enroll(_)=>("Enroll this account’s resource","Hagency will verify this account and model again, then save an unpublished resource on this device. Credentials stay with Codex.","The monthly limit is your declaration, not a provider balance. Resources using the same provider account share one limit. Enrollment does not publish capacity or start an agent.","Enroll resource"),
+            Self::Create(v) if v.recovering() => ("Recover saved configuration creation","This original request already created a configuration. Recover its recorded result without creating another.","The recorded result identifies the new resource. Open its details to see its current configuration.","Recover saved result"),
+            Self::Create(_) => ("Create an additional configuration","Hagency will keep the source resource unchanged and create a new configuration using its original account and shared limit.","The new configuration is published locally. Server admission and capacity allocation remain separate. This does not increase the account limit, verify sign-in or start an agent.","Create configuration"),
+            Self::Edit(v) if v.recovering() => ("Recover saved resource edit","This original request was already saved. Recover its recorded result without applying another edit.","The recorded result describes that request. Refresh resource details to see the latest configuration.","Recover saved result"),
+            Self::Edit(_) => ("Review resource configuration","Hagency will recheck this account, model and resource before saving. The same resource and shared account remain in use.","This changes the resource on this device for every profile that uses it. It does not increase the shared account limit or allocate capacity. Clearing its limit leaves available capacity unknown.","Save configuration"),
+        }
+    }
+    pub(super) async fn accept(self)->Result<Value,String>{match self {Self::Connect(v)=>v.accept().await,Self::Retire(v)=>v.accept().await,Self::Enroll(v)=>v.accept().await,Self::Create(v)=>v.accept().await,Self::Edit(v)=>v.accept().await,Self::Personal(v)=>v.accept().await,Self::Connection(v)=>v.accept().await}}
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+    #[test]
+    fn native_hagency_enrollment_footer_survives_long_account_and_model_details() {
+        for (width,height,language) in [(360.,640.,Language::English),(360.,640.,Language::Chinese),(840.,700.,Language::English),(840.,700.,Language::Chinese)] {
+            let mut cx=Cx::new(Box::new(|_,_|{}));
+            let mut panel=cx.with_vm(|vm|{
+                makepad_widgets::script_mod(vm);crate::i18n::install(vm);makepad_code_editor::script_mod(vm);crate::shared::script_mod(vm);
+                vm.bx.captured_errors=Some(Vec::new());crate::miniapps::script_mod(vm);
+                let value=vm.eval(script!{use mod.prelude.widgets.* use mod.widgets.* MiniAppsPanel{}});
+                let panel=MiniAppsPanel::script_from_value(vm,value);assert!(vm.take_errors().is_empty());panel
+            });
+            for path in [ids!(catalog),ids!(import_form),ids!(hagency_review),ids!(app_content),ids!(notice),ids!(approval)] {panel.view.widget(&cx,path).set_visible(&mut cx,false);}
+            panel.view.widget(&cx,ids!(provider_confirmation)).set_visible(&mut cx,true);
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.heading.title)).set_text(&mut cx,crate::i18n::text_for(language,"Enroll this account’s resource"));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.account)).set_text(&mut cx,"@original-owner:matrix.example");
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&"account_0123456789abcdef0123456789abcdef\nModel and declared capacity\n".repeat(12));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"The monthly limit is your declaration, not a provider balance. Resources using the same provider account share one limit. Enrollment does not publish capacity or start an agent."));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,"Enroll resource"));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
+            let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
+            panel.request_confirmation_redraw(&mut cx);let event=std::mem::take(&mut cx.new_draw_event);assert!(event.will_redraw());
+            let mut draw=CxDraw::new(&mut cx,&event);let mut c=Cx2d::new(&mut draw);c.begin_pass(&pass,None);
+            if list.begin(&mut c,Walk::default()).is_redrawing(){c.begin_root_turtle(dvec2(width,height),Layout::flow_overlay());panel.draw_all(&mut c,&mut Scope::empty());c.end_pass_sized_turtle();list.end(&mut c);}
+            c.end_pass(&pass);drop(c);drop(draw);
+            for path in [ids!(provider_confirmation.buttons.cancel),ids!(provider_confirmation.buttons.connect)] {
+                let button=panel.view.button(&cx,path);let rect=button.area().rect(&cx);
+                assert!(button.visible() && button.area().is_valid(&cx));
+                assert!(rect.size.x>0. && rect.size.y>=40. && rect.pos.y>=0. && rect.pos.y+rect.size.y<=height && rect.pos.x>=0. && rect.pos.x+rect.size.x<=width,"{rect:?}");
+            }
+        }
+    }    #[test]
+    fn native_hagency_retirement_footer_survives_long_account_details() {
+        for (width,height,language) in [(360.,640.,Language::English),(360.,640.,Language::Chinese),(840.,700.,Language::English),(840.,700.,Language::Chinese)] {
+            let mut cx=Cx::new(Box::new(|_,_|{}));
+            let mut panel=cx.with_vm(|vm|{
+                makepad_widgets::script_mod(vm);crate::i18n::install(vm);makepad_code_editor::script_mod(vm);crate::shared::script_mod(vm);
+                vm.bx.captured_errors=Some(Vec::new());crate::miniapps::script_mod(vm);
+                let value=vm.eval(script!{use mod.prelude.widgets.* use mod.widgets.* MiniAppsPanel{}});
+                let panel=MiniAppsPanel::script_from_value(vm,value);assert!(vm.take_errors().is_empty());panel
+            });
+            for path in [ids!(catalog),ids!(import_form),ids!(hagency_review),ids!(app_content),ids!(notice),ids!(approval)] {panel.view.widget(&cx,path).set_visible(&mut cx,false);}
+            panel.view.widget(&cx,ids!(provider_confirmation)).set_visible(&mut cx,true);
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.heading.title)).set_text(&mut cx,crate::i18n::text_for(language,"Retire this account space"));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.account)).set_text(&mut cx,"@original-owner:matrix.example");
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&"account_0123456789abcdef0123456789abcdef\nModel and declared capacity\n".repeat(12));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"This cannot be undone here. Provider sign-out is not performed, and credentials are not deleted. Existing resources and agents are not removed."));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,"Retire account space"));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
+            let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
+            panel.request_confirmation_redraw(&mut cx);let event=std::mem::take(&mut cx.new_draw_event);assert!(event.will_redraw());
+            let mut draw=CxDraw::new(&mut cx,&event);let mut c=Cx2d::new(&mut draw);c.begin_pass(&pass,None);
+            if list.begin(&mut c,Walk::default()).is_redrawing(){c.begin_root_turtle(dvec2(width,height),Layout::flow_overlay());panel.draw_all(&mut c,&mut Scope::empty());c.end_pass_sized_turtle();list.end(&mut c);}
+            c.end_pass(&pass);drop(c);drop(draw);
+            for path in [ids!(provider_confirmation.buttons.cancel),ids!(provider_confirmation.buttons.connect)] {
+                let button=panel.view.button(&cx,path);let rect=button.area().rect(&cx);
+                assert!(button.visible() && button.area().is_valid(&cx));
+                assert!(rect.size.x>0. && rect.size.y>=40. && rect.pos.y>=0. && rect.pos.y+rect.size.y<=height && rect.pos.x>=0. && rect.pos.x+rect.size.x<=width,"{rect:?}");
+            }
+        }
+    }
+    #[test]
+    fn native_hagency_resource_edit_footer_survives_full_before_and_after_details() {
+        for (width,height,language) in [(360.,640.,Language::English),(360.,640.,Language::Chinese),(840.,700.,Language::English),(840.,700.,Language::Chinese)] {
+            let mut cx=Cx::new(Box::new(|_,_|{}));
+            let mut panel=cx.with_vm(|vm|{
+                makepad_widgets::script_mod(vm);crate::i18n::install(vm);makepad_code_editor::script_mod(vm);crate::shared::script_mod(vm);
+                vm.bx.captured_errors=Some(Vec::new());crate::miniapps::script_mod(vm);
+                let value=vm.eval(script!{use mod.prelude.widgets.* use mod.widgets.* MiniAppsPanel{}});
+                let panel=MiniAppsPanel::script_from_value(vm,value);assert!(vm.take_errors().is_empty());panel
+            });
+            for path in [ids!(catalog),ids!(import_form),ids!(hagency_review),ids!(app_content),ids!(notice),ids!(approval)] {panel.view.widget(&cx,path).set_visible(&mut cx,false);}
+            panel.view.widget(&cx,ids!(provider_confirmation)).set_visible(&mut cx,true);
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.heading.title)).set_text(&mut cx,crate::i18n::text_for(language,"Review resource configuration"));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.account)).set_text(&mut cx,"@original-owner:matrix.example");
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&"account_0123456789abcdef0123456789abcdef\nModel and declared capacity\n".repeat(12));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"This changes the resource on this device for every profile that uses it. It does not increase the shared account limit or allocate capacity. Clearing its limit leaves available capacity unknown."));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,"Save configuration"));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
+            let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
+            panel.request_confirmation_redraw(&mut cx);let event=std::mem::take(&mut cx.new_draw_event);assert!(event.will_redraw());
+            let mut draw=CxDraw::new(&mut cx,&event);let mut c=Cx2d::new(&mut draw);c.begin_pass(&pass,None);
+            if list.begin(&mut c,Walk::default()).is_redrawing(){c.begin_root_turtle(dvec2(width,height),Layout::flow_overlay());panel.draw_all(&mut c,&mut Scope::empty());c.end_pass_sized_turtle();list.end(&mut c);}
+            c.end_pass(&pass);drop(c);drop(draw);
+            for path in [ids!(provider_confirmation.buttons.cancel),ids!(provider_confirmation.buttons.connect)] {
+                let button=panel.view.button(&cx,path);let rect=button.area().rect(&cx);
+                assert!(button.visible() && button.area().is_valid(&cx));
+                assert!(rect.size.x>0. && rect.size.y>=40. && rect.pos.y>=0. && rect.pos.y+rect.size.y<=height && rect.pos.x>=0. && rect.pos.x+rect.size.x<=width,"{rect:?}");
+            }
+        }
+    }    #[test]
+    fn native_hagency_resource_creation_footer_survives_source_and_shared_limit_details() {
+        for (width,height,language) in [(360.,640.,Language::English),(360.,640.,Language::Chinese),(840.,700.,Language::English),(840.,700.,Language::Chinese)] {
+            let mut cx=Cx::new(Box::new(|_,_|{}));
+            let mut panel=cx.with_vm(|vm|{
+                makepad_widgets::script_mod(vm);crate::i18n::install(vm);makepad_code_editor::script_mod(vm);crate::shared::script_mod(vm);
+                vm.bx.captured_errors=Some(Vec::new());crate::miniapps::script_mod(vm);
+                let value=vm.eval(script!{use mod.prelude.widgets.* use mod.widgets.* MiniAppsPanel{}});
+                let panel=MiniAppsPanel::script_from_value(vm,value);assert!(vm.take_errors().is_empty());panel
+            });
+            for path in [ids!(catalog),ids!(import_form),ids!(hagency_review),ids!(app_content),ids!(notice),ids!(approval)] {panel.view.widget(&cx,path).set_visible(&mut cx,false);}
+            panel.view.widget(&cx,ids!(provider_confirmation)).set_visible(&mut cx,true);
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.heading.title)).set_text(&mut cx,crate::i18n::text_for(language,"Create an additional configuration"));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.account)).set_text(&mut cx,"@original-owner:matrix.example");
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&"account_0123456789abcdef0123456789abcdef\nModel and declared capacity\n".repeat(12));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"The new configuration is published locally. Server admission and capacity allocation remain separate. This does not increase the account limit, verify sign-in or start an agent."));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,"Create configuration"));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
+            let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
+            panel.request_confirmation_redraw(&mut cx);let event=std::mem::take(&mut cx.new_draw_event);assert!(event.will_redraw());
+            let mut draw=CxDraw::new(&mut cx,&event);let mut c=Cx2d::new(&mut draw);c.begin_pass(&pass,None);
+            if list.begin(&mut c,Walk::default()).is_redrawing(){c.begin_root_turtle(dvec2(width,height),Layout::flow_overlay());panel.draw_all(&mut c,&mut Scope::empty());c.end_pass_sized_turtle();list.end(&mut c);}
+            c.end_pass(&pass);drop(c);drop(draw);
+            for path in [ids!(provider_confirmation.buttons.cancel),ids!(provider_confirmation.buttons.connect)] {
+                let button=panel.view.button(&cx,path);let rect=button.area().rect(&cx);
+                assert!(button.visible() && button.area().is_valid(&cx));
+                assert!(rect.size.x>0. && rect.size.y>=40. && rect.pos.y>=0. && rect.pos.y+rect.size.y<=height && rect.pos.x>=0. && rect.pos.x+rect.size.x<=width,"{rect:?}");
+            }
+        }
+    }}

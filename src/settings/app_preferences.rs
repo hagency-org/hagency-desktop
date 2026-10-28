@@ -132,6 +132,14 @@ impl AppPreferences {
     /// Applies the current `ui_zoom` value by overriding the window's dpi factor.
     pub fn on_ui_zoom_changed(&self, cx: &mut Cx) {
         cx.global::<AppPreferencesGlobal>().0.ui_zoom = self.ui_zoom;
+        // Session restoration can finish before the first Window is allocated.
+        // Retain the preference now; WindowGeomChange reapplies it once the
+        // native DPI is known. Even clearing the default override indexes a
+        // window in Makepad, so it must wait too.
+        if cx.windows.len() == 0 {
+            cx.action(AppPreferencesAction::UiZoomChanged(self.ui_zoom));
+            return;
+        }
         let window_id = CxWindowPool::id_zero();
         let dpi_override = if self.ui_zoom.is_default() {
             None
@@ -146,7 +154,7 @@ impl AppPreferences {
 
     /// Re-applies the `ui_zoom` dpi override if the window's native dpi factor changed.
     pub fn refresh_ui_zoom_override(&self, cx: &mut Cx) {
-        if self.ui_zoom.is_default() {
+        if self.ui_zoom.is_default() || cx.windows.len() == 0 {
             return;
         }
         let window = &cx.windows[CxWindowPool::id_zero()];
@@ -452,3 +460,32 @@ pub enum AppPreferencesAction {
 /// here via `cx.global::<AppPreferencesGlobal>()`.
 #[derive(Default, Clone)]
 pub struct AppPreferencesGlobal(pub AppPreferences);
+
+#[cfg(test)]
+mod startup_zoom_tests {
+    use super::*;
+
+    #[test]
+    fn restored_zoom_waits_for_first_window() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut preferences = AppPreferences::default();
+        // Default restoration used to panic even when it only cleared zoom.
+        preferences.on_ui_zoom_changed(&mut cx);
+        preferences.ui_zoom = UiZoom(1.25);
+        preferences.on_ui_zoom_changed(&mut cx);
+        preferences.refresh_ui_zoom_override(&mut cx);
+        assert_eq!(cx.global::<AppPreferencesGlobal>().0.ui_zoom, UiZoom(1.25));
+        assert_eq!(cx.windows.len(), 0);
+
+        let window = WindowHandle::new(&mut cx);
+        let id = window.window_id();
+        cx.windows[id].os_dpi_factor = Some(2.0);
+        cx.windows[id].window_geom.dpi_factor = 2.0;
+        // This is the existing WindowGeomChange path after allocation.
+        preferences.refresh_ui_zoom_override(&mut cx);
+        assert_eq!(cx.windows[id].dpi_override, Some(2.5));
+        preferences.ui_zoom = UiZoom::default();
+        preferences.on_ui_zoom_changed(&mut cx);
+        assert_eq!(cx.windows[id].dpi_override, None);
+    }
+}

@@ -381,7 +381,8 @@ fn user_error(error: &str) -> &str {
         "project_not_found" | "room_not_found" | "room_kind_mismatch" => {
             "This Project or Room is no longer available. Refresh the list."
         }
-        "device_authorization_required" | "local_access_required" => {
+        "device_authorization_required" | "local_access_required"
+        | "native_resume_missing" | "native_resume_revoked" => {
             "Your account authorization expired. Sign in again to continue."
         }
         value if value.contains('_') && !value.contains(' ') => {
@@ -481,24 +482,43 @@ script_mod! {
             open := Action {text: #(crate::i18n::tr("View details")) i18n_text: "View details"}
         }
         Filler := View {width: Fill height: 64}
-        Empty := View {width: Fill height: 64 padding: 16
-            empty_message := Text {text: #(crate::i18n::tr("No Projects yet. Create a Project to start a shared workspace.")) i18n_text: "No Projects yet. Create a Project to start a shared workspace."}
+        Empty := RoundedView {width: Fill height: Fit flow: Down padding: 24 spacing: 12 margin: Inset{top: 8}
+            draw_bg +: {color: mod.widgets.RINX_SURFACE border_color: mod.widgets.RINX_BORDER border_size: 1 border_radius: theme.corner_radius}
+            empty_message := Text {text: #(crate::i18n::tr("No Matrix workspaces yet. Create one to organize rooms and members.")) i18n_text: "No Matrix workspaces yet. Create one to organize rooms and members."}
         }
     }
     mod.widgets.HagencyPanel = #(HagencyPanel::register_widget(vm)) {
         ..mod.widgets.SolidView
-        width: Fill height: Fill flow: Down padding: Inset{top: 16 left: 20 right: 0 bottom: 0} spacing: 8 draw_bg.color: mod.widgets.RINX_FIELD
+        width: Fill height: Fill flow: Down padding: Inset{top: 16 left: 20 right: 0 bottom: 0} spacing: 12 draw_bg.color: mod.widgets.RINX_PAGE
         View {width: Fill height: 40 margin: Inset{right: 20} spacing: 10 align: Align{y: 0.5}
             back := RinxBackButton {visible: false}
-            heading := Text {text: #(crate::i18n::tr("Projects")) i18n_text: "Projects" draw_text.text_style: theme.font_bold{font_size: (16 * mod.widgets.RINX_TEXT_SCALE)}}
+            heading := Text {text: #(crate::i18n::tr("Matrix workspaces")) i18n_text: "Matrix workspaces" draw_text.text_style: theme.font_bold{font_size: (16 * mod.widgets.RINX_TEXT_SCALE)}}
             loading_status := LoadingSpinner {visible: false width: 18 height: 18 draw_bg +: {color: mod.widgets.RINX_MUTED stroke_width: 2.0}}
-            new_item := Primary {text: #(crate::i18n::tr("New Project")) i18n_text: "New Project"}
+            new_item := Primary {text: #(crate::i18n::tr("New workspace")) i18n_text: "New workspace"}
             refresh := Action {text: #(crate::i18n::tr("Refresh")) i18n_text: "Refresh"}
         }
         owner := Text {visible: false}
         status_holder := View {visible: false width: Fill height: Fit status := Text {width: Fill height: Fit visible: false}}
         login := Action {visible: false text: #(crate::i18n::tr("Sign in again")) i18n_text: "Sign in again"}
         lists_pane := View {width: Fill height: Fill margin: Inset{right: 20 bottom: 16} flow: Down spacing: 10
+            list_intro := Section {
+                View {width: Fill height: Fit flow: Right spacing: 16 align: Align{y: 0.5}
+                    RoundedView {width: 48 height: 48 align: Align{x: 0.5 y: 0.5} draw_bg +: {color: mod.widgets.RINX_SELECTED border_radius: theme.corner_radius}
+                        context_project_icon := View {width: 24 height: 24
+                            Icon {width: Fill height: Fill draw_icon +: {svg: crate_resource("self://resources/icons/hagency-project.svg") color: mod.widgets.RINX_ACCENT}}
+                        }
+                        context_agent_icon := View {visible: false width: 24 height: 24
+                            Icon {width: Fill height: Fill draw_icon +: {svg: crate_resource("self://resources/icons/person.svg") color: mod.widgets.RINX_ACCENT}}
+                        }
+                    }
+                    View {width: Fill height: Fit flow: Down spacing: 8
+                        context_title := Text {draw_text.text_style: theme.font_bold{font_size: (16 * mod.widgets.RINX_TEXT_SCALE)}}
+                        context_description := Text {draw_text.color: mod.widgets.RINX_MUTED}
+                    }
+                }
+                context_steps := Text {draw_text.color: mod.widgets.RINX_ACCENT}
+                context_scope := Text {draw_text.color: mod.widgets.RINX_MUTED}
+            }
                 agent_recovery := Section {visible: false width: Fill height: Fit flow: Down spacing: 8
                     Text {text: #(crate::i18n::tr("Unfinished Agent requests")) i18n_text: "Unfinished Agent requests" draw_text.text_style: theme.font_bold{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}
                     agent_pending_count := Text {draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular{font_size: (11 * mod.widgets.RINX_TEXT_SCALE)}}}
@@ -576,7 +596,7 @@ script_mod! {
                     }
                 }
                 project_form := Section {visible: false width: Fill height: Fit flow: Down spacing: 8
-                    creation_heading := Text {visible: false text: #(crate::i18n::tr("Create Project")) i18n_text: "Create Project" draw_text.text_style: theme.font_bold{font_size: (16 * mod.widgets.RINX_TEXT_SCALE)}}
+                    creation_heading := Text {visible: false text: #(crate::i18n::tr("Create Matrix workspace")) i18n_text: "Create Matrix workspace" draw_text.text_style: theme.font_bold{font_size: (16 * mod.widgets.RINX_TEXT_SCALE)}}
                     creation_note := Text {text: #(crate::i18n::tr("Choose a new Space or connect one you already belong to.")) i18n_text: "Choose a new Space or connect one you already belong to." draw_text.color: mod.widgets.RINX_MUTED}
                     Text {text: #(crate::i18n::tr("Create or connect")) i18n_text: "Create or connect"}
                     creation_source := Select {labels: [#(crate::i18n::tr("Create a new Space (default)")) #(crate::i18n::tr("Connect an existing Space"))]}
@@ -586,7 +606,7 @@ script_mod! {
                     candidates_more := Action {visible: false text: #(crate::i18n::tr("Refresh / load more Spaces")) i18n_text: "Refresh / load more Spaces"}
                     existing_room_holder := View {visible: false width: Fill height: Fit flow: Down spacing: 4 Text {text: #(crate::i18n::tr("Room ID")) i18n_text: "Room ID"}
  existing_room := Input {empty_text: "!existing-room:server"}}
-                    create_project_room := Primary {text: #(crate::i18n::tr("Create Project")) i18n_text: "Create Project"}
+                    create_project_room := Primary {text: #(crate::i18n::tr("Create Matrix workspace")) i18n_text: "Create Matrix workspace"}
                     creation_result := Text {}
                     recovery := View {visible: false width: Fill height: Fit flow: Down spacing: 8
                         Text {text: #(crate::i18n::tr("An earlier creation has not been confirmed. Resume the original request to avoid a duplicate.")) i18n_text: "An earlier creation has not been confirmed. Resume the original request to avoid a duplicate."}
@@ -598,7 +618,7 @@ script_mod! {
             agents_page := View {visible: false width: Fill height: Fit flow: Down spacing: 10
                 View {visible: false width: 0 height: 0 agents := Select {labels: [#(crate::i18n::tr("Select my Agent"))]}}
                 agent_create := Section {visible: false width: Fill height: Fit flow: Down spacing: 8
-                    agent_creation_heading := Text {visible: false text: #(crate::i18n::tr("Create Agent")) i18n_text: "Create Agent" draw_text.text_style: theme.font_bold{font_size: (16 * mod.widgets.RINX_TEXT_SCALE)}}
+                    agent_creation_heading := Text {visible: false text: #(crate::i18n::tr("Create local agent")) i18n_text: "Create local agent" draw_text.text_style: theme.font_bold{font_size: (16 * mod.widgets.RINX_TEXT_SCALE)}}
                     Text {text: #(crate::i18n::tr("Create an Agent on this device. Connect a local runtime and add Rooms afterward.")) i18n_text: "Create an Agent on this device. Connect a local runtime and add Rooms afterward." draw_text.color: mod.widgets.RINX_MUTED}
                     agent_binding_target := View {visible: false width: Fill height: Fit flow: Down spacing: 8
                         agent_project := Select {labels: [#(crate::i18n::tr("Select a Project"))]}
@@ -606,7 +626,7 @@ script_mod! {
                     }
                     agent_name_holder := View {width: Fill height: Fit flow: Down spacing: 4 Text {text: #(crate::i18n::tr("Agent name")) i18n_text: "Agent name"}
  agent_name := Input {empty_text: #(crate::i18n::tr("Agent display name")) i18n_empty_text: "Agent display name"}}
-                    create_agent := Primary {text: #(crate::i18n::tr("Create Agent")) i18n_text: "Create Agent"}
+                    create_agent := Primary {text: #(crate::i18n::tr("Create local agent")) i18n_text: "Create local agent"}
                     bind_agent := Primary {text: #(crate::i18n::tr("Bind selected existing Agent to Room")) i18n_text: "Bind selected existing Agent to Room"}
                 }
                 agent_detail := View {visible: false width: Fill height: Fit flow: Down spacing: 10
@@ -1368,7 +1388,7 @@ impl HagencyPanel {
     fn list_page(&self, cx: &mut Cx) {
         self.view.label(cx, ids!(heading)).set_text(
             cx,
-            crate::i18n::tr(if self.page == Page::Projects {"Projects"} else {"My Agents"}),
+            crate::i18n::tr(if self.page == Page::Projects {"Matrix workspaces"} else {"Local agents"}),
         );
         self.view
             .view(cx, ids!(project_list_holder))
@@ -1788,8 +1808,17 @@ impl HagencyPanel {
             }
         };
         if !detail {
-            self.view.label(cx,ids!(heading)).set_text(cx,crate::i18n::tr(if self.page==Page::Projects {"Projects"} else {"My Agents"}));
-            self.view.button(cx,ids!(new_item)).set_text(cx,crate::i18n::tr(if self.page==Page::Projects {"New Project"} else {"New Agent"}));
+            let projects = self.page == Page::Projects;
+            for (id, text) in [
+                (ids!(context_title), if projects {"Organize your Matrix rooms"} else {"Manage agents you run locally"}),
+                (ids!(context_description), if projects {"Create or connect a Matrix Space, then manage its rooms and people."} else {"Configure this account's local agents, their models, rooms and execution permissions."}),
+                (ids!(context_steps), if projects {"1 · Connect a Space    2 · Add rooms    3 · Invite people"} else {"1 · Create an agent    2 · Choose a model    3 · Connect rooms"}),
+                (ids!(context_scope), if projects {"To use contributed capacity, open Hagency → Resource pools and request an Agent."} else {"To use contributed capacity, open Hagency → Resource pools and request an Agent."}),
+            ] { self.view.label(cx,id).set_text(cx,crate::i18n::tr(text)); }
+            self.view.view(cx,ids!(context_project_icon)).set_visible(cx,projects);
+            self.view.view(cx,ids!(context_agent_icon)).set_visible(cx,!projects);
+            self.view.label(cx,ids!(heading)).set_text(cx,crate::i18n::tr(if self.page==Page::Projects {"Matrix workspaces"} else {"Local agents"}));
+            self.view.button(cx,ids!(new_item)).set_text(cx,crate::i18n::tr(if self.page==Page::Projects {"New workspace"} else {"New local agent"}));
         }
         self.view.view(cx,ids!(lists_pane)).set_visible(cx,!detail && !self.display_blocked);
         self.view.view(cx,ids!(details_scroll)).set_visible(cx,detail && !self.display_blocked);
@@ -1813,7 +1842,7 @@ impl HagencyPanel {
             let title = if self.view.button(cx, ids!(bind_agent)).visible() {
                 "Add Room to Agent"
             } else {
-                "Create Agent"
+                "Create local agent"
             };
             self.view
                 .label(cx, ids!(agent_creation_heading))
@@ -1916,7 +1945,7 @@ impl HagencyPanel {
             == 1;
         let (title, note) = match (self.create_room, existing) {
             (false, false) => (
-                "Create Project",
+                "Create Matrix workspace",
                 "Create a new shared Space for this Project.",
             ),
             (false, true) => (
@@ -1989,11 +2018,11 @@ impl HagencyPanel {
         self.page = page;
         self.view.label(cx, ids!(heading)).set_text(
             cx,
-            crate::i18n::tr(if page == Page::Projects {"Projects"} else {"My Agents"}),
+            crate::i18n::tr(if page == Page::Projects {"Matrix workspaces"} else {"Local agents"}),
         );
         self.view.button(cx, ids!(new_item)).set_text(
             cx,
-            crate::i18n::tr(if page == Page::Projects {"New Project"} else {"New Agent"}),
+            crate::i18n::tr(if page == Page::Projects {"New workspace"} else {"New local agent"}),
         );
         self.view
             .view(cx, ids!(projects_page))
@@ -3082,6 +3111,8 @@ impl Widget for HagencyPanel {
                                 | "matrix_authorization_required"
                                 | "matrix_sign_in_required"
                                 | "sign_in_required"
+                                | "native_resume_missing"
+                                | "native_resume_revoked"
                         );
                         self.view
                             .button(cx, ids!(login))
@@ -3172,7 +3203,7 @@ impl Widget for HagencyPanel {
                 );
                 self.view
                     .label(cx, ids!(creation_heading))
-                    .set_text(cx, crate::i18n::tr("Create Project"));
+                    .set_text(cx, crate::i18n::tr("Create Matrix workspace"));
                 self.view
                     .view(cx, ids!(project_list_holder))
                     .set_visible(cx, false);
@@ -4096,11 +4127,11 @@ impl Widget for HagencyPanel {
                     if rows.is_empty() && index == 0 {
                         row.label(cx, ids!(empty_message)).set_text(
                             cx,
-                            if self.page == Page::Projects {
-                                "No Projects yet. Create a Project to start a shared workspace."
+                            crate::i18n::tr(if self.page == Page::Projects {
+                                "No Matrix workspaces yet. Create one to organize rooms and members."
                             } else {
                                 agent_empty_message(self.agents_loaded, self.agents_loading)
-                            },
+                            }),
                         );
                     }
                     row.draw_all(cx, scope);
@@ -4255,7 +4286,7 @@ impl HagencyPanelRef {
         panel
             .view
             .label(cx, ids!(owner))
-            .set_text(cx, crate::i18n::tr("Projects and Agents for your signed-in account."));
+            .set_text(cx, crate::i18n::tr("Matrix workspaces and local agents for your signed-in account."));
         panel
             .view
             .view(cx, ids!(project_form))
@@ -4287,7 +4318,7 @@ impl HagencyPanelRef {
                 panel
                     .view
                     .label(cx, ids!(creation_heading))
-                    .set_text(cx, crate::i18n::tr("Create Project"));
+                    .set_text(cx, crate::i18n::tr("Create Matrix workspace"));
                 panel
                     .view
                     .drop_down(cx, ids!(creation_source))

@@ -64,6 +64,7 @@ fn kernel_tool_words(tool: &str) -> Option<&'static str> {
 
 /// The Matrix and assistant services, by exact name.
 fn service_words(capability: &str) -> Option<&'static str> {
+    if let Some(words) = octosense_app_contract::hagency::words(capability) { return Some(words); }
     if let Some(words) = octosense_app_contract::palpo::words(capability) { return Some(words); }
     Some(match capability {
         "matrix.account_info" => "See which Matrix account you are using",

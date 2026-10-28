@@ -7,24 +7,14 @@ GitHub Releases at the 2026-10-10 audit.
 
 ## Source dependency
 
-Every Cargo workflow now invokes `.github/actions/setup-hagency-client` after
-checking out Desktop. It checks out `chrislearn/hagency-client` at the exact
-published commit `7da298a93f2f8d48c8f518d189b76c16f995d943`, without persisted
-credentials, and places it at the sibling path required by Cargo.toml. It refuses
-to overwrite an existing sibling tree. Review/update this pin and Desktop's
-Cargo.lock together whenever the native client API changes. It intentionally
-cannot consume unpublished changes from an operator's local sibling repository.
+Desktop depends directly on `https://github.com/chrislearn/hagency-client.git`,
+branch `main`. Cargo.lock records the exact source revision for reproducible
+`--locked` builds, including the engine's internal crates. No sibling checkout
+or CI checkout/move action is needed.
 
-Publication update: the native runtime/provider additions have now been published
-in the pinned client commit above. Desktop Cargo.lock was checked with `--locked`
-against this source. Keep future pin and lock updates synchronized; do not remove
-`--locked` or silently resolve a moving branch to hide mismatches.
-
-The pin also includes the native API migration to `/hagency/api/v1`, matching
-the server namespace and Desktop OAuth fixtures. This path-only update requires
-no Cargo.lock dependency changes; locked builds still verify that contract.
-Discovery responses rejected with 401/403 are reported as request rejections,
-so reverse-proxy configuration errors are not mislabeled as ordinary Matrix servers.
+To adopt newer engine changes, run `cargo update -p hagency`, review the lockfile
+and validate Desktop against the new revision before publishing. Do not remove
+`--locked` from verification or packaging.
 
 ## Checks and artifacts
 
@@ -132,3 +122,18 @@ path when it creates a missing output directory, then changes its working
 directory before executing that relative script path. Installer commands now
 pass an absolute `--out-dir` (including signed macOS) and enable verbose script
 logs. The output remains the same dist directory.
+
+## 0.5.0 readiness (2026-10-16)
+
+The packager now uses the generated `resources/icon.icns` explicitly. The new
+`tools/check-release-icons.py` preflight catches missing/invalid icon inputs
+before expensive builds. This avoids cargo-packager 0.10.1 trying to convert a
+plain 1024px PNG into an unsupported 1x ICNS representation.
+
+Compatible transport security updates pass the main CI and all five desktop
+builds. Formal 0.5.0 publishing is on hold: the Desktop lockfile still has five
+vulnerability matches, and the independently built pinned Octos workspace lock
+has 36. These counts are not proof of reachability for every advisory. The
+[release assessment](../dev-vibe/release-0.5.0/assessment.zh.md) records the actual
+PDF/XML paths, feature boundaries, lock hashes and remaining upstream work.
+Neither cancelled installer run published a v0.5.0 tag or Release.

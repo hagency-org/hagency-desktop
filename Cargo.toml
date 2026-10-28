@@ -10,7 +10,7 @@ license = "Apache-2.0"
 readme = "README.md"
 categories = ["gui"]
 repository = "https://github.com/upstreamlabs/Rinx"
-version = "1.1.2"
+version = "0.5.0"
 metadata.makepad-auto-version = "zqpv-Yj-K7WNVK2I8h5Okhho46Q="
 
 [dependencies]
@@ -18,6 +18,7 @@ hagency = { path = "../hagency-client/native/hagency" }
 octosense-theme-contract = { path = "crates/theme-contract", version = "0.1.0" }
 rinx-system-apps = { path = "crates/system-apps" }
 article-core = { path = "crates/article-core", features = ["l0"] }
+rinx-answer-export = { path = "crates/answer-export" }
 rinx-miniapp-core = { path = "crates/miniapp-core" }
 rinx-miniapp-catalog = { path = "crates/miniapp-catalog" }
 uuid = { version = "1", features = ["v4"] }
@@ -146,6 +147,10 @@ reqwest = { version = "0.12", default-features = false, optional = true, feature
     "macos-system-configuration",
 ] }
 
+[dev-dependencies]
+# Native writer fixtures must never acquire the user's installation authority.
+hagency = { path = "../hagency-client/native/hagency", features = ["test-support"] }
+
 ## For OAuth/SSO login on iOS, via `ASWebAuthenticationSession`. Ugh....
 [target.'cfg(target_os = "ios")'.dependencies]
 robius-web-auth-session = { git = "https://github.com/project-robius/robius" }
@@ -175,9 +180,26 @@ dark-light = "2"
 
 
 [features]
+# Native-only original-source adoption; confirmation still belongs to the owner.
+resource-adoption = ["hagency/resource-adoption"]
+# Managed execution requires the signed-in owner, adopted device, exact grants
+# and matching central deployment support; compiling it grants no authority.
+shared-execution = ["resource-adoption", "hagency/shared-execution"]
+shared-successors = ["shared-execution", "hagency/shared-successors"]
+# Durable Matrix intake requires paired central discovery and native custody.
+shared-intake = ["shared-successors", "hagency/shared-intake"]
+# Bounded delivered-thread context needs the matching server capability.
+shared-context = ["shared-intake", "hagency/shared-context"]
+# Approved additive budgets need paired v3 execution and original-event recovery.
+agent-budget = ["shared-execution", "hagency/agent-budget"]
+shared-budget-execution = ["agent-budget", "shared-context", "hagency/shared-budget-execution"]
+# Explicit isolated instrumentation binary; never part of production defaults.
+onboarding-test-support = ["resource-adoption", "hagency/test-support"]
 # Isolated local accounts exist only in instrument builds.
 palpo-instrument = []
-default = ["standalone", "agent_chat"]
+# Ordinary Hagency Desktop builds include the native management and worker flow.
+# Instrumentation and isolated fixture support remain explicit opt-ins above.
+default = ["standalone", "agent_chat", "shared-budget-execution"]
 ## The standalone app's entry point (window, menus, `app_main!`). A host that
 ## links Rinx as a module disables it.
 standalone = ["octos-local", "octos-remote"]
@@ -342,12 +364,14 @@ Rinx runs on all major desktop and mobile platforms:
 macOS, Windows, Linux, Android, and iOS.
 """
 icons = [
+    "./resources/icon.icns",
     "./resources/icon_32.png",
     "./resources/icon_48.png",
     "./resources/icon_64.png",
     "./resources/icon_128.png",
     "./resources/icon_256.png",
     "./resources/icon_512.png",
+    "./resources/icon_1024.png",
     "./resources/icon.ico",
 ]
 out_dir = "./dist"

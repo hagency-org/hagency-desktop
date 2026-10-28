@@ -25,7 +25,6 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v7
-      - uses: ./.github/actions/setup-hagency-client
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
@@ -36,7 +35,10 @@ jobs:
       - run: cargo test --locked --manifest-path crates/system-apps/Cargo.toml
       - run: bash tools/package-system-apps/check.sh
       - run: python3 tools/test_package_octos.py
+      - run: python3 tools/check-release-icons.py
       - run: cargo test --locked --features agent_chat,octosense-module --lib
+      - name: Budget and chat regression gate
+        run: python3 tools/check-hagency-regressions.py --output .run/ci-regressions
       - run: cargo build --locked --features agent_chat
       - run: cargo check --locked --no-default-features --features agent_chat
       - run: python3 tools/wechat-ux/check_i18n.py

@@ -348,6 +348,7 @@ pub(crate) async fn finish_oauth_login(client:Client,client_session:ClientSessio
         return Err(error);
     }
     OAUTH_REAUTH.lock().unwrap().take();
+    crate::hagency::backend::Service::record_explicit_oauth_signin(&client, epoch);
     Ok((client,None))
 }
 
@@ -3221,15 +3222,29 @@ fn get_room_timeline(room_id: &RoomId) -> Option<Arc<Timeline>> {
         .map(|jrd| jrd.main_timeline.timeline.clone())
 }
 
+pub(crate) mod client_slot;
+
 /// The logged-in Matrix client, which can be freely and cheaply cloned.
-static CLIENT: Mutex<Option<Client>> = Mutex::new(None);
+static CLIENT: client_slot::ClientSlot<Client> = client_slot::ClientSlot::new();
+
+pub(crate) fn client_revision() -> u64 {
+    CLIENT.revision()
+}
 
 /// Revoke the old session before replacing it, then bind the assistant to
 /// the newly installed account. Used for both fresh login and session restore.
 pub(crate) fn replace_client(client: Option<Client>) -> Option<Client> {
     crate::article_app::invalidate_sessions();
     crate::octoscript_apps::invalidate_sessions();
-    let previous = std::mem::replace(&mut *CLIENT.lock().unwrap(), client);
+    // CLIENT → CURRENT is the only nested lock order. Service publication
+    // rechecks the atomic revision under CURRENT without taking CLIENT again.
+    let candidate = client.clone();
+    let previous = CLIENT.replace(client, || {
+        crate::hagency::backend::Service::retire_current();
+        crate::hagency::backend::Service::publish_explicit_oauth_signin(
+            candidate.as_ref(), CLIENT.revision(),
+        );
+    });
     crate::octos_service::sync_account();
     crate::agent_access::publish(None, &Default::default());
     #[cfg(feature = "agent_chat")]
@@ -3240,14 +3255,12 @@ pub(crate) fn replace_client(client: Option<Client>) -> Option<Client> {
 }
 
 pub fn get_client() -> Option<Client> {
-    CLIENT.lock().unwrap().clone()
+    CLIENT.get()
 }
 
 /// Returns the user ID of the currently logged-in user, if any.
 pub fn current_user_id() -> Option<OwnedUserId> {
-    CLIENT.lock().unwrap().as_ref().and_then(|c|
-        c.session_meta().map(|m| m.user_id.clone())
-    )
+    CLIENT.get().and_then(|c| c.session_meta().map(|m| m.user_id.clone()))
 }
 
 /// The display name of the currently-logged-in user, if any.
@@ -3278,6 +3291,19 @@ static SYNC_SERVICE_LIFECYCLE_LOCK: LazyLock<tokio::sync::Mutex<()>> =
 static OAUTH_REAUTH: std::sync::Mutex<Option<(String, OwnedUserId)>> = std::sync::Mutex::new(None);
 
 static TOKEN_EXPIRED: AtomicBool = AtomicBool::new(false);
+
+/// Native management must stop as soon as SDK authorization is rejected.
+pub(crate) fn token_expired() -> bool {
+    TOKEN_EXPIRED.load(Ordering::Acquire)
+}
+
+fn mark_token_expired() {
+    // Publish the transition before retiring the current service so a concurrent
+    // initializer cannot replace it while asynchronous SDK teardown is pending.
+    TOKEN_EXPIRED.store(true, Ordering::Release);
+    crate::hagency::backend::Service::retire_current();
+    TOKEN_EXPIRED_NOTIFY.notify_one();
+}
 
 /// Whether the sync service currently reports the homeserver as unreachable.
 static IS_OFFLINE: AtomicBool = AtomicBool::new(false);
@@ -3639,7 +3665,10 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
                         request = login_receiver.recv() => request,
                         target = account_receiver.recv() => {
                             if let Some(target) = target {
-                                crate::hagency::backend::Service::stop_current().await;
+                                if crate::hagency::backend::Service::suspend_current().await.is_err() {
+                                    Cx::post_action(LoginAction::LoginFailure("Agent shutdown needs recovery before switching accounts.".into()));
+                                    return;
+                                }
                                 crate::account_session::close().await;
                                 if let Err(error) = change_account_ui().await {
                                     Cx::post_action(LoginAction::LoginFailure(error.to_string()));
@@ -3714,9 +3743,6 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         subscriber_task_handles.push(crate::account_session::spawn(crate::moments::dm_sharing::dm_sharing_loop()));
         subscriber_task_handles.push(handle_room_notification_subscriber(client.clone()));
 
-        // Listen for session changes, e.g., when the access token becomes invalid.
-        subscriber_task_handles.push(handle_session_changes(client.clone()));
-
         Cx::post_action(LoginAction::Status {
             title: "Connecting".into(),
             status: "Setting up sync service...".into(),
@@ -3750,6 +3776,10 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         // Doing this before sync_service.start() lets the UI transition to the home screen
         // without waiting for the sync loop to begin.
         TOKEN_EXPIRED.store(false, Ordering::Release);
+        // Start the new session watcher after clearing the old session's fence.
+        // Its immediate check must neither exit on the old flag nor have a new
+        // rejection cleared after it has synchronously retired native authority.
+        subscriber_task_handles.push(handle_session_changes(client.clone()));
         Cx::post_action(LoginAction::LoginSuccess);
 
         // Attempt to load the previously-saved app state.
@@ -3772,6 +3802,10 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         client.send_queue().enable_upload_progress(true);
         client.send_queue().set_enabled(true).await;
 
+        // Account closure aborts these tasks before the logout notification can
+        // win the select below. Keep their original epoch so that a normal
+        // transition is distinguishable even after another scope has opened.
+        let service_epoch = crate::account_session::epoch();
         let mut room_list_service_task = crate::account_session::spawn(room_list_service_loop(room_list_service));
         let mut space_service_task = crate::account_session::spawn(space_service_loop(client.clone()));
         // If the space service fails, we shouldn't kill everything, room sync can still happen.
@@ -3827,6 +3861,12 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
                 }
                 result = &mut room_list_service_task => {
                     match result {
+                        Err(e) if e.is_cancelled() && (
+                            crate::account_session::is_closing()
+                            || crate::account_session::epoch() != service_epoch
+                        ) => {
+                            log!("Room list service stopped for the account transition");
+                        }
                         Ok(Ok(())) => {
                             error!("BUG: room list service loop task ended unexpectedly!");
                         }
@@ -3850,6 +3890,12 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
                 result = &mut space_service_task, if is_space_service_alive => {
                     is_space_service_alive = false;
                     match result {
+                        Err(e) if e.is_cancelled() && (
+                            crate::account_session::is_closing()
+                            || crate::account_session::epoch() != service_epoch
+                        ) => {
+                            log!("Space service stopped for the account transition");
+                        }
                         Ok(Ok(())) => {
                             error!("BUG: space service loop task ended unexpectedly!");
                         }
@@ -3875,7 +3921,10 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
             // globals/UI. Switching never sends Matrix logout or removes keys.
             client.send_queue().set_enabled(false).await;
             if let Some(service) = get_sync_service() { service.stop().await; }
-            crate::hagency::backend::Service::stop_current().await;
+            if crate::hagency::backend::Service::suspend_current().await.is_err() {
+                Cx::post_action(LoginAction::LoginFailure("Agent shutdown needs recovery before switching accounts.".into()));
+                return;
+            }
             crate::account_session::close().await;
             let (done, ready) = tokio::sync::oneshot::channel();
             submit_async_request(MatrixRequest::ClearWorkerSession(done));
@@ -3901,7 +3950,10 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
             if was_token_expired && !was_logout {
                 client.send_queue().set_enabled(false).await;
                 if let Some(service) = get_sync_service() { service.stop().await; }
-                crate::hagency::backend::Service::stop_current().await;
+                if crate::hagency::backend::Service::stop_current().await.is_err() {
+                    Cx::post_action(LoginAction::LoginFailure("Agent authorization cleanup needs recovery before signing in again.".into()));
+                    return;
+                }
                 crate::account_session::close().await;
                 let (done, ready) = tokio::sync::oneshot::channel();
                 submit_async_request(MatrixRequest::ClearWorkerSession(done));
@@ -4779,8 +4831,7 @@ fn handle_session_changes(client: Client) -> JoinHandle<()> {
                         }
                         Ok(Err(error)) if crate::session_auth::http_requires_login(&error) => {
                             error!("Matrix authorization requires a new login (SDK refresh rejected).");
-                            TOKEN_EXPIRED.store(true, Ordering::Release);
-                            TOKEN_EXPIRED_NOTIFY.notify_one();
+                            mark_token_expired();
                             Cx::post_action(LoginAction::LoginFailure("Your login session has expired. Please log in again.".into()));
                             break;
                         }
@@ -4803,8 +4854,7 @@ fn handle_session_changes(client: Client) -> JoinHandle<()> {
                         "Your login token is no longer valid.\n\nPlease log in again."
                     };
                     error!("Session token is no longer valid (soft_logout: {soft_logout}). Prompting re-login.");
-                    TOKEN_EXPIRED.store(true, Ordering::Release);
-                    TOKEN_EXPIRED_NOTIFY.notify_one();
+                    mark_token_expired();
                     Cx::post_action(LoginAction::LoginFailure(msg.to_string()));
                     // Only prompt once — the SDK will keep emitting UnknownToken
                     // for every rejected request, but one re-login prompt suffices.
@@ -5006,8 +5056,7 @@ fn handle_sync_service_state_subscriber(mut subscriber: Subscriber<sync_service:
                         // Setting TOKEN_EXPIRED signals the main monitoring loop to
                         // tear down the current session and wait for re-login.
                         error!("Sync service stopped due to invalid/expired access token: {e}.");
-                        TOKEN_EXPIRED.store(true, Ordering::Release);
-                        TOKEN_EXPIRED_NOTIFY.notify_one();
+                        mark_token_expired();
                         if let Some(ss) = get_sync_service() {
                             ss.stop().await;
                             SYNC_SERVICE_ASSUMED_RUNNING.store(false, Ordering::Release);
@@ -6077,7 +6126,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
         if matches!(stored.user_session, persistence::PersistedUserSession::OAuth { .. }) {
             let (client,_) = persistence::restore_session_for_login(owner.clone()).await?;
             crate::login::homeserver::oauth_browser_login(&client, false, |url| async move {
-                Uri::new(&url).open().map_err(|_| anyhow!("Unable to open your browser"))
+                crate::login::homeserver::open_login_url(&url)
             }).await?;
             if client.user_id()!=Some(&owner) { bail!("Pasion returned another Matrix account"); }
             return Ok((client,stored.client_session));
@@ -6094,7 +6143,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
     let methods = crate::login::homeserver::login_methods(&client).await?;
     if methods.oauth {
         crate::login::homeserver::oauth_browser_login(&client, register, |url| async move {
-            Uri::new(&url).open().map_err(|_| anyhow!("Unable to open your browser"))
+            crate::login::homeserver::open_login_url(&url)
         }).await?;
         return Ok((client, session));
     }
@@ -6378,7 +6427,7 @@ impl UserPowerLevels {
 /// Keeps `REQUEST_SENDER` alive, and also the `matrix_worker_task
 /// which needs to keep running to receive the next login request.
 pub async fn clear_app_state(config: &LogoutConfig) -> Result<()> {
-    crate::hagency::backend::Service::stop_current().await;
+    crate::hagency::backend::Service::stop_current().await.map_err(|code| anyhow!(code))?;
     crate::account_session::close().await;
     let (done, ready) = tokio::sync::oneshot::channel();
     submit_async_request(MatrixRequest::ClearWorkerSession(done));
@@ -6434,8 +6483,12 @@ fn request_account_change_inner(target: Option<OwnedUserId>, reauthenticate: boo
         let Some(client)=get_client().filter(|c| c.oauth().full_session().is_some()) else { ACCOUNT_CHANGING.store(false, Ordering::Release);return false; };
         let Some(user)=client.user_id() else { ACCOUNT_CHANGING.store(false, Ordering::Release);return false; };
         *OAUTH_REAUTH.lock().unwrap()=Some((client.homeserver().to_string(),user.to_owned()));
+        crate::hagency::backend::Service::retire_current();
         submit_async_request(MatrixRequest::Reauthenticate);
-    } else {submit_async_request(MatrixRequest::ChangeAccount(target));}
+    } else {
+        crate::hagency::backend::Service::retire_current();
+        submit_async_request(MatrixRequest::ChangeAccount(target));
+    }
     true
 }
 

@@ -81,11 +81,18 @@ impl Package {
         let manifest = AppManifest::parse(
             &std::fs::read_to_string(root.join("manifest.json")).map_err(|e| e.to_string())?,
         )?;
-        rinx_miniapp_catalog::admit_application(&manifest)?;
         if let Some(app) = builtin {
             app.verify(root)?;
-        } else if crate::system_apps::is_reserved(&manifest.id) {
-            return Err("This app id belongs to Rinx's built-in catalog".into());
+            if manifest.id == octosense_app_contract::hagency::APP_ID {
+                rinx_miniapp_catalog::admit_builtin_management(&manifest, &app.manifest.integrity.bundle_blake3)?;
+            } else {
+                rinx_miniapp_catalog::admit_application(&manifest)?;
+            }
+        } else {
+            rinx_miniapp_catalog::admit_application(&manifest)?;
+            if crate::system_apps::is_reserved(&manifest.id) {
+                return Err("This app id belongs to Rinx's built-in catalog".into());
+            }
         }
         if manifest.agent.is_some() {
             return Err("Bundle agent profiles are not supported here; declare explicit octos.* services instead".into());

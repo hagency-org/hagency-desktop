@@ -835,6 +835,10 @@ fn shorten_title(title: &str) -> String {
 }
 
 #[cfg(test)]
+#[path = "web_browser_message_links.rs"]
+mod message_link_tests;
+
+#[cfg(test)]
 mod session_tests {
     use super::*;
 

@@ -1,0 +1,18 @@
+use mod.std.assert
+let Child={text:""}
+let r={setup:nil}
+let p={localHistory:false}
+let v={
+    Child{text:"heading"}
+    if r.setup == nil {Child{text:"not begun"}}
+    else if !p.localHistory {Child{text:"remote"}}
+    else {
+        if false {
+            if false {input := Child{text:"input"}}
+        }
+    }
+    Child{text:"verification"}
+}
+assert(v.len() == 3)
+assert(v[1].text == "not begun")
+true

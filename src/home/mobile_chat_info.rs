@@ -177,17 +177,17 @@ script_mod! {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 enum InfoTab { #[default] Overview, Members }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InfoRow { Overview, Member(usize), Notifications, Mode(usize), Back, AgentServices, Approvals, Filler }
-fn info_rows(tab: InfoTab, members: usize, choosing: bool, approvals: bool) -> usize {
-    match tab {InfoTab::Members => members, InfoTab::Overview if choosing => 6, InfoTab::Overview => 3 + usize::from(approvals)}
+enum InfoRow { Overview, Member(usize), Notifications, Mode(usize), Back, AgentServices, Filler }
+fn info_rows(tab: InfoTab, members: usize, choosing: bool) -> usize {
+    match tab {InfoTab::Members => members, InfoTab::Overview if choosing => 6, InfoTab::Overview => 3}
 }
-fn info_row(tab: InfoTab, members: usize, choosing: bool, approvals: bool, index: usize) -> InfoRow {
-    if index >= info_rows(tab, members, choosing, approvals) {return InfoRow::Filler;}
+fn info_row(tab: InfoTab, members: usize, choosing: bool, index: usize) -> InfoRow {
+    if index >= info_rows(tab, members, choosing) {return InfoRow::Filler;}
     match tab {
         InfoTab::Members => InfoRow::Member(index),
         InfoTab::Overview if index == 0 => InfoRow::Overview,
         InfoTab::Overview if choosing => if index <= 4 {InfoRow::Mode(index - 1)} else {InfoRow::Back},
-        InfoTab::Overview => match index {1 => InfoRow::Notifications, 2 => InfoRow::AgentServices, _ => InfoRow::Approvals},
+        InfoTab::Overview => match index {1 => InfoRow::Notifications, 2 => InfoRow::AgentServices, _ => InfoRow::Filler},
     }
 }
 #[derive(Clone, Debug)]
@@ -771,10 +771,6 @@ impl Widget for MobileChatInfo {
                     }
                     InfoRow::Back => self.choosing_notifications = false,
                     InfoRow::AgentServices => {self.services_open = !self.services_open;if self.services_open {self.load_services(cx);}},
-                    InfoRow::Approvals => {
-                        #[cfg(feature="agent_chat")]
-                        cx.action(crate::agent_chat::approval_inbox::ApprovalInboxAction::Open {project:Some(data.room.room_id().clone())});
-                    }
                     InfoRow::Overview | InfoRow::Filler => continue,
                 }
                 self.view.redraw(cx);
@@ -830,14 +826,14 @@ impl Widget for MobileChatInfo {
         self.rendered_rows.clear(); self.rendered_members.clear();
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.borrow_mut::<PortalList>() {
-                let count = self.data.as_ref().map_or(0, |d| info_rows(self.tab, d.members.len(), self.choosing_notifications, cfg!(feature="agent_chat")));
+                let count = self.data.as_ref().map_or(0, |d| info_rows(self.tab, d.members.len(), self.choosing_notifications));
                 list.set_item_range(cx, 0, count);
                 while let Some(index) = list.next_visible_item(cx) {
                     let Some(data) = self.data.as_mut().filter(|_| index < count) else {
                         list.item(cx, index, id!(Filler)).draw_all(cx, scope);
                         continue;
                     };
-                    let row = info_row(self.tab, data.members.len(), self.choosing_notifications, cfg!(feature="agent_chat"), index);
+                    let row = info_row(self.tab, data.members.len(), self.choosing_notifications, index);
                     let widget = match row {
                         InfoRow::Overview => {
                             let widget = list.item(cx, index, id!(Header));
@@ -895,7 +891,6 @@ impl Widget for MobileChatInfo {
                                     None => crate::i18n::tr("Default"),
                                 }),
                                 InfoRow::AgentServices => (crate::i18n::tr("Room Agent services"), ""),
-                                InfoRow::Approvals => (crate::i18n::tr("Approval rooms"), ""),
                                 _ => ("", ""),
                             };
                             widget.label(cx, ids!(title)).set_text(cx, title);
@@ -1066,18 +1061,17 @@ mod information_target_tests {
     fn overview_actions_and_member_indices_never_share_notification_or_profile_targets() {
         for members in [0, 1, 5, 200] {
             for choosing in [false, true] {
-                assert_eq!(info_row(InfoTab::Members, members, choosing, true, members), InfoRow::Filler);
-                for index in 0..members {assert_eq!(info_row(InfoTab::Members, members, choosing, true, index), InfoRow::Member(index));}
-                assert_eq!(info_row(InfoTab::Overview, members, choosing, false, 0), InfoRow::Overview);
+                assert_eq!(info_row(InfoTab::Members, members, choosing, members), InfoRow::Filler);
+                for index in 0..members {assert_eq!(info_row(InfoTab::Members, members, choosing, index), InfoRow::Member(index));}
+                assert_eq!(info_row(InfoTab::Overview, members, choosing, 0), InfoRow::Overview);
                 if choosing {
-                    for mode in 0..4 {assert_eq!(info_row(InfoTab::Overview, members, true, true, mode+1), InfoRow::Mode(mode));}
-                    assert_eq!(info_row(InfoTab::Overview, members, true, true, 5), InfoRow::Back);
-                    assert_eq!(info_row(InfoTab::Overview, members, true, true, 6), InfoRow::Filler);
+                    for mode in 0..4 {assert_eq!(info_row(InfoTab::Overview, members, true, mode+1), InfoRow::Mode(mode));}
+                    assert_eq!(info_row(InfoTab::Overview, members, true, 5), InfoRow::Back);
+                    assert_eq!(info_row(InfoTab::Overview, members, true, 6), InfoRow::Filler);
                 } else {
-                    assert_eq!(info_row(InfoTab::Overview, members, false, true, 1), InfoRow::Notifications);
-                    assert_eq!(info_row(InfoTab::Overview, members, false, true, 2), InfoRow::AgentServices);
-                    assert_eq!(info_row(InfoTab::Overview, members, false, true, 3), InfoRow::Approvals);
-                    assert_eq!(info_row(InfoTab::Overview, members, false, false, 3), InfoRow::Filler);
+                    assert_eq!(info_row(InfoTab::Overview, members, false, 1), InfoRow::Notifications);
+                    assert_eq!(info_row(InfoTab::Overview, members, false, 2), InfoRow::AgentServices);
+                    assert_eq!(info_row(InfoTab::Overview, members, false, 3), InfoRow::Filler);
                 }
             }
         }

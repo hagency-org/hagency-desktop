@@ -44,6 +44,7 @@ pub async fn matrix_request(
 pub mod action_room;
 mod catalog_worker;
 mod consent;
+mod design;
 mod library;
 mod package;
 pub mod palpo;
@@ -59,6 +60,11 @@ pub fn script_mod(vm: &mut makepad_widgets::ScriptVm) {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         makepad_widgets::widget_async::register_splash_isolate_mod(crate::theme::script_mod);
+        makepad_widgets::widget_async::register_splash_isolate_mod(crate::i18n::script_mod);
+        makepad_widgets::widget_async::register_splash_isolate_mod(|vm| {
+            design::install_system_cjk_fallback(vm);
+            design::script_mod(vm);
+        });
         makepad_widgets::widget_async::register_splash_isolate_mod(|vm| {
             octoscript_widgets::design::script_mod(vm);
         });
@@ -72,8 +78,10 @@ pub fn script_mod(vm: &mut makepad_widgets::ScriptVm) {
             makepad_widgets::splash::register_agent_module,
         );
     });
+    // Trusted native confirmations also use the shared number editor. Register
+    // its types in the host VM as well as in each contained Splash isolate.
+    design::script_mod(vm);
     library::script_mod(vm);
     ui::script_mod(vm);
     action_room::script_mod(vm);
-    window::script_mod(vm);
 }

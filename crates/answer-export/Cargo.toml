@@ -1,0 +1,13 @@
+[package]
+name = "rinx-answer-export"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+
+[dependencies]
+krilla = { version = "0.8.2", default-features = false, features = ["raster-images"] }
+parley = { version = "0.11.1", features = ["complex-scripts"] }
+pulldown-cmark = "0.13"
+
+[dev-dependencies]
+lopdf = "0.36"

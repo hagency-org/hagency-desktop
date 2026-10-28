@@ -351,3 +351,21 @@ fn retired_palpo_is_hidden_and_cannot_be_installed_but_matrix_apps_remain() {
     manifest.id = "im.palpo.operations".into();
     assert!(admit_application(&manifest).is_err());
 }
+
+#[test]
+fn management_requires_verified_builtin_digest_and_never_upgrades_legacy_or_hub_apps() {
+    let f = Fixture::new();
+    let mut manifest = f.entry("1", &["hagency.session", "hagency.inbox.list"]).manifest;
+    manifest.id = octosense_app_contract::hagency::APP_ID.into();
+    manifest.requires = vec![octosense_app_contract::hagency::FEATURE.into()];
+    manifest.integrity.bundle_blake3 = "a".repeat(64);
+    assert!(admit_application(&manifest).is_err());
+    assert!(compatible(&manifest, "macos", None).is_err());
+    assert!(admit_builtin_management(&manifest, &"a".repeat(64)).is_ok());
+    assert!(admit_builtin_management(&manifest, &"b".repeat(64)).is_err());
+    manifest.capabilities.push("palpo.fleets.export".into());
+    assert!(admit_builtin_management(&manifest, &"a".repeat(64)).is_err());
+    manifest.capabilities.pop();
+    manifest.requires.clear();
+    assert!(admit_builtin_management(&manifest, &"a".repeat(64)).is_err());
+}

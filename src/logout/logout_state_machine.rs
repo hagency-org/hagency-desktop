@@ -443,7 +443,8 @@ impl LogoutStateMachine {
     }
     
     async fn perform_server_logout(&self) -> Result<(), LogoutError> {
-        crate::hagency::backend::Service::stop_current().await;
+        crate::hagency::backend::Service::stop_current().await
+            .map_err(|code| LogoutError::Recoverable(RecoverableError::ServerLogoutFailed(code)))?;
         let Some(client) = get_client() else {
             return Err(LogoutError::Unrecoverable(UnrecoverableError::ComponentsCleared));
         };
@@ -507,7 +508,7 @@ pub fn is_logout_past_point_of_no_return() -> bool {
 }
 
 pub fn is_logout_in_progress() -> bool {
-    LOGOUT_IN_PROGRESS.load(Ordering::Relaxed)
+    LOGOUT_IN_PROGRESS.load(Ordering::Acquire)
 }
 
 fn set_logout_point_of_no_return(value: bool) {
@@ -515,8 +516,14 @@ fn set_logout_point_of_no_return(value: bool) {
 }
 
 fn set_logout_in_progress(value: bool) {
+    // Block replacement services before synchronously retiring native authority.
+    let prev = LOGOUT_IN_PROGRESS.swap(value, Ordering::AcqRel);
+    if value && crate::hagency::backend::Service::revoke_current().is_err() {
+        // perform_server_logout retries the durable operation and exposes its
+        // checked failure before any SDK credentials or UI state are removed.
+        makepad_widgets::error!("Native owner logout persistence requires retry");
+    }
     if value { crate::article_app::invalidate_sessions(); crate::assistant::invalidate(); }
-    let prev = LOGOUT_IN_PROGRESS.swap(value, Ordering::Relaxed);
     if prev != value {
         // Emit the action here (only when the value has changed)
         Cx::post_action(LogoutAction::InProgress(value));

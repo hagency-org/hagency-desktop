@@ -115,3 +115,4 @@ pub use verify::{admit, admit_digest, bundle_digest, RefuseAllSignatures, Signat
 
 /// Exact Palpo service grants and their consent language.
 pub mod palpo;
+pub mod hagency;

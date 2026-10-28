@@ -61,7 +61,7 @@ impl AgentRole {
 /// Whether `localpart` looks like an agent-chat agent puppet: either it carries
 /// the bridge's `ac_` prefix, or it ends in one of the workflow role names.
 pub fn is_agent_localpart(localpart: &str) -> bool {
-    localpart.starts_with(AGENT_LOCALPART_PREFIX) || AgentRole::from_name(localpart).is_some()
+    localpart.starts_with(AGENT_LOCALPART_PREFIX) || localpart.starts_with("_hagency_") || AgentRole::from_name(localpart).is_some()
 }
 
 /// Whether `user_id` is an agent-chat bridge bot.

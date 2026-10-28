@@ -153,6 +153,30 @@ fn validate_oauth_metadata(
 }
 
 /// Standard SDK OAuth: the SDK installs the Matrix device and alone refreshes it.
+/// Instrument builds can hand a local test authorization URL to an isolated
+/// browser. Login, PKCE, callback validation and SDK session persistence still
+/// follow the production path. Packaged builds always use the system browser.
+pub(crate) fn open_login_url(url: &str) -> Result<()> {
+    #[cfg(all(feature = "palpo-instrument", target_os = "macos"))]
+    if let Some(path) = std::env::var_os("HAGENCY_INSTRUMENT_LOGIN_URL") {
+        use std::io::Write;
+        use std::os::unix::fs::OpenOptionsExt;
+        let parsed = Url::parse(url)?;
+        anyhow::ensure!(
+            parsed.scheme() == "http" && parsed.host_str() == Some("127.0.0.1")
+                && parsed.path().starts_with("/auth/")
+                && std::env::var("MAKEPAD_HIDE_WINDOWS").as_deref() == Ok("1"),
+            "Instrument authorization requires a hidden local test instance"
+        );
+        let mut file = std::fs::OpenOptions::new().write(true).create_new(true)
+            .mode(0o600).open(path)?;
+        file.write_all(url.as_bytes())?;
+        file.sync_all()?;
+        return Ok(());
+    }
+    robius_open::Uri::new(url).open().map_err(|_| anyhow::anyhow!("Unable to open your browser"))
+}
+
 pub(crate) async fn oauth_browser_login<F, Fut>(client: &Client, register: bool, open: F) -> Result<()>
 where
     F: FnOnce(String) -> Fut,

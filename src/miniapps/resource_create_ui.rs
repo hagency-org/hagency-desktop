@@ -1,0 +1,82 @@
+//! Load canonical readback before enabling the existing native consent footer.
+use super::*;
+use crate::host::hagency::resource_create::ResourceCreateConsent;
+
+pub(super) struct ResourceCreatePrompt {
+    account: String,
+    expires: Instant,
+    receiver: Option<Receiver<Result<ResourceCreateConsent, String>>>,
+    consent: Option<ResourceCreateConsent>,
+    failure: Option<String>,
+}
+impl ResourceCreatePrompt {
+    pub(super) fn begin(consent: ResourceCreateConsent) -> Self {
+        let account = consent.account().to_owned();
+        let (tx, receiver) = mpsc::sync_channel(1);
+        crate::sliding_sync::spawn_async_task(async move {
+            let result = consent.load().await;
+            let _ = tx.try_send(result);
+            SignalToUI::set_ui_signal();
+        });
+        Self {
+            account,
+            expires: Instant::now() + Duration::from_secs(300),
+            receiver: Some(receiver),
+            consent: None,
+            failure: None,
+        }
+    }
+    pub(super) fn poll(&mut self) -> bool {
+        let Some(receiver) = &self.receiver else {
+            return false;
+        };
+        let result = match receiver.try_recv() {
+            Ok(result) => result,
+            Err(mpsc::TryRecvError::Empty) => return false,
+            Err(mpsc::TryRecvError::Disconnected) => Err("management_unavailable".into()),
+        };
+        self.receiver = None;
+        match result {
+            Ok(consent) => self.consent = Some(consent),
+            Err(code) => self.failure = Some(code),
+        }
+        true
+    }
+    pub(super) fn account(&self) -> &str {
+        &self.account
+    }
+    pub(super) fn expired(&self) -> bool {
+        Instant::now() >= self.expires
+            || self
+                .consent
+                .as_ref()
+                .is_some_and(ResourceCreateConsent::expired)
+    }
+    pub(super) fn ready(&self) -> bool {
+        self.consent.is_some() && !self.expired()
+    }
+    pub(super) fn recovering(&self) -> bool {
+        self.consent
+            .as_ref()
+            .is_some_and(ResourceCreateConsent::recovering)
+    }
+    pub(super) fn details(&self) -> String {
+        if let Some(consent) = &self.consent {
+            return consent.details();
+        }
+        crate::i18n::tr(match self.failure.as_deref() {
+            None => "Reading current resource configuration…",
+            Some("management_resource_source_changed") => "The resource changed. Close this review and refresh its details. Saved requests remain available for recovery.",
+            Some(_) => "The current configuration could not be verified. Close this review, refresh, or recover your original saved request.",
+        }).into()
+    }
+    pub(super) async fn accept(self) -> Result<Value, String> {
+        if self.expired() {
+            return Err("provider_confirmation_expired".into());
+        }
+        self.consent
+            .ok_or_else(|| "resource_create_review_required".to_owned())?
+            .accept()
+            .await
+    }
+}
