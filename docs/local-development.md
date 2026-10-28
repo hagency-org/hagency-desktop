@@ -4,8 +4,8 @@
 
 ## Checkout and build
 
-Cargo fetches the owner engine directly from the `main` branch of
-`https://github.com/chrislearn/hagency-client.git`. Cargo.lock pins its exact
+Cargo fetches the owner engine directly from the `work/hagency-client-local-20261028` branch of
+`https://github.com/hagency-org/hagency-client.git`. Cargo.lock pins its exact
 revision, so a sibling client checkout is not required. Build from Desktop:
 
 The Desktop pins Rust 1.98.0; the server selects its own toolchain. On macOS,

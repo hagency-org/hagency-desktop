@@ -82,8 +82,8 @@ costs; restore the same owner's complete ledger when the recovery gate requires 
 
 ## Build and check
 
-Cargo fetches the owner engine from the `main` branch of
-[`chrislearn/hagency-client`](https://github.com/chrislearn/hagency-client).
+Cargo fetches the owner engine from the `work/hagency-client-local-20261028` branch of
+[`hagency-org/hagency-client`](https://github.com/hagency-org/hagency-client).
 The committed Cargo.lock records the exact revision used for a build; no sibling
 checkout is required. The repository pins Rust 1.98.0.
 Install CMake and the platform's native build dependencies, then run:

@@ -7,8 +7,8 @@ GitHub Releases at the 2026-10-10 audit.
 
 ## Source dependency
 
-Desktop depends directly on `https://github.com/chrislearn/hagency-client.git`,
-branch `main`. Cargo.lock records the exact source revision for reproducible
+Desktop depends directly on `https://github.com/hagency-org/hagency-client.git`,
+branch `work/hagency-client-local-20261028`. Cargo.lock records the exact source revision for reproducible
 `--locked` builds, including the engine's internal crates. No sibling checkout
 or CI checkout/move action is needed.
 

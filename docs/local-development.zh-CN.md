@@ -4,7 +4,7 @@
 
 ## 源码布局与构建
 
-Cargo 直接从 `https://github.com/chrislearn/hagency-client.git` 的 `main` 分支
+Cargo 直接从 `https://github.com/hagency-org/hagency-client.git` 的 `work/hagency-client-local-20261028` 分支
 获取主人引擎，Cargo.lock 锁定具体提交，无需同级 client 源码目录。在 Desktop
 checkout 中构建：
 
