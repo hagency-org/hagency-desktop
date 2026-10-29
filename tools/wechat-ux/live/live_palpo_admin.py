@@ -31,7 +31,7 @@ def main():
     root = (args.root or Path('target/palpo-live') / ('admin-' + uuid.uuid4().hex)).resolve()
     root.mkdir(parents=True, exist_ok=True, mode=0o700)
     if not (root / 'operator.json').exists():
-        remote = '/Users/cloud/rinx-miniapp-validation/admin-' + uuid.uuid4().hex
+        remote = 'rinx-miniapp-validation/admin-' + uuid.uuid4().hex
         (root / 'operator.json').write_text(json.dumps({'remote': remote, 'state': remote + '/accounts.json'}))
     operator = json.loads((root / 'operator.json').read_text())
     remote = operator['remote']

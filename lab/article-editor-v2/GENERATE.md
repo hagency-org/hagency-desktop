@@ -5,13 +5,13 @@ Both requests were executed successfully on 2026-09-21. Original outputs, actual
 Run from the Robrix repository root in an environment with the `openai` Python package and `OPENAI_API_KEY` set. The installed imagegen skill supplies the CLI; no custom SDK runner is necessary.
 
 ```sh
-python3 /Users/ychen/.codex/skills/.system/imagegen/scripts/image_gen.py generate \
+python3 ~/.codex/skills/.system/imagegen/scripts/image_gen.py generate \
   --model gpt-image-2 --no-augment \
   --prompt-file lab/article-editor-v2/atlas-prompt.txt \
   --size 3840x2160 --quality high \
   --out output/imagegen/article-editor-v2/mobile-ux-atlas-v2.png
 
-python3 /Users/ychen/.codex/skills/.system/imagegen/scripts/image_gen.py generate \
+python3 ~/.codex/skills/.system/imagegen/scripts/image_gen.py generate \
   --model gpt-image-2 --no-augment \
   --prompt-file lab/article-editor-v2/desktop-prompt.txt \
   --size 1536x1024 --quality high \

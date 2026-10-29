@@ -18,3 +18,8 @@ testflight.sh
 ## Rendered by packaging/aur/render-pkgbuild.sh, never committed.
 packaging/aur/PKGBUILD
 packaging/aur/.SRCINFO
+
+# Agent working logs stay on the operator's machine: they record local
+# paths, hosts and conversations.
+/docs/progress.md
+/docs/agent-knowledge.md

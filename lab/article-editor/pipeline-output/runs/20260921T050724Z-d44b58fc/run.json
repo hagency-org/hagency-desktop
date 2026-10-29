@@ -51,15 +51,15 @@
         {
           "argv": [
             "/Library/Developer/CommandLineTools/usr/bin/python3",
-            "/Users/ychen/home/octosense-org/Octoscript-AppCard-calendar/lab/image-to-appcard-flow/atlas.py",
+            "~/home/octosense-org/Octoscript-AppCard-calendar/lab/image-to-appcard-flow/atlas.py",
             "--project",
-            "/Users/ychen/home/octosense-org/robrix2/lab/article-editor",
+            "~/home/octosense-org/robrix2/lab/article-editor",
             "--manifest",
-            "/Users/ychen/home/octosense-org/robrix2/lab/article-editor/image-to-appcard-flow.json",
+            "~/home/octosense-org/robrix2/lab/article-editor/image-to-appcard-flow.json",
             "--output",
-            "/Users/ychen/home/octosense-org/robrix2/lab/article-editor/pipeline-output/intake"
+            "~/home/octosense-org/robrix2/lab/article-editor/pipeline-output/intake"
           ],
-          "cwd": "/Users/ychen/home/octosense-org/robrix2/lab/article-editor"
+          "cwd": "~/home/octosense-org/robrix2/lab/article-editor"
         }
       ],
       "logs": [
@@ -77,15 +77,15 @@
         {
           "argv": [
             "/Library/Developer/CommandLineTools/usr/bin/python3",
-            "/Users/ychen/home/octosense-org/Octoscript-AppCard-calendar/lab/image-to-appcard-flow/prepare.py",
+            "~/home/octosense-org/Octoscript-AppCard-calendar/lab/image-to-appcard-flow/prepare.py",
             "--project",
-            "/Users/ychen/home/octosense-org/robrix2/lab/article-editor",
+            "~/home/octosense-org/robrix2/lab/article-editor",
             "--manifest",
-            "/Users/ychen/home/octosense-org/robrix2/lab/article-editor/image-to-appcard-flow.json",
+            "~/home/octosense-org/robrix2/lab/article-editor/image-to-appcard-flow.json",
             "--intake",
-            "/Users/ychen/home/octosense-org/robrix2/lab/article-editor/pipeline-output/intake"
+            "~/home/octosense-org/robrix2/lab/article-editor/pipeline-output/intake"
           ],
-          "cwd": "/Users/ychen/home/octosense-org/robrix2/lab/article-editor"
+          "cwd": "~/home/octosense-org/robrix2/lab/article-editor"
         }
       ],
       "logs": [

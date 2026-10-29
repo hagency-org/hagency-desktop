@@ -62,7 +62,7 @@ along with seven Rinx article integration tests and the translation audit
 
 The tested signed binary, SHA-256
 `0580f55a222fb543243645db065e6654c10e9008dcde0b151a0b9a5a70a754c0`,
-is installed at `/Users/ychen/Applications/Rinx.app`.
+is installed at `~/Applications/Rinx.app`.
 The existing article library was backed up and its hash remained unchanged.
 The installer wrote no profile files. A separate development process was using
 the normal profile, whose login marker was already absent; that process was

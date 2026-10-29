@@ -51,15 +51,15 @@
         {
           "argv": [
             "/Library/Developer/CommandLineTools/usr/bin/python3",
-            "/Users/ychen/home/octosense-org/Octoscript-AppCard-flow/lab/image-to-appcard-flow/atlas.py",
+            "~/home/octosense-org/Octoscript-AppCard-flow/lab/image-to-appcard-flow/atlas.py",
             "--project",
-            "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor",
+            "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor",
             "--manifest",
-            "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/image-to-appcard-flow-v2-mobile.json",
+            "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/image-to-appcard-flow-v2-mobile.json",
             "--output",
-            "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/pipeline-output/intake-v2-mobile"
+            "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/pipeline-output/intake-v2-mobile"
           ],
-          "cwd": "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor"
+          "cwd": "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor"
         }
       ],
       "logs": [
@@ -77,15 +77,15 @@
         {
           "argv": [
             "/Library/Developer/CommandLineTools/usr/bin/python3",
-            "/Users/ychen/home/octosense-org/Octoscript-AppCard-flow/lab/image-to-appcard-flow/prepare.py",
+            "~/home/octosense-org/Octoscript-AppCard-flow/lab/image-to-appcard-flow/prepare.py",
             "--project",
-            "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor",
+            "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor",
             "--manifest",
-            "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/image-to-appcard-flow-v2-mobile.json",
+            "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/image-to-appcard-flow-v2-mobile.json",
             "--intake",
-            "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/pipeline-output/intake-v2-mobile"
+            "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/pipeline-output/intake-v2-mobile"
           ],
-          "cwd": "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor"
+          "cwd": "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor"
         }
       ],
       "logs": [

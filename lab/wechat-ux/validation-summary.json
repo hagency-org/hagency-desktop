@@ -46,7 +46,7 @@
     "passed": true,
     "captures": 10,
     "recipient_confirmed": true,
-    "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/4f6a40b2dbdc43f59d5b4d2cc62a0ef7",
+    "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/4f6a40b2dbdc43f59d5b4d2cc62a0ef7",
     "binary_sha256": "ca6372bf5bdaea98fb47f69439476afda76834921ced74d510d712297904e744",
     "push_rule_modes_server_verified": 4
   },
@@ -88,7 +88,7 @@
         640
       ],
       "passed": true,
-      "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/ca335531146d41b3a37a42d633c80484"
+      "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/ca335531146d41b3a37a42d633c80484"
     },
     {
       "viewport": [
@@ -96,7 +96,7 @@
         812
       ],
       "passed": true,
-      "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/a111082dcf3b4c419a2378406e81cf62"
+      "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/a111082dcf3b4c419a2378406e81cf62"
     },
     {
       "viewport": [
@@ -104,7 +104,7 @@
         932
       ],
       "passed": true,
-      "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/accf4cc7da3845b79eb7b9efd8039402"
+      "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/accf4cc7da3845b79eb7b9efd8039402"
     },
     {
       "viewport": [
@@ -112,7 +112,7 @@
         768
       ],
       "passed": true,
-      "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/b6547c6fbed74cb787f557c7c8047dbd"
+      "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/b6547c6fbed74cb787f557c7c8047dbd"
     }
   ],
   "native_reconnect": {
@@ -130,7 +130,7 @@
       255,
       255
     ],
-    "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/d2e99b9486d84ba7a12b465a110475e7"
+    "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/d2e99b9486d84ba7a12b465a110475e7"
   },
   "native_notifications": {
     "passed": true,
@@ -138,17 +138,17 @@
       {
         "check": "other_session_mute_received",
         "passed": true,
-        "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/3b086b52e9c342ad8d0619bb147b1901"
+        "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/3b086b52e9c342ad8d0619bb147b1901"
       },
       {
         "check": "muted_mode_restored_after_restart",
         "passed": true,
-        "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/ae829d3633b54e6f8859629257f32836"
+        "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/ae829d3633b54e6f8859629257f32836"
       },
       {
         "check": "other_session_reset_received",
         "passed": true,
-        "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/ae829d3633b54e6f8859629257f32836"
+        "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/ae829d3633b54e6f8859629257f32836"
       }
     ],
     "muted_row_icon_visually_inspected": true,
@@ -159,7 +159,7 @@
   "native_media": {
     "passed": true,
     "scope": "API-seeded incoming/outgoing image rendering and native viewer return",
-    "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/1bea45abfcbd4f8fb5d082aaebc86b07",
+    "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/1bea45abfcbd4f8fb5d082aaebc86b07",
     "fixture_events": [
       "$IUBYu9BA0Cn3EOg0OIyNgWUMhPn-ZfKqapqEhAH6JFg",
       "$ACaap2S5oETr2FFkO9H00XMvWESC7S5oHTWnTJe7z-s"
@@ -223,7 +223,7 @@
         "passed": true
       }
     ],
-    "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/d4a1e15b46c94f0ab1bbfd3bf1206363",
+    "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/d4a1e15b46c94f0ab1bbfd3bf1206363",
     "binary_sha256": "88ecb65d19f8da363d38c82ab74e030340913dea837f901cf3caa944a1bdef77"
   },
   "separate_parity_work": [
@@ -254,7 +254,7 @@
         "passed": true
       }
     ],
-    "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/3b8167b461ce468fbcabff15bad14610",
+    "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/3b8167b461ce468fbcabff15bad14610",
     "binary_sha256": "88ecb65d19f8da363d38c82ab74e030340913dea837f901cf3caa944a1bdef77",
     "scope": "Actual native quote pixels, expansion/collapse, and navigation to an API-seeded original Matrix event",
     "visually_inspected": [
@@ -266,7 +266,7 @@
   },
   "native_chat_info": {
     "passed": true,
-    "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/5e8487f4bb4e432dbd234c52235cd893",
+    "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/5e8487f4bb4e432dbd234c52235cd893",
     "checks": [
       {
         "name": "matrix_members_rendered",
@@ -376,7 +376,7 @@
   ],
   "current_gallery": {
     "passed": true,
-    "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/398a2a7029ac48578ed442001f71b48b",
+    "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/native-runs/398a2a7029ac48578ed442001f71b48b",
     "scope": "Current-build gallery captures; not similarity acceptance",
     "captures": 5,
     "binary_sha256": "fc2fe8945fe7a0ed9840f1155c337e894e1c8b93691c246b4187606e51b8ba68"
@@ -442,10 +442,10 @@
         "session_persisted_owner_only",
         "restart_restores_same_account_and_device_without_password"
       ],
-      "evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/login-check-1789884084250171000/native-runs/f6794ac69e144c3ea917bb83abde876b",
+      "evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/login-check-1789884084250171000/native-runs/f6794ac69e144c3ea917bb83abde876b",
       "mode": "headless",
       "binary_sha256": "1b97b4f105691b46446b5ba401fe31d4a3856309fd1fa8ba85f0dfb833257c7e",
-      "restore_evidence": "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/login-check-1789884084250171000/native-runs/adc75674814b4824931be1b90c01b003"
+      "restore_evidence": "~/home/robrix-hagency/lab/wechat-ux/evidence/live/login-check-1789884084250171000/native-runs/adc75674814b4824931be1b90c01b003"
     },
     "native_oauth_only": false,
     "qr_login": false,
@@ -462,9 +462,9 @@
       "provider_icons_and_buttons_visible_320x640"
     ],
     "captures": [
-      "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/social-icons-1789884676081279000/406x900/social-sign-in.png",
-      "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/social-icons-1789884676081279000/375x812/social-sign-in.png",
-      "/Users/ychen/home/robrix-hagency/lab/wechat-ux/evidence/live/social-icons-1789884676081279000/320x640/social-sign-in.png"
+      "~/home/robrix-hagency/lab/wechat-ux/evidence/live/social-icons-1789884676081279000/406x900/social-sign-in.png",
+      "~/home/robrix-hagency/lab/wechat-ux/evidence/live/social-icons-1789884676081279000/375x812/social-sign-in.png",
+      "~/home/robrix-hagency/lab/wechat-ux/evidence/live/social-icons-1789884676081279000/320x640/social-sign-in.png"
     ],
     "binary_sha256": "4bd51ccd761ade3ed2b1e2e492ab1df69da690449a334fd41af7e6f1be4d14e5"
   }

@@ -95,7 +95,7 @@ publishes or sends messages and does not modify the source profile.
 
 ## Installed validation receipt · 2026-09-22
 
-The signed app at `/Users/ychen/Applications/Rinx.app`, updated with Mermaid
+The signed app at `~/Applications/Rinx.app`, updated with Mermaid
 and Editor.md sequence diagrams, passed 28 hidden-window Rinx checks on its
 exact binary. A separate native widget test passed actual selection/copy,
 including both diagram source formats. This update passed 21 native renderer

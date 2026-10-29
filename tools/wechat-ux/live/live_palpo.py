@@ -58,7 +58,7 @@ def main():
     run = uuid.uuid4().hex
     root = Path('target/palpo-live') / run
     root.mkdir(parents=True, mode=0o700)
-    remote = '/Users/cloud/rinx-miniapp-validation/' + run
+    remote = 'rinx-miniapp-validation/' + run
     service_port = port()
     endpoint = f'http://127.0.0.1:{service_port}'
     report = {'passed': False, 'matrix': home, 'admin': 'https://crew.ominix.io:19444',

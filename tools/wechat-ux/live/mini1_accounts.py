@@ -50,21 +50,21 @@ def main():
     parser.add_argument('state', type=Path)
     args = parser.parse_args()
     path = args.state.resolve()
-    assert path.is_relative_to('/Users/cloud/rinx-miniapp-validation')
+    assert path.is_relative_to('<server-home>/rinx-miniapp-validation')
     if args.action == 'create':
         state = json.loads(path.read_text()) if path.exists() else {
             'run': secrets.token_hex(8), 'accounts': {}, 'fleets': [], 'rooms': []}
         assert re.fullmatch(r'[a-f0-9]{16}', state['run']) and not state.get('cleaned')
         save(path, state)
         env = dict(os.environ)
-        with open('/Users/cloud/Library/LaunchAgents/io.ominix.palpo-native.plist', 'rb') as f:
+        with open('<server-home>/Library/LaunchAgents/io.ominix.palpo-native.plist', 'rb') as f:
             env.update(plistlib.load(f)['EnvironmentVariables'])
         env.update(PALPO_AUTO_JOIN_ROOMS='[]', PALPO_ADMIN__ROOM_NOTICES='false',
                    PALPO_ADMIN__STARTUP_EXECUTE='[]', PALPO_ADMIN__CONSOLE_AUTOMATIC='false')
 
         def operator(command):
-            result = subprocess.run(['/Users/cloud/palpo-crew/palpo', '--server', 'false',
-                                     '--execute', command], env=env, cwd='/Users/cloud/palpo-crew',
+            result = subprocess.run(['<server-home>/palpo-crew/palpo', '--server', 'false',
+                                     '--execute', command], env=env, cwd='<server-home>/palpo-crew',
                                     capture_output=True, text=True, timeout=60)
             if result.returncode:
                 # Operator output can contain generated passwords; never echo it.

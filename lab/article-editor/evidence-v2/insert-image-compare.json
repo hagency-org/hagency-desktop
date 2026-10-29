@@ -1,7 +1,7 @@
 {
  "scene": "insert-image",
- "reference": "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/pipeline-output/intake-v2-mobile/scenes/article-v2-insert-image/reference.png",
- "grab": "/private/tmp/claude-505/-Users-ychen-home-robrix-hagency/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/v-insert-image.png",
+ "reference": "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/rinx-ed/lab/article-editor/pipeline-output/intake-v2-mobile/scenes/article-v2-insert-image/reference.png",
+ "grab": "<scratch>/46061f79-0763-44b7-a570-365f859fa86e/scratchpad/v-insert-image.png",
  "side_by_side": "lab/article-editor/evidence-v2/insert-image-compare.png",
  "band_mean_diff": [
   58.4,

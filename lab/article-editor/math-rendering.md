@@ -50,7 +50,7 @@ Reproduce from the Rinx repository:
 ```sh
 python3 tools/wechat-ux/live/native_article_math.py \
   --profile /path/to/robrix-ux-fixture \
-  --binary /Users/ychen/Applications/Rinx.app/Contents/MacOS/rinx
+  --binary ~/Applications/Rinx.app/Contents/MacOS/rinx
 ```
 
 The separate visible native file-picker/source regression passed nine journeys,
@@ -74,7 +74,7 @@ All ten Blitz section captures are complete. The full long document retains
 Blitz's existing 8,192 CSS-pixel output limit; the native reader reaches its end.
 Diagrams, TOC and icon extensions remain literal.
 
-The installed `/Users/ychen/Applications/Rinx.app` is the signed binary used by
+The installed `~/Applications/Rinx.app` is the signed binary used by
 the headless test, SHA-256
 `c990084ba9a25444d26081d9311d90a8cadf05fd5ef302f4fca963e2f09b7ed6`.
 Its signature was verified. All five existing drafts and unapplied sources were
