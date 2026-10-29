@@ -7977,7 +7977,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }}
                 }
-                mod.widgets.HagencyListNote{text:A.t("Assigning gives the Agent this pool’s preset configuration.","分配后，Agent 会使用此资源池的预设配置。")}
+                mod.widgets.HagencyListNote{text:A.t("Assigning gives the Agent this pool’s preset.","分配后，Agent 使用此资源池的预设。")}
                 mod.widgets.HagencyListLabel{text:A.t("SHOWN ONLY · NOT ENFORCED","仅展示，不强制执行")}
                 mod.widgets.HagencyList{
                     mod.widgets.HagencyListRow{
