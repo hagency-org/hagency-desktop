@@ -7777,8 +7777,8 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             if b.low {mod.widgets.HagencyListValue{width:Fill text:if v.editable {A.t("Almost used up. You can raise the monthly maximum below.","额度快用完了，可以提高下方的每月上限。")} else {A.t("Almost used up. New Agent requests may be refused until it resets.","额度快用完了，重置前新的申请可能被拒绝。")} draw_text.color:mod.widgets.RINX_DANGER_FG}}
                             if b.ceiling==nil {mod.widgets.HagencyListValue{width:Fill text:A.t("Set a monthly maximum below so Agents can hold capacity.","在下方设置每月上限后，Agent 才能预留额度。")}}
                             if b.low && !v.editable {View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
-                                if detail.choices.len()>0 && detail.editing.reason!="read_only" {resource_low_another := mod.widgets.HagencyGetButton{text:A.t("Add Another Pool","再建一个资源池") enabled:!H.busy && H.command==nil && !locked on_click:||A.create_resource_configuration()}}
-                                if v.conn!=nil {resource_low_requests := mod.widgets.HagencyGetButton{text:A.t("Review Requests","查看申请") enabled:!H.busy && !locked on_click:||A.owner_requests(v.conn)}}
+                                if detail.choices.len()>0 && detail.editing.reason!="read_only" {View{width:Fit height:Fit resource_low_another := mod.widgets.HagencyGetButton{text:A.t("Add Another Pool","再建一个资源池") enabled:!H.busy && H.command==nil && !locked on_click:||A.create_resource_configuration()}}}
+                                if v.conn!=nil {View{width:Fit height:Fit resource_low_requests := mod.widgets.HagencyGetButton{text:A.t("Review Requests","查看申请") enabled:!H.busy && !locked on_click:||A.owner_requests(v.conn)}}}
                             }}
                         }
                         mod.widgets.HagencyListDivider{margin:Inset{left:16}}
@@ -7821,14 +7821,14 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             if !v.quotaEditable {mod.widgets.HagencyListValue{width:Fill text:v.quotaReason}}
                         }
                     }
-                    if save.visible {pool_save_row := View{visible:save.dirty || save.quotaEditable width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:6 bottom:2}
+                    if save.visible {View{width:Fill height:Fit pool_save_row := View{visible:(save.dirty || save.quotaEditable) width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:6 bottom:2}
                         View{width:Fill height:Fit flow:Right spacing:12
                             pool_revert := mod.widgets.HagencyWideSecondary{visible:save.dirty text:A.t("Revert","还原") enabled:!H.busy && !locked on_click:||A.pool_revert()}
                             pool_save := mod.widgets.HagencyWideButton{text:save.label enabled:save.enabled && !locked draw_bg +: {color_disabled:mod.widgets.RINX_FIELD color_2_disabled:mod.widgets.RINX_FIELD} on_click:||A.pool_save()}
                         }
                         if v.quotaEditable && !save.maxDirty {mod.widgets.HagencyListNote{align:Align{x:0.5} text:A.pool_device_line()}}
-                        if !v.quotaEditable || save.maxDirty {pool_save_note := mod.widgets.HagencyListNote{align:Align{x:0.5} text:A.t("You confirm the new maximum in the confirmation window.","新的每月上限需要在确认窗口中确认。")}}
-                    }}
+                        if !v.quotaEditable || save.maxDirty {mod.widgets.HagencyListNote{align:Align{x:0.5} text:A.t("You confirm the new maximum in the confirmation window.","新的每月上限需要在确认窗口中确认。")}}
+                    }}}
                     mod.widgets.HagencyListNote{text:A.t("1 M is one million tokens. Amounts are Hagency’s records, not the provider’s balance.","1 M 即 100 万 token。额度来自 Hagency 记录，不是服务商余额。")}
                     if H.pool_result!=nil {View{width:Fill height:Fit padding:Inset{top:4 bottom:2} mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
                         mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg(H.pool_result.tone)}
