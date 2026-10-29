@@ -799,9 +799,9 @@ A.stopped_error=fn(code){
     return A.error_text(code)
 }
 A.stopped_action_label=fn(action){
-    if action=="continue" {return A.t("Continue remaining work","继续剩余工作")}
-    if action=="accept_completed" {return A.t("Accept as completed","确认为已完成")}
-    return A.t("Keep task blocked","保持任务阻塞")
+    if action=="continue" {return A.t("Finish the rest","继续剩下的工作")}
+    if action=="accept_completed" {return A.t("It’s done","确认已经完成")}
+    return A.t("Pause the task","先暂停这个任务")
 }
 // Interrupted tasks list inside Health & Recovery, optionally for one workspace.
 A.open_stopped_tasks=fn(resource,workspace,after){
@@ -1127,7 +1127,7 @@ A.sub_back_label=fn(){
     if A.tools_hub_page() || p=="health_hub" || p=="templates" || p=="web_catalog" || p=="connections" {return A.t("Pool","资源池")}
     if p=="tool_request" || p=="execution_policy" || p=="approval_binding_review" || p=="approval_binding_result" {return A.t("Tools","工具与权限")}
     if p=="tool_grants" || p=="tool_grant_review" {return if H.tool_origin=="execution_policy" {A.t("Agent","Agent 权限")} else if H.tool_origin=="approval_binding_review" || H.tool_origin=="approval_bindings" {A.t("Rooms","审批房间")} else {A.t("Tools","工具与权限")}}
-    if p=="tool_grant_result" {return A.t("Permissions","工具权限")}
+    if p=="tool_grant_result" {return A.t("Saved","已保存的工具权限")}
     if p=="resource_alert" || p=="stopped_task" || p=="workspace" {return A.t("Health","健康与恢复")}
     if p=="template" || p=="template_command" {return A.t("Templates","Agent 模板")}
     if p=="web_catalog_command" {return A.t("Offers","目录报价")}
@@ -1544,9 +1544,9 @@ A.stopped_entry_size=fn(entry){
     return ""+floor(bytes/1048576)+" MB"
 }
 A.stopped_action_hint=fn(action){
-    if action=="continue" {return A.t("Queue a new run with the same workspace and messages","用同一工作区和消息重新排队执行剩下的工作")}
-    if action=="accept_completed" {return A.t("Mark the task done · check its result first","将任务标记为已完成，请先核实结果")}
-    return A.t("Close this incident and keep the task blocked","结束这次异常，任务保持阻塞")
+    if action=="continue" {return A.t("The Agent picks up the rest in the same workspace","让 Agent 在同一工作区接着做剩下的部分")}
+    if action=="accept_completed" {return A.t("Mark the task done · check its result first","把任务标记为已完成，请先核对结果")}
+    return A.t("Close this problem; the task waits for later","结束这次异常，任务先暂停，之后再处理")
 }
 A.template_tone=fn(status){if status=="provisioned" {return "running"} if status=="reserved" {return "elsewhere"} return ""}
 A.template_status_short=fn(status){if status=="provisioned" {return A.t("Has an Agent","已有 Agent")} if status=="reserved" {return A.t("Reserved","已预留")} return A.t("Not used yet","尚未使用")}
@@ -6686,7 +6686,7 @@ A.render_page = fn(){
                                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_INFO_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.chat draw_icon.color:mod.widgets.RINX_INFO_FG}}
                                     mod.widgets.HagencyListText{
                                         mod.widgets.HagencyListTitle{text:row.agent}
-                                        mod.widgets.HagencyListSubtitle{text:if row.active {A.t("Working","工作正常")} else {A.t("Needs checking","需要验证")} draw_text.color:if row.active {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_WARNING_FG}}
+                                        mod.widgets.HagencyListSubtitle{text:if row.active {A.t("Working","工作正常")} else {A.t("Not available right now","暂时不可用")} draw_text.color:if row.active {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_WARNING_FG}}
                                     }
                                     mod.widgets.HagencyChevron{}
                                 }
@@ -6870,7 +6870,7 @@ A.render_page = fn(){
                         }
                     }
                 }
-                mod.widgets.HagencyListNote{text:A.t("Changes apply to its next task. Running tasks keep their permissions; read-only tasks stay read-only.","修改在下一个任务开始时生效。正在运行的任务保持原权限，只读任务仍然只读。")}
+                mod.widgets.HagencyListNote{text:A.t("Changes apply when its next task starts; a task that is already running isn’t affected.","修改在下一个任务开始时生效，正在运行的任务不受影响。")}
                 mod.widgets.HagencyListLabel{text:A.t("TOOLS","工具")}
                 mod.widgets.HagencyList{mod.widgets.HagencyListRow{
                     policy_grants := mod.widgets.HagencyListTap{enabled:!H.busy && H.command==nil && (H.policy_mode=="detail" || H.policy_mode=="result") on_click: || A.open_policy_grants()}
@@ -6935,7 +6935,7 @@ A.render_page = fn(){
                             if row.details!=nil {mod.widgets.HagencyWrapSubtitle{max_lines:3 text_overflow:Ellipsis text:A.sub_plain(row.details.description)}}
                             if row.details==nil {mod.widgets.HagencyWrapSubtitle{text:A.t("Its original description isn’t available","原始说明不可用")}}
                             if row.revoked {mod.widgets.HagencyListSubtitle{text:A.t("Taken back","已撤销")}}
-                            if !row.revoked && !row.bindingCurrent {mod.widgets.HagencyListSubtitle{text:A.t("Its approval room needs checking","它的审批房间需要验证") draw_text.color:mod.widgets.RINX_WARNING_FG}}
+                            if !row.revoked && !row.bindingCurrent {mod.widgets.HagencyListSubtitle{text:A.t("Its approval room isn’t available right now","它的审批房间暂时不可用") draw_text.color:mod.widgets.RINX_WARNING_FG}}
                         }
                         if !row.revoked {tool_grant_review := mod.widgets.HagencyGetDanger{text:A.t("Take Back","撤销") enabled:!H.busy && H.command==nil && H.page=="tool_grants" on_click: || A.review_tool_grant(row)}}
                     }
@@ -6974,7 +6974,7 @@ A.render_page = fn(){
                 mod.widgets.HagencyHeroName{text:d.agent}
                 mod.widgets.HagencyPill{draw_bg.color:if active {mod.widgets.RINX_SUCCESS_BG} else {mod.widgets.RINX_WARNING_BG}
                     mod.widgets.HagencyPillDot{draw_bg.color:if active {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_WARNING_FG}}
-                    mod.widgets.HagencyPillText{text:if active {A.t("Approval room working","审批房间工作正常")} else {A.t("Approval room needs checking","审批房间需要验证")} draw_text.color:if active {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_WARNING_FG}}
+                    mod.widgets.HagencyPillText{text:if active {A.t("Approval room working","审批房间工作正常")} else {A.t("Approval room not available","审批房间暂时不可用")} draw_text.color:if active {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_WARNING_FG}}
                 }
             }
             mod.widgets.HagencyListLabel{text:A.t("ROOM","房间")}
@@ -7000,7 +7000,7 @@ A.render_page = fn(){
                     }
                 }
             }
-            mod.widgets.HagencyListNote{text:A.t("Tool approvals for "+d.agent+" are sent to this private room.",A.sub_join(d.agent,"的工具审批会发到这个私密房间。"))}
+            mod.widgets.HagencyListNote{text:if active {A.t("Tool approvals for "+d.agent+" are sent to this private room.",A.sub_join(d.agent,"的工具审批会发到这个私密房间。"))} else {A.t("This room isn’t confirmed right now, so "+d.agent+"’s tool approvals may not arrive.","这个房间目前没有确认可用，"+A.sub_join(d.agent,"的工具审批可能发不出来。"))}}
             View{width:Fill height:Fit padding:Inset{top:6} mod.widgets.HagencyList{
                 mod.widgets.HagencyListRow{
                     binding_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
@@ -7038,7 +7038,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyListValue{text:""+result.revokedGrants}
                 }
             }
-            mod.widgets.HagencyListNote{text:A.t("Permissions taken back stay taken back, even if the room is linked again later.","即使以后重新绑定这个房间，已撤销的权限也不会恢复。")}
+            mod.widgets.HagencyListNote{text:A.t("Permissions taken back stay taken back, even if the room is used again later.","即使以后再次使用这个房间，已撤销的权限也不会恢复。")}
             View{width:Fill height:Fit padding:Inset{top:10}
                 binding_result_refresh := mod.widgets.HagencyWideButton{text:A.t("Done","完成") enabled:!H.busy on_click: || A.open_bindings(H.binding_resource,"")}
             }
@@ -7175,7 +7175,7 @@ A.render_page = fn(){
                     }
                 }}
             }
-            mod.widgets.HagencyListNote{text:A.t("Check the files a task left behind, then continue it, accept it as done, or keep it blocked.","检查任务留下的文件，再决定继续、确认完成或保持阻塞。")}
+            mod.widgets.HagencyListNote{text:A.t("Check the files a task left behind, then finish it, accept it as done, or pause it.","检查任务留下的文件，再决定继续、确认完成或先暂停。")}
 
             mod.widgets.HagencyListLabel{text:A.t("WORKSPACES","工作区")}
             mod.widgets.HagencyList{
@@ -7571,7 +7571,7 @@ A.render_page = fn(){
                             }
                         }}
                     }
-                    mod.widgets.HagencyListNote{text:if H.stopped_action=="continue" {A.t("A new run is queued with the same workspace and messages.","将用同一工作区和消息重新排队执行。")} else if H.stopped_action=="accept_completed" {A.t("The task will be marked done. Make sure its result is right.","任务将被标记为已完成，请确认结果无误。")} else {A.t("This incident is closed and the task stays blocked.","这次异常会被结束，任务保持阻塞。")}}
+                    mod.widgets.HagencyListNote{text:if H.stopped_action=="continue" {A.t("The Agent starts again in the same workspace with your instructions.","Agent 会按你的说明，在同一工作区重新开始剩下的工作。")} else if H.stopped_action=="accept_completed" {A.t("The task will be marked done. Make sure its result is right.","任务将被标记为已完成，请确认结果无误。")} else {A.t("This problem is closed and the task stays paused until someone picks it up.","这次异常会被结束，任务会暂停，直到有人继续处理。")}}
                     mod.widgets.HagencyListNote{text:A.t("This records your decision. It can’t undo anything that already happened.","这只记录你的决定，不能撤销已经发生的影响。")}
                     View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{top:8}
                         stopped_cancel := mod.widgets.HagencyWideTinted{enabled:A.stopped_can_decide() text:A.t("Back","返回修改") on_click: || {if A.stopped_can_decide(){H.stopped_mode="choose" A.redraw()}}}
@@ -10918,7 +10918,7 @@ alert_layer := View{width:Fill height:Fill new_batch:true on_render:||{
             let d=H.binding_draft
             mod.widgets.HagencyAlertTitle{text:A.t("Remove “"+d.agent+"”’s Approval Room?","解除“"+d.agent+"”的审批房间？")}
             mod.widgets.HagencyAlertMessage{padding:Inset{left:16 right:16 top:6 bottom:0} text:A.t("Tool permissions saved in it are taken back, and its pending approvals stop working.","房间里保存的工具权限会被撤销，待处理的审批也会失效。")}
-            mod.widgets.HagencyAlertMessage{text:A.t("A room can be linked again after it’s verified.","房间验证后可以重新绑定。")}
+            mod.widgets.HagencyAlertMessage{text:A.t("The Agent can get a new approval room later.","以后可以为 Agent 再建立审批房间。")}
             mod.widgets.HagencyDivider{}
             View{width:Fill height:44 flow:Right
                 binding_cancel := mod.widgets.HagencyAlertBold{text:A.t("Cancel","取消") enabled:!H.busy && H.command==nil on_click: || {if !H.busy && H.command==nil {H.binding_confirm=false A.redraw()}}}
