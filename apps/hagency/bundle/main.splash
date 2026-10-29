@@ -20,9 +20,9 @@ let {pool_rows=[],pool_after=nil,pool_agents=[],pool_agent_after=nil,pool_select
 H.pool_rows=pool_rows H.pool_after=pool_after H.pool_agents=pool_agents H.pool_agent_after=pool_agent_after H.pool_selected=pool_selected H.pool_detail=pool_detail H.pool_draft=pool_draft H.pool_confirm=pool_confirm
 let {pool_checked=false}=H
 H.pool_checked=pool_checked
-let {local_list=nil,local_status=nil,local_pending="",local_confirm="",local_error="",local_discard="",local_models=nil,local_after="",local_effort_note="",bar_past=false,local_epoch=0,local_failure="",local_failure_reason="",local_failure_code="",local_kept=nil}=H
+let {local_list=nil,local_status=nil,local_pending="",local_confirm="",local_error="",local_discard="",local_models=nil,local_after="",local_effort_note="",bar_past=false,local_epoch=0,local_failure="",local_failure_reason="",local_failure_code="",local_kept=nil,local_rechecked=false}=H
 H.local_list=local_list H.local_status=local_status H.local_pending=local_pending H.local_confirm=local_confirm H.local_error=local_error H.local_discard=local_discard H.local_models=local_models
-H.local_after=local_after H.local_effort_note=local_effort_note H.bar_past=bar_past H.local_epoch=local_epoch H.local_failure=local_failure H.local_failure_reason=local_failure_reason H.local_failure_code=local_failure_code H.local_kept=local_kept
+H.local_after=local_after H.local_effort_note=local_effort_note H.bar_past=bar_past H.local_epoch=local_epoch H.local_failure=local_failure H.local_failure_reason=local_failure_reason H.local_failure_code=local_failure_code H.local_kept=local_kept H.local_rechecked=local_rechecked
 let {account_inventory=nil,account_detail=nil,account_id="",account_after=nil,account_resource_after=nil}=H
 H.account_list_epoch=0 H.account_pending_open=false
 H.account_inventory=account_inventory H.account_detail=account_detail H.account_id=account_id H.account_after=account_after H.account_resource_after=account_resource_after
@@ -1139,7 +1139,7 @@ A.edit_personal_policy = fn(){
     H.personal_draft={agentId:row.id expectedGeneration:row.generation expectedRevision:o.policyRevision
         kind:o.budget.kind tokens:if o.budget.tokens == nil {""} else {""+o.budget.tokens} period:o.budget.period
         requests:o.requests highRiskTools:o.highRiskTools replacesRules:o.highRiskTools == "rules"}
-    H.personal_mode="edit" A.redraw()
+    H.personal_mode="edit" H.local_rechecked=false A.redraw()
 }
 A.personal_valid = fn(){
     if H.personal_draft == nil {return false}
@@ -1238,7 +1238,7 @@ A.personal_model_pick=fn(runtime,model){
             if effort==p.draft.reasoningEffort || (s.pick!=p.draft.reasoningEffort && rank<=current && rank>s.rank) {s.pick=effort s.rank=rank}
         }
         let before=p.draft.reasoningEffort
-        H.local_effort_note=if before=="" || s.pick==before {""} else if s.pick=="" {A.t(row.displayName+" doesn’t offer "+A.reasoning_label(before)+". Choose a reasoning level.",row.displayName+" 不支持「"+A.reasoning_label(before)+"」，请重新选择推理强度。")} else {A.t(row.displayName+" doesn’t offer "+A.reasoning_label(before)+", so it now uses "+A.reasoning_label(s.pick)+".",row.displayName+" 不支持「"+A.reasoning_label(before)+"」，已改为「"+A.reasoning_label(s.pick)+"」。")}
+        H.local_effort_note=if before=="" || s.pick==before {""} else if s.pick=="" {A.t(row.displayName+" doesn’t offer "+A.reasoning_label(before)+". Choose a reasoning level.",row.displayName+" 不支持"+A.reasoning_label(before)+"推理强度，请重新选择。")} else {A.t(row.displayName+" doesn’t offer "+A.reasoning_label(before)+", so it now uses "+A.reasoning_label(s.pick)+".",row.displayName+" 不支持"+A.reasoning_label(before)+"推理强度，已改为"+A.reasoning_label(s.pick)+"。")}
         p.draft.runtime=runtime p.draft.model=model p.draft.reasoningEffort=s.pick A.redraw() return
     }}
 }
@@ -3863,6 +3863,7 @@ A.local_recheck=fn(){
     let d=H.personal_draft
     if d==nil {return}
     d.kind=kept.kind d.tokens=kept.tokens d.period=kept.period d.requests=kept.requests d.highRiskTools=kept.highRiskTools
+    H.local_rechecked=true
     H.personal_mode=if A.local_policy_changed() && A.personal_valid() {"review"} else {"edit"}
     A.redraw()
 }
@@ -7075,6 +7076,9 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                     }}
                     if H.personal_mode == "review" {View{width:Fill height:Fit flow:Down spacing:6
                         let changes=A.local_policy_changes()
+                        if H.local_rechecked {View{width:Fill height:Fit padding:Inset{bottom:10} mod.widgets.HagencyStatus{draw_bg.color:mod.widgets.RINX_INFO_BG
+                            mod.widgets.HagencyCopy{text:A.t("Loaded the latest settings from the execution device. Review your changes again.","已载入执行设备上的最新设置，请再核对一次。") draw_text.color:mod.widgets.RINX_INFO_FG}
+                        }}}
                         mod.widgets.HagencyListLabel{text:A.t("CHANGES TO SAVE","将保存以下修改")}
                         mod.widgets.HagencyList{
                             if changes.len()==0 {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("Nothing has changed.","没有需要保存的修改。")}}}}
@@ -8679,7 +8683,7 @@ alert_layer := View{width:Fill height:Fill new_batch:true on_render:||{
             }}
         }}
         if kind=="retire" {View{width:Fill height:Fit flow:Down
-            mod.widgets.HagencyAlertTitle{text:A.t("Retire “","停用「")+A.local_name()+A.t("”?","」？")}
+            mod.widgets.HagencyAlertTitle{text:A.t("Retire “","要停用“")+A.local_name()+A.t("”?","”吗？")}
             mod.widgets.HagencyAlertMessage{padding:Inset{left:16 right:16 top:6 bottom:0} text:A.t("It will stop serving every room for good. This can’t be undone.","此 Agent 将永久停止在所有房间中的服务，且无法撤销。")}
             mod.widgets.HagencyAlertMessage{text:A.t("This opens the Agent’s settings in Hagency, where you confirm.","将打开 Hagency 中此 Agent 的设置页，在那里确认停用。")}
             mod.widgets.HagencyDivider{}
