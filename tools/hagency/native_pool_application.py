@@ -57,7 +57,7 @@ class App:
         self.wait(lambda: any("Continue saved" in r.get("t", "") or "继续已保存" in r.get("t", "") for r in self.snap()))
         row = next(r for r in self.snap() if "Continue saved" in r.get("t", "") or "继续已保存" in r.get("t", ""))
         self.click_row(row)
-        self.wait(lambda: self.row("pool_tokens").get("t") == "8000000" and "1,000,000" in self.row("pool_limit").get("t", "") and not self.row("pool_review")["enabled"])
+        self.wait(lambda: self.row("pool_tokens").get("t") == "8000000" and "1 M" in self.row("pool_limit").get("t", "") and not self.row("pool_review")["enabled"])
 
     def req(self, path, **query):
         self.trace.append({"path": path, "query": query})
@@ -106,15 +106,18 @@ class App:
         return json.loads(self.state_path.read_text())["poolDraft"]["tokens"]
 
     def enter(self, value, separate=False):
-        self.click("pool_tokens")
+        self.visible("pool_tokens")
+        self.click_row(self.row("input"))
         self.req("/k", c="A", cmd=1, wait=1)
+        raw_value=value
+        value=format(int(value)/1_000_000,".6f").rstrip("0").rstrip(".")
         if separate:
             self.req("/k", c="Backspace", wait=1)
             for char in value:
                 self.req("/t", t=char, wait=1)
         else:
             self.req("/t", t=value, wait=1)
-        self.wait(lambda: self.amount() == value)
+        self.wait(lambda: self.amount() == raw_value)
 
     def shot(self, name):
         (self.out / (name + ".json")).write_text(json.dumps(self.snap(), ensure_ascii=False, indent=2))
@@ -122,7 +125,7 @@ class App:
 
     def run(self):
         assert not self.row("pool_review")["enabled"]
-        assert "8,000,000" in self.row("pool_amount_error")["t"]
+        assert "8 M" in self.row("pool_amount_error")["t"]
         self.visible("pool_review")
         self.shot("01-over-limit")
         self.click("pool_quarter")
@@ -159,7 +162,7 @@ class App:
         self.fixture_path.write_text(json.dumps(self.fixtures))
         self.req("/event", data="ux:reload-fixtures")
         self.click("pool_submit")
-        self.wait(lambda: "500,000" in self.row("pool_limit")["t"])
+        self.wait(lambda: "0.5 M" in self.row("pool_limit")["t"])
         assert self.amount() == "1000000" and not self.row("pool_review")["enabled"]
         assert self.row("pool_failure")["t"]
         state = json.loads(self.state_path.read_text())

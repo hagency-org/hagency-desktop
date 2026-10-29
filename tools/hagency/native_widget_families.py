@@ -53,13 +53,15 @@ class Family(Workspaces):
         else:self.req('/t',t=value,wait=1)
 
     def number(self,name):
-        self.field('input','123456',True)
+        self.field('input','0.123456',True)
         self.wait(lambda:self.row(name).get('t')=='123456')
-        self.click('increase');self.wait(lambda:self.row(name).get('t')=='223456')
-        # The focused native step button is keyboard-activatable.
-        self.req('/k',c='ReturnKey',wait=1)
-        self.wait(lambda:self.row(name).get('t')=='323456')
-        self.click('decrease');self.wait(lambda:self.row(name).get('t')=='223456')
+        slider=self.visible('amount_slider');self.click_row(slider)
+        self.req('/k',c='End',wait=1)
+        self.wait(lambda:self.row(name).get('t')=='10000000')
+        self.req('/k',c='ArrowLeft',wait=1)
+        self.wait(lambda:self.row(name).get('t')=='9900000')
+        assert not any(r.get('i') in {'increase','decrease'} and r['r'][2]>0 and r['r'][3]>0 for r in self.snap())
+        self.field('input','0.223456',True)
         self.req('/event',data='ux:dark');time.sleep(.3)
         assert self.row(name).get('t')=='223456'
         self.visible(name);self.shot('02-dark-number')
@@ -72,7 +74,7 @@ class Family(Workspaces):
             if case=='enrollment':
                 self.field('input','0');self.click('enrollment_review')
                 self.wait(lambda:any('greater than zero' in r.get('t','') or '大于零的整数' in r.get('t','') for r in self.snap()))
-                self.field('input','345678',True)
+                self.field('input','0.345678',True)
                 self.wait(lambda:self.row(name).get('t')=='345678')
             if case=='resource':
                 self.click('resource_config_unrestricted');self.click('resource_config_standard')
@@ -81,7 +83,7 @@ class Family(Workspaces):
         elif case=='budget':
             self.click('budget_request');self.number('budget_tokens')
             self.click('budget_review');self.wait(lambda:self.row('budget_submit')['enabled'])
-            assert any('223,456' in r.get('t','') for r in self.snap())
+            assert any('0.223456 M' in r.get('t','') for r in self.snap())
             self.shot('03-owner-single-confirmation');self.click('budget_edit')
             assert self.row('budget_tokens').get('t')=='223456'
         elif case=='model':

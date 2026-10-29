@@ -63,6 +63,19 @@ pub fn format_decimal_file_size(bytes: u64) -> String {
     size
 }
 
+/// Integer arithmetic avoids rounding a budget while converting its display unit.
+pub(crate) fn token_millions(tokens: u64) -> String {
+    let whole = tokens / 1_000_000;
+    let fraction = tokens % 1_000_000;
+    if fraction == 0 { whole.to_string() }
+    else { format!("{whole}.{}", format!("{fraction:06}").trim_end_matches('0')) }
+}
+
+/// Compact, exact token display shared by native confirmation surfaces.
+pub(crate) fn format_token_count(tokens: u64) -> String {
+    format!("{} M", token_millions(tokens))
+}
+
 pub fn deserialize_or_default<'de, D, T>(deserializer: D) -> Result<T, D::Error>
 where
     D: serde::Deserializer<'de>,

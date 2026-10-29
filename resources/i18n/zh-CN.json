@@ -2263,5 +2263,19 @@
   "Save Markdown": "保存 Markdown",
   "Export PDF": "导出 PDF",
   "Could not find the answer to export. Please try again.": "找不到要导出的答案，请重试。",
-  "Could not export PDF": "PDF 导出失败"
+  "Could not export PDF": "PDF 导出失败",
+  "Resource pool publication": "资源池发布",
+  "Publish resource pool": "发布资源池",
+  "Available to publish": "可发布容量",
+  "Tokens to publish (M)": "发布额度（M tokens）",
+  "Expires (UTC)": "到期时间（UTC）",
+  "1 day": "1 天",
+  "7 days": "7 天",
+  "End of month": "本月底",
+  "Expiry cannot exceed the current monthly budget period. You can also enter an exact UTC time.": "到期时间不晚于本月预算周期结束；也可输入精确的 UTC 时间。",
+  "Publishing resource pool…": "正在发布资源池…",
+  "Loading publication status…": "正在读取发布状态…",
+  "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server.": "设置可申请的账号、额度和到期时间，点击一次即可发布到服务器。",
+  "Publish these saved limits to the server. Capacity is checked automatically during publication.": "按以下已保存的设置发布到服务器；发布时会自动检查可用额度。",
+  "Capacity is reserved. Publish these saved limits to make the pool available on the server.": "额度已预留，发布后以下账号即可在服务器上申请使用。"
 }

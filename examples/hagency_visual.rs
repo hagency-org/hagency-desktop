@@ -31,6 +31,9 @@ struct App {
     #[rust] fixtures: Value,
     #[rust] retained_script_layout: Option<Layout>,
     #[rust] reply_redraw: NextFrame,
+    #[rust] source: String,
+    #[rust] theme_revision: u64,
+    #[rust] restyle_card: bool,
 }
 // Match the production MiniAppsPanel's ownership of Splash's root layout.
 impl ScriptHook for App {
@@ -43,6 +46,9 @@ impl ScriptHook for App {
         if let Some(layout) = self.retained_script_layout.take() {
             if let Some(mut card) = self.ui.splash(vm.cx_mut(), ids!(app)).borrow_mut() {card.view.layout = layout;}
         }
+        let revision = theme::snapshot_for_vm(vm).revision;
+        self.restyle_card |= self.theme_revision != revision && !self.source.is_empty();
+        self.theme_revision = revision;
     }
 }
 impl MatchEvent for App {
@@ -58,7 +64,8 @@ impl MatchEvent for App {
         splash.set_policy(cx, Some(vec![]), Some(50_000_000));
         let source = std::env::var_os("HAGENCY_UX_SOURCE").map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("apps/hagency/bundle/main.splash"));
-        splash.set_text(cx, &std::fs::read_to_string(source).unwrap());
+        self.source = std::fs::read_to_string(source).unwrap();
+        splash.set_text(cx, &self.source);
     }
 }
 impl AppMain for App {
@@ -73,6 +80,11 @@ impl AppMain for App {
         self::script_mod(vm)
     }
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        // Match MiniAppsPanel's source reapplication after host style reload.
+        // Reapplying only the shell would leave cached Splash colors stale.
+        if std::mem::take(&mut self.restyle_card) {
+            self.ui.splash(cx, ids!(app)).set_text(cx, &self.source);
+        }
         if self.reply_redraw.is_event(event).is_some() {cx.redraw_all();}
         if let Event::Custom(command) = event {
             if command == "ux:large-text" {

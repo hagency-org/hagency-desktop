@@ -108,7 +108,7 @@ impl ResourceCreateConsent {
                 };
                 let ceiling = |value: Option<u64>| {
                     value
-                        .map(|n| n.to_string())
+                        .map(crate::utils::format_token_count)
                         .unwrap_or_else(|| tr("Unknown").into())
                 };
                 let previous = detail

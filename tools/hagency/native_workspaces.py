@@ -25,6 +25,7 @@ class Workspaces(App):
                 "hagency.pools.agents.list":{"items":[],"nextAfter":None},
                 "hagency.inbox.list":{"items":[],"nextAfter":None},
                 "hagency.resources.list":{"resources":[],"nextAfter":None},
+                "hagency.accounts.list":{"protocol":"hagency-management-v1","accounts":[],"account":None,"resources":[],"nextAfter":None},
                 "hagency.connections.list":{"connections":[],"nextAfter":None},
             }))
         with socket.socket() as sock:sock.bind(("127.0.0.1",0));port=sock.getsockname()[1]
@@ -61,7 +62,7 @@ class Workspaces(App):
         assert self.row("console_capabilities")["r"][3]==0
         self.shot("03-manager-work")
         self.click("entry_switch");self.click("entry_owner")
-        self.wait(lambda:self.nav()=={"overview","resources","accounts","inbox","devices"})
+        self.wait(lambda:self.nav()=={"resources","accounts","inbox"})
         self.req("/event",data="ux:dark");time.sleep(.3);self.shot("04-owner-dark")
         self.click("inbox");self.wait(lambda:self.row("owner_pending")["r"][2]>0)
         assert not any("Inbox could not" in r.get("t","") or "待办尚未完整" in r.get("t","") for r in self.snap())

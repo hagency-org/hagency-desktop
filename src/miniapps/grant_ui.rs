@@ -5,7 +5,7 @@ use crate::host::hagency::grants::{GrantChoices, GrantFlow, GrantResult};
 use ::hagency::native_owner::{
     OwnerGrantProgress, OwnerGrantReview, OwnerGrantState, OwnerGrantPublicationReview,
     OwnerGrantPublicationProgress, OwnerGrantPublicationState, OwnerGrantCancellationReview,
-    OwnerGrantSummary,
+    OwnerGrantSummary, OwnerGrantForm,
 };
 
 pub(super) struct GrantPrompt {
@@ -17,6 +17,10 @@ pub(super) struct GrantPrompt {
     draft: GrantChoices,
     publishing: bool,
     cancelling: bool,
+    form: Option<OwnerGrantForm>,
+    /// One explicit owner submission covers reservation and publication of
+    /// these same terms. Recovery never sets this flag.
+    submit_publication: bool,
 }
 enum Phase {
     Loading,
@@ -37,8 +41,35 @@ fn utc(ms: u64) -> String {
 }
 fn amount(value: Option<u64>) -> String {
     value
-        .map(|n| n.to_string())
+        .map(|n| format!("{} M", crate::utils::token_millions(n)))
         .unwrap_or_else(|| crate::i18n::tr("Unavailable").into())
+}
+fn publication_period_end() -> chrono::DateTime<chrono::Utc> {
+    use chrono::Datelike;
+    let first = chrono::Utc::now().date_naive().with_day(1).unwrap();
+    (first + chrono::Duration::days(32)).with_day(1).unwrap().and_hms_opt(0,0,0).unwrap().and_utc()
+}
+fn publication_expiry(days: Option<i64>) -> String {
+    let end = publication_period_end();
+    days.map(|days| (chrono::Utc::now()+chrono::Duration::days(days)).min(end)).unwrap_or(end)
+        .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+}
+fn publication_preset_available(days: Option<i64>) -> bool {
+    days.is_none_or(|n| chrono::Utc::now()+chrono::Duration::days(n)<=publication_period_end())
+}
+fn form_choices_valid(form: &OwnerGrantForm, draft: &GrantChoices) -> bool {
+    draft.clone().parse().is_ok_and(|choices| {
+        form.context.resource_total_tokens.is_some()
+            && form.context.remaining_tokens.is_some_and(|n| n>=choices.allocated_tokens)
+            && choices.delegation_expires_at_ms<=publication_period_end().timestamp_millis() as u64
+    })
+}
+fn same_publication_resource(form: &OwnerGrantForm, review: &OwnerGrantReview) -> bool {
+    let c=review.context();let s=review.summary();
+    form.contribution_id==s.contribution_id && form.resource_id==s.resource_id
+        && form.context.server_origin==c.server_origin && form.context.profile_id==c.profile_id
+        && form.context.resource_revision==c.resource_revision
+        && form.context.framework==c.framework && form.context.model==c.model
 }
 /// Only exact reviewed native codes may enter diagnostics. A prefix match would
 /// allow arbitrary provider errors, paths or credentials to escape into logs.
@@ -167,7 +198,7 @@ impl GrantPrompt {
     fn can_primary(&self) -> bool {
         self.actionable()
             && match &self.phase {
-                Phase::Choose => true,
+                Phase::Choose => self.form.as_ref().is_some_and(|f| form_choices_valid(f,&self.draft)),
                 Phase::Review(review) => !review.expired() && review.capacity_available(),
                 Phase::Progress(progress)
                     if progress.closure.is_some()
@@ -198,7 +229,7 @@ impl GrantPrompt {
     }
     fn can_recover(&self) -> bool {
         self.actionable()
-            && !matches!(self.phase, Phase::Choose | Phase::Loading)
+            && !matches!(self.phase, Phase::Loading)
             && !matches!(&self.phase, Phase::Review(review) if review.capacity_available())
             && !matches!(&self.phase, Phase::PublicationReview(review) if !review.expired())
             && !matches!(&self.phase, Phase::CancellationReview(review) if !review.expired())
@@ -223,7 +254,7 @@ fn cancellation_details(server: &str, s: OwnerGrantSummary) -> String {
     [
         ("Matrix server", server.to_owned()),
         ("Resource", s.resource_id),
-        ("Tokens to reserve", s.allocated_tokens.to_string()),
+        ("Tokens to reserve", format!("{} M", crate::utils::token_millions(s.allocated_tokens))),
         (
             "Accounting period (UTC)",
             format!(
@@ -274,6 +305,8 @@ impl MiniAppsPanel {
             draft: GrantChoices::default(),
             publishing: false,
             cancelling: false,
+            form: None,
+            submit_publication: false,
         });
         self.grant_job(async move { flow.open().await });
         self.present_grant_confirmation(cx);
@@ -319,6 +352,19 @@ impl MiniAppsPanel {
             .set_text(cx, prompt.flow.account());
         let choosing = matches!(prompt.phase, Phase::Choose);
         if choosing {
+            for (id,days) in [(ids!(grant_confirmation.scroll.choices.expiry_presets.day),Some(1)),(ids!(grant_confirmation.scroll.choices.expiry_presets.week),Some(7)),(ids!(grant_confirmation.scroll.choices.expiry_presets.month),None)] {
+                self.view.button(cx,id).set_disabled(cx,!publication_preset_available(days));
+            }
+            if let Some(form)=&prompt.form {
+                let widget=self.view.widget(cx,ids!(grant_confirmation.scroll.choices.tokens));
+                if let Some(mut editor)=widget.borrow_mut::<crate::miniapps::design::MiniAppNumberInput>() {
+                    editor.set_maximum(cx,form.context.remaining_tokens.unwrap_or(0));
+                }
+                self.view.label(cx,ids!(grant_confirmation.scroll.choices.capacity)).set_text(cx,
+                    &format!("{} · {}\n{}\n{}: {} M",form.label,form.context.model,form.context.server_origin,
+                        crate::i18n::tr("Available to publish"),form.context.remaining_tokens.map(crate::utils::token_millions)
+                            .unwrap_or_else(||crate::i18n::tr("Unavailable").into())));
+            }
             for (id, value) in [
                 (
                     ids!(grant_confirmation.scroll.choices.managers),
@@ -346,46 +392,42 @@ impl MiniAppsPanel {
             .set_visible(cx, !choosing);
         let mut status: String;
         let mut details = String::new();
-        let mut primary = if prompt.cancelling {
-            "Review cancellation"
-        } else if prompt.publishing {
-            "Review publication"
-        } else {
-            "Review capacity"
-        };
+        let mut primary = if prompt.cancelling {"Review cancellation"} else {"Publish resource pool"};
         let tr = crate::i18n::tr;
         match &prompt.phase {
-            Phase::Loading=>status=tr("Checking the original intent…").into(),
-            Phase::Choose=>status=tr("Choose limits in this native window. The next step shows the verified resource and available budget.").into(),
+            Phase::Loading=>status=tr(if prompt.submit_publication {"Publishing resource pool…"} else {"Loading publication status…"}).into(),
+            Phase::Choose=>status=tr(if prompt.form.as_ref().is_some_and(|f| f.context.remaining_tokens.is_some_and(|n|n>0)) {
+                "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server."
+            } else {"Available capacity is unknown or insufficient. This review cannot be confirmed."}).into(),
             Phase::Review(review)=> {
-                primary="Reserve capacity";
+                primary="Publish resource pool";
                 let s=review.summary();let c=review.context();
                 let rows=[("Matrix server",c.server_origin.clone()),("Native profile",c.profile_id.clone()),
                     ("Resource",format!("{} · {}\n{}",c.framework,c.model,s.resource_id)),
                     ("Remaining / total tokens",format!("{} / {}",amount(c.remaining_tokens),amount(c.resource_total_tokens))),
                     ("Shared account limit",amount(c.shared_account_total_tokens)),
-                    ("Tokens to reserve",s.allocated_tokens.to_string()),
+                    ("Tokens to reserve",format!("{} M", crate::utils::token_millions(s.allocated_tokens))),
                     ("Accounting period (UTC)",format!("{}\n{} → {}",s.period_key,utc(s.period_start_ms),utc(s.period_end_ms))),
                     ("Recorded coordinator",s.coordinator_mxid.clone()),("Agent applicants",s.eligible_managers.join("\n")),
                     ("Delegation expires (UTC)",utc(s.delegation_expires_at_ms)),("Original intent",s.intent_id.clone()),
                     ("Observed at",utc(c.observed_at_ms)),("Resource revision",c.resource_revision.clone())];
                 details=rows.into_iter().map(|(label,value)|format!("{}\n{}",tr(label),value)).collect::<Vec<_>>().join("\n\n");
-                status=tr(if review.capacity_available() {"This reserves capacity on this device. Publishing it to the server is a separate step; no agent starts."} else {"Available capacity is unknown or insufficient. This review cannot be confirmed."}).into();
+                status=tr(if review.capacity_available() {"Publish these saved limits to the server. Capacity is checked automatically during publication."} else {"Available capacity is unknown or insufficient. This review cannot be confirmed."}).into();
             },
             Phase::Progress(p)=>{
-                if matches!(p.state,OwnerGrantState::Recorded) { primary="Review publication"; }
+                if matches!(p.state,OwnerGrantState::Recorded) { primary="Publish resource pool"; }
                 if matches!(p.state,OwnerGrantState::Declined) { primary="Choose new limits"; }
-                details=format!("{}\n{}",tr("Original intent"),p.summary.intent_id);
-                status=tr(match p.state {OwnerGrantState::Recorded=>"The original local reservation receipt is recorded. Review current eligibility before publishing.",
+                details=cancellation_details("",p.summary.clone());
+                status=tr(match p.state {OwnerGrantState::Recorded=>"Capacity is reserved. Publish these saved limits to make the pool available on the server.",
                     OwnerGrantState::ReviewRequired=>"The original intent is waiting for a fresh review.",
                     OwnerGrantState::OutcomeUnknown=>"The outcome is unknown. Recover this original intent; do not create a replacement.",
                     OwnerGrantState::Declined=>"This pending reservation was closed without reserving capacity. Its original record is kept.",OwnerGrantState::ReviewExpired=>"The original accounting period ended. This intent cannot move to a new month."}).into();
                 if let Some(closure) = &p.closure {
                     primary="Review new admission";
                     status=tr("Previous grant closed. Retained amounts remain committed; a new grant requires a separately approved admission.").into();
-                    let rows=[("Retained tokens",closure.retained_tokens.to_string()),
-                        ("Confirmed usage",closure.known_consumed_tokens.to_string()),
-                        ("Unresolved tokens",closure.unresolved_tokens.to_string()),
+                    let rows=[("Retained tokens",format!("{} M", crate::utils::token_millions(closure.retained_tokens))),
+                        ("Confirmed usage",format!("{} M", crate::utils::token_millions(closure.known_consumed_tokens))),
+                        ("Unresolved tokens",format!("{} M", crate::utils::token_millions(closure.unresolved_tokens))),
                         ("Accounting period (UTC)",format!("{}\n{} → {}",p.summary.period_key,utc(p.summary.period_start_ms),utc(p.summary.period_end_ms))),
                         ("Original intent",p.summary.intent_id.clone()),("Observed at",utc(closure.observed_at_ms))];
                     details=rows.into_iter().map(|(label,value)|format!("{}\n{}",tr(label),value)).collect::<Vec<_>>().join("\n\n");
@@ -397,10 +439,10 @@ impl MiniAppsPanel {
                 status=tr("Cancel this unattempted reservation? This closes only the pending local intent. The resource, server admission and previous grants stay unchanged. Closing this review keeps the intent pending.").into();
             },
             Phase::PublicationReview(review)=>{
-                primary="Publish to server";
+                primary="Publish resource pool";
                 let s=review.summary();
                 let rows=[("Matrix server",review.server_origin().to_owned()),
-                    ("Resource",s.resource_id), ("Tokens reserved",s.allocated_tokens.to_string()),
+                    ("Resource",s.resource_id), ("Tokens reserved",format!("{} M", crate::utils::token_millions(s.allocated_tokens))),
                     ("Accounting period (UTC)",format!("{}\n{} → {}",s.period_key,utc(s.period_start_ms),utc(s.period_end_ms))),
                     ("Recorded coordinator",s.coordinator_mxid),("Agent applicants",s.eligible_managers.join("\n")),
                     ("Delegation expires (UTC)",utc(s.delegation_expires_at_ms)),
@@ -411,7 +453,8 @@ impl MiniAppsPanel {
                 status=tr("Publish this existing reservation to the shown server with these owner and manager limits. This does not reserve more tokens or start an agent.").into();
             },
             Phase::PublicationProgress(p)=>{
-                details=format!("{}\n{}",tr("Original intent"),p.summary.intent_id);
+                details=cancellation_details("",p.summary.clone());
+                details.push_str(&format!("\n\n{}\n{}",tr("Expires (UTC)"),utc(p.summary.delegation_expires_at_ms.min(p.summary.period_end_ms))));
                 status=tr(match p.state {
                     OwnerGrantPublicationState::OutcomeUnknown=>"Publication is not confirmed. Recover the original command. This action does not change the local reservation.",
                     OwnerGrantPublicationState::Rejected=>"This original publication was rejected. The operation did not change the local reservation or create a replacement.",
@@ -438,7 +481,8 @@ impl MiniAppsPanel {
             .set_text(cx, tr(primary));
         self.view
             .widget(cx, ids!(grant_confirmation.buttons.primary))
-            .set_visible(cx, prompt.can_primary());
+            .set_visible(cx, choosing || prompt.can_primary());
+        self.view.button(cx, ids!(grant_confirmation.buttons.primary)).set_disabled(cx,!prompt.can_primary());
         self.view
             .button(cx, ids!(grant_confirmation.buttons.recover))
             .set_text(
@@ -475,15 +519,25 @@ impl MiniAppsPanel {
         if let Some(result) = result {
             prompt.receiver = None;
             prompt.phase = match result {
-                Ok(GrantResult::Choose) => {
+                Ok(GrantResult::Choose(form)) => {
                     prompt.original = None;
                     prompt.publishing = false;
                     prompt.cancelling = false;
+                    prompt.submit_publication = false;
+                    if prompt.draft.tokens.is_empty() {
+                        prompt.draft.tokens=form.context.remaining_tokens.unwrap_or(0).min(1_000_000).to_string();
+                    }
+                    if prompt.draft.expires_utc.is_empty() {prompt.draft.expires_utc=publication_expiry(None);}
+                    prompt.draft.coordinator=prompt.flow.account().into();
+                    prompt.form=Some(form);
                     Phase::Choose
                 }
                 Ok(GrantResult::Review(review)) => {
                     prompt.original = Some(review.summary().intent_id);
                     prompt.cancelling = false;
+                    if prompt.submit_publication && prompt.form.as_ref().is_some_and(|f| !same_publication_resource(f,&review)) {
+                        prompt.submit_publication=false;
+                    }
                     Phase::Review(review)
                 }
                 Ok(GrantResult::Progress(progress)) => {
@@ -523,8 +577,36 @@ impl MiniAppsPanel {
             changed = true;
         }
         if changed {
+            self.continue_grant_publication();
             self.present_grant_confirmation(cx);
         }
+    }
+    /// Advance only the exact native reviews covered by this window's owner
+    /// submission. Unknown outcomes, rejection, closing, and reopen all stop it.
+    fn continue_grant_publication(&mut self) {
+        let Some(prompt)=&mut self.grant_confirmation else{return};
+        if !prompt.submit_publication || !prompt.actionable(){return}
+        let flow=prompt.flow.clone();
+        match std::mem::replace(&mut prompt.phase,Phase::Loading) {
+            Phase::Review(review) if !review.expired() && review.capacity_available()=> {
+                self.grant_job(async move {flow.confirm(*review).await});
+            }
+            Phase::Progress(progress) if matches!(progress.state,OwnerGrantState::Recorded) && progress.closure.is_none()=> {
+                prompt.publishing=true;
+                self.grant_job(async move {flow.publication_review(progress.summary.intent_id).await});
+            }
+            Phase::PublicationReview(review) if !review.expired()=> {
+                self.grant_job(async move {flow.publication_confirm(*review).await});
+            }
+            phase=> {prompt.phase=phase;prompt.submit_publication=false;}
+        }
+    }
+    pub(super) fn grant_expiry_preset(&mut self,cx:&mut Cx,days:Option<i64>){
+        self.capture_grant_choices(cx);
+        let Some(prompt)=&mut self.grant_confirmation else{return};
+        if !matches!(prompt.phase,Phase::Choose) || !publication_preset_available(days){return}
+        prompt.draft.expires_utc=publication_expiry(days);
+        self.present_grant_confirmation(cx);
     }
     pub(super) fn capture_grant_choices(&mut self, cx: &mut Cx) {
         let Some(prompt) = &mut self.grant_confirmation else {
@@ -549,6 +631,7 @@ impl MiniAppsPanel {
                 .text(),
             self_approval: false,
         };
+        self.view.button(cx,ids!(grant_confirmation.buttons.primary)).set_disabled(cx,!prompt.can_primary());
     }
     pub(super) fn grant_primary(&mut self, cx: &mut Cx) {
         self.capture_grant_choices(cx);
@@ -574,10 +657,15 @@ impl MiniAppsPanel {
                     return;
                 }
                 // Validate native input before consuming the one possible prepare.
+                prompt.submit_publication=true;
                 self.grant_job(async move { flow.prepare(choices).await });
             }
-            Phase::Review(review) => self.grant_job(async move { flow.confirm(*review).await }),
+            Phase::Review(review) => {
+                prompt.submit_publication=true;
+                self.grant_job(async move { flow.confirm(*review).await });
+            }
             Phase::PublicationReview(review) => {
+                prompt.submit_publication=true;
                 self.grant_job(async move { flow.publication_confirm(*review).await })
             }
             Phase::CancellationReview(review) => {
@@ -594,6 +682,7 @@ impl MiniAppsPanel {
             }
             Phase::Progress(progress) if matches!(progress.state, OwnerGrantState::Recorded) => {
                 prompt.publishing = true;
+                prompt.submit_publication=true;
                 self.grant_job(
                     async move { flow.publication_review(progress.summary.intent_id).await },
                 );
@@ -704,11 +793,11 @@ impl MiniAppsPanel {
         let mut targets = Vec::new();
         if matches!(prompt.phase, Phase::Choose) {
             targets.push(self.view.text_input(cx, ids!(grant_confirmation.scroll.choices.managers)).area());
-            let decrease=self.view.button(cx, ids!(grant_confirmation.scroll.choices.tokens.decrease));
-            let increase=self.view.button(cx, ids!(grant_confirmation.scroll.choices.tokens.increase));
-            if !decrease.disabled(cx) {targets.push(decrease.area());}
+            if let Some(slider)=self.view.widget(cx,ids!(grant_confirmation.scroll.choices.tokens.slider_wrap.amount_slider)).borrow::<crate::miniapps::design::MiniAppAmountSlider>() {targets.push(slider.focus_area());}
             targets.push(self.view.text_input(cx, ids!(grant_confirmation.scroll.choices.tokens.input)).area());
-            if !increase.disabled(cx) {targets.push(increase.area());}
+            for id in [ids!(grant_confirmation.scroll.choices.expiry_presets.day),ids!(grant_confirmation.scroll.choices.expiry_presets.week),ids!(grant_confirmation.scroll.choices.expiry_presets.month)] {
+                let button=self.view.button(cx,id);if !button.disabled(cx){targets.push(button.area());}
+            }
             targets.push(self.view.text_input(cx, ids!(grant_confirmation.scroll.choices.expires)).area());
         }
         targets.push(cancel);
@@ -731,6 +820,11 @@ impl MiniAppsPanel {
             return true;
         }
         if matches!(key.key_code, KeyCode::ReturnKey | KeyCode::Space) {
+            if matches!(prompt.phase,Phase::Choose) {
+                for (id,days) in [(ids!(grant_confirmation.scroll.choices.expiry_presets.day),Some(1)),(ids!(grant_confirmation.scroll.choices.expiry_presets.week),Some(7)),(ids!(grant_confirmation.scroll.choices.expiry_presets.month),None)] {
+                    if cx.has_key_focus(self.view.button(cx,id).area()){self.grant_expiry_preset(cx,days);return true}
+                }
+            }
             if cx.has_key_focus(cancel) {
                 self.close_grant_confirmation(cx);
                 return true;
@@ -783,7 +877,30 @@ mod tests {
     fn period_display_is_explicit_utc_and_unknown_is_not_zero() {
         assert_eq!(utc(1790812800000), "2026-10-01 00:00 UTC");
         assert_ne!(amount(None), "0");
-        assert_eq!(amount(Some(0)), "0");
+        assert_eq!(amount(Some(0)), "0 M");
+    }
+    #[test]
+    fn publication_form_requires_known_capacity_and_expiry_in_current_period() {
+        let mut form=OwnerGrantForm {contribution_id:"c".into(),resource_id:"r".into(),label:"Pool".into(),
+            context: ::hagency::native_owner::OwnerGrantReviewContext {
+                server_origin:"https://matrix.test".into(),profile_id:"profile".into(),resource_revision:"revision".into(),
+                framework:"codex".into(),model:"model".into(),remaining_tokens:Some(1_000_001),
+                resource_total_tokens:Some(2_000_000),shared_account_total_tokens:Some(9_000_000),observed_at_ms:1,
+            }};
+        let mut draft=GrantChoices {coordinator:"@owner:test".into(),managers:"@manager:test".into(),tokens:"1000001".into(),expires_utc:publication_expiry(None),self_approval:false};
+        assert!(form_choices_valid(&form,&draft));
+        draft.tokens="1000002".into();assert!(!form_choices_valid(&form,&draft));
+        draft.tokens="1000001".into();
+        form.context.remaining_tokens=None;assert!(!form_choices_valid(&form,&draft));
+        form.context.remaining_tokens=Some(0);assert!(!form_choices_valid(&form,&draft));
+        form.context.remaining_tokens=Some(1_000_001);
+        draft.expires_utc=(publication_period_end()+chrono::Duration::seconds(1)).to_rfc3339();
+        assert!(!form_choices_valid(&form,&draft));
+        for days in [Some(1),Some(7),None] {
+            draft.expires_utc=publication_expiry(days);
+            assert!(form_choices_valid(&form,&draft));
+        }
+        draft.managers.clear();assert!(!form_choices_valid(&form,&draft));
     }
 }
 
@@ -806,6 +923,10 @@ mod layout_tests {
             (360.0, 640.0, true, 2),
             (840.0, 700.0, false, 2),
             (840.0, 700.0, true, 2),
+            (360.0, 640.0, false, 3),
+            (360.0, 640.0, true, 3),
+            (840.0, 700.0, false, 3),
+            (840.0, 700.0, true, 3),
         ] {
             let mut cx = Cx::new(Box::new(|_, _| {}));
             let mut panel = cx.with_vm(|vm| {
@@ -837,7 +958,8 @@ mod layout_tests {
             panel
                 .view
                 .view(&cx, ids!(grant_confirmation.scroll.choices))
-                .set_visible(&mut cx, false);
+                .set_visible(&mut cx, mode==3);
+            panel.view.widget(&cx,ids!(grant_confirmation.scroll.details)).set_visible(&mut cx,mode!=3);
             let long = if cn {
                 "Agent 申请者\n@申请者:example.org\n原始授权核对信息\n"
             } else {
@@ -902,6 +1024,15 @@ mod layout_tests {
             cx2d.end_pass(&pass);
             drop(cx2d);
             drop(draw);
+            if mode==3 {
+                let slider=panel.view.widget(&cx,ids!(grant_confirmation.scroll.choices.tokens.slider_wrap.amount_slider)).area().rect(&cx);
+                let input=panel.view.widget(&cx,ids!(grant_confirmation.scroll.choices.tokens.input)).area().rect(&cx);
+                assert!(slider.size.x>=100.0 && slider.size.y>=44.0,"{slider:?}");
+                assert!(input.size.x<=111.0 && input.pos.x+input.size.x<=width+0.5,"{input:?}");
+                for path in [ids!(grant_confirmation.scroll.choices.tokens.decrease),ids!(grant_confirmation.scroll.choices.tokens.increase)] {
+                    assert!(!panel.view.widget(&cx,path).visible());
+                }
+            }
             for path in [
                 ids!(grant_confirmation.buttons.cancel),
                 ids!(grant_confirmation.buttons.primary),

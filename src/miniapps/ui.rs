@@ -240,7 +240,7 @@ script_mod! {
                 status := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
                 choices := View {width: Fill height: Fit flow: Down spacing: 12
                     RinxLabel {width: Fill text: #(crate::i18n::tr("Shared monthly account limit")) i18n_text: "Shared monthly account limit"}
-                    tokens := RinxNumberInput {width: Fill empty_text: ""}
+                    tokens := RinxNumberInput {width: Fill millions: true empty_text: ""}
                     RinxHint {width: Fill flow: Flow.Right{wrap: true} text: #(crate::i18n::tr("This shared limit is not a provider quota measurement. It does not grant tokens to a project.")) i18n_text: "This shared limit is not a provider quota measurement. It does not grant tokens to a project."}
                 }
                 details := RoundedView {width: Fill height: Fit flow: Down padding: 16
@@ -276,17 +276,24 @@ script_mod! {
             scroll := ScrollYView {width: Fill height: Fill flow: Down spacing: 16
                 heading := View {width: Fill height: Fit flow: Right spacing: 12 align: Align{y: 0.5}
                     Icon {width: 24 height: 24 draw_icon +: {svg: ICON_SHIELD color: RINX_ACCENT}}
-                    RinxPageTitle {width: Fill text: #(crate::i18n::tr("Review owner capacity")) i18n_text: "Review owner capacity"}
+                    RinxPageTitle {width: Fill text: #(crate::i18n::tr("Resource pool publication")) i18n_text: "Resource pool publication"}
                 }
                 owner := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
                 status := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
                 choices := View {width: Fill height: Fit flow: Down spacing: 12
+                    capacity := RinxLabel {width:Fill flow:Flow.Right{wrap:true}}
                     RinxLabel {text: #(crate::i18n::tr("Agent applicants")) i18n_text: "Agent applicants"}
                     managers := RinxInput {width: Fill empty_text: "@manager:server"}
-                    RinxLabel {text: #(crate::i18n::tr("Tokens to reserve")) i18n_text: "Tokens to reserve"}
-                    tokens := RinxNumberInput {width: Fill minimum: 1 empty_text: "1000000"}
-                    RinxLabel {text: #(crate::i18n::tr("Delegation expires (UTC)")) i18n_text: "Delegation expires (UTC)"}
-                    expires := RinxInput {width: Fill empty_text: "2027-01-01T00:00:00Z"}
+                    RinxLabel {text: #(crate::i18n::tr("Tokens to publish (M)")) i18n_text: "Tokens to publish (M)"}
+                    tokens := RinxNumberInput {width: Fill millions: true slider_mode:true maximum:0 minimum: 1 empty_text: "1"}
+                    RinxLabel {text: #(crate::i18n::tr("Expires (UTC)")) i18n_text: "Expires (UTC)"}
+                    expiry_presets := View {width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
+                        day := RinxKeyButton{text:#(crate::i18n::tr("1 day")) i18n_text:"1 day"}
+                        week := RinxKeyButton{text:#(crate::i18n::tr("7 days")) i18n_text:"7 days"}
+                        month := RinxKeyButton{text:#(crate::i18n::tr("End of month")) i18n_text:"End of month"}
+                    }
+                    expires := RinxInput {width: Fill empty_text: "YYYY-MM-DDTHH:MM:SSZ"}
+                    RinxHint {width:Fill flow:Flow.Right{wrap:true} text:#(crate::i18n::tr("Expiry cannot exceed the current monthly budget period. You can also enter an exact UTC time.")) i18n_text:"Expiry cannot exceed the current monthly budget period. You can also enter an exact UTC time."}
                 }
                 details := RoundedView {width: Fill height: Fit flow: Down padding: 16
                     draw_bg +: {color: RINX_SURFACE border_color: RINX_BORDER border_size: 1 border_radius: theme.corner_radius}
@@ -294,8 +301,8 @@ script_mod! {
                 }
             }
             buttons := View {width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 12
-                cancel := RinxButton {text: #(crate::i18n::tr("Close review")) i18n_text: "Close review"}
-                primary := RinxPrimaryButton {text: #(crate::i18n::tr("Review capacity")) i18n_text: "Review capacity"}
+                cancel := RinxButton {text: #(crate::i18n::tr("Close")) i18n_text: "Close"}
+                primary := RinxPrimaryButton {text: #(crate::i18n::tr("Publish resource pool")) i18n_text: "Publish resource pool"}
                 recover := RinxButton {text: #(crate::i18n::tr("Recover original")) i18n_text: "Recover original"}
                 cancel_intent := RinxButton {text: #(crate::i18n::tr("Review cancellation")) i18n_text: "Review cancellation"}
             }
@@ -1436,6 +1443,9 @@ impl Widget for MiniAppsPanel {
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.primary)).clicked(actions) {self.grant_primary(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.recover)).clicked(actions) {self.grant_recover(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.cancel_intent)).clicked(actions) {self.grant_cancel_intent(cx);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.choices.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.choices.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.choices.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
                 return;
             }
             self.handle_account_login_actions(cx,actions);

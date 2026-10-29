@@ -44,11 +44,15 @@ def main():
     run("package", ["bash", "tools/package-system-apps/check.sh"])
     run("script-vm", ["cargo", "build", "--locked", "--manifest-path", "tools/hagency-script-review/Cargo.toml"])
     vm = ROOT / "tools/hagency-script-review/target/debug/hagency-script-review"
-    for name in ["check_full_bundle", "check_agent_budget", "check_pool_application", "check_entry_workspaces", "check_account_identity", "check_accounts"]:
+    for name in ["check_full_bundle", "check_agent_budget", "check_pool_application", "check_entry_workspaces", "check_account_identity", "check_accounts", "check_owner_tasks"]:
         run(name, ["python3", f"apps/hagency/tests/{name}.py", str(vm), "--output", str(output / name)])
     # Keep these together: a budget fix must not erase rendering, activity or answer actions.
     for name, pattern in [
         ("budget-host", "host::hagency::budget"),
+        ("token-units", "token_unit_tests"),
+        ("native-resource-units", "host::hagency::enrollment"),
+        ("publication-host", "host::hagency::grants"),
+        ("publication-ui", "grant_ui::"),
         ("agent-chat", "agent_chat"),
         ("link-preview", "link_preview"),
         ("linkify", "linkify"),
@@ -64,6 +68,11 @@ def main():
         run("apple-system-fonts", ["cargo", "test", "--locked", "--manifest-path", "crates/article-makepad/Cargo.toml", "--lib", "apple_fonts", "--", "--test-threads=1"], rust_tests=True)
     run("answer-export", ["cargo", "test", "--locked", "--manifest-path", "crates/answer-export/Cargo.toml", "--lib"], rust_tests=True)
     if args.client:
+        for name, pattern in [("native-publication-form", "publication_form"), ("native-publication-recovery", "native_grant_publication_")]:
+            run(name, ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", pattern, "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-model-qualification", ["cargo", "test", "--locked", "-p", "hagency-core", "--test", "qualification"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-model-catalog", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "resource_onboarding::tests"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-resource-creation", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution,resource-adoption", "--lib", "additional_configuration_", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         probe_build = run("native-context-probe", ["cargo", "build", "--locked", "-p", "hagency-runtime", "--features", "shared-context", "--bin", "hagency-managed-runtime-probe", "--message-format=json"], cwd=args.client.resolve())
         artifacts = [json.loads(line) for line in probe_build.splitlines() if line.startswith("{")]
         probes = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "hagency-managed-runtime-probe" and item.get("executable")]

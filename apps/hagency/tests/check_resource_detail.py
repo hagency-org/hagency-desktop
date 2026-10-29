@@ -71,7 +71,7 @@ let has=fn(text){for value in texts {if value == text {return true}} return fals
       'loading':('H.busy=true', 'assert(has(A.t("Reading this device’s resource…","正在读取此设备上的资源…")))'),
       'unavailable':('', 'assert(has(A.t("No current resource snapshot","暂无当前资源快照")))'),
       'unmeasured':(observed, 'assert(has(A.t("Unknown / 5000 tokens","未知 / 5000 token")))\nassert(has(A.t("No measurement yet","暂无观测记录")))'),
-      'measured':(observed+'\nH.resource_detail.resource.budget.remainingTokens=4700\nH.resource_detail.resource.usage.spent=120\nH.resource_detail.resource.usage.spend_period_key="2026-10"\nH.resource_detail.resource.published=true', 'assert(has("2026-10"))\nassert(has(A.t("4700 / 5000 tokens","4700 / 5000 token")))\nassert(has(A.t("120 tokens","120 token")))\nassert(has(A.t("Published locally","已在本地发布")))'),
+      'measured':(observed+'\nH.resource_detail.resource.budget.remainingTokens=4700\nH.resource_detail.resource.usage.spent=120\nH.resource_detail.resource.usage.spend_period_key="2026-10"\nH.resource_detail.resource.published=true', 'assert(has("2026-10"))\nassert(has(A.t("4700 / 5000 tokens","4700 / 5000 token")))\nassert(has(A.t("120 tokens","120 token")))\nassert(has(A.t("Listed locally","已登记到本机目录")))'),
       'zero':(observed+'\nH.resource_detail.resource.budget.pool.ceiling=0\nH.resource_detail.resource.budget.remainingTokens=0', 'assert(has(A.t("0 / 0 tokens","0 / 0 token")))'),
       'unknown_limit':(observed+'\nH.resource_detail.resource.budget.pool.ceiling=nil\nH.resource_detail.resource.budget.pool.period=nil', 'assert(has(A.t("Unknown / Unknown tokens","未知 / 未知 token")))\nassert(has(A.t("Not declared","未声明")))'),
     }

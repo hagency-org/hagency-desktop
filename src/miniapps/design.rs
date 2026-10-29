@@ -13,30 +13,73 @@ pub struct MiniAppNumberInput {
     #[live] text: String,
     #[live] empty_text: String,
     #[live] is_read_only: bool,
+    /// Display millions while the widget's text/actions stay exact token integers.
+    #[live] millions: bool,
+    #[live] slider_mode: bool,
+    /// A nonnegative maximum is an observed capacity bound. A negative value
+    /// leaves exact entry unrestricted and uses an expanding slider scale.
+    #[live(-1.0)] maximum: f64,
+    #[rust] slider_ceiling: u64,
     #[live(100000.0)] step: f64,
     #[live(0.0)] minimum: f64,
     #[live] on_change: Option<ScriptFnRef>,
 }
 impl ScriptHook for MiniAppNumberInput {
     fn on_after_apply(&mut self, vm: &mut ScriptVm, _: &Apply, _: &mut Scope, _: ScriptValue) {
-        let cx=vm.cx_mut();
-        self.view.text_input(cx,ids!(input)).set_text(cx,&self.text);
-        self.view.text_input(cx,ids!(input)).set_is_read_only(cx,self.is_read_only);
-        self.view.text_input(cx,ids!(input)).set_empty_text(cx,self.empty_text.clone());
-        self.sync_steps(cx);
+        vm.with_cx_mut(|cx| {
+            self.view.text_input(cx,ids!(input)).set_text(cx,&self.display_text());
+            self.view.text_input(cx,ids!(input)).set_is_read_only(cx,self.is_read_only);
+            self.view.text_input(cx,ids!(input)).set_empty_text(cx,self.empty_text.clone());
+            self.view.label(cx,ids!(unit)).set_visible(cx,self.millions);
+            self.sync_steps(cx);
+        });
     }
 }
 impl MiniAppNumberInput {
     const MAX: u64=9_007_199_254_740_991;
+    fn display_text(&self) -> String {
+        if !self.millions || self.text.is_empty() { return self.text.clone(); }
+        if let Some(invalid) = self.text.strip_prefix("invalid:") { return invalid.into(); }
+        self.text.parse::<u64>().map(token_millions).unwrap_or_else(|_| self.text.clone())
+    }
     fn number(&self)->Option<u64>{
         if self.text.is_empty(){return Some(0)}
         if !self.text.bytes().all(|v|v.is_ascii_digit()){return None}
         self.text.parse::<u64>().ok().filter(|v|*v<=Self::MAX)
     }
-    fn sync_steps(&self,cx:&mut Cx){
+    fn sync_steps(&mut self,cx:&mut Cx){
         let value=self.number();
+        self.slider_ceiling=self.slider_ceiling.max(value.unwrap_or(0)).max(10_000_000);
+        self.view.widget(cx,ids!(decrease)).set_visible(cx,!self.slider_mode);
+        self.view.widget(cx,ids!(increase)).set_visible(cx,!self.slider_mode);
+        self.view.widget(cx,ids!(slider_wrap)).set_visible(cx,self.slider_mode);
+        let slider=self.view.widget(cx,ids!(slider_wrap.amount_slider));
+        if let Some(mut slider)=slider.borrow_mut::<MiniAppAmountSlider>() {
+            let max=self.slider_max();
+            slider.enabled=!self.is_read_only && max>=self.minimum.max(1.0) as u64;
+            let disabled=!slider.enabled;
+            slider.slider.set_disabled(cx,disabled);
+            slider.value=value.unwrap_or(0).min(max) as f64 / max.max(1) as f64;
+            let value=slider.value;
+            slider.slider.set_value(cx,value);
+        }
         self.view.button(cx,ids!(decrease)).set_disabled(cx,self.is_read_only || value.is_none_or(|v|v<=self.minimum.max(0.0) as u64));
         self.view.button(cx,ids!(increase)).set_disabled(cx,self.is_read_only || value.is_none_or(|v|v==Self::MAX));
+    }
+    fn slider_max(&self)->u64 {
+        if self.maximum.is_finite() && self.maximum>=0.0 {return self.maximum.min(Self::MAX as f64) as u64;}
+        self.slider_ceiling.max(self.number().unwrap_or(0)).max(10_000_000)
+    }
+    pub(crate) fn set_maximum(&mut self,cx:&mut Cx,maximum:u64){
+        self.maximum=maximum.min(Self::MAX) as f64;self.sync_steps(cx);
+    }
+    fn slide_to(&mut self,cx:&mut Cx,position:f64){
+        let max=self.slider_max();
+        if self.is_read_only || max==0 || !position.is_finite(){return}
+        let step=if max>=1_000_000 {100_000} else {1};
+        let value=if position>=1.0 {max} else {((position.clamp(0.0,1.0)*max as f64/step as f64).round() as u64)*step};
+        self.set_text(cx,&value.max(self.minimum.max(0.0) as u64).min(max).to_string());
+        self.notify_change(cx);
     }
     fn notify_change(&self,cx:&mut Cx){
         // Trusted confirmation screens capture their draft on Actions. Keep
@@ -54,7 +97,7 @@ impl MiniAppNumberInput {
         let minimum=self.minimum.max(0.0).min(Self::MAX as f64) as u64;
         let value=if up{value.saturating_add(step).min(Self::MAX)}else{value.saturating_sub(step).max(minimum)};
         self.text=value.to_string();
-        self.view.text_input(cx,ids!(input)).set_text(cx,&self.text);
+        self.view.text_input(cx,ids!(input)).set_text(cx,&self.display_text());
         self.sync_steps(cx);self.notify_change(cx);
     }
 }
@@ -62,8 +105,15 @@ impl Widget for MiniAppNumberInput {
     fn handle_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope){
         let actions=cx.capture_actions(|cx|self.view.handle_event(cx,event,scope));
         if self.is_read_only{return}
+        if self.slider_mode {
+            let uid=self.view.widget(cx,ids!(slider_wrap.amount_slider)).widget_uid();
+            if let SliderAction::Slide(value)=actions.find_widget_action(uid).cast(){self.slide_to(cx,value);}
+        }
         if let Some(text)=self.view.text_input(cx,ids!(input)).changed(&actions){
-            self.text=text;self.sync_steps(cx);self.notify_change(cx);
+            self.text=if self.millions && !text.is_empty() {
+                tokens_from_millions(&text).map(|n| n.to_string()).unwrap_or_else(|| format!("invalid:{text}"))
+            } else { text };
+            self.sync_steps(cx);self.notify_change(cx);
         }
         let decrease=self.view.button(cx,ids!(decrease));let increase=self.view.button(cx,ids!(increase));
         let mut down=decrease.clicked(&actions);let mut up=increase.clicked(&actions);
@@ -78,16 +128,51 @@ impl Widget for MiniAppNumberInput {
     }
     fn draw_walk(&mut self,cx:&mut Cx2d,scope:&mut Scope,walk:Walk)->DrawStep{self.view.draw_walk(cx,scope,walk)}
     fn text(&self)->String{self.text.clone()}
-    fn set_text(&mut self,cx:&mut Cx,text:&str){self.text=text.into();self.view.text_input(cx,ids!(input)).set_text(cx,text);self.sync_steps(cx)}
+    fn set_text(&mut self,cx:&mut Cx,text:&str){
+        // A callback may echo the unchanged token integer while the user is
+        // typing "0.". Preserve that in-progress decimal and its caret.
+        if self.text==text{return}
+        self.text=text.into();self.view.text_input(cx,ids!(input)).set_text(cx,&self.display_text());self.sync_steps(cx)
+    }
     fn script_call(&mut self,vm:&mut ScriptVm,method:LiveId,args:ScriptValue)->ScriptAsyncResult{
         if method==id!(set_text){
             if let Some(args)=args.as_object(){
                 let value=vm.bx.heap.vec_value(args,0,NoTrap);
-                if let Some(text)=vm.bx.heap.cast_to_owned_string(value,"number editor") {self.set_text(vm.cx_mut(),&text)}
+                if let Some(text)=vm.bx.heap.cast_to_owned_string(value,"number editor") {vm.with_cx_mut(|cx|self.set_text(cx,&text))}
             }
             return ScriptAsyncResult::Return(NIL)
         }
         self.view.script_call(vm,method,args)
+    }
+}
+
+use crate::utils::token_millions;
+
+fn tokens_from_millions(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty() && fraction.is_empty() { return None; }
+    if !whole.bytes().all(|c| c.is_ascii_digit()) || !fraction.bytes().all(|c| c.is_ascii_digit())
+        || fraction.len() > 6 { return None; }
+    let whole = if whole.is_empty() { 0 } else { whole.parse::<u64>().ok()? };
+    let fraction = if fraction.is_empty() { 0 } else { fraction.parse::<u64>().ok()? * 10u64.pow(6 - fraction.len() as u32) };
+    whole.checked_mul(1_000_000)?.checked_add(fraction).filter(|v| *v <= MiniAppNumberInput::MAX)
+}
+
+#[cfg(test)]
+mod token_unit_tests {
+    use super::*;
+    #[test]
+    fn million_editor_preserves_each_token_and_safe_integer_boundary() {
+        for tokens in [0, 1, 10, 100_000, 123_456, 750_000, 1_000_000, 1_000_001, MiniAppNumberInput::MAX] {
+            assert_eq!(tokens_from_millions(&token_millions(tokens)), Some(tokens));
+        }
+        assert_eq!(token_millions(750_000), "0.75");
+        assert_eq!(tokens_from_millions(".1"), Some(100_000));
+        assert_eq!(tokens_from_millions("1."), Some(1_000_000));
+        for invalid in ["", ".", "NaN", "1e3", "-1", "1.0000001", "9007199254.740992", "1.2.3"] {
+            assert_eq!(tokens_from_millions(invalid), None, "{invalid}");
+        }
     }
 }
 
@@ -112,11 +197,13 @@ impl ScriptHook for MiniAppAmountSlider {
     }
 }
 impl MiniAppAmountSlider {
+    pub(crate) fn focus_area(&self)->Area {self.focus_area}
     fn changed(&mut self, cx: &mut Cx, value: f64) {
         if !value.is_finite() {return;}
         self.value = value.clamp(0.0, 1.0);
         self.slider.set_value(cx, self.value);
         self.slider.redraw(cx);
+        cx.widget_action(self.widget_uid(),SliderAction::Slide(self.value));
         if let Some(handler) = self.on_change.clone() {
             cx.widget_to_script_call(self.widget_uid(), NIL, self.source.clone(), handler,
                 &[ScriptValue::from_f64(self.value)]);
@@ -197,6 +284,14 @@ impl Widget for MiniAppButton {
         self.button.draw_walk(cx, scope, walk)
     }
     fn script_call(&mut self, vm: &mut ScriptVm, method: LiveId, args: ScriptValue) -> ScriptAsyncResult {
+        // A task tab can rebuild its content. Restore focus after that frame so
+        // subsequent Tab/Enter input continues from the selected native button.
+        if method == id!(focus) {
+            if self.button.enabled() && self.button.visible() {
+                vm.with_cx_mut(|cx| cx.set_key_focus(self.button.area()));
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
         // Update one button without rebuilding its parent and stealing input focus.
         if method == id!(set_enabled) {
             if let Some(args) = args.as_object() {
@@ -328,12 +423,6 @@ impl Widget for MiniAppPageScroll {
 }
 script_mod! {
         use mod.prelude.widgets.*
-        mod.widgets.RinxNumberInput = set_type_default() do #(MiniAppNumberInput::register_widget(vm)) {
-            width: Fill height: Fit flow: Right spacing: 8 align: Align{y:0.5}
-            decrease := mod.widgets.RinxButton{width:max(44,mod.widgets.RINX_CONTROL_HEIGHT) height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) text:"−" grab_key_focus:true}
-            input := mod.widgets.RinxInput{width:Fill height:max(44,mod.widgets.RINX_CONTROL_HEIGHT)}
-            increase := mod.widgets.RinxButton{width:max(44,mod.widgets.RINX_CONTROL_HEIGHT) height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) text:"+" grab_key_focus:true}
-        }
         mod.widgets.RinxAmountSlider = set_type_default() do #(MiniAppAmountSlider::register_widget(vm)) {
             ..mod.widgets.Slider
             width: Fill height: 44 margin: 0 padding: 0
@@ -359,6 +448,16 @@ script_mod! {
                     return sdf.result
                 }
             }
+        }
+        mod.widgets.RinxNumberInput = set_type_default() do #(MiniAppNumberInput::register_widget(vm)) {
+            width: Fill height: Fit flow: Right spacing: 8 align: Align{y:0.5}
+            slider_wrap := View{visible:false width:Fill height:44
+                amount_slider := mod.widgets.RinxAmountSlider{width:Fill}
+            }
+            decrease := mod.widgets.RinxButton{width:max(44,mod.widgets.RINX_CONTROL_HEIGHT) height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) text:"−" grab_key_focus:true}
+            input := mod.widgets.RinxInput{width:110 height:max(44,mod.widgets.RINX_CONTROL_HEIGHT)}
+            unit := mod.widgets.RinxHint{visible:false width:Fit text:"M"}
+            increase := mod.widgets.RinxButton{width:max(44,mod.widgets.RINX_CONTROL_HEIGHT) height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) text:"+" grab_key_focus:true}
         }
         mod.widgets.RinxKeyButton = set_type_default() do #(MiniAppButton::register_widget(vm)) {
             ..mod.widgets.RinxButton

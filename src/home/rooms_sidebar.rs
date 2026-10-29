@@ -53,6 +53,17 @@ script_mod! {
             CachedWidget {
                 room_filter_input_bar := RoomFilterInputBar {}
             }
+            new_workspace := NavigationBarButton {
+                width: Fill height: 44 flow: Right spacing: 10
+                align: Align{x: 0 y: 0.5} padding: Inset{left: 12 right: 8}
+                tooltip_text: #(crate::i18n::tr("New workspace"))
+                draw_bg +: {color_hover: mod.widgets.RINX_HOVER color_active: mod.widgets.RINX_SELECTED}
+                Icon {icon_walk: Walk{width: 18 height: 18} draw_icon +: {svg: ICON_ADD color: mod.widgets.RINX_ACCENT}}
+                label := Label {width: Fill max_lines: 1 text_overflow: Ellipsis
+                    text: #(crate::i18n::tr("New workspace")) i18n_text: "New workspace"
+                    draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_regular{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}
+                }
+            }
             // No "All Chats | Spaces" switch here: on desktop, spaces live in the
             // navigation rail on the left, and selecting one filters this list.
             file_transfer_entry := MobileRow {height: 46 title.text: #(crate::i18n::tr("File Transfer")) title.i18n_text: "File Transfer" icon.draw_icon.svg: ICON_FILE}
@@ -183,6 +194,9 @@ impl Widget for RoomsSideBar {
         // If the main room filter input bar changed keywords, re-emit that action
         // as a MainFilterAction so that other widgets can handle it.
         if let Event::Actions(actions) = event {
+            if self.view.navigation_bar_button(cx, ids!(new_workspace)).clicked(actions) {
+                cx.action(crate::hagency::ui::HagencyAction::NewProject);
+            }
             if self.view.navigation_bar_button(cx, ids!(file_transfer_entry)).clicked(actions) {
                 cx.action(crate::moments::ui::MomentsAction::FileTransfer);
             }

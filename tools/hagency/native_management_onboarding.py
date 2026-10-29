@@ -19,7 +19,7 @@ from native_management_wizard import App
 COPY = {
     'en': {
         'title': 'Set up shared capacity',
-        'steps': ('1 · Review this device', '2 · Check server admission', '3 · Review capacity and publication'),
+        'steps': ('1 · Review this device', '2 · Check server admission', '3 · Publish resource pool'),
         'states': {'legacy': 'Device migration needs review', 'recovery_required': 'Resume the original migration',
                    'active': 'Shared resource inventory available', 'unavailable': 'Shared-capacity setup unavailable'},
         'native': 'Review resource migration', 'choose': 'Enter the shared monthly account limit.',
@@ -27,7 +27,7 @@ COPY = {
     },
     'zh-CN': {
         'title': '设置共享容量',
-        'steps': ('1 · 核对此设备', '2 · 检查服务器准入', '3 · 核对容量与发布'),
+        'steps': ('1 · 核对此设备', '2 · 检查服务器准入', '3 · 发布资源池'),
         'states': {'legacy': '需要核对设备资源迁移', 'recovery_required': '恢复原始迁移',
                    'active': '共享资源清单已可用', 'unavailable': '共享容量设置暂不可用'},
         'native': '核对资源迁移', 'choose': '请输入共享账号每月上限',

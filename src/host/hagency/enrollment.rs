@@ -18,7 +18,7 @@ impl Host {
 impl ResourceConsent {
     pub fn account(&self)->&str {&self.lease.identity().account}
     pub fn details(&self)->String {
-        format!("Codex · {}\n{} · {}\n{}: {}",self.input.account.account_id,self.input.model,self.input.reasoning.as_deref().unwrap_or("—"),crate::i18n::tr("Declared monthly token limit"),self.input.monthly_tokens)
+        enrollment_details(&self.input)
     }
     pub fn expired(&self)->bool {Instant::now()>=self.expires}
     pub async fn accept(self)->Result<Value,String>{
@@ -32,9 +32,26 @@ impl ResourceConsent {
         rinx_miniapp_core::bounded_reply(result?)
     }
 }
+fn enrollment_details(input: &::hagency::native_owner::NamespaceEnrollment) -> String {
+    format!("Codex · {}\n{} · {}\n{}: {}", input.account.account_id, input.model,
+        input.reasoning.as_deref().unwrap_or("—"), crate::i18n::tr("Declared monthly token limit"),
+        crate::utils::format_token_count(input.monthly_tokens))
+}
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn enrollment_review_uses_millions_without_changing_the_request() {
+        let input: ::hagency::native_owner::NamespaceEnrollment = parse(json!({
+            "commandId":"original", "account":{"accountId":"account_selected", "expectedRevision":"a".repeat(64)},
+            "model":"gpt-5.6-sol", "reasoning":"medium", "monthlyTokens":123456
+        })).unwrap();
+        input.validate().unwrap();
+        let details = enrollment_details(&input);
+        assert!(details.contains("0.123456 M"), "{details}");
+        assert!(!details.contains(": 123456"));
+        assert_eq!(input.monthly_tokens, 123456);
+    }
     #[test]
     fn enrollment_input_excludes_identity_paths_and_approval_claims(){
         let valid=json!({"commandId":"original","account":{"accountId":"account_selected","expectedRevision":"a".repeat(64)},"model":"gpt-5.6-sol","reasoning":"medium","monthlyTokens":1000});

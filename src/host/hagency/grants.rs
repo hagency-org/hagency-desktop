@@ -5,7 +5,7 @@ use ::hagency::native_owner::{
     OwnerGrantAccess, OwnerGrantChoices, OwnerGrantProgress, OwnerGrantReview,
     OwnerGrantReviewResult, OwnerGrantPublicationReview, OwnerGrantPublicationResult,
     OwnerGrantPublicationProgress, OwnerGrantCancellationReview, OwnerGrantCancellationResult,
-    OwnerGrantState,
+    OwnerGrantState, OwnerGrantForm,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -100,7 +100,7 @@ impl GrantChoices {
 }
 
 pub(crate) enum GrantResult {
-    Choose,
+    Choose(OwnerGrantForm),
     Review(Box<OwnerGrantReview>),
     Progress(Box<OwnerGrantProgress>),
     PublicationReview(Box<OwnerGrantPublicationReview>),
@@ -132,6 +132,13 @@ pub(crate) struct GrantFlow {
     selector: Selector,
 }
 impl GrantFlow {
+    async fn form(&self) -> Result<GrantResult, String> {
+        self.check()?;
+        let form = self.access.publication_form(self.selector.contribution_id.clone()
+            .ok_or("owner_grant_original_intent_required")?).await.map_err(|e| e.code)?;
+        self.check()?;
+        Ok(GrantResult::Choose(form))
+    }
     fn check(&self) -> Result<(), String> {
         let account = self.host.check(&self.lease)?;
         self.lease.authorize(&account, REVIEW_GRANT, None)?;
@@ -156,7 +163,7 @@ impl GrantFlow {
             if let Some(progress) = existing_progress(records)? {
                 return self.observe_progress(progress).await;
             }
-            Ok(GrantResult::Choose)
+            self.form().await
         } else {
             self.recover(self.selector.intent_id.clone().ok_or("owner_grant_original_intent_required")?).await
         }
@@ -171,12 +178,12 @@ impl GrantFlow {
             return Err("owner_grant_original_intent_required".into());
         }
         match self.open().await? {
-            GrantResult::Progress(p) if matches!(p.state, OwnerGrantState::Declined) => Ok(GrantResult::Choose),
+            GrantResult::Progress(p) if matches!(p.state, OwnerGrantState::Declined) => self.form().await,
             GrantResult::Progress(p) if matches!(p.state, OwnerGrantState::Recorded) && p.closure.is_some() => {
                 self.access.check_new_admission(self.selector.contribution_id.clone()
                     .ok_or("owner_grant_original_intent_required")?).await.map_err(|e| e.code)?;
                 self.check()?;
-                Ok(GrantResult::Choose)
+                self.form().await
             }
             result => Ok(result),
         }

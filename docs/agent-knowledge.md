@@ -1,5 +1,11 @@
 # Desktop durable knowledge
 
+## 2026-10-28 — resource publication and workspace entry
+
+The native publication form reads capacity before owner consent. Its one submit action advances the original reservation and publication; recovery never enables this continuation. Published pool status takes precedence over an expired connection diagnostic. Diagnostics are optional and collapsed. The shared token editor uses a slider and a fixed 110px exact M input. Do not use host `script_apply_eval!` to resize a TextInput owned by a Splash isolate: cross-VM script object handles can become invalid during typing. Keep input layout in its widget definition.
+
+The desktop sidebar `new_workspace` button dispatches the existing `HagencyAction::NewProject` native Matrix Space form. Resource project/allocation requests remain disabled; Matrix collaboration workspaces are independent of pool Agent applications.
+
 ## 2026-10-13 — execution device configuration
 
 `hagency-desktop` uses the sibling `hagency-client/native/hagency` dependency. The CI checkout pin in `.github/actions/setup-hagency-client/action.yml` must include the NativeOwner configuration wrappers whenever Desktop calls them. A local sibling build alone cannot verify that checkout pin.

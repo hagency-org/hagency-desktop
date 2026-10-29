@@ -2244,5 +2244,19 @@
   "Save Markdown": "Save Markdown",
   "Export PDF": "Export PDF",
   "Could not find the answer to export. Please try again.": "Could not find the answer to export. Please try again.",
-  "Could not export PDF": "Could not export PDF"
+  "Could not export PDF": "Could not export PDF",
+  "Resource pool publication": "Resource pool publication",
+  "Publish resource pool": "Publish resource pool",
+  "Available to publish": "Available to publish",
+  "Tokens to publish (M)": "Tokens to publish (M)",
+  "Expires (UTC)": "Expires (UTC)",
+  "1 day": "1 day",
+  "7 days": "7 days",
+  "End of month": "End of month",
+  "Expiry cannot exceed the current monthly budget period. You can also enter an exact UTC time.": "Expiry cannot exceed the current monthly budget period. You can also enter an exact UTC time.",
+  "Publishing resource pool…": "Publishing resource pool…",
+  "Loading publication status…": "Loading publication status…",
+  "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server.": "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server.",
+  "Publish these saved limits to the server. Capacity is checked automatically during publication.": "Publish these saved limits to the server. Capacity is checked automatically during publication.",
+  "Capacity is reserved. Publish these saved limits to make the pool available on the server.": "Capacity is reserved. Publish these saved limits to make the pool available on the server."
 }

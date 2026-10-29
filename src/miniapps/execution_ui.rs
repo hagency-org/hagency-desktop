@@ -151,7 +151,7 @@ mod enabled {
         let tr = crate::i18n::tr;
         let remaining = r
             .remaining_tokens
-            .map(|n| n.to_string())
+            .map(crate::utils::format_token_count)
             .unwrap_or_else(|| tr("Unknown").into());
         format!(
             "{}\n{}\n\n{}\n{} / {}\n\n{} · {}\n{} · {}\n{} · {}",
@@ -159,13 +159,13 @@ mod enabled {
             r.description.agent_name,
             tr("Remaining / allocated tokens"),
             remaining,
-            r.allocated_tokens,
+            crate::utils::format_token_count(r.allocated_tokens),
             tr("Known consumed tokens"),
-            r.known_consumed_tokens,
+            crate::utils::format_token_count(r.known_consumed_tokens),
             tr("Retained tokens"),
-            r.retained_tokens,
+            crate::utils::format_token_count(r.retained_tokens),
             tr("Known usage above allocation"),
-            r.known_overrun_tokens
+            crate::utils::format_token_count(r.known_overrun_tokens)
         )
     }
     fn progress_details(v: &Value) -> String {
@@ -320,7 +320,7 @@ mod enabled {
                 ),
                 Phase::Review(r) => {
                     let r = r.review();
-                    (tr("Start another process for this approved agent on this device. The server checks current policy and authority when submitted.").to_owned(),format!("{}\n{}\n\n{}\n{} / {}\n\n{}\n{}\n\n{} · {}",tr("Agent"),r.agent_name,tr("Remaining / allocated tokens"),r.remaining_tokens,r.allocated_tokens,tr("Project ID"),r.project_id,tr("Known consumed tokens"),r.known_consumed_tokens))
+                    (tr("Start another process for this approved agent on this device. The server checks current policy and authority when submitted.").to_owned(),format!("{}\n{}\n\n{}\n{} / {}\n\n{}\n{}\n\n{} · {}",tr("Agent"),r.agent_name,tr("Remaining / allocated tokens"),crate::utils::format_token_count(r.remaining_tokens),crate::utils::format_token_count(r.allocated_tokens),tr("Project ID"),r.project_id,tr("Known consumed tokens"),crate::utils::format_token_count(r.known_consumed_tokens)))
                 }
                 Phase::Blocked(r) => (tr(blocked_copy(r)).to_owned(), blocked_details(r)),
                 Phase::Progress(v) => (tr(progress_copy(v)).to_owned(), progress_details(v)),
@@ -355,7 +355,7 @@ mod enabled {
                         tr("Next process attempt"),
                         r.process_attempt,
                         tr("Retained tokens"),
-                        r.retained_tokens
+                        crate::utils::format_token_count(r.retained_tokens)
                     )
                 }
                 Phase::Blocked(r) => format!(

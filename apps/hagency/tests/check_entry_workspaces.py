@@ -56,7 +56,7 @@ H.entry_role="manager" assert(A.entry_parent()=="agents")
 H.entry_role="admin" H.page="connections" assert(A.entry_parent()=="servers")
 H.entry_role="owner" assert(A.entry_parent()=="resources")
 H.page="provider_account" assert(A.entry_parent()=="accounts")
-H.page="device_execution" assert(A.entry_parent()=="devices")
+H.page="device_execution" assert(A.entry_parent()=="accounts")
 ''',
 }
 

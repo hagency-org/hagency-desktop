@@ -12,9 +12,15 @@ def main():
     pages=source[start:source.index('        if H.page=="resource_alerts" ||',start)]
     fixture='''
 let Down=3
+mod.widgets.RINX_FIELD=1
 mod.widgets.RINX_SPACING=1 mod.rinx_icons.connection=1 mod.rinx_icons.close=1
 H.ux.accountId="" H.ux.resourceJourney=false
+H.owner={accountId:"" accountLabel:"" accountTab:"login" creatingPool:false setupOpen:false}
+A.resource_title=fn(r){return r.model}
+A.tokens=fn(v){return ""+v+" M"}
+mod.rinx_icons.person=1
 H.account_list_epoch=0 H.account_pending_open=true
+H.enrollment_models_open=false
 H.account_models=nil H.account_models_attempted=false H.account_models_epoch=0 H.enrollment_draft=nil
 H.page="provider_accounts" H.account_inventory=nil H.account_detail=nil H.account_id="account_original" H.account_after=nil H.account_resource_after=nil
 H.wizard={step:0 resource:nil admission:nil}
@@ -62,7 +68,7 @@ let detail={protocol:"hagency-management-v1" observedAtMs:1000 accounts:[] accou
       'models_visible':('H.page="provider_account" H.account_detail=detail H.account_models_attempted=true H.account_models={provider:{models:[{label:"Original model" model:"original-model" sharedReasoning:["high"]}]}}','assert(has("Original model") && has("original-model"))\nassert(has(A.t("Eligible model choice; resource setup is still required","可选模型；仍需完成资源接入")))'),
       'detail_retired':('H.page="provider_account" H.account_detail=detail row.state="retired"','assert(button("account_models_check")==nil)\nassert(has(A.t("Retired","已停用")))'),
       'detail_linked':('H.page="provider_account" H.account_detail=detail row.kind="resource_binding" row.state="linked"','assert(button("account_models_check")==nil)\nassert(has(A.t("Recorded resource association","已记录资源关联")))'),
-      'detail':('H.page="provider_account" H.account_detail=detail','assert(has(A.t("Associated resources","关联资源")))\nassert(has("Coding model"))\nbutton("account_resource").on_click()\nassert(H.page=="resource_detail" && H.resource_id=="resource_original")'),
+      'detail':('H.page="provider_account" H.account_detail=detail','assert(has(A.t("Resource pools on this tool","此工具的资源池")))\nassert(has("Coding model"))\nbutton("account_resource").on_click()\nassert(H.page=="resource_detail" && H.resource_id=="resource_original")'),
       'detail_pagination':('H.page="provider_account" H.account_detail=detail detail.nextAfter="resource_original"','button("account_resources_next").on_click()\nassert(H.calls[0].service=="hagency.accounts.get" && H.calls[0].args.after=="resource_original" && H.calls[0].args.id=="account_original")'),
       'refresh':('H.page="provider_account" H.account_detail=detail','button("accounts_refresh").on_click()\nassert(H.calls.len()==1 && H.calls[0].service=="hagency.accounts.get" && H.account_detail==nil)'),
     }
@@ -71,7 +77,9 @@ let detail={protocol:"hagency-management-v1" observedAtMs:1000 accounts:[] accou
         path=a.output/(name+'.splash');path.write_text(code+'\ntrue\n');r=subprocess.run([str(a.vm.resolve()),'eval',str(path)],text=True,stdout=subprocess.PIPE,stderr=subprocess.STDOUT);(a.output/(name+'.log')).write_text(r.stdout);results.append({'case':name,'passed':r.returncode==0})
     for lang in ['en','zh']:
         base=PREFIX+helpers+fixture+('A.t=fn(en,zh){return zh}\n' if lang=='zh' else '')
-        for name,(state,checks) in cases.items():run(name+'-'+lang,base+state+'\nlet root=View{'+pages+'}\ncollect(root)\n'+checks)
+        for name,(state,checks) in cases.items():
+            tab='H.owner.accountTab="pools"\n' if name.startswith('models_') or name in {'detail','detail_pagination'} else ''
+            run(name+'-'+lang,base+state+'\n'+tab+'let root=View{'+pages+'}\ncollect(root)\n'+checks)
         for name,checks in {
           'late_list':'A.open_accounts(nil)\nH.page="overview"\nH.callback(inventory)\nassert(H.account_inventory==nil)',
           'late_detail':'A.open_account("account_original",nil)\nH.account_id="other"\nH.callback(detail)\nassert(H.account_detail==nil)',

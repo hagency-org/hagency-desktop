@@ -1,4 +1,16 @@
-# Native owner grant review checkpoint
+# Resource pool publication — 2026-10-28
+
+The owner now submits one native **Publish resource pool** form containing eligible Matrix accounts, an exact token budget displayed in M, and a UTC expiry. The slider is bounded by the observed canonical remaining capacity; unknown capacity disables publication. Expiry presets (1 day, 7 days, end of month) are bounded by the current accounting period. Local catalogue listing is labeled separately from server publication.
+
+`OwnerGrantAccess::publication_form` supplies read-only native facts before submission. Opening or refreshing this form creates no grant intent, hold or publication. One explicit native submission advances prepare → confirm the original reservation → review its publication → confirm its saved command. Each existing client boundary still rechecks the resource, owner, device, period, host lease, and available capacity. A resource identity/revision change stops continuation. Unknown, rejected, expired or closed outcomes stop continuation and retain their original IDs. Closing the window stops subsequent UI stages; an already pending operation retains its original custody.
+
+Opening a published pool observes its existing original grant. Recovery and reopening never set the submission flag. No additional confirmation is required for successful intermediate stages, and no extra hold is created. The workflow does not launch an Agent or alter admission approval policy.
+
+The shared token editor supports a slider plus a compact exact M input. Publication uses a real capacity bound; configuration editors have an expanding slider scale and do not misrepresent it as an account authorization limit. Typed values retain integer precision and are validated before publication.
+
+The notes below document earlier implementation checkpoints; their separate-confirmation UI is superseded by this flow.
+
+# Historical native owner grant review checkpoint
 
 This is a native confirmation prerequisite, not activation of capacity allocation in the shipped Hagency app. The built-in bundle and service-capability catalog are unchanged. No normal session has a registry/adoption initializer or `hagency.grants.review` grant.
 

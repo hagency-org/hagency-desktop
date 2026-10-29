@@ -149,7 +149,7 @@ mod enabled {
             rows.push(format!(
                 "{}\n{}",
                 tr("Shared monthly account limit"),
-                tokens
+                crate::utils::format_token_count(tokens)
             ));
         }
         rows.join("\n\n")
@@ -268,7 +268,7 @@ mod enabled {
                         (tr("Confirm to set up local management on this device. Existing records are preserved. You can add and authorize a provider account afterward.").to_owned(),context_text(review.context()),if review.recovering(){"Resume device setup"}else{"Set up this device"})
                     } else {
                         let mut details=context_text(review.context());
-                        if let Some(tokens)=review.monthly_tokens(){details.push_str(&format!("\n\n{}\n{}",tr("Shared monthly account limit"),tokens));}
+                        if let Some(tokens)=review.monthly_tokens(){details.push_str(&format!("\n\n{}\n{}",tr("Shared monthly account limit"),crate::utils::format_token_count(tokens)));}
                         (tr("Confirming stops existing local workers, preserves resource identities and original history, and moves management into the shared native registry. This does not reserve capacity for a server or start an agent.").to_owned(),details,if review.recovering(){"Resume migration"}else{"Move resources"})
                     }
                 }
