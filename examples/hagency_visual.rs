@@ -66,6 +66,9 @@ impl MatchEvent for App {
             .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("apps/hagency/bundle/main.splash"));
         self.source = std::fs::read_to_string(source).unwrap();
         splash.set_text(cx, &self.source);
+        // MiniAppsPanel refuses a source whose root sections did not install.
+        // Refuse it here too rather than review screens the app never shows.
+        assert!(rinx::miniapps::ui::hagency_root_installed(&splash), "required root was not installed");
     }
 }
 impl AppMain for App {

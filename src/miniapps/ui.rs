@@ -46,6 +46,7 @@ mod personal_folder_picker;
 mod account_login_ui;
 #[path = "startup.rs"]
 mod startup;
+pub use startup::hagency_root_installed;
 #[path = "locale.rs"]
 mod locale;
 #[cfg(test)]

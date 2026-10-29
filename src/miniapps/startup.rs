@@ -6,24 +6,31 @@ use super::*;
 const STARTUP_FAILED: &str =
     "Hagency could not finish opening. Select Run to try again. Saved requests are preserved.";
 
-fn hagency_root_installed(card: &SplashRef) -> bool {
+/// Whether the shipped Hagency root installed into `card`. The offline visual
+/// review applies the same check, so it cannot pass a bundle the desktop refuses.
+pub fn hagency_root_installed(card: &SplashRef) -> bool {
     let Some(card) = card.borrow() else {
         return false;
     };
-    // These four direct children are unconditional in the shipped root. This
-    // checks installation, not geometry: the body can be hidden while Run is
-    // applying its source, and readiness/data arrive asynchronously afterward.
-    let required = [id!(heading), id!(navigation), id!(notice), id!(content)];
-    let mut present = [false; 4];
-    card.view.children(&mut |id, child| {
-        if !child.is_empty() {
-            for (index, expected) in required.iter().enumerate() {
-                if id == *expected {
-                    present[index] = true;
-                }
+    // These four sections are unconditional in the shipped root. They need not
+    // be direct children: the root groups them in a shell under its alert
+    // layer. This checks installation, not geometry: the body can be hidden
+    // while Run is applying its source, and readiness/data arrive
+    // asynchronously afterward.
+    fn mark(id: LiveId, child: WidgetRef, required: &[LiveId; 4], present: &mut [bool; 4]) {
+        if child.is_empty() {
+            return;
+        }
+        for (index, expected) in required.iter().enumerate() {
+            if id == *expected {
+                present[index] = true;
             }
         }
-    });
+        child.children(&mut |id, child| mark(id, child, required, present));
+    }
+    let required = [id!(heading), id!(navigation), id!(notice), id!(content)];
+    let mut present = [false; 4];
+    card.view.children(&mut |id, child| mark(id, child, &required, &mut present));
     present.into_iter().all(|value| value)
 }
 
@@ -268,6 +275,26 @@ host.request("fixture.pending",{},fn(result){ui.content.reply.set_text("original
             assert!(!hagency_root_installed(&card));
             assert!(card.isolate_heap_key(&mut cx).is_none());
         }
+    }
+
+    #[test]
+    fn native_hagency_startup_finds_sections_grouped_under_an_alert_layer() {
+        // The shipped root nests its sections in a shell so alerts can cover
+        // the whole app. A direct-children check refused it at every Run.
+        let (mut cx, mut panel, _directory) = fixture();
+        let card = panel.view.splash(&cx, ids!(card));
+        panel.lease = Some(lease());
+        let shell = format!(
+            "width: Fill height: Fill flow: Overlay\nshell := View{{\n{ROOT}\n}}\nalert_layer := View{{}}"
+        );
+        panel.install_script_source(&mut cx, &shell).unwrap();
+        assert!(hagency_root_installed(&card));
+        panel.stop(&mut cx);
+        // Nesting does not relax the check: every section must still install.
+        panel.lease = Some(lease());
+        let partial = "shell := View{\nheading := View{}\nnavigation := View{}\nnotice := Label{text: \"\"}\n}";
+        assert!(panel.install_script_source(&mut cx, partial).is_err());
+        assert!(!hagency_root_installed(&card));
     }
 
     #[test]
