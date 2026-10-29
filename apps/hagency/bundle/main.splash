@@ -14,9 +14,9 @@ let {owner={accountId:"" accountLabel:"" accountTab:"login" creatingPool:false s
 H.owner=owner
 let {connection_capacity={id:"" epoch:0 state:"idle" pool:nil}}=H
 H.connection_capacity=connection_capacity
-let {pool_meta=nil,pool_info=nil,pool_edit=nil,pool_result=nil,pool_list_result=nil,pool_grants=[],pool_epoch=0,pool_jobs=[],pool_job_at=0,pool_job_running=false,pool_create=nil}=H
+let {pool_meta=nil,pool_info=nil,pool_edit=nil,pool_result=nil,pool_list_result=nil,pool_grants=[],pool_epoch=0,pool_jobs=[],pool_job_at=0,pool_job_running=false,pool_create=nil,pool_create_seq=0}=H
 H.pool_meta=pool_meta H.pool_info=pool_info H.pool_edit=pool_edit H.pool_result=pool_result H.pool_list_result=pool_list_result H.pool_grants=pool_grants
-H.pool_epoch=pool_epoch H.pool_jobs=pool_jobs H.pool_job_at=pool_job_at H.pool_job_running=pool_job_running H.pool_create=pool_create
+H.pool_epoch=pool_epoch H.pool_jobs=pool_jobs H.pool_job_at=pool_job_at H.pool_job_running=pool_job_running H.pool_create=pool_create H.pool_create_seq=pool_create_seq
 let {entry_role="",entry_choosing=false}=H
 H.entry_role=entry_role H.entry_choosing=entry_choosing
 let {pool_rows=[],pool_after=nil,pool_agents=[],pool_agent_after=nil,pool_selected=nil,pool_detail=nil,pool_draft=nil,pool_confirm=""}=H
@@ -3303,8 +3303,8 @@ A.pool_month_name=fn(m){
 }
 A.pool_reset_text=fn(key,observed){
     let s={m:0}
-    if key!=nil && key.is_string() {let c=key.to_chars() if c.len()>=7 {s.m=A.pool_digits(c,5,7)}}
-    if s.m==0 && observed!=nil {s.m=A.pool_civil(observed).m}
+    if observed!=nil {s.m=A.pool_civil(observed).m}
+    if s.m==0 && key!=nil && key.is_string() {let c=key.to_chars() if c.len()>=7 {s.m=A.pool_digits(c,5,7)}}
     if !(s.m>=1 && s.m<=12) {return ""}
     let next=s.m%12+1
     return A.t("Resets "+A.pool_month_name(next)+" 1",""+next+" 月 1 日重置")
@@ -3389,7 +3389,7 @@ A.pool_view=fn(detail){
     v.status=A.pool_status(v.conn,v.grant,b.low,known)
     v.lapsed=A.pool_lapsed(v.conn,v.grant)
     v.now=if p!=nil && p.rid==row.id && p.now!=nil {p.now} else if observedAtMs!=nil && observedAtMs>0 {observedAtMs} else {nil}
-    v.reset=if b.ceiling==nil {""} else {A.pool_reset_text(b.key,observedAtMs)}
+    v.reset=if b.ceiling==nil {""} else {A.pool_reset_text(b.key,v.now)}
     v.summary=if v.conn==nil {nil} else {A.pool_grant_summary(v.conn.id)}
     v.managers=A.pool_summary_managers(v.summary)
     v.expires=A.pool_summary_expiry(v.summary)
@@ -3663,7 +3663,7 @@ A.pool_create_open=fn(){
     if H.busy || H.command!=nil {return}
     H.ux.resourceJourney=false
     let keep=H.pool_create!=nil && H.enrollment_draft!=nil
-    if !keep {H.pool_create={epoch:H.pool_epoch accounts:nil error:"" account:nil models:nil modelsError:"" loadingModels:false}}
+    if !keep {H.pool_create_seq+=1 H.pool_create={epoch:H.pool_create_seq accounts:nil error:"" account:nil models:nil modelsError:"" loadingModels:false}}
     H.page="pool_create" H.notice="" H.bar_past=false A.redraw()
     A.pool_create_accounts()
 }
@@ -7900,6 +7900,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             mod.widgets.HagencyListBody{
                                 mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.usage}}
                                 mod.widgets.HagencyListTitle{text:A.t("Catalogue offers","目录报价")}
+                                mod.widgets.HagencyListValue{text:A.t("Shown only, not enforced","仅展示，不强制执行")}
                                 mod.widgets.HagencyChevron{}
                             }
                         }
@@ -7947,11 +7948,13 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         mod.widgets.HagencyListDivider{}
                         mod.widgets.HagencySwitchRow{
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info}}
-                            mod.widgets.HagencyListTitle{text:A.t("Resource ID","资源标识")}
-                            mod.widgets.HagencyListValue{text:A.resource_short_id(row.id)}
+                            mod.widgets.HagencyListText{
+                                mod.widgets.HagencyListTitle{text:A.t("Resource ID","资源标识")}
+                                resource_id_text := mod.widgets.HagencyCopyText{text:row.id}
+                            }
                         }
                     }
-                    mod.widgets.HagencyListNote{text:A.t("Listing a pool in the catalogue locks its model and monthly maximum.","登记到目录后，模型和每月上限不能修改。")}
+                    mod.widgets.HagencyListNote{text:A.t("Listing a pool in the catalogue locks its model and monthly maximum. Select the ID to copy it.","登记到目录后，模型和每月上限不能修改。资源标识可选中复制。")}
                 }}
             }}
         }}}
@@ -9893,6 +9896,10 @@ mod.widgets.HagencyPresetOn = mod.widgets.HagencyPreset{
     draw_bg +: {color:mod.widgets.RINX_SELECTED color_focus:mod.widgets.RINX_SELECTED color_hover:mod.widgets.RINX_SELECTED color_disabled:mod.widgets.RINX_SELECTED color_2_disabled:mod.widgets.RINX_SELECTED border_size:1.0 border_color:mod.widgets.RINX_ACCENT}
     draw_text +: {text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE} color:mod.widgets.RINX_ACCENT color_hover:mod.widgets.RINX_ACCENT color_down:mod.widgets.RINX_ACCENT color_focus:mod.widgets.RINX_ACCENT}}
 mod.widgets.HagencyPresetCard = mod.widgets.HagencyPreset{draw_bg +: {color:mod.widgets.RINX_SURFACE color_focus:mod.widgets.RINX_SURFACE color_disabled:mod.widgets.RINX_SURFACE color_2_disabled:mod.widgets.RINX_SURFACE}}
+// Selectable, read-only text for IDs a person may need to copy.
+mod.widgets.HagencyCopyText = mod.widgets.RinxInput{width:Fill height:(18+8*mod.widgets.RINX_TEXT_SCALE) padding:0 is_read_only:true
+    draw_bg +: {border_size:0.0 color:#0000 color_hover:#0000 color_focus:#0000 color_empty:#0000 color_down:#0000 border_color:#0000 border_color_hover:#0000 border_color_focus:#0000 border_color_empty:#0000 border_color_down:#0000 border_color_2:#0000}
+    draw_text +: {color:mod.widgets.RINX_MUTED color_hover:mod.widgets.RINX_MUTED color_focus:mod.widgets.RINX_MUTED text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE}}}
 mod.widgets.HagencyTallSegment = mod.widgets.HagencySegment{height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) margin:0}
 mod.widgets.HagencyTallSegmentOn = mod.widgets.HagencySegmentOn{height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) margin:0}
 mod.widgets.HagencyTile = RoundedView{width:Fill height:(46+18*mod.widgets.RINX_TEXT_SCALE) flow:Overlay show_bg:true draw_bg +: {color:mod.widgets.RINX_SURFACE border_radius:12.0 border_size:0.0}}
