@@ -1417,6 +1417,10 @@ async fn matrix_worker_task(
                         Some(room) => room.enable_encryption().await.map_err(|e| e.to_string()),
                         None => Err("room not found".into()),
                     };
+                    Cx::post_action(crate::hagency::ui::OwnerDirectEncryption {
+                        room_id: room_id.to_string(),
+                        enabled: result.is_ok(),
+                    });
                     match result {
                         Ok(()) => enqueue_popup_notification(
                             crate::i18n::tr("End-to-end encryption is on for this private chat. New messages are encrypted."),

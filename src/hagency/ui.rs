@@ -18,6 +18,8 @@ pub enum HagencyAction {
         section: ProjectDetailSection,
     },
     OpenAgents,
+    /// Opens one Agent's local settings (private chat, encryption, Rooms).
+    OpenAgent {agent_id:String},
     AgentRun {agent_id:String,binding_id:String},
     NewAgent {
         project_id: Option<String>,
@@ -85,6 +87,9 @@ struct Completed {
 }
 #[derive(Debug)]
 struct ConfigurationCompleted {identity:String,request:u64,agent:String,generation:i64,device:String,result:Result<Value,String>}
+/// Outcome of turning on end-to-end encryption in an owner-direct private chat.
+#[derive(Clone, Debug)]
+pub struct OwnerDirectEncryption {pub room_id:String,pub enabled:bool}
 #[derive(Debug)]
 struct ApprovalsCompleted { identity:String, request:u64, agent:String, binding:String, room:String, result:Result<Value,String> }
 
@@ -653,8 +658,8 @@ script_mod! {
                         View {width: Fill height: 40 spacing: 8
                             ensure_owner_direct := Action {text: #(crate::i18n::tr("Set up / retry private chat")) i18n_text: "Set up / retry private chat"}
                             open_owner_direct := Action {text: #(crate::i18n::tr("Open private chat")) i18n_text: "Open private chat" enabled: false}
-                            encrypt_owner_direct := Action {text: #(crate::i18n::tr("Enable end-to-end encryption")) i18n_text: "Enable end-to-end encryption" enabled: false}
                         }
+                        encrypt_owner_direct := ToggleFlat {active: false text: #(crate::i18n::tr("End-to-end encryption")) i18n_text: "End-to-end encryption"}
                     }
                     View {width: Fill height: 40 spacing: 8
                         pause_agent := Action {text: #(crate::i18n::tr("Pause Agent")) i18n_text: "Pause Agent"}
@@ -954,6 +959,8 @@ pub struct HagencyPanel {
     #[rust] wanted_run: Option<(String,String)>,
     #[rust] direct_timer: Timer,
     #[rust] direct_retry: Option<(String,String,u8)>,
+    #[rust] direct_encrypting: Option<String>,
+    #[rust] direct_encrypted: HashSet<String>,
     #[rust] approval_timer: Timer,
     #[rust] approval_poll: Option<u64>,
     #[rust] approval_started: Option<Instant>,
@@ -1544,13 +1551,21 @@ impl HagencyPanel {
     fn render_owner_direct(&self,cx:&mut Cx) {
         let exact=self.agent(cx).is_some_and(|a|a == self.direct_agent);
         let state=if exact {string(&self.direct_state,"state")} else {""};
+        let room=string(&self.direct_state,"roomId");
+        let encrypted=state == "active" && (self.direct_encrypted.contains(room) || matrix_sdk::ruma::OwnedRoomId::try_from(room).ok()
+            .and_then(|id|crate::sliding_sync::get_client()?.get_room(&id))
+            .is_some_and(|room|room.encryption_state().is_encrypted()));
+        let encrypting=!room.is_empty() && self.direct_encrypting.as_deref()==Some(room);
         self.view.label(cx,ids!(owner_direct_status)).set_text(cx,match state {
+            "active" if encrypted=>crate::i18n::tr("Your private chat with this Agent is ready and end-to-end encrypted. Matrix cannot turn encryption off again."),
             "active"=>"Your private chat with this Agent is ready.",
             "pending"=>"Your Agent exists. Private chat setup is still pending; retry its original setup when connected.",
             _=>"Set up a private chat with this Agent. Retrying preserves the original setup request.",
         });
         self.view.button(cx,ids!(open_owner_direct)).set_enabled(cx,exact && state == "active" && !string(&self.direct_state,"roomId").is_empty() && !self.busy);
-        self.view.button(cx,ids!(encrypt_owner_direct)).set_enabled(cx,exact && state == "active" && !string(&self.direct_state,"roomId").is_empty() && !self.busy);
+        // Matrix has no way to turn a room's encryption off: on stays on.
+        self.view.check_box(cx,ids!(encrypt_owner_direct)).set_active(cx,encrypted || encrypting,Animate::No);
+        self.view.widget(cx,ids!(encrypt_owner_direct)).set_disabled(cx,!(exact && state == "active" && !encrypted && !encrypting && !room.is_empty() && !self.busy));
     }
     fn project_section(&self, cx: &mut Cx, selected: &[LiveId]) {
         for id in [
@@ -3054,6 +3069,15 @@ impl Widget for HagencyPanel {
             return;
         };
         for action in actions {
+            if let Some(result)=action.downcast_ref::<OwnerDirectEncryption>() {
+                if self.direct_encrypting.as_deref()==Some(result.room_id.as_str()) {self.direct_encrypting=None;}
+                if result.enabled {self.direct_encrypted.insert(result.room_id.clone());}
+                if string(&self.direct_state,"roomId")==result.room_id {
+                    self.status(cx,if result.enabled {"End-to-end encryption is on for this private chat. New messages are encrypted."} else {"Could not enable end-to-end encryption. Try again."});
+                    self.render_owner_direct(cx);
+                }
+                continue;
+            }
             if let Some(done)=action.downcast_ref::<ConfigurationCompleted>()
                 && self.configuration_poll_request==Some(done.request) {
                 self.configuration_poll_request=None;
@@ -4001,11 +4025,15 @@ impl Widget for HagencyPanel {
         }
         // The Agent's own device on its execution host reads and answers the
         // encrypted private chat; the server only routes ciphertext.
-        if self.view.button(cx,ids!(encrypt_owner_direct)).clicked(actions) {
-            if self.agent(cx).as_deref()==Some(self.direct_agent.as_str()) && self.direct_state["state"] == "active" && Service::for_current().is_ok_and(|s|s.identity()==self.identity)
+        if let Some(on)=self.view.check_box(cx,ids!(encrypt_owner_direct)).changed(actions) {
+            if on && self.direct_encrypting.is_none() && self.agent(cx).as_deref()==Some(self.direct_agent.as_str()) && self.direct_state["state"] == "active" && Service::for_current().is_ok_and(|s|s.identity()==self.identity)
                 && let Ok(room_id)=matrix_sdk::ruma::OwnedRoomId::try_from(string(&self.direct_state,"roomId")) {
+                self.direct_encrypting=Some(room_id.to_string());
+                self.status(cx,"Turning on end-to-end encryption…");
                 crate::sliding_sync::submit_async_request(crate::sliding_sync::MatrixRequest::EnableEncryption {room_id});
             }
+            // Always show the real state; a refused change snaps back.
+            self.render_owner_direct(cx);
             return;
         }
         if self.view.button(cx, ids!(assign_current_device)).clicked(actions) {
@@ -4221,7 +4249,7 @@ impl HagencyPanelRef {
         };
         panel.cancel_direct_retry(cx);
         panel.cancel_read_wait(cx);
-        if matches!(action,HagencyAction::AgentRun {..}|HagencyAction::NewAgent {..}|HagencyAction::NewProject) {panel.reset_detail_scroll(cx);}
+        if matches!(action,HagencyAction::AgentRun {..}|HagencyAction::OpenAgent {..}|HagencyAction::NewAgent {..}|HagencyAction::NewProject) {panel.reset_detail_scroll(cx);}
         panel.wanted_run=None;
         if matches!(action, HagencyAction::Close) {
             panel.active = false;
@@ -4357,9 +4385,10 @@ impl HagencyPanelRef {
                 }
                 panel.run(cx, Target::Journal, Command::Creations);
             }
-            HagencyAction::OpenAgents | HagencyAction::NewAgent { .. } | HagencyAction::AgentRun {..} => {
+            HagencyAction::OpenAgents | HagencyAction::OpenAgent { .. } | HagencyAction::NewAgent { .. } | HagencyAction::AgentRun {..} => {
                 panel.set_page(cx, Page::Agents);
                 if let HagencyAction::AgentRun {agent_id,binding_id}=action {panel.wanted_agent=Some(agent_id.clone()); panel.wanted_run=Some((agent_id.clone(),binding_id.clone()));}
+                if let HagencyAction::OpenAgent {agent_id}=action {panel.wanted_agent=Some(agent_id.clone());}
                 if matches!(action, HagencyAction::NewAgent { .. }) {
                     panel
                         .view
@@ -5210,9 +5239,15 @@ mod tests {
         panel.apply(&mut cx,Target::Bindings,&bindings);
         assert_eq!(panel.direct_agent,"agent-a");
         assert_eq!(panel.direct_state["roomId"],"!private:server");
-        for id in [ids!(open_owner_direct),ids!(encrypt_owner_direct)] {
-            assert!(panel.view.button(&mut cx,id).borrow().unwrap().enabled());
-        }
+        assert!(panel.view.button(&mut cx,ids!(open_owner_direct)).borrow().unwrap().enabled());
+        assert!(!panel.view.widget(&mut cx,ids!(encrypt_owner_direct)).disabled(&cx));
+        assert!(!panel.view.check_box(&mut cx,ids!(encrypt_owner_direct)).active(&mut cx));
+        // Once encrypted, the switch stays on and cannot be turned off.
+        panel.direct_encrypted.insert("!private:server".into());
+        panel.render_owner_direct(&mut cx);
+        assert!(panel.view.check_box(&mut cx,ids!(encrypt_owner_direct)).active(&mut cx));
+        assert!(panel.view.widget(&mut cx,ids!(encrypt_owner_direct)).disabled(&cx));
+        panel.direct_encrypted.clear();
         // A setup retry in flight keeps its own state.
         panel.direct_state=json!({"state":"pending"});
         panel.direct_retry=Some((panel.identity.clone(),"agent-a".into(),1));
@@ -5223,7 +5258,7 @@ mod tests {
         panel.view.drop_down(&mut cx,ids!(agents)).set_selected_item(&mut cx,2);
         panel.apply(&mut cx,Target::Bindings,&bindings);
         panel.render_owner_direct(&mut cx);
-        assert!(!panel.view.button(&mut cx,ids!(encrypt_owner_direct)).borrow().unwrap().enabled());
+        assert!(panel.view.widget(&mut cx,ids!(encrypt_owner_direct)).disabled(&cx));
     }
     #[test]
     fn entering_run_reads_saved_resources_without_reauth_and_uses_their_actual_model_choices() {

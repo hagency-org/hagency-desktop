@@ -1166,9 +1166,17 @@ impl MiniAppsPanel {
         if self.hagency.is_none() || self.package.as_ref().and_then(|p| p.builtin_id()) != Some(octosense_app_contract::hagency::APP_ID) {
             return Err("management_navigation_unavailable".into());
         }
-        let action = match args.as_object().filter(|a| a.len() == 1).and_then(|a| a.get("destination")).and_then(Value::as_str) {
-            Some("matrix_workspaces") => crate::hagency::ui::HagencyAction::OpenProjects,
-            Some("local_agents") => crate::hagency::ui::HagencyAction::OpenAgents,
+        let args = args.as_object().ok_or("invalid_management_navigation")?;
+        let action = match (args.get("destination").and_then(Value::as_str), args.len()) {
+            (Some("matrix_workspaces"), 1) => crate::hagency::ui::HagencyAction::OpenProjects,
+            (Some("local_agents"), 1) => crate::hagency::ui::HagencyAction::OpenAgents,
+            // Navigation only: the panel opens the Agent only if this owner has it.
+            (Some("local_agent"), 2) => {
+                let agent_id = args.get("agentId").and_then(Value::as_str)
+                    .filter(|id| (1..=128).contains(&id.len()) && id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
+                    .ok_or("invalid_management_navigation")?;
+                crate::hagency::ui::HagencyAction::OpenAgent { agent_id: agent_id.into() }
+            }
             _ => return Err("invalid_management_navigation".into()),
         };
         cx.action(action);

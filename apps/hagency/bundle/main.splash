@@ -3679,6 +3679,7 @@ A.nav_parent=fn(){
 }
 A.return_list=fn(page){if H.busy{return} H.ux.origin="" H.page=page H.ux.restore=true A.refresh_page()}
 A.native_open=fn(destination){A.request("hagency.navigation.open",{destination:destination},fn(v){})}
+A.native_open_agent=fn(id){A.request("hagency.navigation.open",{destination:"local_agent",agentId:id},fn(v){})}
 A.return_origin=fn(){
     if H.busy {return}
     let origin=H.ux.origin H.ux.origin="" H.confirm="" H.notice="" H.page=origin H.ux.restore=true
@@ -4117,6 +4118,14 @@ A.render_page = fn(){
     if H.page=="pool_agents" || H.page=="inbox"{
         mod.widgets.HagencyTitle{text:if H.entry_role=="owner"{A.t("Agent requests","Agent 申请")}else{A.t("My Agents","我的 Agent")}}
         mod.widgets.HagencyHint{text:if H.entry_role=="owner"{A.t("Review capacity requests for resources you own.","审核使用你所拥有资源的容量申请。")}else{A.t("Agents you requested and manage.","查看你申请并管理的 Agent。")}}
+        if H.entry_role=="manager" && H.page=="pool_agents"{mod.widgets.HagencyCard{
+            mod.widgets.HagencySectionTitle{text:A.t("Your own Agents","你自己的 Agent")}
+            mod.widgets.HagencyHint{text:A.t("Agents that run on your device. Budgets and models are in Personal-agent settings; private chat, encryption, Rooms and service are in Local settings.","在你的设备上运行的 Agent。预算与模型在「个人 Agent 设置」；私聊、加密、房间与服务运行在「本地设置」。")}
+            mod.widgets.HagencyActions{
+                agents_personal := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Personal-agent settings","个人 Agent 设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.person on_click:||A.open_personal_agents(nil,1)}
+                agents_local := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Local settings","本地设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.device on_click:||A.native_open("local_agents")}
+            }
+        }}
         if H.entry_role=="manager" && H.pool_draft!=nil{mod.widgets.HagencyButton{text:A.t("Continue saved application","继续未完成的申请") enabled:!H.busy on_click:||A.navigate("pool_apply")}}
         if H.entry_role=="owner" && H.owner.poolId!=""{mod.widgets.HagencyStatus{flow:Down
             mod.widgets.HagencyCopy{text:H.owner.poolLabel}
@@ -6484,6 +6493,11 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 let s=H.personal_detail.settings
                 mod.widgets.HagencyTitle{text:row.displayName}
                 mod.widgets.HagencyHint{text:row.id}
+                mod.widgets.HagencySection{
+                    mod.widgets.HagencySectionTitle{text:A.t("Private chat, encryption and Rooms","私聊、加密与房间")}
+                    mod.widgets.HagencyHint{text:A.t("Open this Agent's local settings: private chat and end-to-end encryption, connected Rooms, execution device and service.","打开此 Agent 的本地设置：私聊与端到端加密、已连接的房间、执行设备与服务运行。")}
+                    mod.widgets.HagencyActions{personal_local := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Open local settings","打开本地设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.device on_click: || A.native_open_agent(row.id)}}
+                }
                 if !s.supported {mod.widgets.HagencyCopy{text:A.personal_reason("configuration_unsupported")}}
                 if s.supported {View{width:Fill height:Fit flow:Down spacing:16
                     mod.widgets.HagencySection{

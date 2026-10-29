@@ -227,7 +227,7 @@ impl MiniAppsWindowHost {
             self.ensure_window(cx);
         }
         self.management_page = Some(matches!(action,
-            HagencyAction::OpenAgents | HagencyAction::NewAgent {..} | HagencyAction::AgentRun {..}));
+            HagencyAction::OpenAgents | HagencyAction::OpenAgent {..} | HagencyAction::NewAgent {..} | HagencyAction::AgentRun {..}));
         if let Some(window) = &self.window {
             window.mini_apps_panel(cx, ids!(mini_apps_panel)).script_visibility(cx, false);
             window.hagency_panel(cx, ids!(management_panel)).action(cx, action);
