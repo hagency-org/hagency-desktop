@@ -1484,7 +1484,7 @@ A.workspace_tone=fn(row){
 A.workspace_next=fn(row){
     if row.releaseBlock=="shared_resource_authority" {return A.t("Needs access to every pool that shares it","需要共用它的所有资源池的权限")}
     if row.quarantined {return A.t("Next: resolve the interrupted task first","建议：先处理中断的任务")}
-    if row.activeLeases>0 {return A.t("A task is using it · nothing to do now","任务正在使用，暂时无需操作")}
+    if row.activeLeases>0 {return A.t("Nothing to do until the task finishes","任务结束前无需操作")}
     if row.dirty {return A.t("Next: check it, then clear the marker","建议：检查后解除标记")}
     return A.t("Nothing to do","无需操作")
 }
@@ -1495,6 +1495,14 @@ A.workspace_label=fn(row){
     for item in H.health.stopped.items {if item.engagementId==engagement {return A.t(item.agent+"’s workspace",A.sub_join(item.agent,"的工作区"))}}
     if H.policy_list!=nil {for item in H.policy_list.agents {if item.engagementId==engagement {return A.t(item.agent+"’s workspace",A.sub_join(item.agent,"的工作区"))}}}
     return A.t("Agent workspace","Agent 工作区")
+}
+// Without an Agent name, describe how the workspace is used instead of repeating a generic label.
+A.workspace_usage=fn(row){
+    let name=A.workspace_label(row)
+    if name!=A.t("Agent workspace","Agent 工作区") {return name}
+    if row.activeLeases>0 {return A.t(""+row.activeLeases+(if row.activeLeases==1 {" task is using it"} else {" tasks are using it"}),""+row.activeLeases+" 个任务正在使用")}
+    if row.sharedResourceCount>1 {return A.t("Shared with "+row.sharedResourceCount+" pools","与 "+row.sharedResourceCount+" 个资源池共用")}
+    return A.t("Used by this pool only","只有此资源池使用")
 }
 A.stopped_entry_size=fn(entry){
     if entry.kind=="directory" {return A.t("Folder","文件夹")}
@@ -6691,13 +6699,12 @@ A.render_page = fn(){
                         }
                         mod.widgets.HagencyListDivider{}
                     }}
-                    mod.widgets.HagencySwitchRow{
+                    if !live {mod.widgets.HagencySwitchRow{
                         mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_INFO_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_INFO_FG}}
                         mod.widgets.HagencyListTitle{text:A.t("Decision","决定")}
                         mod.widgets.HagencyListValue{text:A.tool_choice(row.choice)}
-                    }
+                    }}
                     if live {View{width:Fill height:Fit flow:Down
-                        mod.widgets.HagencyListDivider{}
                         mod.widgets.HagencySwitchRow{
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.gauge draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                             mod.widgets.HagencyListTitle{text:A.t("Time left","剩余时间")}
@@ -6756,7 +6763,7 @@ A.render_page = fn(){
                 let chat=A.shared_mode(row)=="chat"
                 let codex=row.framework=="codex"
                 let project=A.tool_project_name(row)
-                let can=!H.busy && H.command==nil && H.policy_mode!="review"
+                let can=!H.busy && H.command==nil && H.policy_mode!="review" && H.policy_mode!="result"
                 let key="policy:"+row.engagementId
                 View{width:Fill height:Fit flow:Down spacing:10 align:Align{x:0.5} padding:Inset{top:6 bottom:8}
                     mod.widgets.HagencyAvatar{draw_bg.color:if full {mod.widgets.RINX_WARNING_BG} else {mod.widgets.RINX_INFO_BG} mod.widgets.HagencyAvatarGlyph{draw_icon.color:if full {mod.widgets.RINX_WARNING_FG} else {mod.widgets.RINX_INFO_FG}}}
@@ -6769,6 +6776,7 @@ A.render_page = fn(){
                 }
                 if H.policy_mode=="result" {View{width:Fill height:Fit padding:Inset{bottom:6} mod.widgets.HagencyStatus{draw_bg.color:mod.widgets.RINX_SUCCESS_BG
                     mod.widgets.HagencyCopy{text:A.t("Saved. It applies when "+row.agent+" starts its next task.","已保存，"+A.sub_join(row.agent,"的下一个任务开始时生效。")) draw_text.color:mod.widgets.RINX_SUCCESS_FG}
+                    policy_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("Done","完成") enabled:!H.busy on_click: || A.open_policy(H.policy_resource,H.policy_engagement)}
                 }}}
                 mod.widgets.HagencyListLabel{text:A.t("WHAT IT MAY DO","执行权限")}
                 mod.widgets.HagencyList{
@@ -7151,7 +7159,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{draw_bg.color:A.local_tone_bg(tone) mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.folder draw_icon.color:A.local_tone_fg(tone)}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{max_lines:1 text_overflow:Ellipsis text:A.workspace_state(row)}
-                                mod.widgets.HagencyListSubtitle{text:A.workspace_label(row)}
+                                mod.widgets.HagencyListSubtitle{text:A.workspace_usage(row)}
                                 mod.widgets.HagencyWrapSubtitle{max_lines:1 text_overflow:Ellipsis text:A.workspace_next(row) draw_text.color:if tone=="waiting" || tone=="attention" {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_MUTED}}
                             }
                             mod.widgets.HagencyChevron{}
