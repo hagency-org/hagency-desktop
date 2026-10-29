@@ -3684,6 +3684,8 @@ A.pool_slider_ratio=fn(value,top){
 }
 A.pool_count_text=fn(n){return if n==-2 {A.t("Unavailable","无法读取")} else if n<0 {""} else {""+n}}
 A.pool_yolo_label=fn(yolo){return if yolo {A.t("Full trust (unrestricted)","完全信任（不受限）")} else {A.t("Standard","标准权限")}}
+// The segment is half a phone width: at large text the note below carries "(unrestricted)".
+A.pool_yolo_segment=fn(){return if mod.widgets.RINX_TEXT_SCALE>1.2 {A.t("Full trust","完全信任")} else {A.pool_yolo_label(true)}}
 A.pool_default_policy=fn(){
     if H.busy || H.resource_detail==nil {return}
     let detail=H.resource_detail
@@ -5780,7 +5782,10 @@ A.render_page = fn(){
                     }
                 }}
             }}
-            if H.owner.poolsReady && H.resources.len()>0 {mod.widgets.HagencyListNote{text:A.t("1 M is one million tokens. Amounts are Hagency’s records, not the provider’s balance; pools on one account share its limit.","1 M 即 100 万 token。额度来自 Hagency 记录，不是服务商余额；同一账号下的资源池共用账号上限。")}}
+            if H.owner.poolsReady && H.resources.len()>0 {View{width:Fill height:Fit flow:Down spacing:2
+                mod.widgets.HagencyListNote{text:A.t("Amounts are Hagency’s records, not the provider’s balance.","额度来自 Hagency 记录，不是服务商余额。")}
+                mod.widgets.HagencyListNote{text:A.t("1 M is one million tokens. Pools on one account share its limit.","1 M 即 100 万 token。同一账号下的资源池共用账号上限。")}
+            }}
             if H.pool_meta!=nil && H.pool_meta.connsError && H.resources.len()>0 {mod.widgets.HagencyListNote{text:A.t("Server status couldn’t be read. Refresh to try again.","暂时无法读取服务器状态，请刷新重试。") draw_text.color:mod.widgets.RINX_DANGER_FG}}
         }}}
         if H.page == "pool_create" && H.pool_create!=nil {View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{top:18 bottom:28} mod.widgets.HagencyColumn{
@@ -6610,7 +6615,7 @@ A.render_page = fn(){
                 if reason != nil {mod.widgets.HagencyCopy{text:A.onboarding_reason(reason)}}
                 mod.widgets.HagencySection{
                     mod.widgets.HagencySectionTitle{text:if p.state == "active" {A.t("1 · Device resources", "1 · 设备资源")} else {A.t("1 · Review this device", "1 · 核对此设备")}}
-                    mod.widgets.HagencyCopy{text:if p.state == "active" {A.t("The native resource inventory is readable. This does not mean capacity is granted to a server.", "原生资源清单已可读取，这不代表已向服务器授权容量。")} else if A.onboarding_empty(p) {A.t("Set up local management for your signed-in Matrix account. No provider account or shared quota is created in this step.", "为当前登录的 Matrix 账号设置本机管理。此步骤不会创建模型服务账号或共享额度。")} else {A.t("The native window verifies the signed-in owner, exact resources and shared monthly account limit before asking you to move resources.", "原生窗口会核对已登录的资源主人、具体资源与共享账号每月上限，再请你确认迁移资源。")}}
+                    mod.widgets.HagencyCopy{text:if p.state == "active" {A.t("The native resource inventory is readable.", "原生资源清单已可读取。")} else if A.onboarding_empty(p) {A.t("Set up local management for your signed-in Matrix account. No provider account or shared quota is created in this step.", "为当前登录的 Matrix 账号设置本机管理。此步骤不会创建模型服务账号或共享额度。")} else {A.t("The native window verifies the signed-in owner, exact resources and shared monthly account limit before asking you to move resources.", "原生窗口会核对已登录的资源主人、具体资源与共享账号每月上限，再请你确认迁移资源。")}}
                     if p.state != "active" {mod.widgets.HagencyHint{text:if A.onboarding_empty(p) {A.t("Review your Matrix identity in the native window. Closing before confirmation changes nothing; interrupted setup resumes its original request.", "请在原生窗口核对 Matrix 身份。确认前关闭不会修改数据；设置中断后会继续原始请求。")} else {A.t("Confirming migration stops existing local workers and preserves original identities and history. Closing a new review does not start migration; closing recovery preserves earlier progress. Interrupted confirmation must recover its original result.", "确认迁移会停止原有本地工作进程，并保留原始标识与历史。关闭新核对不会开始迁移，关闭恢复核对会保留此前进度。确认中断后须恢复原始结果。")}}}
                     if p.canReview {mod.widgets.HagencyActions{
                         onboarding_review := mod.widgets.RinxKeyPrimaryButton{enabled:!H.busy text:if p.state == "recovery_required" {if A.onboarding_empty(p) {A.t("Resume device setup", "继续设备设置")} else {A.t("Recover native migration", "恢复原生迁移")}} else if A.onboarding_empty(p) {A.t("Set up this device", "设置此设备")} else {A.t("Open native review", "打开原生核对")} icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.connection on_click: || A.review_onboarding()}
@@ -6618,13 +6623,13 @@ A.render_page = fn(){
                 }
                 if p.state=="active" {mod.widgets.HagencySection{
                     mod.widgets.HagencySectionTitle{text:A.t("Add an account and register a resource", "添加账号并登记资源")}
-                    mod.widgets.HagencyCopy{text:A.t("Create an account space, authorize the provider, then choose a model and review its account limit.", "创建账号空间、授权模型服务，再选择模型并核对账号额度。")}
+                    mod.widgets.HagencyCopy{text:A.t("Create an account space, authorize the provider, then choose a model.", "创建账号空间、授权模型服务，再选择模型。")}
                     mod.widgets.HagencyActions{onboarding_accounts := mod.widgets.RinxKeyPrimaryButton{enabled:!H.busy text:A.t("Continue to provider accounts", "继续前往模型服务账号") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.connection on_click: || A.open_accounts(nil)}}
                 }}
                 mod.widgets.HagencyDivider{}
                 mod.widgets.HagencySection{
                     mod.widgets.HagencySectionTitle{text:A.t("2 · Check server admission", "2 · 检查服务器准入")}
-                    mod.widgets.HagencyCopy{text:A.t("A resource owner offers the resource; the server administrator approves admission. An approved connection alone does not allocate tokens.", "资源主人提交资源，由服务器管理员批准准入。连接获准本身不会分配 token。")}
+                    mod.widgets.HagencyCopy{text:A.t("A resource owner offers the resource; the server administrator approves admission. Once approved, set limits and publish in Resource Pools.", "资源主人提交资源，由服务器管理员批准准入。获准后，在「资源池」中设置额度并发布。")}
                     mod.widgets.HagencyActions{onboarding_connections := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("View server connections", "查看服务器连接") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.connection on_click: || A.navigate("connections")}}
                 }
                 if p.grantReviewAvailable && p.grantIntents.len()>0 {View{width:Fill height:Fit flow:Down spacing:(16 * mod.widgets.RINX_SPACING)
@@ -7776,7 +7781,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                     mod.widgets.HagencyListValue{text:A.t("Left ","剩余 ")+A.tokens(b.remaining)+A.t(" of ","，共 ")+A.tokens(b.ceiling)}
                                 }
                             }}
-                            if b.low {mod.widgets.HagencyListValue{width:Fill text:if v.editable {A.t("Almost used up. You can raise the monthly maximum below.","额度快用完了，可以提高下方的每月上限。")} else {A.t("Almost used up. New Agent requests may be refused until it resets.","额度快用完了，重置前新的申请可能被拒绝。")} draw_text.color:mod.widgets.RINX_DANGER_FG}}
+                            if b.low {mod.widgets.HagencyListValue{width:Fill text:if v.editable {A.t("Almost used up. You can raise the monthly maximum below.","快用完了，可在下方调高每月上限。")} else {A.t("Almost used up. New Agent requests may be refused until it resets.","额度快用完了，重置前新的申请可能被拒绝。")} draw_text.color:mod.widgets.RINX_DANGER_FG}}
                             if b.ceiling==nil {mod.widgets.HagencyListValue{width:Fill text:A.t("Set a monthly maximum below so Agents can hold capacity.","在下方设置每月上限后，Agent 才能预留额度。")}}
                             if b.low && !v.editable {View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
                                 if detail.choices.len()>0 && detail.editing.reason!="read_only" {View{width:Fit height:Fit resource_low_another := mod.widgets.HagencyGetButton{text:A.t("Add Another Pool","再建一个资源池") enabled:!H.busy && H.command==nil && !locked on_click:||A.create_resource_configuration()}}}
@@ -7794,11 +7799,15 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 pool_max_value := mod.widgets.RinxAmountSlider{width:Fill enabled:false value:A.pool_slider_ratio(b.ceiling,v.maxMax)}
                                 mod.widgets.HagencyListTitle{width:Fit draw_text +: {text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}} text:if b.ceiling==nil {A.t("Not set","未设置")} else {A.tokens(b.ceiling)}}
                             }}
-                            View{width:Fill height:Fit flow:Right spacing:8
+                            if mod.widgets.RINX_TEXT_SCALE<=1.2 {View{width:Fill height:Fit flow:Right spacing:8
                                 mod.widgets.HagencyListValue{text:if b.committed>0 {A.t("At least ","最低 ")+A.tokens(b.committed)+A.t(" (held for Agents)","（已预留给 Agent）")} else {A.t("From 0","从 0 起")}}
                                 View{width:Fill height:1}
                                 mod.widgets.HagencyListValue{text:if v.maxMax>0 {A.t("Account limit ","账号上限 ")+A.tokens(v.maxMax)} else {A.t("Account limit unknown","账号上限未知")}}
-                            }
+                            }}
+                            if mod.widgets.RINX_TEXT_SCALE>1.2 {View{width:Fill height:Fit flow:Down spacing:2
+                                mod.widgets.HagencyListValue{text:if b.committed>0 {A.t("At least ","最低 ")+A.tokens(b.committed)+A.t(" (held for Agents)","（已预留给 Agent）")} else {A.t("From 0","从 0 起")}}
+                                mod.widgets.HagencyListValue{text:if v.maxMax>0 {A.t("Account limit ","账号上限 ")+A.tokens(v.maxMax)} else {A.t("Account limit unknown","账号上限未知")}}
+                            }}
                             if v.editable && v.presets.len()>0 {View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
                                 for amount in v.presets {let value=amount View{width:Fit height:Fit
                                     pool_max_preset := mod.widgets.HagencyPreset{text:A.tokens(value) enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_max_preset(value)}
@@ -7831,7 +7840,10 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         if v.quotaEditable && !save.maxDirty {mod.widgets.HagencyListNote{align:Align{x:0.5} text:A.pool_device_line()}}
                         if !v.quotaEditable || save.maxDirty {mod.widgets.HagencyListNote{align:Align{x:0.5} text:A.t("You confirm the new maximum in the confirmation window.","新的每月上限需要在确认窗口中确认。")}}
                     }}}
-                    mod.widgets.HagencyListNote{text:A.t("1 M is one million tokens. Amounts are Hagency’s records, not the provider’s balance.","1 M 即 100 万 token。额度来自 Hagency 记录，不是服务商余额。")}
+                    View{width:Fill height:Fit flow:Down spacing:2
+                        mod.widgets.HagencyListNote{text:A.t("Amounts are Hagency’s records, not the provider’s balance.","额度来自 Hagency 记录，不是服务商余额。")}
+                        mod.widgets.HagencyListNote{text:A.t("1 M is one million tokens.","1 M 即 100 万 token。")}
+                    }
                     if H.pool_result!=nil {View{width:Fill height:Fit padding:Inset{top:4 bottom:2} mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
                         mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg(H.pool_result.tone)}
                     }}}
@@ -7862,7 +7874,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             mod.widgets.HagencyListValue{text:if v.expires!=nil {A.pool_date(v.expires)} else if v.published {A.t("End of this month","本月底")} else {A.t("Set when you publish","发布时设置")}}
                         }
                     }
-                    mod.widgets.HagencyListNote{text:A.t("You choose who may request, and until when, in the confirmation window when you publish.","发布时，在确认窗口中选择申请者和有效期。")}
+                    mod.widgets.HagencyListNote{text:A.t("You choose who may request, and until when, in the confirmation window when you publish.","申请者和有效期在发布确认时选择。")}
 
                     mod.widgets.HagencyListLabel{text:A.t("AGENTS AND PERMISSIONS","Agent 与权限")}
                     mod.widgets.HagencyList{
@@ -8039,7 +8051,10 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             }
                         }
                     }
-                    mod.widgets.HagencyListNote{text:A.t("Listing a pool in the catalogue locks its model and monthly maximum. Select the ID to copy it.","登记到目录后，模型和每月上限不能修改。资源标识可选中复制。")}
+                    View{width:Fill height:Fit flow:Down spacing:2
+                        mod.widgets.HagencyListNote{text:A.t("Listing a pool in the catalogue locks its model and monthly maximum.","登记到目录后，模型和每月上限不能修改。")}
+                        mod.widgets.HagencyListNote{text:A.t("Select the ID to copy it.","资源标识可选中复制。")}
+                    }
                 }}
             }}
         }}}
@@ -8082,8 +8097,8 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         if yolo {resource_config_standard := mod.widgets.HagencyTallSegment{text:A.t("Standard","标准权限") enabled:!H.busy && H.command==nil on_click:||A.choose_resource_default("edit",false)}}
                     }
                     if detail.resource.framework=="codex" {View{width:Fill height:Fit
-                        if yolo {resource_config_unrestricted := mod.widgets.HagencyTallSegmentOn{text:A.pool_yolo_label(true) enabled:!H.busy && H.command==nil draw_text +: {color:mod.widgets.RINX_WARNING_FG color_hover:mod.widgets.RINX_WARNING_FG color_focus:mod.widgets.RINX_WARNING_FG} on_click:||A.choose_resource_default("edit",true)}}
-                        if !yolo {resource_config_unrestricted := mod.widgets.HagencyTallSegment{text:A.pool_yolo_label(true) enabled:!H.busy && H.command==nil on_click:||A.choose_resource_default("edit",true)}}
+                        if yolo {resource_config_unrestricted := mod.widgets.HagencyTallSegmentOn{text:A.pool_yolo_segment() enabled:!H.busy && H.command==nil draw_text +: {color:mod.widgets.RINX_WARNING_FG color_hover:mod.widgets.RINX_WARNING_FG color_focus:mod.widgets.RINX_WARNING_FG} on_click:||A.choose_resource_default("edit",true)}}
+                        if !yolo {resource_config_unrestricted := mod.widgets.HagencyTallSegment{text:A.pool_yolo_segment() enabled:!H.busy && H.command==nil on_click:||A.choose_resource_default("edit",true)}}
                     }}
                 }
             }}
@@ -8102,11 +8117,15 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 }
                 if d.limitMode=="monthly" {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:4 right:4}
                     resource_config_tokens := mod.widgets.HagencyNumberInput{minimum:eb.committed maximum:top text:d.tokens on_change:|text| {if H.command==nil {d.tokens=text}}}
-                    View{width:Fill height:Fit flow:Right spacing:8
+                    if mod.widgets.RINX_TEXT_SCALE<=1.2 {View{width:Fill height:Fit flow:Right spacing:8
                         mod.widgets.HagencyListValue{text:if eb.committed>0 {A.t("At least ","最低 ")+A.tokens(eb.committed)+A.t(" (held for Agents)","（已预留给 Agent）")} else {A.t("From 0","从 0 起")}}
                         View{width:Fill height:1}
                         mod.widgets.HagencyListValue{text:if top>0 {A.t("Account limit ","账号上限 ")+A.tokens(top)} else {A.t("Account limit unknown","账号上限未知")}}
-                    }
+                    }}
+                    if mod.widgets.RINX_TEXT_SCALE>1.2 {View{width:Fill height:Fit flow:Down spacing:2
+                        mod.widgets.HagencyListValue{text:if eb.committed>0 {A.t("At least ","最低 ")+A.tokens(eb.committed)+A.t(" (held for Agents)","（已预留给 Agent）")} else {A.t("From 0","从 0 起")}}
+                        mod.widgets.HagencyListValue{text:if top>0 {A.t("Account limit ","账号上限 ")+A.tokens(top)} else {A.t("Account limit unknown","账号上限未知")}}
+                    }}
                     View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
                         for amount in [500000,1000000,2000000,5000000] {let value=amount View{width:Fit height:Fit
                             resource_config_preset := mod.widgets.HagencyPreset{text:A.tokens(value) enabled:!H.busy && H.command==nil && value>=eb.committed && (top<0 || value<=top) on_click:||{d.tokens=""+value A.redraw()}}
@@ -8155,8 +8174,8 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         if yolo {resource_create_standard := mod.widgets.HagencyTallSegment{text:A.t("Standard","标准权限") enabled:!H.busy && H.command==nil on_click:||A.choose_resource_default("create",false)}}
                     }
                     if detail.resource.framework=="codex" {View{width:Fill height:Fit
-                        if yolo {resource_create_unrestricted := mod.widgets.HagencyTallSegmentOn{text:A.pool_yolo_label(true) enabled:!H.busy && H.command==nil draw_text +: {color:mod.widgets.RINX_WARNING_FG color_hover:mod.widgets.RINX_WARNING_FG color_focus:mod.widgets.RINX_WARNING_FG} on_click:||A.choose_resource_default("create",true)}}
-                        if !yolo {resource_create_unrestricted := mod.widgets.HagencyTallSegment{text:A.pool_yolo_label(true) enabled:!H.busy && H.command==nil on_click:||A.choose_resource_default("create",true)}}
+                        if yolo {resource_create_unrestricted := mod.widgets.HagencyTallSegmentOn{text:A.pool_yolo_segment() enabled:!H.busy && H.command==nil draw_text +: {color:mod.widgets.RINX_WARNING_FG color_hover:mod.widgets.RINX_WARNING_FG color_focus:mod.widgets.RINX_WARNING_FG} on_click:||A.choose_resource_default("create",true)}}
+                        if !yolo {resource_create_unrestricted := mod.widgets.HagencyTallSegment{text:A.pool_yolo_segment() enabled:!H.busy && H.command==nil on_click:||A.choose_resource_default("create",true)}}
                     }}
                 }
             }}
@@ -8175,11 +8194,15 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 }
                 if d.limitMode=="monthly" {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:4 right:4}
                     resource_create_tokens := mod.widgets.HagencyNumberInput{minimum:0 maximum:ctop text:d.tokens on_change:|text| {if H.command==nil {d.tokens=text}}}
-                    View{width:Fill height:Fit flow:Right spacing:8
+                    if mod.widgets.RINX_TEXT_SCALE<=1.2 {View{width:Fill height:Fit flow:Right spacing:8
                         mod.widgets.HagencyListValue{text:A.t("From 0","从 0 起")}
                         View{width:Fill height:1}
                         mod.widgets.HagencyListValue{text:if ctop>0 {A.t("Account limit ","账号上限 ")+A.tokens(ctop)} else {A.t("Account limit unknown","账号上限未知")}}
-                    }
+                    }}
+                    if mod.widgets.RINX_TEXT_SCALE>1.2 {View{width:Fill height:Fit flow:Down spacing:2
+                        mod.widgets.HagencyListValue{text:A.t("From 0","从 0 起")}
+                        mod.widgets.HagencyListValue{text:if ctop>0 {A.t("Account limit ","账号上限 ")+A.tokens(ctop)} else {A.t("Account limit unknown","账号上限未知")}}
+                    }}
                     View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
                         for amount in [500000,1000000,2000000,5000000] {let value=amount View{width:Fit height:Fit
                             resource_create_preset := mod.widgets.HagencyPreset{text:A.tokens(value) enabled:!H.busy && H.command==nil && (ctop<0 || value<=ctop) on_click:||{d.tokens=""+value A.redraw()}}
