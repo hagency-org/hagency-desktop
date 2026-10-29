@@ -5727,7 +5727,27 @@ fn populate_message_view(
         }
     };
 
-    item.widget(cx, ids!(content.message)).set_visible(cx, web_mini_app.is_none() && forward_bundle.is_none());
+    // An agent's text reply renders in `content.agent_reply` (below), not in
+    // `content.message`. Give `content.message` its final visibility once:
+    // showing it here and hiding it again below changed it twice per draw, and
+    // each change redrew the timeline, so an agent reply on screen redrew the
+    // window every frame.
+    #[cfg(feature = "agent_chat")]
+    let agent_text = match &msg_like_content.kind {
+        MsgLikeKind::Message(msg) => match msg.msgtype() {
+            MessageType::Text(text) => Some((&text.body, text.formatted.as_ref())),
+            MessageType::Notice(text) => Some((&text.body, text.formatted.as_ref())),
+            _ => None,
+        },
+        _ => None,
+    };
+    #[cfg(feature = "agent_chat")]
+    let agent_reply = agent_text.is_some()
+        && event_tl_item.event_id().is_some()
+        && AgentMessagePresentation::for_sender(event_tl_item.sender()).is_some();
+    #[cfg(not(feature = "agent_chat"))]
+    let agent_reply = false;
+    item.widget(cx, ids!(content.message)).set_visible(cx, web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply);
     item.forward_card(cx, ids!(content.forward_card)).set_bundle(cx, forward_bundle);
     new_drawn_status.content_drawn &= item.mini_app_card(cx, ids!(content.mini_app_card)).set_app(
         cx, web_mini_app, timeline_kind,
@@ -5860,25 +5880,15 @@ fn populate_message_view(
     {
         use crate::agent_chat::reply::AgentReplyWidgetRefExt;
         let reply = item.agent_reply(cx, ids!(content.agent_reply));
-        let text = match &msg_like_content.kind {
-            MsgLikeKind::Message(msg) => match msg.msgtype() {
-                MessageType::Text(text) => Some((&text.body, text.formatted.as_ref())),
-                MessageType::Notice(text) => Some((&text.body, text.formatted.as_ref())),
-                _ => None,
-            },
-            _ => None,
-        };
         if let (Some((body, formatted)), Some(mut presentation), Some(event_id)) =
-            (text, AgentMessagePresentation::for_sender(event_tl_item.sender()), event_tl_item.event_id())
+            (agent_text, AgentMessagePresentation::for_sender(event_tl_item.sender()), event_tl_item.event_id())
         {
             let (body, formatted) = presentation.present(usage.as_ref().map_or(body.as_str(),|u|u.answer), formatted);
             let identity = format!("{}|{}|{}", crate::sliding_sync::current_user_id().map(|id| id.to_string()).unwrap_or_default(), timeline_kind.room_id(), event_id);
             let fresh = crate::agent_chat::reply::event_is_fresh(event_tl_item);
             reply.populate(cx, identity, &body, formatted.as_deref(), crate::agent_chat::reply::event_is_live(event_tl_item), fresh);
-            item.widget(cx, ids!(content.message)).set_visible(cx, false);
         } else {
             reply.hide(cx);
-            if text.is_some() { item.widget(cx, ids!(content.message)).set_visible(cx, true); }
         }
     }
 

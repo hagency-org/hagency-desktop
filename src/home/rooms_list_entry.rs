@@ -440,7 +440,13 @@ pub struct RoomsListEntryContent {
 }
 
 impl ScriptHook for RoomsListEntryContent {
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, _: &Apply, _: &mut Scope, _: ScriptValue) {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, _: &mut Scope, _: ScriptValue) {
+        // The selection toggle in `update_latest_event_colors` applies its
+        // animator state through this hook. That is not a style change: resetting
+        // here re-ran the toggle and re-snapshotted the theme on every draw.
+        if apply.is_animate() {
+            return;
+        }
         self.appearance = crate::theme::snapshot_for_vm(vm);
         self.last_selection_drawn = None;
     }
