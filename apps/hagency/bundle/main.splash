@@ -7777,7 +7777,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             resource_applicants := mod.widgets.HagencyListTap{enabled:!H.busy && H.command==nil && !locked && (v.quotaEditable || v.published) on_click:||{if v.quotaEditable {A.pool_save()} else {A.pool_open_grant()}}}
                             mod.widgets.HagencyListBody{
                                 mod.widgets.HagencyListTitle{text:A.t("Applicants","申请者")}
-                                mod.widgets.HagencyListValue{text:if v.published {A.t("See publication","在发布记录中查看")} else if v.quotaEditable {A.t("Chosen when you publish","发布时选择")} else {A.t("Chosen after approval","获准后选择")}}
+                                mod.widgets.HagencyListValue{text:if v.published {A.t("See publication","在发布记录中查看")} else if v.quotaEditable {A.t("Chosen when you publish","发布时选择")} else {A.t("Set when you publish","发布时设置")}}
                                 if v.quotaEditable || v.published {mod.widgets.HagencyChevron{}}
                             }
                         }}
