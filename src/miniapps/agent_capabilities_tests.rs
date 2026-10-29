@@ -48,6 +48,8 @@ fn fixture(source: &str) -> (Cx, SplashRef) {
         assert!(vm.take_errors().is_empty());
         card
     });
+    // As the panel mounts a system app; see operator_tasks_tests.
+    card.set_time_budget(&mut cx, Some(SYSTEM_APP_TIME_BUDGET));
     card.set_text(&mut cx, &format!("{source}\n{OPEN}"));
     // The app normally seeds this tree during its first frame. Materialize the
     // real children before entering a callback that mutably borrows Splash.

@@ -65,7 +65,12 @@ impl MatchEvent for App {
         let source = std::env::var_os("HAGENCY_UX_SOURCE").map(std::path::PathBuf::from)
             .unwrap_or_else(|| std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("apps/hagency/bundle/main.splash"));
         self.source = std::fs::read_to_string(source).unwrap();
+        // As MiniAppsPanel mounts a system app. The time is printed so a
+        // bundle creeping toward the budget shows up in every probe run.
+        splash.set_time_budget(cx, Some(rinx::miniapps::ui::SYSTEM_APP_TIME_BUDGET));
+        let started = std::time::Instant::now();
         splash.set_text(cx, &self.source);
+        eprintln!("hagency bundle evaluated in {} ms", started.elapsed().as_millis());
         // MiniAppsPanel refuses a source whose root sections did not install.
         // Refuse it here too rather than review screens the app never shows.
         assert!(rinx::miniapps::ui::hagency_root_installed(&splash), "required root was not installed");

@@ -46,6 +46,7 @@ mod personal_folder_picker;
 mod account_login_ui;
 #[path = "startup.rs"]
 mod startup;
+pub use super::sandbox::SYSTEM_APP_TIME_BUDGET;
 pub use startup::hagency_root_installed;
 #[path = "locale.rs"]
 mod locale;
@@ -904,6 +905,9 @@ impl MiniAppsPanel {
         // workspace for this instance is its kernel request context's.
         let root = crate::app_data_dir().join("miniapps").join(account_dir);
         let mut settings = super::sandbox::IsolateSettings::for_app(&package.policy, &root);
+        if package.builtin_id().is_some() {
+            settings.system_app();
+        }
         std::fs::create_dir_all(&settings.jail_root).map_err(|e| e.to_string())?;
         let wants_octos = package
             .manifest

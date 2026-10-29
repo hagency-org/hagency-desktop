@@ -37,6 +37,9 @@ fn fixture_with_open(source: &str, open: &str) -> (Cx, SplashRef) {
         assert!(vm.take_errors().is_empty());
         card
     });
+    // The panel gives its system apps this budget; the full bundle does not
+    // fit Makepad's default in an unoptimised test build.
+    card.set_time_budget(&mut cx, Some(SYSTEM_APP_TIME_BUDGET));
     card.set_text(&mut cx, &format!("{source}\n{open}"));
     // The app normally seeds this tree during its first frame. Materialize the
     // real children before entering a callback that mutably borrows Splash.

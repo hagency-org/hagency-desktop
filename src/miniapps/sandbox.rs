@@ -15,12 +15,26 @@
 //!   capability), not "always" as a foreground App Hub surface now grants;
 //! - the jail is `<root>/<app id>`, under a root Rinx chooses.
 //!
-//! The one addition is Rinx's own, as in 1.0.x: [`IsolateSettings::serve_bundle`]
+//! Two additions are Rinx's own. As in 1.0.x, [`IsolateSettings::serve_bundle`]
 //! lets the app reach the loopback server that serves its own frozen bundle
-//! (images, kit files), and nothing else.
+//! (images, kit files), and nothing else. And [`IsolateSettings::system_app`]
+//! gives an app that ships inside the build a longer per-entry time budget,
+//! a knob the contract does not have.
 use makepad_widgets::{Cx, SplashRef};
 use octosense_app_contract::AppPolicy;
 use std::path::{Path, PathBuf};
+use std::time::Duration;
+
+/// How long each entry into a system app's script (its body's evaluation, a
+/// handler, a render) may run before Makepad stops it with `script time
+/// budget exceeded`. Makepad's default, 64 ms, is sized for a small installed
+/// card on a fast machine. Hagency's bundle is over a megabyte, and parsing
+/// it and building its widgets count against that clock: on a slow machine,
+/// or in an unoptimised build (`cargo run`, the `fast` profile, `cargo
+/// test`), the app stopped before its first screen. A system app ships
+/// inside the build and is tested with it, so this only has to stop a
+/// runaway; Splash's per-entry instruction cap still bounds a script loop.
+pub const SYSTEM_APP_TIME_BUDGET: Duration = Duration::from_secs(10);
 
 /// What Rinx applies to a mini app's Splash isolate.
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,6 +56,9 @@ pub struct IsolateSettings {
     pub jail_root: PathBuf,
     /// Exactly the hosts the isolate may reach, on every network path.
     pub hosts: Vec<String>,
+    /// How long each entry into the app's script may run; None keeps
+    /// Makepad's default.
+    pub time_budget: Option<Duration>,
 }
 
 impl IsolateSettings {
@@ -59,7 +76,14 @@ impl IsolateSettings {
             memory_bytes: policy.memory_bytes,
             jail_root: app_data_root.join(&policy.app_id),
             hosts: policy.hosts.iter().cloned().collect(),
+            time_budget: None,
         }
+    }
+
+    /// A system app, one that ships inside Rinx's build, gets
+    /// [`SYSTEM_APP_TIME_BUDGET`] for each entry into its script.
+    pub fn system_app(&mut self) {
+        self.time_budget = Some(SYSTEM_APP_TIME_BUDGET);
     }
 
     /// Let the app load its own bundle's files from Rinx's loopback asset
@@ -82,9 +106,10 @@ impl IsolateSettings {
 /// Seat `settings` on `splash` before its body is evaluated.
 ///
 /// Order matters: the jail and the quota are set before anything the app
-/// runs can write; the policy (capabilities, hosts, budget) and the heap
-/// ceiling come next; the isolate's own network module is granted last, so
-/// a failure earlier leaves an isolate with less reach rather than more.
+/// runs can write; the policy (capabilities, hosts, budget), the heap
+/// ceiling and the time budget come next; the isolate's own network module
+/// is granted last, so a failure earlier leaves an isolate with less reach
+/// rather than more.
 pub fn apply(splash: &SplashRef, cx: &mut Cx, settings: &IsolateSettings) {
     splash.set_sandbox_dir(cx, Some(settings.jail_root.clone()));
     splash.set_storage_quota(cx, Some(settings.storage_quota));
@@ -94,6 +119,7 @@ pub fn apply(splash: &SplashRef, cx: &mut Cx, settings: &IsolateSettings) {
     // under a granted `net` reaches nothing.
     splash.set_policy(cx, Some(settings.hosts.clone()), Some(settings.instruction_budget));
     splash.set_memory_bytes(cx, Some(settings.memory_bytes as usize));
+    splash.set_time_budget(cx, settings.time_budget);
     if let Some(mut inner) = splash.borrow_mut() {
         inner.set_allow_net(settings.allow_net);
     }
@@ -185,5 +211,16 @@ mod tests {
         let mut card = before.clone();
         card.serve_bundle("127.0.0.1:4321".into(), true);
         assert_eq!(card.capabilities, ["storage", "rinx.event", "net"]);
+    }
+
+    #[test]
+    fn only_a_system_app_gets_the_longer_time_budget() {
+        let policy = policy(&["storage"], &[], serde_json::json!({}));
+        let installed = IsolateSettings::for_app(&policy, Path::new("/r"));
+        assert_eq!(installed.time_budget, None);
+        let mut system = installed.clone();
+        system.system_app();
+        assert_eq!(system.time_budget, Some(SYSTEM_APP_TIME_BUDGET));
+        assert_eq!(IsolateSettings { time_budget: None, ..system }, installed);
     }
 }

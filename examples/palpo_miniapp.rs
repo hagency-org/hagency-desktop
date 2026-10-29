@@ -95,6 +95,8 @@ impl MatchEvent for App {
             "/apps/palpo/bundle/main.splash"
         ))
         .unwrap();
+        // As MiniAppsPanel mounts a system app.
+        splash.set_time_budget(cx, Some(rinx::miniapps::ui::SYSTEM_APP_TIME_BUDGET));
         splash.set_text(cx, &source);
     }
 }
