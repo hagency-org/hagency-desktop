@@ -20,8 +20,19 @@ import urllib.request
 ROOT = Path(__file__).resolve().parents[2]
 AGENT = "agt_01xiaobaicai"
 
+def pool_request(**changes):
+    request = dict(
+        id="par_xiaobai", definition=dict(name="小白", description="程序员", capability="architect"),
+        state="approved_waiting_executor", revision=2, requestedTokens=1000000, poolId="pool",
+        poolLabel="codex-pool-01", resourceOwnerMxid="@dspfac:example.test", managerMxid="@edward:example.test",
+        membershipState="matrix_verified", assignmentId="asg_1", reservationState="reserved",
+        reservationReason=None, runtimeState=None, canCancel=True, canDecide=False,
+        canStopSupply=False, blockingReason=None)
+    request.update(changes)
+    return request
+
 def fixtures(encrypted=True, running=True, here=True, online=True, status_error=None, empty=False, hold_service=False,
-             save_error=None):
+             save_error=None, pool=None, account="@edward:example.test"):
     observation = dict(policyRevision=3, budget=dict(kind="tokens", tokens=2000000, period="utc_month"),
                        requests="allow", highRiskTools="deny", toolRuleCount=0, directoryRuleCount=0,
                        knownConsumedTokens=885626, heldTokens=0,
@@ -31,18 +42,13 @@ def fixtures(encrypted=True, running=True, here=True, online=True, status_error=
                   chat=dict(roomId="!dm:example.test", encrypted=encrypted),
                   rooms=[dict(id="bnd_project", name="Hagency-Project", state="active")], resetLocalTime="08:00")
     return {
-        "hagency.session": dict(protocol="hagency-management-v1", account="@edward:example.test",
+        "hagency.session": dict(protocol="hagency-management-v1", account=account,
             administrator="@admin:example.test", device="offline-device", deviceGeneration=1,
             canAdmitResources=False, features=["resource-pool-agents-v1"]),
         "hagency.intent.pending": {"commands": []},
         "hagency.pools.list": {"items": [], "nextAfter": None},
-        "hagency.pools.agents.list": {"items": [dict(
-            id="par_xiaobai", definition=dict(name="小白", description="秘书", capability="architect"),
-            state="approved_waiting_executor", revision=2, requestedTokens=1000000, poolId="pool",
-            poolLabel="codex-pool-01", resourceOwnerMxid="@dspfac:example.test", managerMxid="@edward:example.test",
-            membershipState="matrix_verified", assignmentId="asg_1", reservationState="reserved",
-            reservationReason=None, runtimeState=None, canCancel=True, canDecide=False,
-            canStopSupply=False, blockingReason=None)], "nextAfter": None},
+        "hagency.pools.agents.list": {"items": [pool_request(**(pool or {}))], "nextAfter": None},
+        "hagency.pools.agents.get": {"request": pool_request(**(pool or {}))},
         "hagency.personal_agents.list": {"protocol": "hagency-personal-settings-v1",
             "items": [] if empty else [dict(id=AGENT, displayName="小白菜", state="active")], "nextAfter": None},
         "hagency.personal_agents.get": {"protocol": "hagency-personal-settings-v1",
@@ -65,13 +71,13 @@ def fixtures(encrypted=True, running=True, here=True, online=True, status_error=
     }
 
 class Host:
-    def __init__(self, binary, output, language, narrow, **variant):
+    def __init__(self, binary, output, language, narrow, workspace="manager", **variant):
         self.out = output
         profile = output / "profile"
         (profile / "sandbox").mkdir(parents=True, exist_ok=True)
         (profile / "ui-language.json").write_text(json.dumps(language))
         (profile / "sandbox/onboarding-v1.json").write_text(json.dumps(dict(version=1,
-            account="@edward:example.test", workspace="manager", command=None,
+            account=variant.get("account", "@edward:example.test"), workspace=workspace, command=None,
             wizard=dict(step=0, runtime="", model=None, reasoning=None, tokens="1000000", label="",
                         coordinator="", resource=None, admission=None))))
         self.fixture_path = output / "fixtures.json"
@@ -180,10 +186,13 @@ def main():
     parser.add_argument("--binary", type=Path, default=ROOT / "target/release/examples/hagency_visual")
     parser.add_argument("--language", default="zh-CN")
     parser.add_argument("--wide", action="store_true")
+    parser.add_argument("--only", default="", help="comma-separated run names, such as project,project-pending")
     a = parser.parse_args()
     a.output.mkdir(parents=True, exist_ok=True)
     narrow = not a.wide
     def run(name, steps, **variant):
+        if a.only and name not in a.only.split(","):
+            return
         host = Host(a.binary, a.output / name, a.language, narrow, **variant)
         try:
             steps(host)
@@ -324,6 +333,67 @@ def main():
     run("empty", empty_flow, empty=True)
     run("pending", pending_flow, hold_service=True)
     run("conflict", conflict_flow, save_error="local_revision_conflict")
+
+    def open_pool(host):
+        host.click("agents", content=False)
+        host.wait(lambda: host.row("pool_agent_open"), "project agent list")
+        host.click("pool_agent_open")
+        host.wait(lambda: host.row("pool_agent_back"), "project agent page")
+        time.sleep(.8)
+
+    def pool_flow(host):
+        open_pool(host)
+        host.capture("20-project-agent-top")
+        host.scroll(900)
+        host.capture("20b-project-agent-bottom")
+        host.click("pool_agent_stop")
+        host.wait(lambda: host.row("owner_decision_confirm"), "remove alert")
+        host.capture("21-project-agent-remove-alert")
+        host.click("owner_decision_cancel")
+        host.scroll(-100000)
+        host.event("ux:dark")
+        host.capture("22-project-agent-dark")
+        host.event("ux:light")
+        host.event("ux:large-text")
+        host.capture("23-project-agent-large-text")
+        host.scroll(900)
+        host.capture("23b-project-agent-large-text-bottom")
+        host.scroll(-100000)
+        host.click("pool_agent_back", content=False)
+        host.wait(lambda: host.row("pool_agent_open"), "back to my agents")
+
+    def capture_pool(name):
+        def steps(host):
+            open_pool(host)
+            host.capture(name)
+        return steps
+
+    def owner_flow(host):
+        host.click("inbox", content=False)
+        host.wait(lambda: host.row("owner_request_open"), "owner inbox")
+        host.click("owner_request_open")
+        host.wait(lambda: host.row("pool_agent_back"), "request page")
+        time.sleep(.8)
+        host.capture("26-project-request-owner")
+        host.click("owner_approve")
+        host.wait(lambda: host.row("owner_decision_confirm"), "approve alert")
+        host.capture("26b-project-request-approve-alert")
+        host.click("owner_decision_cancel")
+        host.click("owner_reject")
+        host.wait(lambda: host.row("owner_decision_confirm"), "decline alert")
+        host.capture("26c-project-request-decline-alert")
+        host.click("owner_decision_cancel")
+        host.click("pool_agent_back", content=False)
+        host.wait(lambda: host.row("owner_request_open"), "back to the inbox")
+
+    run("project", pool_flow)
+    run("project-capacity", capture_pool("24-project-agent-no-capacity"), pool=dict(
+        reservationState="refused", reservationReason="insufficient_capacity", assignmentId=None, membershipState=None))
+    run("project-pending", capture_pool("25-project-agent-pending"), pool=dict(
+        state="pending_approval", assignmentId=None, membershipState=None, reservationState=None))
+    run("project-owner", owner_flow, workspace="owner", account="@dspfac:example.test", pool=dict(
+        state="pending_approval", assignmentId=None, membershipState=None, reservationState=None,
+        canCancel=False, canDecide=True))
 
 if __name__ == "__main__":
     main()
