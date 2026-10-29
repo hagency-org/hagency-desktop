@@ -4,7 +4,21 @@ use serde_json::Value;
 use crate::hagency::{backend::Service,model::{Command,LocalAction},ui::HagencyAction};
 
 #[derive(Debug)]
-struct NoticeResult { identity:String, room:String, request:u64, target:Option<(String,String)>, text:String, failed:bool }
+struct NoticeResult { identity:String, room:String, request:u64, target:Option<(String,String)>, text:String, attention:bool, failed:bool }
+/// Normal or self-resolving states. The owner has nothing to do, so the notice
+/// stays hidden; Open Service remains available from the chat info panel.
+const QUIET: [&str; 8] = [
+    "Processing requests on this device.",
+    "Running in all connected Rooms on this device. New Rooms are included automatically; configured budgets and policy permissions still apply.",
+    "Running in previously selected Rooms. Stop and start to enable automatic Room discovery.",
+    "Starting service. Discovering connected Rooms…",
+    "Checking this device's local runtime connection…",
+    "Waiting for the previous runtime lease to be released…",
+    "Service enabled. Waiting for an available Room.",
+    "Processing is assigned to another device; this device does not run it.",
+];
+/// Show the notice only for states that need the owner, or when diagnostics follow the label.
+fn needs_attention(label:&str,text:&str)->bool {!QUIET.contains(&label) || text.contains('\n')}
 fn exact_direct_binding<'a>(bindings:&'a Value,agent:&str,room:&str)->Option<&'a Value> {
     bindings["bindings"].as_array()?.iter().find(|b|b["agentId"]==agent && b["roomId"]==room && b["scopeKind"]=="owner_direct" && b["projectId"].is_null() && b["state"]=="active" && b["id"].as_str().is_some_and(|id|!id.is_empty()))
 }
@@ -76,20 +90,23 @@ impl AgentRuntimeNotice {
                 let binding_id=binding["id"].as_str().ok_or("invalid_binding")?.to_owned();
                 let current=roster["currentDeviceId"].as_str().filter(|id|!id.is_empty());
                 let here=current.is_some_and(|id|agent["executionDeviceId"]==id && roster["devices"].as_array().is_some_and(|ds|ds.iter().any(|d|d["id"]==id && d["revoked"]==false)));
-                let text=if here {
+                let (label,text)=if here {
                     let result=service.execute(Command::Local {agent_id:agent_id.clone(),action:LocalAction::Runtime,input:None,binding_id:None,requester:None}).await.and_then(|v|room_runtime(&v,&agent_id,&binding_id));
-                    crate::hagency::ui::runtime_service_description(Some(&result),&agent_id)
-                } else if current.is_none() {"Local processing could not be verified. Refresh to retry.".into()}
-                else if agent["executionDeviceId"].as_str().is_none_or(|id|id.is_empty()) {"No available execution device. Open Agent settings to assign this device.".into()}
-                else {"Processing is assigned to another device; this device does not run it.".into()};
-                Ok::<_,String>(Some((agent_id,binding_id,text)))
+                    (crate::hagency::ui::runtime_list_label(Some(&result),&agent_id),crate::hagency::ui::runtime_service_description(Some(&result),&agent_id))
+                } else {
+                    let label=if current.is_none() {"Local processing could not be verified. Refresh to retry."}
+                    else if agent["executionDeviceId"].as_str().is_none_or(|id|id.is_empty()) {"No available execution device. Open Agent settings to assign this device."}
+                    else {"Processing is assigned to another device; this device does not run it."};
+                    (label,label.to_owned())
+                };
+                Ok::<_,String>(Some((agent_id,binding_id,needs_attention(label,&text),text)))
             }).await;
-            let (target,text,failed)=match result {
-                Ok(Ok(Some((agent,binding,text))))=>(Some((agent,binding)),text,false),
-                Ok(Ok(None))=>(None,String::new(),false),
-                _=>(None,"Local processing could not be verified. Refresh to retry.".into(),true),
+            let (target,text,attention,failed)=match result {
+                Ok(Ok(Some((agent,binding,attention,text))))=>(Some((agent,binding)),text,attention,false),
+                Ok(Ok(None))=>(None,String::new(),false,false),
+                _=>(None,"Local processing could not be verified. Refresh to retry.".into(),true,true),
             };
-            Cx::post_action(NoticeResult {identity,room,request,target,text,failed});
+            Cx::post_action(NoticeResult {identity,room,request,target,text,attention,failed});
         });
     }
 }
@@ -103,7 +120,7 @@ impl Widget for AgentRuntimeNotice {
                     && done.identity==self.identity && done.room==self.room && done.request==self.request {
                     self.set_loading(cx,false);if !done.failed {self.target=done.target.clone();}
                     self.view.label(cx,ids!(status)).set_text(cx,crate::i18n::tr(&done.text));
-                    self.view.set_visible(cx,self.target.is_some());self.view.button(cx,ids!(open)).set_enabled(cx,self.target.is_some() && !done.failed);
+                    self.view.set_visible(cx,self.target.is_some() && done.attention);self.view.button(cx,ids!(open)).set_enabled(cx,self.target.is_some() && !done.failed);
                     self.timer=cx.start_timeout(10.0);self.view.redraw(cx);
                 }
             }
@@ -171,6 +188,16 @@ mod tests {
             assert_eq!(geometry[0],geometry[1],"polling must not resize the notice or move Open Service at width {width}");
             assert_eq!(geometry[0],geometry[2]);
         }
+    }
+    #[test] fn notice_shows_only_states_that_need_the_owner() {
+        for quiet in QUIET {assert!(!needs_attention(quiet,quiet),"{quiet}");}
+        assert!(needs_attention("Processing requests on this device.","Processing requests on this device.\nRetry in 5s"));
+        for loud in ["Not running on this device. Open Service to configure and start.","Waiting for your approval before continuing.",
+            "The runtime stopped with an error. Check the details below.","Local processing could not be verified. Refresh to retry.",
+            "No available execution device. Open Agent settings to assign this device."] {assert!(needs_attention(loud,loud),"{loud}");}
+        // Every quiet label is one runtime_list_label or the assigned-elsewhere text can produce.
+        let source=include_str!("../hagency/ui.rs");
+        for quiet in &QUIET[..7] {assert!(source.contains(&format!("\"{quiet}\"")),"{quiet}");}
     }
     #[test] fn direct_notice_requires_exact_owner_direct_scope_and_active_binding() {
         let good=json!({"bindings":[{"id":"b","agentId":"a","roomId":"!r:s","scopeKind":"owner_direct","projectId":null,"state":"active"}]});
