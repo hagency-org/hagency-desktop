@@ -2553,6 +2553,15 @@ impl HagencyPanel {
             Target::Bindings => {
                 self.clear_approval_state(cx);self.approvals.clear();
                 self.bindings = array(value, "bindings");
+                // The private chat is the Agent's owner_direct binding: show it as
+                // ready (open / encrypt) without a setup retry. A retry in flight wins.
+                if let Some(agent)=self.agent(cx)
+                    && self.direct_retry.as_ref().is_none_or(|(_,retry,_)|retry != &agent)
+                    && let Some(binding)=self.bindings.iter().find(|b|string(b,"scopeKind")=="owner_direct" && string(b,"agentId")==agent && b["projectId"].is_null() && !string(b,"roomId").is_empty()) {
+                    self.direct_state=json!({"roomId":string(binding,"roomId"),"bindingId":string(binding,"id"),"state":string(binding,"state"),"phase":string(binding,"state"),"lastError":null});
+                    self.direct_agent=agent;
+                    self.render_owner_direct(cx);
+                }
                 self.label_bindings(cx,ids!(bindings));
                 self.label_bindings(cx,ids!(policy_binding));
                 let initial = self.bindings.iter().position(|b| string(b,"scopeKind") == "owner_direct" && string(b,"state") == "active").or_else(||self.bindings.iter().position(|b| string(b,"state") == "active"));
@@ -5187,6 +5196,34 @@ mod tests {
         panel.view.drop_down(&mut cx,ids!(agents)).set_selected_item(&mut cx,2);
         panel.render_owner_direct(&mut cx);
         assert!(!panel.view.button(&mut cx,ids!(open_owner_direct)).borrow().unwrap().enabled());
+    }
+    #[test]
+    fn known_private_chat_is_ready_to_open_and_encrypt_from_bindings() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut panel=cx.with_vm(|vm|{makepad_widgets::script_mod(vm);crate::app::register_widgets(vm);let value=script_eval!(vm,{mod.widgets.HagencyPanel {}});HagencyPanel::script_from_value(vm,value)});
+        panel.agents=vec![json!({"id":"agent-a"}),json!({"id":"agent-b"})];
+        panel.labels(&mut cx,ids!(agents),"Select",&panel.agents,"id");
+        panel.view.drop_down(&mut cx,ids!(agents)).set_selected_item(&mut cx,1);
+        let bindings=json!({"bindings":[
+            {"id":"room-a","agentId":"agent-a","scopeKind":"project","projectId":"project","roomId":"!room:server","state":"active"},
+            {"id":"direct-a","agentId":"agent-a","scopeKind":"owner_direct","projectId":null,"roomId":"!private:server","state":"active"}]});
+        panel.apply(&mut cx,Target::Bindings,&bindings);
+        assert_eq!(panel.direct_agent,"agent-a");
+        assert_eq!(panel.direct_state["roomId"],"!private:server");
+        for id in [ids!(open_owner_direct),ids!(encrypt_owner_direct)] {
+            assert!(panel.view.button(&mut cx,id).borrow().unwrap().enabled());
+        }
+        // A setup retry in flight keeps its own state.
+        panel.direct_state=json!({"state":"pending"});
+        panel.direct_retry=Some((panel.identity.clone(),"agent-a".into(),1));
+        panel.apply(&mut cx,Target::Bindings,&bindings);
+        assert_eq!(panel.direct_state["state"],"pending");
+        // Another Agent's bindings never mark that Agent's chat ready.
+        panel.direct_retry=None;
+        panel.view.drop_down(&mut cx,ids!(agents)).set_selected_item(&mut cx,2);
+        panel.apply(&mut cx,Target::Bindings,&bindings);
+        panel.render_owner_direct(&mut cx);
+        assert!(!panel.view.button(&mut cx,ids!(encrypt_owner_direct)).borrow().unwrap().enabled());
     }
     #[test]
     fn entering_run_reads_saved_resources_without_reauth_and_uses_their_actual_model_choices() {
