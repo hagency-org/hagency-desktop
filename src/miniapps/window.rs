@@ -217,6 +217,7 @@ impl MiniAppsWindowHost {
     }
 
     pub fn hagency_action(&mut self, cx: &mut Cx, action: &HagencyAction) {
+        log!("Hagency management {action:?}: window open {}, closing {}", self.window.is_some(), self.closing);
         if matches!(action, HagencyAction::Close) {
             self.show_apps(cx);
             return;

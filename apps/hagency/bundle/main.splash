@@ -1056,7 +1056,7 @@ A.personal_reason = fn(code){
     if code == "local_revision_conflict" || code == "personal_agent_settings_changed" {return A.t("The agent or policy changed. Refresh its settings before reviewing another edit.", "Agent 或策略已变化，请刷新设置后再核对修改。")}
     if code == "personal_policy_original_device_required" {return A.t("Recover this request on the device that originally sent it. Its command identity is retained.", "请在最初发送此请求的设备上恢复，原始请求标识已保留。")}
     if code == "configuration_device_offline" || code == "configuration_device_unavailable" {return A.t("The agent’s execution device is offline. Bring it online and refresh before reviewing another request.", "Agent 的执行设备离线，请将其联网并刷新后再核对请求。")}
-    if code == "configuration_unsupported" {return A.t("Personal-agent configuration is currently unavailable on this server. Any pending request keeps its original identity for recovery.", "此服务器当前未提供个人 Agent 配置，待处理请求会保留原始标识以便恢复。")}
+    if code == "configuration_unsupported" {return A.t("Local-agent configuration is currently unavailable on this server. Any pending request keeps its original identity for recovery.", "此服务器当前未提供本地 Agent 配置，待处理请求会保留原始标识以便恢复。")}
     if code == "configuration_request_busy" || code == "configuration_queue_full" {return A.t("The execution device has another configuration request. Wait for it, then refresh.", "执行设备正在处理其他配置请求，请等待后刷新。")}
     if code == "invalid_personal_policy" {return A.t("Choose a policy mode and a nonnegative whole token limit within the supported range.", "请选择策略模式，并输入支持范围内的非负整数 token 上限。")}
     if code == "configuration_outcome_unknown" || code == "configuration_request_expired" || code == "management_outcome_unknown" {return A.t("The settings request outcome is unknown. Recover the original saved request; do not submit a replacement.", "设置请求结果未知，请恢复已保存的原请求，不要另建替代请求。")}
@@ -1958,7 +1958,7 @@ A.recipient_option_detail=fn(row){
     if room_scope!=nil{return A.t("Room connection","房间关联")}
     return row.detail
 }
-A.recipient_kind=fn(kind){if kind=="shared_agent"{return A.t("Shared project agent","项目共享 Agent")} if kind=="personal_agent"{return A.t("Personal agent","个人 Agent")} return A.t("Human","人员")}
+A.recipient_kind=fn(kind){if kind=="shared_agent"{return A.t("Shared project agent","项目共享 Agent")} if kind=="personal_agent"{return A.t("Local agent","本地 Agent")} return A.t("Human","人员")}
 A.recipient_state=fn(state){if state=="binding_saved"{return A.t("Recipient binding saved","已保存接收方绑定")} if state=="binding_stale"{return A.t("Recipient binding needs review","接收方绑定需要重新核对")} return A.t("No recipient binding","尚未绑定接收方")}
 A.recipient_saved_state=fn(p){
     if p.result!=nil{return A.flow_delivery("binding_saved")}
@@ -1973,8 +1973,8 @@ A.recipient_reason=fn(code){
     if code=="recipient_not_joined"{return A.t("This recipient has not joined the selected room. Choose a current member or check again later.","此接收方尚未加入所选房间，请选择现有成员或稍后重新检查。")}
     if code=="room_identity_unavailable"{return A.t("The room identity could not be verified. Refresh its current state before continuing.","无法验证此房间身份，请刷新其当前状态后继续。")}
     if code=="sender_cannot_send"{return A.t("Your current account cannot send messages in this room. Ask the room administrator to check its permissions.","当前账号不能在此房间发送消息，请房间管理员检查权限。")}
-    if code=="personal_binding_inactive"{return A.t("This personal agent’s room connection is inactive. Check its existing connection before choosing it.","此个人 Agent 的房间关联尚未启用，请先检查已有的关联。")}
-    if code=="personal_binding_scope_unavailable"{return A.t("This room cannot be used for the selected personal agent. Choose one of its supported connections.","所选个人 Agent 不能使用此房间，请选择其支持的已有房间关联。")}
+    if code=="personal_binding_inactive"{return A.t("This local agent’s room connection is inactive. Check its existing connection before choosing it.","此本地 Agent 的房间关联尚未启用，请先检查已有的关联。")}
+    if code=="personal_binding_scope_unavailable"{return A.t("This room cannot be used for the selected local agent. Choose one of its supported connections.","所选本地 Agent 不能使用此房间，请选择其支持的已有房间关联。")}
     if code=="project_room_inactive"{return A.t("This project room is inactive. Check the project’s current room setup.","此项目房间尚未启用，请检查项目当前的房间设置。")}
     if code=="shared_agent_not_approved"{return A.t("This shared agent has not been approved. Review its project request before selecting it.","此共享 Agent 尚未获批，请先查看项目中的申请状态。")}
     if code=="shared_project_not_ready"{return A.t("This project is not ready. Complete its allocation and Matrix room setup before selecting an agent.","此项目尚未就绪，请先完成资源分配和 Matrix 房间设置。")}
@@ -3311,7 +3311,7 @@ A.recover_native = fn(row){
 }
 A.saved_label = fn(operation){
     if operation=="web_catalog"{return A.t("Resource offers and defaults","资源报价与默认设置")}
-    if A.personal_config_operation(operation){return A.t("Personal-agent model, workspace or tool rules","个人 Agent 模型、工作区或工具规则")}
+    if A.personal_config_operation(operation){return A.t("Local-agent model, workspace or tool rules","本地 Agent 模型、工作区或工具规则")}
     if A.is_template_operation(operation){return A.t("Saved agent template change","已保存的 Agent 模板更改")}
     if A.is_graph_operation(operation){return A.t("Saved graph change","已保存的任务图更改")}
     if A.is_task_operation(operation){return A.t("Saved task change", "已保存的任务更改")}
@@ -3330,8 +3330,8 @@ A.saved_label = fn(operation){
     if operation == "triage_resource_alert" {return A.t("Resource alert update","资源告警处理")}
     if operation == "edit_local_resource" {return A.t("Resource configuration", "资源配置")}
     if operation == "rename_resource" {return A.t("Local resource name", "资源本地名称")}
-    if operation == "personal_agent_observation" {return A.t("Read current personal-agent settings", "读取个人 Agent 当前设置")}
-    if operation == "personal_agent_policy" {return A.t("Personal-agent policy change", "个人 Agent 策略修改")}
+    if operation == "personal_agent_observation" {return A.t("Read current local-agent settings", "读取本地 Agent 当前设置")}
+    if operation == "personal_agent_policy" {return A.t("Local-agent policy change", "本地 Agent 策略修改")}
     if operation == "allocation_decide" {return A.t("Project allocation decision", "项目分配决定")}
     if operation == "allocation_release" {return A.t("Project allocation release", "项目分配释放")}
     if operation == "agent_request" {return A.t("Agent request", "Agent 申请")}
@@ -4119,12 +4119,16 @@ A.render_page = fn(){
         mod.widgets.HagencyTitle{text:if H.entry_role=="owner"{A.t("Agent requests","Agent 申请")}else{A.t("My Agents","我的 Agent")}}
         mod.widgets.HagencyHint{text:if H.entry_role=="owner"{A.t("Review capacity requests for resources you own.","审核使用你所拥有资源的容量申请。")}else{A.t("Agents you requested and manage.","查看你申请并管理的 Agent。")}}
         if H.entry_role=="manager" && H.page=="pool_agents"{mod.widgets.HagencyCard{
-            mod.widgets.HagencySectionTitle{text:A.t("Your own Agents","你自己的 Agent")}
-            mod.widgets.HagencyHint{text:A.t("Agents that run on your device. Budgets and models are in Personal-agent settings; private chat, encryption, Rooms and service are in Local settings.","在你的设备上运行的 Agent。预算与模型在「个人 Agent 设置」；私聊、加密、房间与服务运行在「本地设置」。")}
+            mod.widgets.HagencySectionTitle{text:A.t("Local agents","本地 Agent")}
+            mod.widgets.HagencyHint{text:A.t("Agents that run on your own device and use your own model account.","在你自己的设备上运行、使用你自己模型账号的 Agent。")}
             mod.widgets.HagencyActions{
-                agents_personal := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Personal-agent settings","个人 Agent 设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.person on_click:||A.open_personal_agents(nil,1)}
-                agents_local := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Local settings","本地设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.device on_click:||A.native_open("local_agents")}
+                agents_personal := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Budgets and models","预算与模型") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.person on_click:||A.open_personal_agents(nil,1)}
+                agents_local := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Private chat, encryption and Rooms","私聊、加密与房间") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.device on_click:||A.native_open("local_agents")}
             }
+        }}
+        if H.entry_role=="manager" && H.page=="pool_agents"{View{width:Fill height:Fit flow:Down spacing:4
+            mod.widgets.HagencySectionTitle{text:A.t("Project agents · organization resource pools","项目 Agent · 组织资源池")}
+            mod.widgets.HagencyHint{text:A.t("Agents that use an organization resource pool's capacity. The resource owner approves capacity; you manage the Agent.","使用组织资源池容量的 Agent：资源 owner 审批容量，你负责管理。")}
         }}
         if H.entry_role=="manager" && H.pool_draft!=nil{mod.widgets.HagencyButton{text:A.t("Continue saved application","继续未完成的申请") enabled:!H.busy on_click:||A.navigate("pool_apply")}}
         if H.entry_role=="owner" && H.owner.poolId!=""{mod.widgets.HagencyStatus{flow:Down
@@ -4345,9 +4349,9 @@ A.render_page = fn(){
             }
 
             manager_personal := mod.widgets.HagencyCard{visible:H.entry_role=="manager"
-                mod.widgets.HagencySectionTitle{text:A.t("Personal Agents","个人 Agent")}
+                mod.widgets.HagencySectionTitle{text:A.t("Local Agents","本地 Agent")}
                 mod.widgets.HagencyCopy{text:A.t("Configure your own Agents and their execution-device settings.","配置你自己的 Agent 及其执行设备设置。")}
-                personal_entry := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Personal-agent settings","个人 Agent 设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.person on_click:||A.open_personal_agents(nil,1)}
+                personal_entry := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Local-agent settings","本地 Agent 设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.person on_click:||A.open_personal_agents(nil,1)}
             }
             mod.widgets.HagencyHint{text:A.t("Workspace: ","当前工作台：")+A.entry_label(H.entry_role)}
         }
@@ -6449,14 +6453,14 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
         }}
         if H.page == "personal_agents" {mod.widgets.HagencyDetailCard{
             mod.widgets.HagencyActions{
-                personal_home := mod.widgets.HagencyButton{text:A.t("Overview", "概览") enabled:!H.busy draw_icon.svg:mod.rinx_icons.back icon_walk:Walk{width:16 height:16} on_click: || A.navigate("overview")}
+                personal_home := mod.widgets.HagencyButton{text:A.t("My Agents", "我的 Agent") enabled:!H.busy draw_icon.svg:mod.rinx_icons.back icon_walk:Walk{width:16 height:16} on_click: || A.navigate("agent_home")}
                 personal_refresh := mod.widgets.HagencyButton{text:A.t("Refresh", "刷新") enabled:!H.busy draw_icon.svg:mod.rinx_icons.refresh icon_walk:Walk{width:16 height:16} on_click: || A.open_personal_agents(H.personal_after,H.personal_page)}
             }
-            mod.widgets.HagencyTitle{text:A.t("Personal agents", "个人 Agent")}
-            mod.widgets.HagencyCopy{text:A.t("Your personal Agents and their execution-device settings. Resource-pool Agents are listed under My Agents.", "查看个人 Agent 及执行设备设置；资源池 Agent 请在“我的 Agent”中管理。")}
-            if H.personal_list == nil {mod.widgets.HagencyHint{text:if H.busy {A.t("Reading personal agents…", "正在读取个人 Agent…")} else {A.t("No current agent list", "暂无当前 Agent 列表")}}}
+            mod.widgets.HagencyTitle{text:A.t("Local agents", "本地 Agent")}
+            mod.widgets.HagencyCopy{text:A.t("Your local Agents and their execution-device settings. Project (resource-pool) Agents are listed under My Agents.", "查看本地 Agent 及执行设备设置；项目（资源池）Agent 在「我的 Agent」中管理。")}
+            if H.personal_list == nil {mod.widgets.HagencyHint{text:if H.busy {A.t("Reading local agents…", "正在读取本地 Agent…")} else {A.t("No current agent list", "暂无当前 Agent 列表")}}}
             if H.personal_list != nil {View{width:Fill height:Fit flow:Down spacing:12
-                if H.personal_list.items.len() == 0 {mod.widgets.HagencyHint{text:A.t("No personal agents on this page", "此页暂无个人 Agent")}}
+                if H.personal_list.items.len() == 0 {mod.widgets.HagencyHint{text:A.t("No local agents on this page", "此页暂无本地 Agent")}}
                 for row in H.personal_list.items {mod.widgets.HagencySection{
                     mod.widgets.HagencySectionTitle{text:row.displayName}
                     mod.widgets.HagencyHint{text:row.id}
@@ -6471,7 +6475,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
         }}
         if H.page == "personal_agent" {mod.widgets.HagencyDetailCard{
             mod.widgets.HagencyActions{
-                personal_back := mod.widgets.HagencyButton{text:A.t("Personal agents", "个人 Agent") enabled:!H.busy draw_icon.svg:mod.rinx_icons.back icon_walk:Walk{width:16 height:16} on_click: || A.open_personal_agents(H.personal_after,H.personal_page)}
+                personal_back := mod.widgets.HagencyButton{text:A.t("Local agents", "本地 Agent") enabled:!H.busy draw_icon.svg:mod.rinx_icons.back icon_walk:Walk{width:16 height:16} on_click: || A.open_personal_agents(H.personal_after,H.personal_page)}
                 personal_reload := mod.widgets.HagencyButton{text:A.t("Refresh", "刷新") enabled:!H.busy draw_icon.svg:mod.rinx_icons.refresh icon_walk:Walk{width:16 height:16} on_click: || A.open_personal_agent(H.personal_id)}
             }
             if H.personal_config.result != nil {mod.widgets.HagencySection{
@@ -6636,9 +6640,9 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 }}
             }
             mod.widgets.HagencyCard{
-                mod.widgets.HagencySectionTitle{text:A.t("Personal agents","个人 Agent")}
-                mod.widgets.HagencyHint{text:A.t("Budgets, models, workspace and approval preferences for your own agents.","管理个人 Agent 的预算、模型、工作区与审批偏好。")}
-                overview_personal := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Personal-agent settings","个人 Agent 设置") on_click:||A.open_personal_agents(nil,1)}
+                mod.widgets.HagencySectionTitle{text:A.t("Local agents","本地 Agent")}
+                mod.widgets.HagencyHint{text:A.t("Budgets, models, workspace and approval preferences for your own agents.","管理本地 Agent 的预算、模型、工作区与审批偏好。")}
+                overview_personal := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Local-agent settings","本地 Agent 设置") on_click:||A.open_personal_agents(nil,1)}
             }
             mod.widgets.HagencyRow{
                 View{width:Fill height:Fit flow:Down spacing:4

@@ -1236,6 +1236,9 @@ impl MiniAppsPanel {
                     self.dispatch(&req.service, args, Some((req.heap_key, req.req_id)), None)
                 }
             });
+            if req.service == "hagency.navigation.open" {
+                log!("Hagency navigation {}: {:?}", req.args_json, result);
+            }
             if req.service == "rinx.event" || req.service == "hagency.navigation.open" || result.is_err() {
                 splash_host_respond(
                     cx,
