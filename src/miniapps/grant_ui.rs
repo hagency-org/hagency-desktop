@@ -1,7 +1,7 @@
 //! Trusted native owner grant screen. The package cannot render or acknowledge
 //! this confirmation; its reply contains only public progress and original IDs.
 use super::*;
-use crate::host::hagency::grants::{GrantChoices, GrantFlow, GrantResult};
+use crate::host::hagency::grants::{GrantChoices, GrantFlow, GrantResult, month_ended, now_ms};
 use ::hagency::native_owner::{
     OwnerGrantProgress, OwnerGrantReview, OwnerGrantState, OwnerGrantPublicationReview,
     OwnerGrantPublicationProgress, OwnerGrantPublicationState, OwnerGrantCancellationReview,
@@ -24,6 +24,8 @@ pub(super) struct GrantPrompt {
     /// The script's proposed tokens, shown beside the current amount until the
     /// owner submits terms natively. Only the native tokens field commits.
     proposal: Option<u64>,
+    /// The owner asked for this month's limits after a grant's month ended.
+    regrant: bool,
 }
 enum Phase {
     Loading,
@@ -88,13 +90,18 @@ fn fill_form_defaults(draft: &mut GrantChoices, form: &OwnerGrantForm) {
 }
 /// Whether a phase offers the native primary action. A proposal never changes
 /// this; in particular a published grant is only shown, never replaced here.
+/// A grant whose UTC month ended can be followed by this month's grant.
 fn primary_available(
     phase: &Phase,
     form: Option<&OwnerGrantForm>,
     draft: &GrantChoices,
     has_original: bool,
     can_choose_new_limits: bool,
+    now: u64,
 ) -> bool {
+    if ended_grant(phase, now) {
+        return can_choose_new_limits;
+    }
     match phase {
         Phase::Choose => form.is_some_and(|f| form_choices_valid(f, draft)),
         Phase::Review(review) => !review.expired() && review.capacity_available(),
@@ -121,18 +128,33 @@ fn primary_available(
         _ => false,
     }
 }
-/// The server has accepted a grant for this pool's current admission. It
-/// accepts only one per admission, even after revocation or expiry, so a
-/// proposal is never applied here and nothing is revoked to make room.
-fn published_grant(phase: &Phase) -> bool {
+/// A recorded grant whose UTC month has ended. The pool has no capacity from
+/// it any more, and this month's grant may follow it on the same admission.
+fn ended_grant(phase: &Phase, now: u64) -> bool {
+    match phase {
+        Phase::PublicationProgress(p) => month_ended(&p.summary, now),
+        Phase::Progress(p) => {
+            matches!(p.state, OwnerGrantState::Recorded)
+                && p.closure.is_none()
+                && month_ended(&p.summary, now)
+        }
+        _ => false,
+    }
+}
+/// The server has accepted a grant for this pool's current admission and
+/// month. It accepts only one per admission each month, even after
+/// revocation, so a proposal is never applied here and nothing is revoked to
+/// make room. Once that month has ended the grant no longer blocks a proposal.
+fn published_grant(phase: &Phase, now: u64) -> bool {
     matches!(phase, Phase::PublicationProgress(p) if matches!(p.state, OwnerGrantPublicationState::ServerObserved))
+        && !ended_grant(phase, now)
 }
 /// The pool's current per-request limit: the tokens of a grant the server last
 /// reported as active. Reserved, rejected, revoked or expired grants set none.
-fn live_grant_tokens(phase: &Phase) -> Option<u64> {
+fn live_grant_tokens(phase: &Phase, now: u64) -> Option<u64> {
     match phase {
         Phase::PublicationProgress(p)
-            if published_grant(phase) && p.server_state.as_deref() == Some("active") =>
+            if published_grant(phase, now) && p.server_state.as_deref() == Some("active") =>
         {
             Some(p.summary.allocated_tokens)
         }
@@ -140,14 +162,15 @@ fn live_grant_tokens(phase: &Phase) -> Option<u64> {
     }
 }
 /// What the mini app learns when the panel closes. A proposal still pending
-/// beside this admission's published grant was never applied: say why.
+/// beside this month's published grant was never applied: say why.
 fn close_reply(
     phase: &Phase,
     proposal: Option<u64>,
     in_flight: bool,
     original: Option<&str>,
+    now: u64,
 ) -> Result<String, String> {
-    if proposal.is_some() && published_grant(phase) {
+    if proposal.is_some() && published_grant(phase, now) {
         return Err("pool_grant_already_published".into());
     }
     match phase {
@@ -158,18 +181,31 @@ fn close_reply(
 }
 /// An unattempted original reserves nothing; cancelling it reopens new limits.
 const PENDING_NOTE: &str = "The proposed limit is not applied to this pending reservation. To use it, cancel the pending reservation, then choose new limits.";
+/// One grant per admission per UTC month, even after revocation.
+const PUBLISHED_NOTE: &str = "This pool already has a published grant for this month on its current admission, and the server accepts one grant per admission each month, so the proposed limit is not applied. Nothing was revoked or changed.";
+/// Shown for a grant whose month ended: the pool is closed until the owner
+/// publishes this month's grant, which needs last month's Agents settled.
+const ENDED_STATUS: &str = "This grant's UTC month has ended, so the pool has no capacity. Choose this month's limits to publish it again. Last month's Agents must first stop and report their final usage, which happens only while this device is online after the month ends (00:00 UTC).";
+/// This month's form cannot show capacity while last month's usage is unknown.
+const REGRANT_UNKNOWN_STATUS: &str = "Available capacity is unknown until last month's Agents stop and report their final usage. Keep this device online, then refresh.";
 /// Native text for a script's proposed per-request limit: the current limit,
 /// the amount this screen would commit, and why a phase does not use it.
-fn proposal_notice(phase: &Phase, proposal: Option<u64>, draft_tokens: &str) -> Option<String> {
+fn proposal_notice(
+    phase: &Phase,
+    proposal: Option<u64>,
+    draft_tokens: &str,
+    now: u64,
+) -> Option<String> {
     let proposal = proposal?;
     let (new, note) = match phase {
         Phase::Loading => return None,
         // The form commits only what its tokens field holds now.
         Phase::Choose => (draft_tokens.trim().parse::<u64>().ok(), None),
-        phase if published_grant(phase) => (
+        phase if ended_grant(phase, now) => (
             Some(proposal),
-            Some("This pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed."),
+            Some("The proposed limit is filled in when you choose this month's limits."),
         ),
+        phase if published_grant(phase, now) => (Some(proposal), Some(PUBLISHED_NOTE)),
         Phase::Progress(p)
             if matches!(p.state, OwnerGrantState::Declined)
                 || (matches!(p.state, OwnerGrantState::Recorded) && p.closure.is_some()) =>
@@ -190,7 +226,7 @@ fn proposal_notice(phase: &Phase, proposal: Option<u64>, draft_tokens: &str) -> 
             Some("The proposed limit is not applied to this existing grant. It keeps the amounts shown below."),
         ),
     };
-    let current = live_grant_tokens(phase)
+    let current = live_grant_tokens(phase, now)
         .map(|tokens| amount(Some(tokens)))
         .unwrap_or_else(|| crate::i18n::tr("None active").into());
     let mut text = crate::i18n::format(
@@ -219,6 +255,7 @@ fn grant_failure_code(code: &str) -> &'static str {
         "management_features_invalid" => "management_features_invalid",
         "owner_grant_prior_intent_required" => "owner_grant_prior_intent_required",
         "owner_grant_new_admission_required" => "owner_grant_new_admission_required",
+        "management_monthly_regrant_required" => "management_monthly_regrant_required",
         "management_backing_changed" => "management_backing_changed",
         "management_capacity" => "management_capacity",
         "management_drain_outcome_unknown" => "management_drain_outcome_unknown",
@@ -308,6 +345,9 @@ fn failure_message(code: &str) -> &'static str {
         "management_admission_receipts_required" => {
             "The server is not accepting grants for this admission. Check with its administrator."
         }
+        "management_monthly_regrant_required" => {
+            "This server does not accept a new month's grant on the same admission yet. Ask its administrator to update the server."
+        }
         "management_features_invalid" => {
             "Server support for this grant could not be verified. Refresh the connection and try again."
         }
@@ -348,6 +388,7 @@ impl GrantPrompt {
                 &self.draft,
                 self.original.is_some(),
                 self.flow.can_choose_new_limits(),
+                now_ms(),
             )
     }
     fn can_recover(&self) -> bool {
@@ -432,6 +473,7 @@ impl MiniAppsPanel {
             form: None,
             submit_publication: false,
             proposal,
+            regrant: false,
         });
         self.grant_job(async move { flow.open().await });
         self.present_grant_confirmation(cx);
@@ -470,6 +512,7 @@ impl MiniAppsPanel {
         let Some(prompt) = &self.grant_confirmation else {
             return;
         };
+        let now = now_ms();
         self.view.view(cx, ids!(app_content)).set_visible(cx, false);
         self.view.view(cx, ids!(approval)).set_visible(cx, false);
         self.view
@@ -523,6 +566,8 @@ impl MiniAppsPanel {
             Phase::Loading=>status=tr(if prompt.submit_publication {"Publishing resource pool…"} else {"Loading publication status…"}).into(),
             Phase::Choose=>status=tr(if prompt.form.as_ref().is_some_and(|f| f.context.remaining_tokens.is_some_and(|n|n>0)) {
                 "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server."
+            } else if prompt.regrant && prompt.form.as_ref().is_some_and(|f| f.context.remaining_tokens.is_none()) {
+                REGRANT_UNKNOWN_STATUS
             } else {"Available capacity is unknown or insufficient. This review cannot be confirmed."}).into(),
             Phase::Review(review)=> {
                 primary="Publish resource pool";
@@ -591,6 +636,10 @@ impl MiniAppsPanel {
             },
             Phase::Failed(code)=>status=tr(failure_message(code)).into(),
         }
+        if ended_grant(&prompt.phase, now) {
+            primary = "Choose this month's limits";
+            status = tr(ENDED_STATUS).into();
+        }
         if !prompt.flow.active() {
             status =
                 tr("The account or session changed. Open a fresh review after signing in.").into();
@@ -598,7 +647,7 @@ impl MiniAppsPanel {
         self.view
             .label(cx, ids!(grant_confirmation.scroll.status))
             .set_text(cx, &status);
-        let notice = proposal_notice(&prompt.phase, prompt.proposal, &prompt.draft.tokens);
+        let notice = proposal_notice(&prompt.phase, prompt.proposal, &prompt.draft.tokens, now);
         self.view
             .widget(cx, ids!(grant_confirmation.scroll.change))
             .set_visible(cx, notice.is_some());
@@ -761,7 +810,12 @@ impl MiniAppsPanel {
             self_approval: false,
         };
         // Keep the shown new amount equal to what the tokens field would commit.
-        let notice = proposal_notice(&prompt.phase, prompt.proposal, &prompt.draft.tokens);
+        let notice = proposal_notice(
+            &prompt.phase,
+            prompt.proposal,
+            &prompt.draft.tokens,
+            now_ms(),
+        );
         self.view
             .label(cx, ids!(grant_confirmation.scroll.change))
             .set_text(cx, notice.as_deref().unwrap_or_default());
@@ -777,7 +831,14 @@ impl MiniAppsPanel {
             return;
         }
         let flow = prompt.flow.clone();
+        let now = now_ms();
         match std::mem::replace(&mut prompt.phase, Phase::Loading) {
+            // Before any other action on a recorded grant: its month ended, so
+            // the only step is this month's grant, never publishing the old one.
+            phase if ended_grant(&phase, now) => {
+                prompt.regrant = true;
+                self.grant_job(async move { flow.choose_new_limits().await });
+            }
             Phase::Choose => {
                 let choices = prompt.draft.clone();
                 if let Err(code) = choices.clone().parse() {
@@ -865,10 +926,14 @@ impl MiniAppsPanel {
         let flow = prompt.flow.clone();
         let id = prompt.original.clone();
         let publishing = prompt.publishing;
+        // This month's form refreshes its capacity, e.g. once last month's
+        // Agents have reported their final usage.
+        let regrant = prompt.regrant;
         self.grant_job(async move {
             match id {
                 Some(id) if publishing => flow.publication_review(id).await,
                 Some(id) => flow.recover(id).await,
+                None if regrant => flow.choose_new_limits().await,
                 None => flow.open().await,
             }
         });
@@ -880,7 +945,13 @@ impl MiniAppsPanel {
         };
         // Close never mutates the private journal. An in-flight effect keeps
         // its original native custody even when the screen/reply disappears.
-        let reply=close_reply(&prompt.phase,prompt.proposal,prompt.receiver.is_some(),prompt.original.as_deref());
+        let reply = close_reply(
+            &prompt.phase,
+            prompt.proposal,
+            prompt.receiver.is_some(),
+            prompt.original.as_deref(),
+            now_ms(),
+        );
         splash_host_respond(
             cx,
             prompt.reply.0,
@@ -1064,6 +1135,9 @@ mod tests {
             }),
         })
     }
+    /// Inside the fixtures' 2026-10 month, and that month's end (2026-11-01).
+    const OCTOBER: u64 = 1_792_000_000_000;
+    const NOVEMBER: u64 = 1_793_491_200_000;
     #[test]
     fn proposal_prefills_only_the_native_tokens_field_and_is_never_lowered() {
         let form = pool_form(10_000_000);
@@ -1098,36 +1172,36 @@ mod tests {
         // is whatever the native tokens field holds now.
         for (field, shown) in [("3000000", "3 M"), ("2500000", "2.5 M"), ("2.5", "Unavailable")] {
             assert_eq!(
-                proposal_notice(&Phase::Choose, Some(3_000_000), field).as_deref(),
+                proposal_notice(&Phase::Choose, Some(3_000_000), field, OCTOBER).as_deref(),
                 Some(format!("Per-request limit: None active → {shown}").as_str())
             );
         }
-        assert!(proposal_notice(&Phase::Choose, None, "3000000").is_none());
-        assert!(proposal_notice(&Phase::Loading, Some(3_000_000), "").is_none());
-        let declined = proposal_notice(&progress(OwnerGrantState::Declined, false), Some(3_000_000), "").unwrap();
+        assert!(proposal_notice(&Phase::Choose, None, "3000000", OCTOBER).is_none());
+        assert!(proposal_notice(&Phase::Loading, Some(3_000_000), "", OCTOBER).is_none());
+        let declined = proposal_notice(&progress(OwnerGrantState::Declined, false), Some(3_000_000), "", OCTOBER).unwrap();
         assert_eq!(declined, "Per-request limit: None active → 3 M\nThe proposed limit is filled in when you choose new limits.");
-        let closed = proposal_notice(&progress(OwnerGrantState::Recorded, true), Some(3_000_000), "").unwrap();
+        let closed = proposal_notice(&progress(OwnerGrantState::Recorded, true), Some(3_000_000), "", OCTOBER).unwrap();
         assert!(closed.ends_with("filled in when you choose new limits."), "{closed}");
-        let failed = proposal_notice(&Phase::Failed("owner_grant_prior_intent_required".into()), Some(3_000_000), "").unwrap();
+        let failed = proposal_notice(&Phase::Failed("owner_grant_prior_intent_required".into()), Some(3_000_000), "", OCTOBER).unwrap();
         assert!(failed.ends_with("\nThe proposed limit was not applied."), "{failed}");
     }
     #[test]
-    fn published_grant_is_shown_read_only_and_never_replaced() {
-        const PUBLISHED: &str = "This pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed.";
+    fn published_grant_is_shown_read_only_and_never_replaced_in_its_month() {
         let live = publication(OwnerGrantPublicationState::ServerObserved, Some("active"));
-        assert_eq!(live_grant_tokens(&live), Some(2_000_000));
+        assert_eq!(live_grant_tokens(&live, OCTOBER), Some(2_000_000));
         assert_eq!(
-            proposal_notice(&live, Some(3_000_000), "").unwrap(),
-            format!("Per-request limit: 2 M → 3 M\n{PUBLISHED}")
+            proposal_notice(&live, Some(3_000_000), "", OCTOBER).unwrap(),
+            format!("Per-request limit: 2 M → 3 M\n{PUBLISHED_NOTE}")
         );
-        // Revoked or expired grants still used this admission: no current limit,
-        // and the proposal still cannot become a second grant.
+        // A grant revoked, or expired by its delegation, within its month still
+        // used this month of the admission: no current limit, and the proposal
+        // still cannot become a second grant this month.
         for server in ["revoked", "expired"] {
             let used = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
-            assert_eq!(live_grant_tokens(&used), None);
+            assert_eq!(live_grant_tokens(&used, OCTOBER), None);
             assert_eq!(
-                proposal_notice(&used, Some(3_000_000), "").unwrap(),
-                format!("Per-request limit: None active → 3 M\n{PUBLISHED}")
+                proposal_notice(&used, Some(3_000_000), "", OCTOBER).unwrap(),
+                format!("Per-request limit: None active → 3 M\n{PUBLISHED_NOTE}")
             );
         }
         // No proposal, applicant or selector flag offers a commit beside a
@@ -1137,15 +1211,94 @@ mod tests {
         fill_form_defaults(&mut draft, &form);
         draft.coordinator = "@owner:test".into();
         draft.managers = "@manager:test".into();
-        assert!(primary_available(&Phase::Choose, Some(&form), &draft, false, true));
+        assert!(primary_available(
+            &Phase::Choose,
+            Some(&form),
+            &draft,
+            false,
+            true,
+            OCTOBER
+        ));
         for server in ["active", "revoked", "expired"] {
             let phase = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
             for has_original in [false, true] {
                 for can_choose_new_limits in [false, true] {
-                    assert!(!primary_available(&phase, Some(&form), &draft, has_original, can_choose_new_limits));
+                    assert!(!primary_available(
+                        &phase,
+                        Some(&form),
+                        &draft,
+                        has_original,
+                        can_choose_new_limits,
+                        OCTOBER
+                    ));
                 }
             }
         }
+    }
+    #[test]
+    fn ended_month_grant_no_longer_blocks_a_proposal_and_offers_this_month() {
+        const ENDED_NOTE: &str =
+            "The proposed limit is filled in when you choose this month's limits.";
+        let form = pool_form(10_000_000);
+        let draft = initial_draft(Some(3_000_000));
+        // Once its UTC month has ended, a published grant (the server reports
+        // it expired) or an unpublished recorded one no longer blocks: the
+        // pool has no limit and the panel offers this month's limits instead.
+        for phase in [
+            publication(OwnerGrantPublicationState::ServerObserved, Some("expired")),
+            publication(OwnerGrantPublicationState::ServerObserved, Some("active")),
+            publication(OwnerGrantPublicationState::ServerObserved, Some("revoked")),
+            publication(OwnerGrantPublicationState::OutcomeUnknown, None),
+            publication(OwnerGrantPublicationState::Rejected, None),
+            progress(OwnerGrantState::Recorded, false),
+        ] {
+            assert!(ended_grant(&phase, NOVEMBER) && !ended_grant(&phase, NOVEMBER - 1));
+            assert!(!published_grant(&phase, NOVEMBER));
+            assert_eq!(live_grant_tokens(&phase, NOVEMBER), None);
+            assert_eq!(
+                proposal_notice(&phase, Some(3_000_000), "", NOVEMBER).unwrap(),
+                format!("Per-request limit: None active → 3 M\n{ENDED_NOTE}")
+            );
+            assert!(primary_available(
+                &phase,
+                Some(&form),
+                &draft,
+                true,
+                true,
+                NOVEMBER
+            ));
+            assert!(!primary_available(
+                &phase,
+                Some(&form),
+                &draft,
+                true,
+                false,
+                NOVEMBER
+            ));
+            // Closing keeps the public progress, never pool_grant_already_published.
+            let reply: serde_json::Value = serde_json::from_str(
+                &close_reply(&phase, Some(3_000_000), false, Some("original"), NOVEMBER).unwrap(),
+            )
+            .unwrap();
+            assert_eq!(reply["summary"]["periodKey"], "2026-10");
+        }
+        // Unresolved, declined and closed originals keep their own handling.
+        for phase in [
+            progress(OwnerGrantState::OutcomeUnknown, false),
+            progress(OwnerGrantState::ReviewExpired, false),
+            progress(OwnerGrantState::Declined, false),
+            progress(OwnerGrantState::Recorded, true),
+        ] {
+            assert!(!ended_grant(&phase, NOVEMBER));
+        }
+        assert!(!primary_available(
+            &progress(OwnerGrantState::OutcomeUnknown, false),
+            None,
+            &draft,
+            true,
+            true,
+            NOVEMBER
+        ));
     }
     #[test]
     fn other_originals_keep_their_amounts_and_their_own_actions() {
@@ -1156,52 +1309,87 @@ mod tests {
             progress(OwnerGrantState::Recorded, false),
             progress(OwnerGrantState::OutcomeUnknown, false),
         ] {
-            assert_eq!(live_grant_tokens(&phase), None);
-            assert_eq!(proposal_notice(&phase, Some(3_000_000), "").unwrap(), EXISTING);
+            assert_eq!(live_grant_tokens(&phase, OCTOBER), None);
+            assert_eq!(
+                proposal_notice(&phase, Some(3_000_000), "", OCTOBER).unwrap(),
+                EXISTING
+            );
         }
         // An unattempted original reserved nothing; cancelling it reopens the form.
         for state in [OwnerGrantState::ReviewRequired, OwnerGrantState::ReviewExpired] {
             assert_eq!(
-                proposal_notice(&progress(state, false), Some(3_000_000), "").unwrap(),
+                proposal_notice(&progress(state, false), Some(3_000_000), "", OCTOBER).unwrap(),
                 format!("Per-request limit: None active → 3 M\n{PENDING_NOTE}")
             );
         }
         // A proposal adds or removes no action on an existing original.
         let draft = initial_draft(Some(3_000_000));
-        assert!(primary_available(&progress(OwnerGrantState::Recorded, false), None, &draft, true, true));
-        assert!(!primary_available(&progress(OwnerGrantState::OutcomeUnknown, false), None, &draft, true, true));
+        assert!(primary_available(
+            &progress(OwnerGrantState::Recorded, false),
+            None,
+            &draft,
+            true,
+            true,
+            OCTOBER
+        ));
+        assert!(!primary_available(
+            &progress(OwnerGrantState::OutcomeUnknown, false),
+            None,
+            &draft,
+            true,
+            true,
+            OCTOBER
+        ));
     }
     #[test]
     fn closing_beside_a_published_grant_names_why_the_proposal_was_not_applied() {
         for server in ["active", "revoked", "expired"] {
             let phase = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
             assert_eq!(
-                close_reply(&phase, Some(3_000_000), false, Some("original")),
+                close_reply(&phase, Some(3_000_000), false, Some("original"), OCTOBER),
                 Err("pool_grant_already_published".into())
             );
             // Without a proposal the reply stays the public publication status.
             let reply: serde_json::Value =
-                serde_json::from_str(&close_reply(&phase, None, false, Some("original")).unwrap()).unwrap();
+                serde_json::from_str(&close_reply(&phase, None, false, Some("original"), OCTOBER).unwrap()).unwrap();
             assert_eq!(reply["state"], "server_observed");
             assert_eq!(reply["serverState"], server);
             assert_eq!(reply["summary"]["allocatedTokens"], 2_000_000);
         }
         // Other outcomes keep their public progress so the app can recover them.
         let reserved: serde_json::Value = serde_json::from_str(
-            &close_reply(&progress(OwnerGrantState::Recorded, false), Some(3_000_000), false, Some("original")).unwrap(),
+            &close_reply(&progress(OwnerGrantState::Recorded, false), Some(3_000_000), false, Some("original"), OCTOBER).unwrap(),
         ).unwrap();
         assert_eq!(reserved["state"], "recorded");
         assert_eq!(reserved["summary"]["allocatedTokens"], 2_000_000);
-        let unknown = close_reply(&publication(OwnerGrantPublicationState::OutcomeUnknown, None), Some(3_000_000), false, Some("original"));
+        let unknown = close_reply(
+            &publication(OwnerGrantPublicationState::OutcomeUnknown, None),
+            Some(3_000_000),
+            false,
+            Some("original"),
+            OCTOBER,
+        );
         assert!(unknown.unwrap().contains("\"state\":\"outcome_unknown\""));
         // Closing the form itself applies nothing and names no grant.
         let parsed = |reply: Result<String, String>| serde_json::from_str::<serde_json::Value>(&reply.unwrap()).unwrap();
         assert_eq!(
-            parsed(close_reply(&Phase::Choose, Some(3_000_000), false, None)),
+            parsed(close_reply(
+                &Phase::Choose,
+                Some(3_000_000),
+                false,
+                None,
+                OCTOBER
+            )),
             json!({"state":"review_closed","intentId":null})
         );
         assert_eq!(
-            parsed(close_reply(&Phase::Loading, Some(3_000_000), true, None)),
+            parsed(close_reply(
+                &Phase::Loading,
+                Some(3_000_000),
+                true,
+                None,
+                OCTOBER
+            )),
             json!({"state":"outcome_unknown","intentId":null})
         );
     }
@@ -1276,9 +1464,9 @@ mod layout_tests {
             // The proposed-limit line sits above the form and the details.
             panel.view.widget(&cx, ids!(grant_confirmation.scroll.change)).set_visible(&mut cx, true);
             panel.view.label(&cx, ids!(grant_confirmation.scroll.change)).set_text(&mut cx, if cn {
-                "每次申请上限：2 M → 3 M\n此资源池在当前准入下已发布过授权，而服务器每次准入只接受一个授权，因此提议的上限未生效。没有撤销或更改任何授权。"
+                "每次申请上限：2 M → 3 M\n此资源池在当前准入下本月已发布过授权，而服务器每次准入每月只接受一个授权，因此提议的上限未生效。没有撤销或更改任何授权。"
             } else {
-                "Per-request limit: 2 M → 3 M\nThis pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed."
+                "Per-request limit: 2 M → 3 M\nThis pool already has a published grant for this month on its current admission, and the server accepts one grant per admission each month, so the proposed limit is not applied. Nothing was revoked or changed."
             });
             if cn {
                 for (id, text) in [
@@ -1372,6 +1560,7 @@ mod diagnostic_tests {
     fn grant_diagnostics_only_accept_exact_static_codes() {
         for code in [
             "management_access_required",
+            "management_monthly_regrant_required",
             "management_backing_changed",
             "management_capacity",
             "management_drain_outcome_unknown",

@@ -2270,7 +2270,7 @@
   "Tokens to publish (M)": "发布额度（M tokens）",
   "None active": "暂无生效授权",
   "Per-request limit: {current} → {new}": "每次申请上限：{current} → {new}",
-  "This pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed.": "此资源池在当前准入下已发布过授权，而服务器每次准入只接受一个授权，因此提议的上限未生效。没有撤销或更改任何授权。",
+  "This pool already has a published grant for this month on its current admission, and the server accepts one grant per admission each month, so the proposed limit is not applied. Nothing was revoked or changed.": "此资源池在当前准入下本月已发布过授权，而服务器每次准入每月只接受一个授权，因此提议的上限未生效。没有撤销或更改任何授权。",
   "The proposed limit is not applied to this pending reservation. To use it, cancel the pending reservation, then choose new limits.": "提议的上限不会用于这项待确认的预留。如需使用，请先取消该预留，再选择新的额度。",
   "The proposed limit is filled in when you choose new limits.": "选择新的额度时会自动填入提议的上限。",
   "The proposed limit was not applied.": "提议的上限未生效。",
@@ -2289,5 +2289,10 @@
   "Could not enable end-to-end encryption. Try again.": "未能开启端到端加密，请重试。",
   "Turning on end-to-end encryption…": "正在开启端到端加密…",
   "Your private chat with this Agent is ready and end-to-end encrypted. Matrix cannot turn encryption off again.": "你与此 Agent 的私聊已准备好，并已开启端到端加密（Matrix 不支持再关闭）。",
-  "End-to-end encryption": "端到端加密"
+  "End-to-end encryption": "端到端加密",
+  "Choose this month's limits": "选择本月额度",
+  "This grant's UTC month has ended, so the pool has no capacity. Choose this month's limits to publish it again. Last month's Agents must first stop and report their final usage, which happens only while this device is online after the month ends (00:00 UTC).": "此授权所在的 UTC 自然月已结束，资源池目前没有容量。请选择本月额度并重新发布。上月的 Agent 必须先停止并报告最终用量，这只有在月末（UTC 00:00）之后本设备保持在线时才会完成。",
+  "Available capacity is unknown until last month's Agents stop and report their final usage. Keep this device online, then refresh.": "在上月的 Agent 停止并报告最终用量之前，可用容量未知。请保持本设备在线，然后刷新。",
+  "The proposed limit is filled in when you choose this month's limits.": "选择本月额度时会自动填入提议的上限。",
+  "This server does not accept a new month's grant on the same admission yet. Ask its administrator to update the server.": "此服务器尚不支持在同一准入下发布新月份的授权，请联系服务器管理员更新服务器。"
 }

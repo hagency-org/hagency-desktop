@@ -2251,7 +2251,7 @@
   "Tokens to publish (M)": "Tokens to publish (M)",
   "None active": "None active",
   "Per-request limit: {current} → {new}": "Per-request limit: {current} → {new}",
-  "This pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed.": "This pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed.",
+  "This pool already has a published grant for this month on its current admission, and the server accepts one grant per admission each month, so the proposed limit is not applied. Nothing was revoked or changed.": "This pool already has a published grant for this month on its current admission, and the server accepts one grant per admission each month, so the proposed limit is not applied. Nothing was revoked or changed.",
   "The proposed limit is not applied to this pending reservation. To use it, cancel the pending reservation, then choose new limits.": "The proposed limit is not applied to this pending reservation. To use it, cancel the pending reservation, then choose new limits.",
   "The proposed limit is filled in when you choose new limits.": "The proposed limit is filled in when you choose new limits.",
   "The proposed limit was not applied.": "The proposed limit was not applied.",
@@ -2289,5 +2289,10 @@
   "This message was blocked by the budget limit. After the resource owner adds capacity, send a new message.": "This message was blocked by the budget limit. After the resource owner adds capacity, send a new message.",
   "Turning on end-to-end encryption…": "Turning on end-to-end encryption…",
   "Your private chat with this Agent is ready and end-to-end encrypted. Matrix cannot turn encryption off again.": "Your private chat with this Agent is ready and end-to-end encrypted. Matrix cannot turn encryption off again.",
-  "End-to-end encryption": "End-to-end encryption"
+  "End-to-end encryption": "End-to-end encryption",
+  "Choose this month's limits": "Choose this month's limits",
+  "This grant's UTC month has ended, so the pool has no capacity. Choose this month's limits to publish it again. Last month's Agents must first stop and report their final usage, which happens only while this device is online after the month ends (00:00 UTC).": "This grant's UTC month has ended, so the pool has no capacity. Choose this month's limits to publish it again. Last month's Agents must first stop and report their final usage, which happens only while this device is online after the month ends (00:00 UTC).",
+  "Available capacity is unknown until last month's Agents stop and report their final usage. Keep this device online, then refresh.": "Available capacity is unknown until last month's Agents stop and report their final usage. Keep this device online, then refresh.",
+  "The proposed limit is filled in when you choose this month's limits.": "The proposed limit is filled in when you choose this month's limits.",
+  "This server does not accept a new month's grant on the same admission yet. Ask its administrator to update the server.": "This server does not accept a new month's grant on the same admission yet. Ask its administrator to update the server."
 }

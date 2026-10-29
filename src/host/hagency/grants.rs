@@ -5,7 +5,7 @@ use ::hagency::native_owner::{
     OwnerGrantAccess, OwnerGrantChoices, OwnerGrantProgress, OwnerGrantReview,
     OwnerGrantReviewResult, OwnerGrantPublicationReview, OwnerGrantPublicationResult,
     OwnerGrantPublicationProgress, OwnerGrantCancellationReview, OwnerGrantCancellationResult,
-    OwnerGrantState, OwnerGrantForm,
+    OwnerGrantState, OwnerGrantForm, OwnerGrantSummary,
 };
 use serde::Deserialize;
 use serde_json::Value;
@@ -117,14 +117,27 @@ pub(crate) enum GrantResult {
     PublicationProgress(Box<OwnerGrantPublicationProgress>),
     CancellationReview(Box<OwnerGrantCancellationReview>),
 }
-// Journal order is creation order. Cancelled or canonically closed originals
-// remain in history without hiding a pending, unknown or active original.
-fn existing_progress(records: Vec<OwnerGrantProgress>) -> Result<Option<OwnerGrantProgress>, String> {
+pub(crate) fn now_ms() -> u64 {
+    u64::try_from(chrono::Utc::now().timestamp_millis()).unwrap_or(0)
+}
+/// A grant's UTC month has ended. Its receipt stays history; the server and the
+/// native ledger accept one new grant for the same admission in a later month.
+pub(crate) fn month_ended(summary: &OwnerGrantSummary, now: u64) -> bool {
+    summary.period_end_ms <= now
+}
+// Journal order is creation order. Cancelled, canonically closed or ended
+// originals remain in history without hiding a pending, unknown or active original.
+fn existing_progress(
+    records: Vec<OwnerGrantProgress>,
+    now: u64,
+) -> Result<Option<OwnerGrantProgress>, String> {
     let mut pending = None;
     let mut declined = None;
     for record in records {
         if matches!(record.state, OwnerGrantState::Declined)
-            || (matches!(record.state, OwnerGrantState::Recorded) && record.closure.is_some()) {
+            || (matches!(record.state, OwnerGrantState::Recorded)
+                && (record.closure.is_some() || month_ended(&record.summary, now)))
+        {
             declined = Some(record);
         } else if pending.replace(record).is_some() {
             return Err("owner_grant_history_unavailable".into());
@@ -170,7 +183,7 @@ impl GrantFlow {
                 records.push(self.access.recover(original.intent_id).await.map_err(|e| e.code)?);
                 self.check()?;
             }
-            if let Some(progress) = existing_progress(records)? {
+            if let Some(progress) = existing_progress(records, now_ms())? {
                 return self.observe_progress(progress).await;
             }
             self.form().await
@@ -186,21 +199,34 @@ impl GrantFlow {
         self.selector.proposed_tokens
     }
     /// Closed grants require a currently approved, distinct admission before
-    /// reopening choices. Prepare and the atomic writer repeat their checks.
+    /// reopening choices. A grant whose UTC month ended may instead be followed
+    /// by this month's grant on the same admission: the same native check
+    /// verifies that regrant. Prepare and the atomic writer repeat their checks.
     pub async fn choose_new_limits(&self) -> Result<GrantResult, String> {
         if !self.can_choose_new_limits() {
             return Err("owner_grant_original_intent_required".into());
         }
+        let now = now_ms();
         match self.open().await? {
             GrantResult::Progress(p) if matches!(p.state, OwnerGrantState::Declined) => self.form().await,
-            GrantResult::Progress(p) if matches!(p.state, OwnerGrantState::Recorded) && p.closure.is_some() => {
-                self.access.check_new_admission(self.selector.contribution_id.clone()
-                    .ok_or("owner_grant_original_intent_required")?).await.map_err(|e| e.code)?;
-                self.check()?;
-                self.form().await
-            }
+            GrantResult::Progress(p) if matches!(p.state, OwnerGrantState::Recorded)
+                && (p.closure.is_some() || month_ended(&p.summary, now)) => self.new_limits().await,
+            GrantResult::PublicationProgress(p) if month_ended(&p.summary, now) => self.new_limits().await,
             result => Ok(result),
         }
+    }
+    async fn new_limits(&self) -> Result<GrantResult, String> {
+        self.access
+            .check_new_admission(
+                self.selector
+                    .contribution_id
+                    .clone()
+                    .ok_or("owner_grant_original_intent_required")?,
+            )
+            .await
+            .map_err(|e| e.code)?;
+        self.check()?;
+        self.form().await
     }
     pub fn account(&self) -> &str {
         &self.lease.identity().account
@@ -374,25 +400,106 @@ mod tests {
             },
         }
     }
+    /// Inside the fixtures' 2026-10 month, and that month's end (2026-11-01).
+    const OCTOBER: u64 = 1_792_000_000_000;
+    const NOVEMBER: u64 = 1_793_491_200_000;
+    fn in_month(mut p: OwnerGrantProgress, key: &str, start: u64, end: u64) -> OwnerGrantProgress {
+        p.summary.period_key = key.into();
+        p.summary.period_start_ms = start;
+        p.summary.period_end_ms = end;
+        p
+    }
     #[test]
     fn closed_originals_never_hide_pending_unknown_or_recorded_effects() {
         for state in [OwnerGrantState::ReviewRequired, OwnerGrantState::ReviewExpired,
             OwnerGrantState::OutcomeUnknown, OwnerGrantState::Recorded] {
             let result = existing_progress(vec![progress("closed-before", OwnerGrantState::Declined),
-                progress("original", state), progress("closed-after", OwnerGrantState::Declined)]).unwrap().unwrap();
+                progress("original", state), progress("closed-after", OwnerGrantState::Declined)], OCTOBER).unwrap().unwrap();
             assert_eq!(result.summary.intent_id, "original");
             assert!(!matches!(result.state, OwnerGrantState::Declined));
         }
         assert!(existing_progress(vec![progress("one", OwnerGrantState::OutcomeUnknown),
-            progress("two", OwnerGrantState::ReviewRequired)]).is_err());
+            progress("two", OwnerGrantState::ReviewRequired)], OCTOBER).is_err());
     }
     #[test]
     fn cancellation_history_keeps_latest_closed_original_for_explicit_new_choices() {
         let result = existing_progress(vec![progress("first", OwnerGrantState::Declined),
-            progress("second", OwnerGrantState::Declined)]).unwrap().unwrap();
+            progress("second", OwnerGrantState::Declined)], OCTOBER).unwrap().unwrap();
         assert_eq!(result.summary.intent_id, "second");
         assert!(matches!(result.state, OwnerGrantState::Declined));
-        assert!(existing_progress(vec![]).unwrap().is_none());
+        assert!(existing_progress(vec![], OCTOBER).unwrap().is_none());
+    }
+    #[test]
+    fn ended_months_are_history_beside_this_month_original() {
+        let september = in_month(
+            progress("september", OwnerGrantState::Recorded),
+            "2026-09",
+            1_788_220_800_000,
+            1_790_812_800_000,
+        );
+        let october = progress("october", OwnerGrantState::Recorded);
+        assert!(!month_ended(&october.summary, NOVEMBER - 1));
+        assert!(month_ended(&october.summary, NOVEMBER));
+        // In its own month a recorded grant is the current original.
+        let current = existing_progress(vec![september.clone(), october.clone()], OCTOBER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(current.summary.intent_id, "october");
+        assert!(
+            existing_progress(
+                vec![
+                    october.clone(),
+                    progress("review", OwnerGrantState::ReviewRequired)
+                ],
+                OCTOBER
+            )
+            .is_err()
+        );
+        // Several ended grants are history, never an ambiguous history.
+        let ended = existing_progress(vec![september.clone(), october.clone()], NOVEMBER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(ended.summary.intent_id, "october");
+        assert!(matches!(ended.state, OwnerGrantState::Recorded));
+        // This month's original is current beside them, whatever its state.
+        for state in [
+            OwnerGrantState::ReviewRequired,
+            OwnerGrantState::ReviewExpired,
+            OwnerGrantState::OutcomeUnknown,
+            OwnerGrantState::Recorded,
+        ] {
+            let november = in_month(
+                progress("november", state),
+                "2026-11",
+                NOVEMBER,
+                1_796_083_200_000,
+            );
+            let p = existing_progress(vec![september.clone(), november, october.clone()], NOVEMBER)
+                .unwrap()
+                .unwrap();
+            assert_eq!(p.summary.intent_id, "november");
+        }
+        // An unresolved original is never history, even after its month.
+        let unknown = progress("unknown", OwnerGrantState::OutcomeUnknown);
+        let p = existing_progress(vec![october.clone(), unknown.clone()], NOVEMBER)
+            .unwrap()
+            .unwrap();
+        assert_eq!(p.summary.intent_id, "unknown");
+        assert!(
+            existing_progress(
+                vec![
+                    unknown,
+                    in_month(
+                        progress("november", OwnerGrantState::ReviewRequired),
+                        "2026-11",
+                        NOVEMBER,
+                        1_796_083_200_000
+                    )
+                ],
+                NOVEMBER
+            )
+            .is_err()
+        );
     }
     fn settled(id: &str) -> OwnerGrantProgress {
         let mut p = progress(id, OwnerGrantState::Recorded);
@@ -407,11 +514,13 @@ mod tests {
         for state in [OwnerGrantState::ReviewRequired, OwnerGrantState::ReviewExpired,
             OwnerGrantState::OutcomeUnknown, OwnerGrantState::Recorded] {
             let p = existing_progress(vec![settled("old"), progress("current", state),
-                settled("other_closed")]).unwrap().unwrap();
+                settled("other_closed")], OCTOBER).unwrap().unwrap();
             assert_eq!(p.summary.intent_id, "current");
             assert!(p.closure.is_none());
         }
-        let p = existing_progress(vec![settled("first"), settled("last")]).unwrap().unwrap();
+        let p = existing_progress(vec![settled("first"), settled("last")], OCTOBER)
+            .unwrap()
+            .unwrap();
         assert_eq!(p.summary.intent_id, "last");
         assert_eq!(p.closure.unwrap().retained_tokens, 200);
     }
@@ -419,7 +528,13 @@ mod tests {
     fn settlement_metadata_cannot_hide_an_unknown_effect() {
         let mut unknown = settled("unknown");
         unknown.state = OwnerGrantState::OutcomeUnknown;
-        assert!(existing_progress(vec![unknown, progress("current", OwnerGrantState::Recorded)]).is_err());
+        assert!(
+            existing_progress(
+                vec![unknown, progress("current", OwnerGrantState::Recorded)],
+                OCTOBER
+            )
+            .is_err()
+        );
     }
     #[test]
     fn handoff_rejects_authority_fields_and_ambiguous_selectors() {
