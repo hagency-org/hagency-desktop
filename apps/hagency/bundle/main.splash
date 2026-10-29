@@ -3576,6 +3576,15 @@ A.pool_quota_reply=fn(rid,cid,r){
     if e!=nil {e.quota=e.quotaBase}
     A.pool_info_load(rid)
 }
+// Publishes this month with the slider's per-request limit (also behind Applicants).
+A.pool_publish_quota=fn(){
+    let e=H.pool_edit
+    if e==nil || H.busy || H.command!=nil {return}
+    let s=A.pool_save_state()
+    if !s.quotaEditable || s.quotaError!="" {A.pool_edit_refresh() return}
+    H.pool_result=nil
+    A.pool_save_quota(A.pool_whole(e.quota))
+}
 // Opens this pool's publication natively without proposing an amount.
 A.pool_open_grant=fn(){
     let p=H.pool_info
@@ -7774,7 +7783,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             }
                         }}
                         if v.managers==nil {mod.widgets.HagencyListRow{
-                            resource_applicants := mod.widgets.HagencyListTap{enabled:!H.busy && H.command==nil && !locked && (v.quotaEditable || v.published) on_click:||{if v.quotaEditable {A.pool_save()} else {A.pool_open_grant()}}}
+                            resource_applicants := mod.widgets.HagencyListTap{enabled:!H.busy && H.command==nil && !locked && (v.quotaEditable || v.published) on_click:||{if v.quotaEditable {A.pool_publish_quota()} else {A.pool_open_grant()}}}
                             mod.widgets.HagencyListBody{
                                 mod.widgets.HagencyListTitle{text:A.t("Applicants","申请者")}
                                 mod.widgets.HagencyListValue{text:if v.published {A.t("See publication","在发布记录中查看")} else if v.quotaEditable {A.t("Chosen when you publish","发布时选择")} else {A.t("Set when you publish","发布时设置")}}
