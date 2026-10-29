@@ -635,5 +635,11 @@ mod.widgets.RinxProgress = mod.widgets.RinxAmountSlider{height:8 enabled:false
             alert: crate_resource("self://resources/icons/alert_triangle.svg")
             reply: crate_resource("self://resources/icons/reply.svg")
             trash: crate_resource("self://resources/icons/trash.svg")
+            info: crate_resource("self://resources/icons/info.svg")
+            edit: crate_resource("self://resources/icons/edit.svg")
+            file: crate_resource("self://resources/icons/file.svg")
+            eye: crate_resource("self://resources/icons/eye_open.svg")
+            pause: crate_resource("self://resources/icons/service_pause.svg")
+            wallet: crate_resource("self://resources/icons/add_wallet.svg")
         }
 }

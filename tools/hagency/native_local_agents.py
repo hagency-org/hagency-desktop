@@ -32,7 +32,7 @@ def pool_request(**changes):
     return request
 
 def fixtures(encrypted=True, running=True, here=True, online=True, status_error=None, empty=False, hold_service=False,
-             save_error=None, pool=None, account="@edward:example.test"):
+             save_error=None, pool=None, account="@edward:example.test", pools=None):
     observation = dict(policyRevision=3, budget=dict(kind="tokens", tokens=2000000, period="utc_month"),
                        requests="allow", highRiskTools="deny", toolRuleCount=0, directoryRuleCount=0,
                        knownConsumedTokens=885626, heldTokens=0,
@@ -46,7 +46,7 @@ def fixtures(encrypted=True, running=True, here=True, online=True, status_error=
             administrator="@admin:example.test", device="offline-device", deviceGeneration=1,
             canAdmitResources=False, features=["resource-pool-agents-v1"]),
         "hagency.intent.pending": {"commands": []},
-        "hagency.pools.list": {"items": [], "nextAfter": None},
+        "hagency.pools.list": {"items": pools or [], "nextAfter": None},
         "hagency.pools.agents.list": {"items": [pool_request(**(pool or {}))], "nextAfter": None},
         "hagency.pools.agents.get": {"request": pool_request(**(pool or {}))},
         "hagency.personal_agents.list": {"protocol": "hagency-personal-settings-v1",
@@ -386,11 +386,29 @@ def main():
         host.click("pool_agent_back", content=False)
         host.wait(lambda: host.row("owner_request_open"), "back to the inbox")
 
+    def pools_flow(host):
+        host.click("projects", content=False)
+        host.wait(lambda: host.row("pool_request"), "pools list")
+        time.sleep(.6)
+        host.capture("27-pools")
+        host.event("ux:dark")
+        host.capture("27b-pools-dark")
+        host.event("ux:light")
+        host.event("ux:large-text")
+        host.capture("27c-pools-large-text")
+
     run("project", pool_flow)
     run("project-capacity", capture_pool("24-project-agent-no-capacity"), pool=dict(
         reservationState="refused", reservationReason="insufficient_capacity", assignmentId=None, membershipState=None))
     run("project-pending", capture_pool("25-project-agent-pending"), pool=dict(
         state="pending_approval", assignmentId=None, membershipState=None, reservationState=None))
+    run("pools", pools_flow, pools=[
+        dict(id="pool", label="codex-pool-01", ownerMxid="@dspfac:example.test", runtime="codex", revision=7,
+             grantRevision=1, publishedTokens=1000000, nativeAvailableTokens=None, canRequest=True, blockingReason=None,
+             capabilities=["architect", "coding", "documentation", "integration", "review", "testing"]),
+        dict(id="terra", label="terra", ownerMxid="@dspfac:example.test", runtime="codex", revision=2,
+             grantRevision=None, publishedTokens=None, nativeAvailableTokens=None, canRequest=False,
+             blockingReason="pool_not_shared_with_account", capabilities=["architect", "coding"])])
     run("project-owner", owner_flow, workspace="owner", account="@dspfac:example.test", pool=dict(
         state="pending_approval", assignmentId=None, membershipState=None, reservationState=None,
         canCancel=False, canDecide=True))
