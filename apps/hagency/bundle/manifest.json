@@ -75,6 +75,10 @@
     "hagency.personal_agents.list",
     "hagency.personal_agents.get",
     "hagency.personal_agents.policy.save",
+    "hagency.personal_agents.status",
+    "hagency.personal_agents.service",
+    "hagency.personal_agents.chat.open",
+    "hagency.personal_agents.chat.encrypt",
     "hagency.personal_agents.observe",
     "hagency.personal_agents.model.choices",
     "hagency.personal_agents.model.save",
@@ -158,7 +162,7 @@
   ],
   "id": "im.palpo.operations",
   "integrity": {
-    "bundle_blake3": "62d058800537f47618090e28e00f12e989f32c7c9257678b1a08ff90a0c3f0df"
+    "bundle_blake3": "04d6d7999169f2315ad6566f507900ca2e1506fb799829572996fb8c45e74974"
   },
   "name": "Hagency",
   "requires": [

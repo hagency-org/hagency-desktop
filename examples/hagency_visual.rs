@@ -114,6 +114,8 @@ impl AppMain for App {
         for request in take_splash_host_requests_for(&owned) {
             // Only predeclared read responses are available. This host has no backend.
             if let Some(value) = self.fixtures.get(&request.service) {
+                // A held request never answers, so its pending state can be captured.
+                if value["_hold"] == true {continue;}
                 let mut value = value.clone();
                 let args: Value = serde_json::from_str(&request.args_json).unwrap();
                 if let Some(cases) = value.get("_cases").and_then(Value::as_array) {

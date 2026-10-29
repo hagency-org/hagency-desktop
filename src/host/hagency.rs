@@ -33,6 +33,7 @@ mod templates;
 mod graphs;
 mod graph_history;
 pub(crate) mod reauthentication;
+mod local;
 mod personal;
 pub(crate) mod personal_configuration;
 mod agents;
@@ -314,6 +315,7 @@ fn permissions(lease: &Lease) -> Vec<ManagementPermission> {
             "hagency.inbox.list" | "hagency.inbox.get" => vec![ReadInbox],
             "hagency.inbox.decide" => vec![DecideInbox],
             _ if !personal::permissions(cap).is_empty() => personal::permissions(cap).to_vec(),
+            _ if !local::permissions(cap).is_empty() => local::permissions(cap).to_vec(),
             _ if !allocations::permissions(cap).is_empty() => allocations::permissions(cap).to_vec(),
             _ if !budget::permissions(cap).is_empty() => budget::permissions(cap).to_vec(),
             _ if !control::permissions(cap).is_empty() => control::permissions(cap).to_vec(),
@@ -733,6 +735,12 @@ impl Host {
             self.check(&lease)?;
             lease.authorize(&account,service,None)?;
             return rinx_miniapp_core::bounded_reply(agents::status_display(value(result?)?)?);
+        }
+        if let Some(call)=local::parse_call(service,args.clone())? {
+            let result=call.execute(&account).await;
+            self.check(&lease)?;
+            lease.authorize(&account,service,None)?;
+            return rinx_miniapp_core::bounded_reply(result?);
         }
         if let Some(call)=personal::parse_call(service,args.clone())? {
             let manager=self.manager(&lease).await?;

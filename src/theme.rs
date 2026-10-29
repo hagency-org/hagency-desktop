@@ -403,6 +403,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
         mod.widgets.RINX_TEXT_SELECTION_BG = #(text_selection_bg)
         mod.widgets.RINX_ACCENT_HOVER = #(accent_hover)
         mod.widgets.RINX_ACCENT_DOWN = #(accent_down)
+        mod.widgets.RINX_DARK = #(dark)
     });
     for (name, role) in [
         ("RINX_DISABLED", "color.content.disabled"),

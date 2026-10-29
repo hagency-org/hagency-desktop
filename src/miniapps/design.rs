@@ -15,6 +15,8 @@ pub struct MiniAppNumberInput {
     #[live] is_read_only: bool,
     /// Display millions while the widget's text/actions stay exact token integers.
     #[live] millions: bool,
+    /// Display ten-thousands (万), the unit Chinese readers expect for counts.
+    #[live] wan: bool,
     #[live] slider_mode: bool,
     /// A nonnegative maximum is an observed capacity bound. A negative value
     /// leaves exact entry unrestricted and uses an expanding slider scale.
@@ -30,7 +32,8 @@ impl ScriptHook for MiniAppNumberInput {
             self.view.text_input(cx,ids!(input)).set_text(cx,&self.display_text());
             self.view.text_input(cx,ids!(input)).set_is_read_only(cx,self.is_read_only);
             self.view.text_input(cx,ids!(input)).set_empty_text(cx,self.empty_text.clone());
-            self.view.label(cx,ids!(unit)).set_visible(cx,self.millions);
+            self.view.label(cx,ids!(unit)).set_visible(cx,self.millions || self.wan);
+            if self.wan {self.view.label(cx,ids!(unit)).set_text(cx,"万 token");}
             self.sync_steps(cx);
         });
     }
@@ -38,8 +41,11 @@ impl ScriptHook for MiniAppNumberInput {
 impl MiniAppNumberInput {
     const MAX: u64=9_007_199_254_740_991;
     fn display_text(&self) -> String {
-        if !self.millions || self.text.is_empty() { return self.text.clone(); }
+        if !(self.millions || self.wan) || self.text.is_empty() { return self.text.clone(); }
         if let Some(invalid) = self.text.strip_prefix("invalid:") { return invalid.into(); }
+        if self.wan {
+            return self.text.parse::<u64>().map(token_wan).unwrap_or_else(|_| self.text.clone());
+        }
         self.text.parse::<u64>().map(token_millions).unwrap_or_else(|_| self.text.clone())
     }
     fn number(&self)->Option<u64>{
@@ -52,6 +58,7 @@ impl MiniAppNumberInput {
         self.slider_ceiling=self.slider_ceiling.max(value.unwrap_or(0)).max(10_000_000);
         self.view.widget(cx,ids!(decrease)).set_visible(cx,!self.slider_mode);
         self.view.widget(cx,ids!(increase)).set_visible(cx,!self.slider_mode);
+        self.view.widget(cx,ids!(stepper_gap)).set_visible(cx,!self.slider_mode);
         self.view.widget(cx,ids!(slider_wrap)).set_visible(cx,self.slider_mode);
         let slider=self.view.widget(cx,ids!(slider_wrap.amount_slider));
         if let Some(mut slider)=slider.borrow_mut::<MiniAppAmountSlider>() {
@@ -110,7 +117,9 @@ impl Widget for MiniAppNumberInput {
             if let SliderAction::Slide(value)=actions.find_widget_action(uid).cast(){self.slide_to(cx,value);}
         }
         if let Some(text)=self.view.text_input(cx,ids!(input)).changed(&actions){
-            self.text=if self.millions && !text.is_empty() {
+            self.text=if self.wan && !text.is_empty() {
+                tokens_from_wan(&text).map(|n| n.to_string()).unwrap_or_else(|| format!("invalid:{text}"))
+            } else if self.millions && !text.is_empty() {
                 tokens_from_millions(&text).map(|n| n.to_string()).unwrap_or_else(|| format!("invalid:{text}"))
             } else { text };
             self.sync_steps(cx);self.notify_change(cx);
@@ -148,6 +157,26 @@ impl Widget for MiniAppNumberInput {
 
 use crate::utils::token_millions;
 
+/// 885626 → "88.56"; whole numbers stay whole.
+fn token_wan(tokens: u64) -> String {
+    let hundredths = tokens / 100;
+    let (whole, part) = (hundredths / 100, hundredths % 100);
+    match part {
+        0 => whole.to_string(),
+        p if p % 10 == 0 => format!("{whole}.{}", p / 10),
+        p => format!("{whole}.{p:02}"),
+    }
+}
+/// "88.5" 万 → 885000 tokens; at most two decimals, like the display.
+fn tokens_from_wan(text: &str) -> Option<u64> {
+    let text = text.trim();
+    let (whole, part) = text.split_once('.').unwrap_or((text, ""));
+    if whole.is_empty() || part.len() > 2 || !whole.bytes().chain(part.bytes()).all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let part = format!("{part:0<2}").parse::<u64>().ok()?;
+    whole.parse::<u64>().ok()?.checked_mul(10_000)?.checked_add(part * 100)
+}
 fn tokens_from_millions(text: &str) -> Option<u64> {
     let text = text.trim();
     let (whole, fraction) = text.split_once('.').unwrap_or((text, ""));
@@ -162,6 +191,18 @@ fn tokens_from_millions(text: &str) -> Option<u64> {
 #[cfg(test)]
 mod token_unit_tests {
     use super::*;
+    #[test]
+    fn wan_display_and_entry_round_trip() {
+        assert_eq!(token_wan(2_000_000), "200");
+        assert_eq!(token_wan(885_626), "88.56");
+        assert_eq!(token_wan(885_000), "88.5");
+        assert_eq!(tokens_from_wan("200"), Some(2_000_000));
+        assert_eq!(tokens_from_wan("88.5"), Some(885_000));
+        assert_eq!(tokens_from_wan("88.56"), Some(885_600));
+        for invalid in ["", ".5", "1.234", "1e3", "-1", "万"] {
+            assert_eq!(tokens_from_wan(invalid), None, "{invalid}");
+        }
+    }
     #[test]
     fn million_editor_preserves_each_token_and_safe_integer_boundary() {
         for tokens in [0, 1, 10, 100_000, 123_456, 750_000, 1_000_000, 1_000_001, MiniAppNumberInput::MAX] {
@@ -314,21 +355,30 @@ impl Widget for MiniAppButton {
     fn set_disabled(&mut self, cx: &mut Cx, disabled: bool) { self.button.set_disabled(cx,disabled); }
 }
 
-/// Use the macOS UI's installed CJK sans fallback inside mini apps. Keep this
-/// in the script font family so lazy emoji loading cannot discard the font.
-/// Only the framework's default WenKai fallback is replaced; customer fonts
-/// and the Latin face, metrics and lazy-loading policy are retained.
+/// Use the macOS UI's installed CJK sans inside mini apps: PingFang SC, as in
+/// the host UI, so bold roles keep their weight; Hiragino Sans GB, one face
+/// for every role, where PingFang is unavailable. Keep this in the script font
+/// family so lazy emoji loading cannot discard the font. Only the framework's
+/// default WenKai fallback is replaced; customer fonts and the Latin face,
+/// metrics and lazy-loading policy are retained.
 pub(super) fn install_system_cjk_fallback(vm: &mut ScriptVm) {
     #[cfg(target_os = "macos")]
     {
-        const FONT: &str = "/System/Library/Fonts/Hiragino Sans GB.ttc";
-        if !std::path::Path::new(FONT).is_file() { return; }
-        vm.bx.code.crate_manifests.borrow_mut().insert(
-            "rinx_system_fonts".into(), "/System/Library/Fonts".into());
-        let resource = makepad_widgets::makepad_platform::script::res::register_crate_resource_path(
-            vm, "rinx_system_fonts/Hiragino Sans GB.ttc");
+        let (regular, bold) = match article_makepad::apple_fonts::pingfang(vm) {
+            Ok(faces) => faces,
+            Err(_) => {
+                const FONT: &str = "/System/Library/Fonts/Hiragino Sans GB.ttc";
+                if !std::path::Path::new(FONT).is_file() { return; }
+                vm.bx.code.crate_manifests.borrow_mut().insert(
+                    "rinx_system_fonts".into(), "/System/Library/Fonts".into());
+                let resource = makepad_widgets::makepad_platform::script::res::register_crate_resource_path(
+                    vm, "rinx_system_fonts/Hiragino Sans GB.ttc");
+                (resource, resource)
+            }
+        };
         let theme = vm.module(id!(theme));
         for role in [id!(font_regular), id!(font_label), id!(font_bold), id!(font_italic), id!(font_bold_italic)] {
+            let resource = if role == id!(font_bold) || role == id!(font_bold_italic) { bold } else { regular };
             let Some(style) = vm.bx.heap.value(theme, role.into(), NoTrap).as_object() else { continue; };
             let Some(family) = vm.bx.heap.value(style, id!(font_family).into(), NoTrap).as_object() else { continue; };
             for i in 0..vm.bx.heap.vec_len(family) {
@@ -364,11 +414,27 @@ pub struct MiniAppPageScroll {
     restore_position: Option<Vec2d>,
     #[rust]
     restore_frame: NextFrame,
+    /// Scroll offset past which `on_scroll_mark` reports true, as when a
+    /// page's own title scrolls under its navigation bar.
+    #[live]
+    scroll_mark: f64,
+    #[live]
+    on_scroll_mark: Option<ScriptFnRef>,
+    #[rust]
+    past_mark: bool,
+    #[rust]
+    mark_frame: NextFrame,
 }
 impl Widget for MiniAppPageScroll {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.restore_frame.is_event(event).is_some() {
             self.view.redraw(cx);
+        }
+        if self.mark_frame.is_event(event).is_some() {
+            if let Some(handler) = self.on_scroll_mark.clone() {
+                cx.widget_to_script_call(self.widget_uid(), NIL, self.source.clone(), handler,
+                    &[ScriptValue::from_bool(self.past_mark)]);
+            }
         }
         self.view.handle_event(cx, event, scope);
     }
@@ -381,6 +447,12 @@ impl Widget for MiniAppPageScroll {
             let viewport = self.view.view(cx, ids!(body)).area().rect(cx);
             let page = self.view.view(cx, ids!(body.page)).area().rect(cx);
             self.last_scroll = dvec2(0.0, (viewport.pos.y - page.pos.y).max(0.0));
+            // Report crossings on the next frame: script must not run mid-draw.
+            let past = self.on_scroll_mark.is_some() && self.last_scroll.y > self.scroll_mark;
+            if past != self.past_mark {
+                self.past_mark = past;
+                self.mark_frame = cx.new_next_frame();
+            }
             if let Some(pos) = self.restore_position.take() {
                 // The new page's scroll bounds are now known; applying before
                 // this draw can clamp a saved offset to a loading placeholder.
@@ -454,9 +526,11 @@ script_mod! {
             slider_wrap := View{visible:false width:Fill height:44
                 amount_slider := mod.widgets.RinxAmountSlider{width:Fill}
             }
-            decrease := mod.widgets.RinxButton{width:max(44,mod.widgets.RINX_CONTROL_HEIGHT) height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) text:"−" grab_key_focus:true}
             input := mod.widgets.RinxInput{width:110 height:max(44,mod.widgets.RINX_CONTROL_HEIGHT)}
             unit := mod.widgets.RinxHint{visible:false width:Fit text:"M"}
+            // The value reads with its unit; the stepper sits at the trailing edge.
+            stepper_gap := View{width:Fill height:1}
+            decrease := mod.widgets.RinxButton{width:max(44,mod.widgets.RINX_CONTROL_HEIGHT) height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) text:"−" grab_key_focus:true}
             increase := mod.widgets.RinxButton{width:max(44,mod.widgets.RINX_CONTROL_HEIGHT) height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) text:"+" grab_key_focus:true}
         }
         mod.widgets.RinxKeyButton = set_type_default() do #(MiniAppButton::register_widget(vm)) {
@@ -478,6 +552,33 @@ mod.widgets.RinxToggle = mod.widgets.RinxKeyButton{height:max(44,mod.widgets.RIN
             sdf.stroke(self.accent, self.focus)
             sdf.box(12.0,y-10.0,34.0,20.0,10.0) sdf.fill(self.muted.mix(self.accent,self.selected).mix(self.muted,self.disabled))
             sdf.circle(22.0+14.0*self.selected,y,7.0) sdf.fill(self.knob)
+            return sdf.result
+        }
+    }
+}
+mod.widgets.RinxSwitch = mod.widgets.RinxKeyButton{width:51 height:31 text:"" padding:0
+    draw_bg +: {selected:instance(0.0) on_color:uniform(#x1f9d55) off_color:uniform(#x7f8b9c) knob:uniform(#fff)
+        pixel:fn(){
+            let sdf=Sdf2d.viewport(self.pos * self.rect_size)
+            let h=self.rect_size.y
+            sdf.box(0.0,0.0,self.rect_size.x,h,h*0.5)
+            sdf.fill(self.off_color.mix(self.on_color,self.selected))
+            let r=h*0.5-2.5
+            sdf.circle(2.5+r+(self.rect_size.x-5.0-2.0*r)*self.selected,h*0.5,r)
+            sdf.fill(self.knob)
+            // Disabled switches fade as a whole, in either position.
+            return sdf.result*(1.0-0.5*self.disabled)
+        }
+    }
+}
+mod.widgets.RinxChevron = View{width:8 height:14 show_bg:true
+    draw_bg +: {color:mod.widgets.RINX_MUTED
+        pixel:fn(){
+            let sdf=Sdf2d.viewport(self.pos * self.rect_size)
+            sdf.move_to(1.0,1.0)
+            sdf.line_to(self.rect_size.x-1.5,self.rect_size.y*0.5)
+            sdf.line_to(1.0,self.rect_size.y-1.0)
+            sdf.stroke(self.color,1.6)
             return sdf.result
         }
     }
@@ -515,5 +616,22 @@ mod.widgets.RinxProgress = mod.widgets.RinxAmountSlider{height:8 enabled:false
             device: crate_resource("self://resources/icons/device.svg")
             expand: crate_resource("self://resources/icons/chevron_down.svg")
             collapse: crate_resource("self://resources/icons/chevron_up.svg")
+            chevron: crate_resource("self://resources/icons/chevron_right.svg")
+            chevron_back: crate_resource("self://resources/icons/chevron_left.svg")
+            lock: crate_resource("self://resources/icons/lock.svg")
+            chat: crate_resource("self://resources/icons/message_circle.svg")
+            power: crate_resource("self://resources/icons/power.svg")
+            robot: crate_resource("self://resources/icons/robot.svg")
+            cpu: crate_resource("self://resources/icons/cpu.svg")
+            bulb: crate_resource("self://resources/icons/bulb.svg")
+            usage: crate_resource("self://resources/icons/chart_bar.svg")
+            gauge: crate_resource("self://resources/icons/gauge.svg")
+            people: crate_resource("self://resources/icons/people.svg")
+            globe: crate_resource("self://resources/icons/globe.svg")
+            shield: crate_resource("self://resources/icons/shield.svg")
+            adjust: crate_resource("self://resources/icons/adjustments.svg")
+            sync: crate_resource("self://resources/icons/refresh.svg")
+            folder: crate_resource("self://resources/icons/folder.svg")
+            alert: crate_resource("self://resources/icons/alert_triangle.svg")
         }
 }

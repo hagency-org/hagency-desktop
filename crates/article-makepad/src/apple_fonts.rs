@@ -103,6 +103,15 @@ pub fn install(vm: &mut ScriptVm) {
     );
 }
 
+/// The installed PingFang SC Regular and Semibold faces as script font
+/// resources, for VMs that build their own theme, such as Splash isolates.
+pub fn pingfang(vm: &mut ScriptVm) -> Result<(ScriptValue, ScriptValue), String> {
+    Ok((
+        system_face_resource(vm, REGULAR)?,
+        system_face_resource(vm, SEMIBOLD)?,
+    ))
+}
+
 fn system_face_resource(vm: &mut ScriptVm, name: &str) -> Result<ScriptValue, String> {
     let path = format!("apple-system-font://{name}");
     let heap_key = vm.bx.heap.heap_key();

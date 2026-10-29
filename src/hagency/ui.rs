@@ -87,6 +87,12 @@ struct Completed {
 }
 #[derive(Debug)]
 struct ConfigurationCompleted {identity:String,request:u64,agent:String,generation:i64,device:String,result:Result<Value,String>}
+/// Opens a local Agent's private chat in the main window.
+#[derive(Clone, Debug)]
+pub struct OpenAgentChat {pub room_id: matrix_sdk::ruma::OwnedRoomId}
+pub(crate) fn open_agent_chat(cx: &mut Cx, room_id: matrix_sdk::ruma::OwnedRoomId) {
+    navigate_agent_chat(cx, room_id, true, None);
+}
 /// Outcome of turning on end-to-end encryption in an owner-direct private chat.
 #[derive(Clone, Debug)]
 pub struct OwnerDirectEncryption {pub room_id:String,pub enabled:bool}

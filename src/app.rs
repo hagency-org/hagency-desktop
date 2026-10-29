@@ -593,6 +593,10 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            if let Some(chat) = action.downcast_ref::<crate::hagency::ui::OpenAgentChat>() {
+                crate::hagency::ui::open_agent_chat(cx, chat.room_id.clone());
+                continue;
+            }
             if let Some(action) = action.downcast_ref::<crate::hagency::ui::HagencyAction>() {
                 // Management opens beside chat; it never replaces the chat dock.
                 if !self.embedded && cfg!(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")))) {

@@ -63,15 +63,21 @@ impl Call {
         .map_err(|e| e.code)?;
         if let Some(settings) = reply.get_mut("settings") {
             let at = &settings["observedAtMs"];
-            settings["observedAtUtc"] = if at.is_null() {
-                Value::Null
+            let (utc, local) = if at.is_null() {
+                (Value::Null, Value::Null)
             } else {
                 let timestamp = at
                     .as_i64()
                     .and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis)
                     .ok_or("personal_agent_settings_invalid")?;
-                Value::String(timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string())
+                let local = timestamp.with_timezone(&chrono::Local);
+                (
+                    Value::String(timestamp.format("%Y-%m-%d %H:%M:%S UTC").to_string()),
+                    Value::String(local.format("%Y-%m-%d %H:%M").to_string()),
+                )
             };
+            settings["observedAtUtc"] = utc;
+            settings["observedAtLocal"] = local;
         }
         Ok(reply)
     }
