@@ -11,12 +11,17 @@ use serde::Deserialize;
 use serde_json::Value;
 
 pub(crate) const REVIEW_GRANT: &str = "hagency.grants.review";
+/// Largest grant amount, in tokens, that stays an exact JSON integer.
+pub(crate) const MAX_GRANT_TOKENS: u64 = 9_007_199_254_740_991;
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Selector {
     contribution_id: Option<String>,
     intent_id: Option<String>,
+    /// A script may only propose an amount for a new grant on this pool. It
+    /// fills the native tokens field once; prepare never reads it.
+    proposed_tokens: Option<u64>,
 }
 impl Selector {
     fn parse(value: Value) -> Result<Self, String> {
@@ -33,6 +38,9 @@ impl Selector {
                         .bytes()
                         .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
             })
+            || value.proposed_tokens.is_some_and(|tokens| {
+                value.contribution_id.is_none() || tokens == 0 || tokens > MAX_GRANT_TOKENS
+            })
         {
             return Err("invalid_management_arguments".into());
         }
@@ -41,6 +49,8 @@ impl Selector {
 }
 
 /// Strings read from native widgets only. This is intentionally not Deserialize.
+/// A script proposal can only pre-fill the native tokens field; these values
+/// are always read back from the widgets the owner sees before committing.
 #[derive(Clone, Default)]
 pub(crate) struct GrantChoices {
     pub coordinator: String,
@@ -73,7 +83,7 @@ impl GrantChoices {
         managers.sort();
         managers.dedup();
         if amount == 0
-            || amount > 9_007_199_254_740_991
+            || amount > MAX_GRANT_TOKENS
             || managers.is_empty()
             || managers.len() > 64
         {
@@ -170,6 +180,10 @@ impl GrantFlow {
     }
     pub fn can_choose_new_limits(&self) -> bool {
         self.selector.contribution_id.is_some()
+    }
+    /// The script's proposed amount for the native tokens field, if any.
+    pub fn proposed_tokens(&self) -> Option<u64> {
+        self.selector.proposed_tokens
     }
     /// Closed grants require a currently approved, distinct admission before
     /// reopening choices. Prepare and the atomic writer repeat their checks.
@@ -420,6 +434,32 @@ mod tests {
             assert!(Selector::parse(bad).is_err());
         }
         assert!(Selector::parse(json!({"intentId":"original_1"})).is_ok());
+    }
+    #[test]
+    fn proposed_tokens_are_a_bounded_integer_for_a_pool_only() {
+        let proposal = |value: Value| Selector::parse(value).map(|s| s.proposed_tokens);
+        assert_eq!(proposal(json!({"contributionId":"pool_1","proposedTokens":1})), Ok(Some(1)));
+        assert_eq!(
+            proposal(json!({"contributionId":"pool_1","proposedTokens":MAX_GRANT_TOKENS})),
+            Ok(Some(MAX_GRANT_TOKENS))
+        );
+        assert_eq!(proposal(json!({"contributionId":"pool_1"})), Ok(None));
+        assert_eq!(proposal(json!({"contributionId":"pool_1","proposedTokens":null})), Ok(None));
+        for bad in [
+            json!({"proposedTokens":3000000}),
+            json!({"intentId":"original_1","proposedTokens":3000000}),
+            json!({"contributionId":"pool_1","intentId":"original_1","proposedTokens":3000000}),
+            json!({"contributionId":"pool_1","proposedTokens":0}),
+            json!({"contributionId":"pool_1","proposedTokens":MAX_GRANT_TOKENS + 1}),
+            json!({"contributionId":"pool_1","proposedTokens":-1}),
+            json!({"contributionId":"pool_1","proposedTokens":1.5}),
+            json!({"contributionId":"pool_1","proposedTokens":"3000000"}),
+            json!({"contributionId":"pool_1","proposedTokens":true}),
+            json!({"contributionId":"pool_1","proposedTokens":[3000000]}),
+            json!({"contributionId":"pool_1","proposedTokens":3000000,"allocatedTokens":3000000}),
+        ] {
+            assert_eq!(proposal(bad.clone()), Err("invalid_management_arguments".into()), "{bad}");
+        }
     }
     #[test]
     fn native_choices_require_explicit_utc_and_bounded_budget() {

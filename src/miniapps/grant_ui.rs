@@ -21,6 +21,9 @@ pub(super) struct GrantPrompt {
     /// One explicit owner submission covers reservation and publication of
     /// these same terms. Recovery never sets this flag.
     submit_publication: bool,
+    /// The script's proposed tokens, shown beside the current amount until the
+    /// owner submits terms natively. Only the native tokens field commits.
+    proposal: Option<u64>,
 }
 enum Phase {
     Loading,
@@ -63,6 +66,142 @@ fn form_choices_valid(form: &OwnerGrantForm, draft: &GrantChoices) -> bool {
             && form.context.remaining_tokens.is_some_and(|n| n>=choices.allocated_tokens)
             && choices.delegation_expires_at_ms<=publication_period_end().timestamp_millis() as u64
     })
+}
+/// A script proposal only seeds the native tokens field; the owner can edit it
+/// and the committed value is always read back from that widget.
+fn initial_draft(proposal: Option<u64>) -> GrantChoices {
+    GrantChoices {
+        tokens: proposal.map(|tokens| tokens.to_string()).unwrap_or_default(),
+        ..GrantChoices::default()
+    }
+}
+/// Defaults for fields that are still empty when the form opens. A proposal
+/// is kept exactly, even above the available capacity: the form then shows it
+/// and stays unconfirmable instead of silently lowering it.
+fn fill_form_defaults(draft: &mut GrantChoices, form: &OwnerGrantForm) {
+    if draft.tokens.is_empty() {
+        draft.tokens = form.context.remaining_tokens.unwrap_or(0).min(1_000_000).to_string();
+    }
+    if draft.expires_utc.is_empty() {
+        draft.expires_utc = publication_expiry(None);
+    }
+}
+/// Whether a phase offers the native primary action. A proposal never changes
+/// this; in particular a published grant is only shown, never replaced here.
+fn primary_available(
+    phase: &Phase,
+    form: Option<&OwnerGrantForm>,
+    draft: &GrantChoices,
+    has_original: bool,
+    can_choose_new_limits: bool,
+) -> bool {
+    match phase {
+        Phase::Choose => form.is_some_and(|f| form_choices_valid(f, draft)),
+        Phase::Review(review) => !review.expired() && review.capacity_available(),
+        Phase::Progress(progress)
+            if progress.closure.is_some() && matches!(progress.state, OwnerGrantState::Recorded) =>
+        {
+            can_choose_new_limits
+        }
+        Phase::Progress(progress) => {
+            matches!(progress.state, OwnerGrantState::ReviewRequired | OwnerGrantState::Recorded)
+                || (matches!(progress.state, OwnerGrantState::Declined) && can_choose_new_limits)
+        }
+        Phase::PublicationReview(review) => !review.expired(),
+        Phase::CancellationReview(review) => !review.expired(),
+        Phase::Failed(code) => {
+            has_original
+                && matches!(
+                    code.as_str(),
+                    "owner_grant_review_changed"
+                        | "owner_grant_original_review_expired"
+                        | "owner_grant_publication_review_expired"
+                )
+        }
+        _ => false,
+    }
+}
+/// The server has accepted a grant for this pool's current admission. It
+/// accepts only one per admission, even after revocation or expiry, so a
+/// proposal is never applied here and nothing is revoked to make room.
+fn published_grant(phase: &Phase) -> bool {
+    matches!(phase, Phase::PublicationProgress(p) if matches!(p.state, OwnerGrantPublicationState::ServerObserved))
+}
+/// The pool's current per-request limit: the tokens of a grant the server last
+/// reported as active. Reserved, rejected, revoked or expired grants set none.
+fn live_grant_tokens(phase: &Phase) -> Option<u64> {
+    match phase {
+        Phase::PublicationProgress(p)
+            if published_grant(phase) && p.server_state.as_deref() == Some("active") =>
+        {
+            Some(p.summary.allocated_tokens)
+        }
+        _ => None,
+    }
+}
+/// What the mini app learns when the panel closes. A proposal still pending
+/// beside this admission's published grant was never applied: say why.
+fn close_reply(
+    phase: &Phase,
+    proposal: Option<u64>,
+    in_flight: bool,
+    original: Option<&str>,
+) -> Result<String, String> {
+    if proposal.is_some() && published_grant(phase) {
+        return Err("pool_grant_already_published".into());
+    }
+    match phase {
+        Phase::Progress(p) => serde_json::to_string(p).map_err(|_| "management_outcome_unknown".to_owned()),
+        Phase::PublicationProgress(p) => serde_json::to_string(p).map_err(|_| "management_outcome_unknown".to_owned()),
+        _ => Ok(json!({"state":if in_flight {"outcome_unknown"} else {"review_closed"},"intentId":original}).to_string()),
+    }
+}
+/// An unattempted original reserves nothing; cancelling it reopens new limits.
+const PENDING_NOTE: &str = "The proposed limit is not applied to this pending reservation. To use it, cancel the pending reservation, then choose new limits.";
+/// Native text for a script's proposed per-request limit: the current limit,
+/// the amount this screen would commit, and why a phase does not use it.
+fn proposal_notice(phase: &Phase, proposal: Option<u64>, draft_tokens: &str) -> Option<String> {
+    let proposal = proposal?;
+    let (new, note) = match phase {
+        Phase::Loading => return None,
+        // The form commits only what its tokens field holds now.
+        Phase::Choose => (draft_tokens.trim().parse::<u64>().ok(), None),
+        phase if published_grant(phase) => (
+            Some(proposal),
+            Some("This pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed."),
+        ),
+        Phase::Progress(p)
+            if matches!(p.state, OwnerGrantState::Declined)
+                || (matches!(p.state, OwnerGrantState::Recorded) && p.closure.is_some()) =>
+        {
+            (Some(proposal), Some("The proposed limit is filled in when you choose new limits."))
+        }
+        Phase::Progress(p)
+            if matches!(p.state, OwnerGrantState::ReviewRequired | OwnerGrantState::ReviewExpired) =>
+        {
+            (Some(proposal), Some(PENDING_NOTE))
+        }
+        // Reviews of an existing, unattempted original; submitting the form
+        // clears the proposal before its own review appears.
+        Phase::Review(_) | Phase::CancellationReview(_) => (Some(proposal), Some(PENDING_NOTE)),
+        Phase::Failed(_) => (Some(proposal), Some("The proposed limit was not applied.")),
+        _ => (
+            Some(proposal),
+            Some("The proposed limit is not applied to this existing grant. It keeps the amounts shown below."),
+        ),
+    };
+    let current = live_grant_tokens(phase)
+        .map(|tokens| amount(Some(tokens)))
+        .unwrap_or_else(|| crate::i18n::tr("None active").into());
+    let mut text = crate::i18n::format(
+        "Per-request limit: {current} → {new}",
+        &[("current", current), ("new", amount(new))],
+    );
+    if let Some(note) = note {
+        text.push('\n');
+        text.push_str(crate::i18n::tr(note));
+    }
+    Some(text)
 }
 fn same_publication_resource(form: &OwnerGrantForm, review: &OwnerGrantReview) -> bool {
     let c=review.context();let s=review.summary();
@@ -195,37 +334,21 @@ impl GrantPrompt {
     fn actionable(&self) -> bool {
         self.receiver.is_none() && self.flow.active()
     }
+    /// The owner submits the terms shown natively for reservation and
+    /// publication; a script proposal plays no further part in this window.
+    fn submit(&mut self) {
+        self.submit_publication = true;
+        self.proposal = None;
+    }
     fn can_primary(&self) -> bool {
         self.actionable()
-            && match &self.phase {
-                Phase::Choose => self.form.as_ref().is_some_and(|f| form_choices_valid(f,&self.draft)),
-                Phase::Review(review) => !review.expired() && review.capacity_available(),
-                Phase::Progress(progress)
-                    if progress.closure.is_some()
-                        && matches!(progress.state, OwnerGrantState::Recorded) =>
-                {
-                    self.flow.can_choose_new_limits()
-                }
-                Phase::Progress(progress) => {
-                    matches!(
-                        progress.state,
-                        OwnerGrantState::ReviewRequired | OwnerGrantState::Recorded
-                    ) || (matches!(progress.state, OwnerGrantState::Declined)
-                        && self.flow.can_choose_new_limits())
-                }
-                Phase::PublicationReview(review) => !review.expired(),
-                Phase::CancellationReview(review) => !review.expired(),
-                Phase::Failed(code) => {
-                    self.original.is_some()
-                        && matches!(
-                            code.as_str(),
-                            "owner_grant_review_changed"
-                                | "owner_grant_original_review_expired"
-                                | "owner_grant_publication_review_expired"
-                        )
-                }
-                _ => false,
-            }
+            && primary_available(
+                &self.phase,
+                self.form.as_ref(),
+                &self.draft,
+                self.original.is_some(),
+                self.flow.can_choose_new_limits(),
+            )
     }
     fn can_recover(&self) -> bool {
         self.actionable()
@@ -296,17 +419,19 @@ impl MiniAppsPanel {
             self.lease.clone().ok_or("management_session_required")?,
             args,
         )?;
+        let proposal = flow.proposed_tokens();
         self.grant_confirmation = Some(GrantPrompt {
             flow: flow.clone(),
             reply,
             phase: Phase::Loading,
             original: None,
             receiver: None,
-            draft: GrantChoices::default(),
+            draft: initial_draft(proposal),
             publishing: false,
             cancelling: false,
             form: None,
             submit_publication: false,
+            proposal,
         });
         self.grant_job(async move { flow.open().await });
         self.present_grant_confirmation(cx);
@@ -473,6 +598,13 @@ impl MiniAppsPanel {
         self.view
             .label(cx, ids!(grant_confirmation.scroll.status))
             .set_text(cx, &status);
+        let notice = proposal_notice(&prompt.phase, prompt.proposal, &prompt.draft.tokens);
+        self.view
+            .widget(cx, ids!(grant_confirmation.scroll.change))
+            .set_visible(cx, notice.is_some());
+        self.view
+            .label(cx, ids!(grant_confirmation.scroll.change))
+            .set_text(cx, notice.as_deref().unwrap_or_default());
         self.view
             .label(cx, ids!(grant_confirmation.scroll.details.copy))
             .set_text(cx, &details);
@@ -524,10 +656,7 @@ impl MiniAppsPanel {
                     prompt.publishing = false;
                     prompt.cancelling = false;
                     prompt.submit_publication = false;
-                    if prompt.draft.tokens.is_empty() {
-                        prompt.draft.tokens=form.context.remaining_tokens.unwrap_or(0).min(1_000_000).to_string();
-                    }
-                    if prompt.draft.expires_utc.is_empty() {prompt.draft.expires_utc=publication_expiry(None);}
+                    fill_form_defaults(&mut prompt.draft, &form);
                     prompt.draft.coordinator=prompt.flow.account().into();
                     prompt.form=Some(form);
                     Phase::Choose
@@ -631,6 +760,11 @@ impl MiniAppsPanel {
                 .text(),
             self_approval: false,
         };
+        // Keep the shown new amount equal to what the tokens field would commit.
+        let notice = proposal_notice(&prompt.phase, prompt.proposal, &prompt.draft.tokens);
+        self.view
+            .label(cx, ids!(grant_confirmation.scroll.change))
+            .set_text(cx, notice.as_deref().unwrap_or_default());
         self.view.button(cx,ids!(grant_confirmation.buttons.primary)).set_disabled(cx,!prompt.can_primary());
     }
     pub(super) fn grant_primary(&mut self, cx: &mut Cx) {
@@ -657,15 +791,15 @@ impl MiniAppsPanel {
                     return;
                 }
                 // Validate native input before consuming the one possible prepare.
-                prompt.submit_publication=true;
+                prompt.submit();
                 self.grant_job(async move { flow.prepare(choices).await });
             }
             Phase::Review(review) => {
-                prompt.submit_publication=true;
+                prompt.submit();
                 self.grant_job(async move { flow.confirm(*review).await });
             }
             Phase::PublicationReview(review) => {
-                prompt.submit_publication=true;
+                prompt.submit();
                 self.grant_job(async move { flow.publication_confirm(*review).await })
             }
             Phase::CancellationReview(review) => {
@@ -682,7 +816,7 @@ impl MiniAppsPanel {
             }
             Phase::Progress(progress) if matches!(progress.state, OwnerGrantState::Recorded) => {
                 prompt.publishing = true;
-                prompt.submit_publication=true;
+                prompt.submit();
                 self.grant_job(
                     async move { flow.publication_review(progress.summary.intent_id).await },
                 );
@@ -746,11 +880,7 @@ impl MiniAppsPanel {
         };
         // Close never mutates the private journal. An in-flight effect keeps
         // its original native custody even when the screen/reply disappears.
-        let reply=match prompt.phase {
-            Phase::Progress(p)=>serde_json::to_string(&p).map_err(|_|"management_outcome_unknown".to_owned()),
-            Phase::PublicationProgress(p)=>serde_json::to_string(&p).map_err(|_|"management_outcome_unknown".to_owned()),
-            _=>Ok(json!({"state":if prompt.receiver.is_some(){"outcome_unknown"}else{"review_closed"},"intentId":prompt.original}).to_string()),
-        };
+        let reply=close_reply(&prompt.phase,prompt.proposal,prompt.receiver.is_some(),prompt.original.as_deref());
         splash_host_respond(
             cx,
             prompt.reply.0,
@@ -902,6 +1032,179 @@ mod tests {
         }
         draft.managers.clear();assert!(!form_choices_valid(&form,&draft));
     }
+    fn pool_form(remaining: u64) -> OwnerGrantForm {
+        OwnerGrantForm {contribution_id:"pool_1".into(),resource_id:"r".into(),label:"Pool".into(),
+            context: ::hagency::native_owner::OwnerGrantReviewContext {
+                server_origin:"https://matrix.test".into(),profile_id:"profile".into(),resource_revision:"revision".into(),
+                framework:"codex".into(),model:"model".into(),remaining_tokens:Some(remaining),
+                resource_total_tokens:Some(20_000_000),shared_account_total_tokens:None,observed_at_ms:1,
+            }}
+    }
+    fn summary(tokens: u64) -> OwnerGrantSummary {
+        OwnerGrantSummary {
+            intent_id: "original".into(), owner_mxid: "@owner:test".into(),
+            contribution_id: "pool_1".into(), resource_id: "resource".into(),
+            coordinator_mxid: "@owner:test".into(), allocated_tokens: tokens,
+            eligible_managers: vec!["@manager:test".into()], allow_self_approval: false,
+            delegation_expires_at_ms: 1793491200000, period_key: "2026-10".into(),
+            period_start_ms: 1790812800000, period_end_ms: 1793491200000,
+        }
+    }
+    fn publication(state: OwnerGrantPublicationState, server: Option<&str>) -> Phase {
+        Phase::PublicationProgress(OwnerGrantPublicationProgress {
+            summary: summary(2_000_000), state, server_state: server.map(str::to_owned),
+            server_revision: server.map(|_| 1), observed_at_ms: server.map(|_| 1),
+        })
+    }
+    fn progress(state: OwnerGrantState, closed: bool) -> Phase {
+        Phase::Progress(OwnerGrantProgress {
+            summary: summary(2_000_000), state,
+            closure: closed.then_some(::hagency::native_owner::OwnerGrantClosure {
+                retained_tokens: 0, known_consumed_tokens: 0, unresolved_tokens: 0, observed_at_ms: 1,
+            }),
+        })
+    }
+    #[test]
+    fn proposal_prefills_only_the_native_tokens_field_and_is_never_lowered() {
+        let form = pool_form(10_000_000);
+        let mut draft = initial_draft(Some(3_000_000));
+        assert_eq!(draft.tokens, "3000000");
+        fill_form_defaults(&mut draft, &form);
+        assert_eq!(draft.tokens, "3000000");
+        // Applicants are still typed natively; expiry keeps today's default.
+        assert!(draft.managers.is_empty());
+        assert_eq!(draft.expires_utc, publication_expiry(None));
+        let mut default = initial_draft(None);
+        fill_form_defaults(&mut default, &form);
+        assert_eq!(default.tokens, "1000000");
+        // Above the available capacity the proposal stays visible and unconfirmable.
+        let mut above = initial_draft(Some(12_000_000));
+        fill_form_defaults(&mut above, &form);
+        above.coordinator = "@owner:test".into();
+        above.managers = "@manager:test".into();
+        assert_eq!(above.tokens, "12000000");
+        assert!(!form_choices_valid(&form, &above));
+        above.tokens = "3000000".into();
+        assert!(form_choices_valid(&form, &above));
+        // A reopened form keeps what the owner typed over the proposal.
+        let mut edited = initial_draft(Some(3_000_000));
+        edited.tokens = "2500000".into();
+        fill_form_defaults(&mut edited, &form);
+        assert_eq!(edited.tokens, "2500000");
+    }
+    #[test]
+    fn proposal_notice_shows_the_current_and_the_committed_amount() {
+        // Only a pool without an issued grant reaches the form; the new amount
+        // is whatever the native tokens field holds now.
+        for (field, shown) in [("3000000", "3 M"), ("2500000", "2.5 M"), ("2.5", "Unavailable")] {
+            assert_eq!(
+                proposal_notice(&Phase::Choose, Some(3_000_000), field).as_deref(),
+                Some(format!("Per-request limit: None active → {shown}").as_str())
+            );
+        }
+        assert!(proposal_notice(&Phase::Choose, None, "3000000").is_none());
+        assert!(proposal_notice(&Phase::Loading, Some(3_000_000), "").is_none());
+        let declined = proposal_notice(&progress(OwnerGrantState::Declined, false), Some(3_000_000), "").unwrap();
+        assert_eq!(declined, "Per-request limit: None active → 3 M\nThe proposed limit is filled in when you choose new limits.");
+        let closed = proposal_notice(&progress(OwnerGrantState::Recorded, true), Some(3_000_000), "").unwrap();
+        assert!(closed.ends_with("filled in when you choose new limits."), "{closed}");
+        let failed = proposal_notice(&Phase::Failed("owner_grant_prior_intent_required".into()), Some(3_000_000), "").unwrap();
+        assert!(failed.ends_with("\nThe proposed limit was not applied."), "{failed}");
+    }
+    #[test]
+    fn published_grant_is_shown_read_only_and_never_replaced() {
+        const PUBLISHED: &str = "This pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed.";
+        let live = publication(OwnerGrantPublicationState::ServerObserved, Some("active"));
+        assert_eq!(live_grant_tokens(&live), Some(2_000_000));
+        assert_eq!(
+            proposal_notice(&live, Some(3_000_000), "").unwrap(),
+            format!("Per-request limit: 2 M → 3 M\n{PUBLISHED}")
+        );
+        // Revoked or expired grants still used this admission: no current limit,
+        // and the proposal still cannot become a second grant.
+        for server in ["revoked", "expired"] {
+            let used = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
+            assert_eq!(live_grant_tokens(&used), None);
+            assert_eq!(
+                proposal_notice(&used, Some(3_000_000), "").unwrap(),
+                format!("Per-request limit: None active → 3 M\n{PUBLISHED}")
+            );
+        }
+        // No proposal, applicant or selector flag offers a commit beside a
+        // published grant: nothing is revoked, reserved or published from here.
+        let form = pool_form(10_000_000);
+        let mut draft = initial_draft(Some(3_000_000));
+        fill_form_defaults(&mut draft, &form);
+        draft.coordinator = "@owner:test".into();
+        draft.managers = "@manager:test".into();
+        assert!(primary_available(&Phase::Choose, Some(&form), &draft, false, true));
+        for server in ["active", "revoked", "expired"] {
+            let phase = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
+            for has_original in [false, true] {
+                for can_choose_new_limits in [false, true] {
+                    assert!(!primary_available(&phase, Some(&form), &draft, has_original, can_choose_new_limits));
+                }
+            }
+        }
+    }
+    #[test]
+    fn other_originals_keep_their_amounts_and_their_own_actions() {
+        const EXISTING: &str = "Per-request limit: None active → 3 M\nThe proposed limit is not applied to this existing grant. It keeps the amounts shown below.";
+        for phase in [
+            publication(OwnerGrantPublicationState::Rejected, None),
+            publication(OwnerGrantPublicationState::OutcomeUnknown, None),
+            progress(OwnerGrantState::Recorded, false),
+            progress(OwnerGrantState::OutcomeUnknown, false),
+        ] {
+            assert_eq!(live_grant_tokens(&phase), None);
+            assert_eq!(proposal_notice(&phase, Some(3_000_000), "").unwrap(), EXISTING);
+        }
+        // An unattempted original reserved nothing; cancelling it reopens the form.
+        for state in [OwnerGrantState::ReviewRequired, OwnerGrantState::ReviewExpired] {
+            assert_eq!(
+                proposal_notice(&progress(state, false), Some(3_000_000), "").unwrap(),
+                format!("Per-request limit: None active → 3 M\n{PENDING_NOTE}")
+            );
+        }
+        // A proposal adds or removes no action on an existing original.
+        let draft = initial_draft(Some(3_000_000));
+        assert!(primary_available(&progress(OwnerGrantState::Recorded, false), None, &draft, true, true));
+        assert!(!primary_available(&progress(OwnerGrantState::OutcomeUnknown, false), None, &draft, true, true));
+    }
+    #[test]
+    fn closing_beside_a_published_grant_names_why_the_proposal_was_not_applied() {
+        for server in ["active", "revoked", "expired"] {
+            let phase = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
+            assert_eq!(
+                close_reply(&phase, Some(3_000_000), false, Some("original")),
+                Err("pool_grant_already_published".into())
+            );
+            // Without a proposal the reply stays the public publication status.
+            let reply: serde_json::Value =
+                serde_json::from_str(&close_reply(&phase, None, false, Some("original")).unwrap()).unwrap();
+            assert_eq!(reply["state"], "server_observed");
+            assert_eq!(reply["serverState"], server);
+            assert_eq!(reply["summary"]["allocatedTokens"], 2_000_000);
+        }
+        // Other outcomes keep their public progress so the app can recover them.
+        let reserved: serde_json::Value = serde_json::from_str(
+            &close_reply(&progress(OwnerGrantState::Recorded, false), Some(3_000_000), false, Some("original")).unwrap(),
+        ).unwrap();
+        assert_eq!(reserved["state"], "recorded");
+        assert_eq!(reserved["summary"]["allocatedTokens"], 2_000_000);
+        let unknown = close_reply(&publication(OwnerGrantPublicationState::OutcomeUnknown, None), Some(3_000_000), false, Some("original"));
+        assert!(unknown.unwrap().contains("\"state\":\"outcome_unknown\""));
+        // Closing the form itself applies nothing and names no grant.
+        let parsed = |reply: Result<String, String>| serde_json::from_str::<serde_json::Value>(&reply.unwrap()).unwrap();
+        assert_eq!(
+            parsed(close_reply(&Phase::Choose, Some(3_000_000), false, None)),
+            json!({"state":"review_closed","intentId":null})
+        );
+        assert_eq!(
+            parsed(close_reply(&Phase::Loading, Some(3_000_000), true, None)),
+            json!({"state":"outcome_unknown","intentId":null})
+        );
+    }
 }
 
 #[cfg(test)]
@@ -970,6 +1273,13 @@ mod layout_tests {
                 .view
                 .label(&cx, ids!(grant_confirmation.scroll.details.copy))
                 .set_text(&mut cx, &long);
+            // The proposed-limit line sits above the form and the details.
+            panel.view.widget(&cx, ids!(grant_confirmation.scroll.change)).set_visible(&mut cx, true);
+            panel.view.label(&cx, ids!(grant_confirmation.scroll.change)).set_text(&mut cx, if cn {
+                "每次申请上限：2 M → 3 M\n此资源池在当前准入下已发布过授权，而服务器每次准入只接受一个授权，因此提议的上限未生效。没有撤销或更改任何授权。"
+            } else {
+                "Per-request limit: 2 M → 3 M\nThis pool already has a published grant for its current admission, and the server accepts only one grant per admission, so the proposed limit is not applied. Nothing was revoked or changed."
+            });
             if cn {
                 for (id, text) in [
                     (ids!(grant_confirmation.buttons.cancel), "关闭核对"),
@@ -1024,6 +1334,8 @@ mod layout_tests {
             cx2d.end_pass(&pass);
             drop(cx2d);
             drop(draw);
+            let change=panel.view.widget(&cx,ids!(grant_confirmation.scroll.change)).area().rect(&cx);
+            assert!(change.size.x>0.0 && change.size.y>0.0 && change.pos.x+change.size.x<=width+0.5,"{change:?}");
             if mode==3 {
                 let slider=panel.view.widget(&cx,ids!(grant_confirmation.scroll.choices.tokens.slider_wrap.amount_slider)).area().rect(&cx);
                 let input=panel.view.widget(&cx,ids!(grant_confirmation.scroll.choices.tokens.input)).area().rect(&cx);

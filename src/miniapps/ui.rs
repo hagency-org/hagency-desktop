@@ -281,6 +281,7 @@ script_mod! {
                 }
                 owner := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
                 status := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                change := RinxLabel {visible: false width: Fill flow: Flow.Right{wrap: true}}
                 choices := View {width: Fill height: Fit flow: Down spacing: 12
                     capacity := RinxLabel {width:Fill flow:Flow.Right{wrap:true}}
                     RinxLabel {text: #(crate::i18n::tr("Agent applicants")) i18n_text: "Agent applicants"}
