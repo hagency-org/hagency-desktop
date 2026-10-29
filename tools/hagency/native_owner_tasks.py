@@ -34,7 +34,7 @@ def fixtures():
 
 class Owner(Accounts):
  def visible(self,name):
-  if name in {'entry_switch','refresh','accounts','resources','inbox'}:
+  if name in {'entry_switch','refresh','accounts','resources','inbox','pool_agent_back'}:
    r=self.row(name);assert r['r'][2]>0 and r['r'][3]>=43;return r
   return super().visible(name)
  def set_fixtures(self,data):

@@ -278,6 +278,28 @@ host.request("fixture.pending",{},fn(result){ui.content.reply.set_text("original
     }
 
     #[test]
+    fn shipped_hagency_bundle_defines_each_helper_once() {
+        // A later `A.name = fn` silently replaces an earlier one. A second
+        // `A.local_name` once broke every resource title in the bundle.
+        let source = include_str!("../../apps/hagency/bundle/main.splash");
+        let mut seen = std::collections::HashSet::new();
+        let duplicates: Vec<&str> = source
+            .lines()
+            .filter_map(|line| {
+                let name = line
+                    .strip_prefix("A.")?
+                    .split(|c: char| c == '=' || c.is_whitespace())
+                    .next()?;
+                let rest = line[2 + name.len()..].trim_start().strip_prefix('=')?;
+                rest.trim_start().starts_with("fn").then_some(name)
+            })
+            .filter(|name| !seen.insert(*name))
+            .collect();
+        assert!(seen.len() > 100, "the helper scan found too few definitions");
+        assert!(duplicates.is_empty(), "redefined bundle helpers: {duplicates:?}");
+    }
+
+    #[test]
     fn native_hagency_startup_finds_sections_grouped_under_an_alert_layer() {
         // The shipped root nests its sections in a shell so alerts can cover
         // the whole app. A direct-children check refused it at every Run.
