@@ -653,6 +653,7 @@ script_mod! {
                         View {width: Fill height: 40 spacing: 8
                             ensure_owner_direct := Action {text: #(crate::i18n::tr("Set up / retry private chat")) i18n_text: "Set up / retry private chat"}
                             open_owner_direct := Action {text: #(crate::i18n::tr("Open private chat")) i18n_text: "Open private chat" enabled: false}
+                            encrypt_owner_direct := Action {text: #(crate::i18n::tr("Enable end-to-end encryption")) i18n_text: "Enable end-to-end encryption" enabled: false}
                         }
                     }
                     View {width: Fill height: 40 spacing: 8
@@ -1549,6 +1550,7 @@ impl HagencyPanel {
             _=>"Set up a private chat with this Agent. Retrying preserves the original setup request.",
         });
         self.view.button(cx,ids!(open_owner_direct)).set_enabled(cx,exact && state == "active" && !string(&self.direct_state,"roomId").is_empty() && !self.busy);
+        self.view.button(cx,ids!(encrypt_owner_direct)).set_enabled(cx,exact && state == "active" && !string(&self.direct_state,"roomId").is_empty() && !self.busy);
     }
     fn project_section(&self, cx: &mut Cx, selected: &[LiveId]) {
         for id in [
@@ -3985,6 +3987,15 @@ impl Widget for HagencyPanel {
             if self.agent(cx).as_deref()==Some(self.direct_agent.as_str()) && self.direct_state["state"] == "active" && Service::for_current().is_ok_and(|s|s.identity()==self.identity)
                 && let Ok(id)=matrix_sdk::ruma::OwnedRoomId::try_from(string(&self.direct_state,"roomId")) {
                 navigate_agent_chat(cx, id, true, None);
+            }
+            return;
+        }
+        // The Agent's own device on its execution host reads and answers the
+        // encrypted private chat; the server only routes ciphertext.
+        if self.view.button(cx,ids!(encrypt_owner_direct)).clicked(actions) {
+            if self.agent(cx).as_deref()==Some(self.direct_agent.as_str()) && self.direct_state["state"] == "active" && Service::for_current().is_ok_and(|s|s.identity()==self.identity)
+                && let Ok(room_id)=matrix_sdk::ruma::OwnedRoomId::try_from(string(&self.direct_state,"roomId")) {
+                crate::sliding_sync::submit_async_request(crate::sliding_sync::MatrixRequest::EnableEncryption {room_id});
             }
             return;
         }

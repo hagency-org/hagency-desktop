@@ -2277,5 +2277,8 @@
   "Loading publication status…": "正在读取发布状态…",
   "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server.": "设置可申请的账号、额度和到期时间，点击一次即可发布到服务器。",
   "Publish these saved limits to the server. Capacity is checked automatically during publication.": "按以下已保存的设置发布到服务器；发布时会自动检查可用额度。",
-  "Capacity is reserved. Publish these saved limits to make the pool available on the server.": "额度已预留，发布后以下账号即可在服务器上申请使用。"
+  "Capacity is reserved. Publish these saved limits to make the pool available on the server.": "额度已预留，发布后以下账号即可在服务器上申请使用。",
+  "Enable end-to-end encryption": "启用端到端加密",
+  "End-to-end encryption is on for this private chat. New messages are encrypted.": "此私聊已开启端到端加密，之后的消息都会加密。",
+  "Could not enable end-to-end encryption. Try again.": "未能开启端到端加密，请重试。"
 }

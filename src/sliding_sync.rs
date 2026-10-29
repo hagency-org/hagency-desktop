@@ -612,6 +612,10 @@ pub enum MatrixRequest {
     LeaveRoom {
         room_id: OwnedRoomId,
     },
+    /// Request to turn on end-to-end encryption in the given room. Irreversible.
+    EnableEncryption {
+        room_id: OwnedRoomId,
+    },
     /// Request to get the actual list of members in a room.
     ///
     /// This returns the list of members that can be displayed in the UI.
@@ -1403,6 +1407,31 @@ async fn matrix_worker_task(
                         }
                     };
                     Cx::post_action(result_action);
+                });
+            }
+
+            MatrixRequest::EnableEncryption { room_id } => {
+                let Some(client) = get_client() else { continue };
+                let _enable_encryption_task = crate::account_session::spawn(async move {
+                    let result = match client.get_room(&room_id) {
+                        Some(room) => room.enable_encryption().await.map_err(|e| e.to_string()),
+                        None => Err("room not found".into()),
+                    };
+                    match result {
+                        Ok(()) => enqueue_popup_notification(
+                            crate::i18n::tr("End-to-end encryption is on for this private chat. New messages are encrypted."),
+                            PopupKind::Success,
+                            Some(5.0),
+                        ),
+                        Err(e) => {
+                            error!("Failed to enable encryption in room {room_id}: {e}");
+                            enqueue_popup_notification(
+                                crate::i18n::tr("Could not enable end-to-end encryption. Try again."),
+                                PopupKind::Error,
+                                None,
+                            );
+                        }
+                    }
                 });
             }
 

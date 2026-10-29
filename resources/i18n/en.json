@@ -2258,5 +2258,8 @@
   "Loading publication status…": "Loading publication status…",
   "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server.": "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server.",
   "Publish these saved limits to the server. Capacity is checked automatically during publication.": "Publish these saved limits to the server. Capacity is checked automatically during publication.",
-  "Capacity is reserved. Publish these saved limits to make the pool available on the server.": "Capacity is reserved. Publish these saved limits to make the pool available on the server."
+  "Capacity is reserved. Publish these saved limits to make the pool available on the server.": "Capacity is reserved. Publish these saved limits to make the pool available on the server.",
+  "Enable end-to-end encryption": "Enable end-to-end encryption",
+  "End-to-end encryption is on for this private chat. New messages are encrypted.": "End-to-end encryption is on for this private chat. New messages are encrypted.",
+  "Could not enable end-to-end encryption. Try again.": "Could not enable end-to-end encryption. Try again."
 }
