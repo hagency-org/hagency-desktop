@@ -5765,7 +5765,9 @@ A.render_page = fn(){
                                 }
                                 mod.widgets.HagencyListSubtitle{max_lines:1 text_overflow:TextOverflow.Ellipsis text:s.capacity draw_text.color:if s.low {mod.widgets.RINX_DANGER_FG} else {mod.widgets.RINX_MUTED}}
                             }
-                            if s.badge>0 {mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:""+s.badge}}}
+                            View{width:(20+10*mod.widgets.RINX_TEXT_SCALE) height:Fit align:Align{x:1.0 y:0.5}
+                                if s.badge>0 {mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:""+s.badge}}}
+                            }
                             mod.widgets.HagencyChevron{}
                         }
                     }
