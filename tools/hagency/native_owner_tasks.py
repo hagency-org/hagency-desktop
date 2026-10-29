@@ -83,11 +83,14 @@ class Owner(Accounts):
   self.click('owner_account_pools');self.visible('resource_detail')
   assert self.text_present('0.75 M')
   self.shot('06-pools-scoped-to-tool')
-  self.click('resource_detail');self.wait(lambda:self.row('owner_pool_config')['r'][2]>0)
+  self.click('resource_detail');self.wait(lambda:self.row('resource_alerts_open')['r'][2]>0)
+  # The model and limit editor is reached from the pool page's Model row.
   self.visible('owner_pool_config');self.shot('07-pool-management')
   self.click('resource_publish_review');self.wait(lambda:self.row('resource_publish_confirm')['r'][2]>0);self.shot('07b-catalogue-alert')
   self.click('resource_publish_cancel')
-  self.visible('resource_all_connections');self.shot('07c-pool-manage-tiles')
+  # One status-aware Server and publishing row replaces the Servers tile.
+  assert not any(r.get('i')=='resource_all_connections' for r in self.snap())
+  self.visible('resource_alerts_open');self.shot('07c-pool-manage-tiles')
   self.visible('resource_publish_review');self.shot('07d-pool-on-device')
   self.req('/m',k='scroll',x=200,y=400,dy=-10000,wait=1)
   self.click('resource_connections');self.wait(lambda:self.row('owner_connection_requests')['r'][2]>0)
