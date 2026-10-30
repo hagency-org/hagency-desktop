@@ -17,6 +17,8 @@ H.connection_capacity=connection_capacity
 let {pool_meta=nil,pool_info=nil,pool_edit=nil,pool_result=nil,pool_list_result=nil,pool_grants=[],pool_epoch=0,pool_jobs=[],pool_job_at=0,pool_job_running=false,pool_create=nil,pool_create_seq=0,pool_saved=nil}=H
 H.pool_meta=pool_meta H.pool_info=pool_info H.pool_edit=pool_edit H.pool_result=pool_result H.pool_list_result=pool_list_result H.pool_grants=pool_grants
 H.pool_epoch=pool_epoch H.pool_jobs=pool_jobs H.pool_job_at=pool_job_at H.pool_job_running=pool_job_running H.pool_create=pool_create H.pool_create_seq=pool_create_seq H.pool_saved=pool_saved
+let {pool_result_scrolls=0,pool_before=nil}=H
+H.pool_result_scrolls=pool_result_scrolls H.pool_before=pool_before
 let {pool_drafts=nil,pool_draft_seq=0,pool_tip="",pool_device=nil,pool_device_from="list",device_from="",pool_sub_rid=""}=H
 H.pool_drafts=pool_drafts H.pool_draft_seq=pool_draft_seq H.pool_tip=pool_tip H.pool_device_from=pool_device_from H.device_from=device_from H.pool_sub_rid=pool_sub_rid
 if pool_device==nil {pool_device={state:"idle" board:nil error:""}}
@@ -254,11 +256,11 @@ A.onboarding_state = fn(state){
 }
 A.onboarding_result_text = fn(data){
     let {state=nil closure=nil}=data
-    if state == "recorded" && closure != nil {return A.t("Previous grant closed. Retained amounts remain committed; a new grant requires a separately approved admission.", "旧的发布已关闭，保留的额度仍被占用。新的发布需要重新通过加入审批。")}
+    if state == "recorded" && closure != nil {return A.t("Previous grant closed. Retained amounts remain committed; a new grant requires a separately approved admission.", "旧的发布已关闭；已分给 Agent 的额度仍算在已承诺里。新的发布需要重新通过加入审批。")}
     if state == "active" {return A.t("Device setup completed. Continue with accounts, resources and sharing below.", "设备设置已完成，请继续处理下方的账号、资源和共享步骤。")}
-    if state == "recorded" {return A.t("Capacity is reserved. Open the saved publication to continue.", "额度已预留，可打开已保存的发布记录继续。")}
+    if state == "recorded" {return A.t("Capacity is reserved. Open the saved publication to continue.", "这台电脑已记下这次发布，打开发布记录就能继续。")}
     if state == "server_observed" {return A.t("The server result was read. Reopening the original grant does not renew or reactivate it.", "已读取服务器结果。重新打开原始授权不会续期或重新激活它。")}
-    if state == "rejected" || state == "declined" {return A.t("The original action was declined. Its history and any existing local reservation remain unchanged.", "原始操作已被拒绝，其历史和任何已有本地预留保持不变。")}
+    if state == "rejected" || state == "declined" {return A.t("The original action was declined. Its history and any existing local reservation remain unchanged.", "原来的操作被拒绝了；记录和这台电脑上已有的发布都不变。")}
     if state == "review_expired" {return A.t("The original accounting period ended. This grant cannot move silently to another month.", "原始记账周期已结束，此授权不能自动转移到其他月份。")}
     if state == "review_required" {return A.t("The original grant needs a fresh native review.", "原来的发布需要重新确认。")}
     return A.onboarding_state(state)
@@ -588,11 +590,12 @@ A.open_resource = fn(id){
         A.pool_edit_sync()
         A.pool_info_load(id)
         if H.nav.anchor!="" {start_timeout(0.3,||{if H.page=="resource_detail" {A.nav_scroll()}})}
+        A.pool_result_show()
     })
 }
 A.alert_state = fn(state){
     if state=="open" {return A.t("Open","待处理")}
-    if state=="acknowledged" {return A.t("Seen","已知道")}
+    if state=="acknowledged" {return A.t("Marked Got It","已标记“知道了”")}
     if state=="assigned" {return A.t("Being handled","处理中")}
     if state=="suppressed" {return A.t("Muted","暂停提醒中")}
     if state=="resolved" {return A.t("Handled","已处理好")}
@@ -4710,8 +4713,8 @@ A.pool_requests_text=fn(n){return if n==1 {A.t("1 Agent request to review","1 �
 A.pool_info_load=fn(rid){
     let epoch=A.pool_queue_reset()
     let old=H.pool_info
-    let p={rid:rid conn:nil connState:"loading" grant:nil grantState:"loading" board:nil boardState:"loading" requests:-1 alerts:-1 tools:-1 stopped:-1 workspaces:-1 agents:-1 now:nil}
-    if old!=nil && old.rid==rid {p.conn=old.conn p.connState=old.connState p.grant=old.grant p.grantState=old.grantState p.board=old.board p.boardState=old.boardState p.requests=old.requests p.alerts=old.alerts p.tools=old.tools p.stopped=old.stopped p.workspaces=old.workspaces p.agents=old.agents p.now=old.now}
+    let p={rid:rid conn:nil connState:"loading" grant:nil grantState:"loading" board:nil boardState:"loading" requests:-1 alerts:-1 tools:-1 stopped:-1 workspaces:-1 agents:-1 now:nil using:nil}
+    if old!=nil && old.rid==rid {p.conn=old.conn p.connState=old.connState p.grant=old.grant p.grantState=old.grantState p.board=old.board p.boardState=old.boardState p.requests=old.requests p.alerts=old.alerts p.tools=old.tools p.stopped=old.stopped p.workspaces=old.workspaces p.agents=old.agents p.now=old.now p.using=old.using}
     H.pool_info=p
     if H.session==nil {p.connState="error" p.grantState="error" return}
     let rest=fn(){
@@ -4738,7 +4741,10 @@ A.pool_info_load=fn(rid){
                 if p.grantState=="error" {p.grant=nil}
             }
             A.pool_edit_sync()
+            A.pool_result_show()
             A.pool_enqueue(epoch,"hagency.pools.agents.list",{after:nil needsMyAction:true poolId:cid},fn(r){p.requests=A.pool_count_requests(r,cid)})
+            // The Agents running on this pool and what each was given: the per-request floor.
+            A.pool_enqueue(epoch,"hagency.pools.agents.list",{after:nil poolId:cid},fn(r){p.using=A.pool_using_rows(r,cid)})
             rest()
         })
     })
@@ -4748,18 +4754,70 @@ A.pool_saved_note=fn(args,data){
     let {resourceId=nil,ceiling=nil}=args
     if ceiling==nil {return nil}
     let {kind=nil,tokens=nil}=ceiling
-    if kind=="clear" {return {rid:resourceId tone:"running" text:A.t("Saved. Sharing is paused: this pool has no monthly maximum, so Agents can’t request it.","已保存。已暂停共享：这个资源池没有每月上限，Agent 不能申请。")}}
+    // The maximum before this change: the amendment's record, else what the page showed when it was sent.
+    let kept=H.pool_before
+    H.pool_before=nil
+    let shown=if kept!=nil && kept.rid==resourceId {kept.max} else {nil}
+    if kind=="clear" {return {rid:resourceId at:"max" tone:"running" text:if shown!=nil {A.t("Saved: sharing paused (monthly maximum "+A.tokens(shown)+" → none). Agents can’t request it.","已保存：暂停共享（每月上限 "+A.tokens(shown)+" → 未设置），Agent 不能申请。")} else {A.t("Saved: sharing paused (no monthly maximum). Agents can’t request it.","已保存：暂停共享（不设每月上限），Agent 不能申请。")}}}
     if kind!="monthly" || tokens==nil {return nil}
     let amended=if data==nil {nil} else {A.recipient_optional(data,"ceilingAmendment")}
-    let before=if amended==nil {nil} else {A.recipient_optional(amended,"previousTokens")}
-    if before!=nil && before!=tokens {return {rid:resourceId tone:"running" text:A.t("Saved. The monthly maximum went from ","已保存。每月上限从 ")+A.tokens(before)+A.t(" to "," 调到 ")+A.tokens(tokens)+A.t(".","。") raised:tokens>before}}
-    return {rid:resourceId tone:"running" text:A.t("Saved. The monthly maximum is now ","已保存。每月上限现在是 ")+A.tokens(tokens)+A.t(".","。")}
+    let recorded=if amended==nil {nil} else {A.recipient_optional(amended,"previousTokens")}
+    let before=if recorded!=nil {recorded} else {shown}
+    if before!=nil && before!=tokens {return {rid:resourceId at:"max" tone:"running" text:A.pool_saved_text("max",before,tokens) raised:tokens>before}}
+    return {rid:resourceId at:"max" tone:"running" text:A.pool_saved_text("max",nil,tokens)}
+}
+// "Saved: monthly maximum 1 M → 2 M" / "Saved: per-request limit 0.2 M → 0.25 M": one wording for every saved change.
+A.pool_saved_text=fn(what,before,after){
+    let max=what=="max"
+    if before==nil {return if max {A.t("Saved: monthly maximum is now "+A.tokens(after),"已保存：每月上限改为 "+A.tokens(after))} else {A.t("Saved: per-request limit is now "+A.tokens(after),"已保存：每次申请上限改为 "+A.tokens(after))}}
+    return if max {A.t("Saved: monthly maximum "+A.tokens(before)+" → "+A.tokens(after),"已保存：每月上限 "+A.tokens(before)+" → "+A.tokens(after))} else {A.t("Saved: per-request limit "+A.tokens(before)+" → "+A.tokens(after),"已保存：每次申请上限 "+A.tokens(before)+" → "+A.tokens(after))}
 }
 A.pool_take_saved=fn(rid){
     let note=H.pool_saved
     H.pool_saved=nil
     if note==nil || note.rid!=rid {return nil}
-    return {tone:note.tone text:note.text raised:A.recipient_optional(note,"raised")==true}
+    H.pool_result_scrolls=2
+    let at=A.recipient_optional(note,"at")
+    return {at:if at==nil {"top"} else {at} tone:note.tone text:note.text raised:A.recipient_optional(note,"raised")==true}
+}
+// One way of confirming a change on the pool page: the result sits beside the control that changed
+// (the maximum, the per-request limit or publishing ahead; else the top of the capacity card).
+A.pool_result_at=fn(v){
+    let r=H.pool_result
+    if r==nil {return ""}
+    let at=A.recipient_optional(r,"at")
+    if at=="max" || at=="quota" {return at}
+    if at=="renew" && (v.renewOpen || v.renewal!=nil) {return at}
+    return "top"
+}
+A.pool_result_dismiss=fn(){H.pool_result=nil H.pool_offer=nil A.redraw()}
+// Scrolls the result's section into view once it is drawn: after the page loads, then again
+// once its publication state is in (rows above may have moved).
+A.pool_result_show=fn(){
+    if H.pool_result==nil || H.page!="resource_detail" || H.pool_result_scrolls<=0 {return}
+    H.pool_result_scrolls=H.pool_result_scrolls-1
+    start_timeout(0.35,||{
+        if H.page!="resource_detail" || H.pool_result==nil || H.resource_detail==nil {return}
+        let at=A.pool_result_at(A.pool_view(H.resource_detail))
+        ui.content.scroll_to(if at=="max" {"pool_max_section"} else if at=="quota" {"pool_quota_section"} else if at=="renew" {"pool_renew_section"} else {"pool_result_top"})
+    })
+}
+// Says a result on the pool page, where it belongs, and brings it into view.
+A.pool_say=fn(at,tone,text){H.pool_result={at:at tone:tone text:text} H.pool_result_scrolls=2 A.redraw() A.pool_result_show()}
+// Agents running on a pool and what each was given (the per-request floor), from one read of its requests.
+A.pool_using_rows=fn(r,cid){
+    if !r.is_ok {return nil}
+    let {items=nil}=r.data
+    if items==nil {return nil}
+    let out=[]
+    for q in items {let {poolId=nil,state=nil,reservationState=nil,resourceOwnerMxid=nil,requestedTokens=nil}=q if poolId==cid && state=="approved_waiting_executor" && reservationState!="refused" && resourceOwnerMxid==H.session.account && requestedTokens!=nil {out.push(q)}}
+    return out
+}
+A.pool_floor=fn(v){
+    let p=H.pool_info
+    if p==nil || p.rid!=v.row.id || p.using==nil {return nil}
+    let n={t:0} for q in p.using {n.t=n.t+q.requestedTokens}
+    return if n.t>0 {n.t} else {nil}
 }
 A.pool_info_retry=fn(){if H.busy || H.resource_detail==nil {return} H.pool_result=nil A.pool_info_load(H.resource_id) A.redraw()}
 // A month key "2026-10" or a UTC time; the pool resets on the 1st of the next month.
@@ -4880,17 +4938,17 @@ A.pool_max_reason=fn(reason,amend){
     if reason=="read_only" {return A.t("You can only view this pool here.","这里只能查看，不能修改。")}
     if reason=="account_unavailable" {return A.t("Sign in to the coding tool again to change it.","请先在「编码工具」里重新登录。")}
     if reason=="published" {return A.t("It can’t change while the pool is listed in the catalogue.","列在目录中时，每月上限不能修改。")}
-    if reason=="retained_commitments" {return A.t("Agents still hold some of it, so it can’t change yet.","还有 Agent 分到了额度，暂时不能修改。")}
+    if reason=="retained_commitments" {return A.t("Some of it is given to Agents, so it can’t change yet.","还有额度已分给 Agent，暂时不能修改。")}
     if amend==nil {return A.pool_lock_rule()}
     let why=A.recipient_optional(amend,"reason")
-    if why=="contribution_history_not_proven" {return A.t("This computer doesn’t have the records from when the pool was offered, so the maximum can only change on the computer that offered it.","这台电脑上没有提交这个资源池时的记录，只能在原来提交它的电脑上调整每月上限。")}
-    if why=="monthly_ceiling_required" {return A.t("This pool was offered without a monthly maximum, and one can’t be added afterwards. Add another pool with a maximum instead.","这个资源池提交时没有设每月上限，之后不能再加。可以再建一个设了上限的资源池。")}
+    if why=="contribution_history_not_proven" {return A.t("This computer doesn’t have the records from when the pool was offered, so the maximum can only change on the computer that offered it.","这台电脑上没有这个资源池连接服务器时的记录，只能在原来那台电脑上调整每月上限。")}
+    if why=="monthly_ceiling_required" {return A.t("This pool was offered without a monthly maximum, and one can’t be added afterwards. Add another pool with a maximum instead.","这个资源池连接服务器时没有设每月上限，之后不能再加。可以再建一个设了上限的资源池。")}
     if why=="read_only" {return A.t("You can only view this pool here.","这里只能查看，不能修改。")}
-    if why=="not_offered" {return A.t("Finish offering the pool to a server first.","请先完成资源池的提交。")}
+    if why=="not_offered" {return A.t("Connect the pool to a server first.","请先把资源池连接到服务器。")}
     return A.pool_lock_rule()
 }
 // The one wording of the lock rule, used on the pool page, the glossary and alerts.
-A.pool_lock_rule=fn(){return A.t("This server or this computer’s Hagency can’t change an offered pool’s monthly maximum yet, so it stays as it is for now.","这个服务器或这台电脑上的 Hagency 还不支持调整已提交资源池的每月上限，现在先保持不变。")}
+A.pool_lock_rule=fn(){return A.t("This server or this computer’s Hagency can’t change an offered pool’s monthly maximum yet, so it stays as it is for now.","这个服务器或这台电脑上的 Hagency 还不支持调整已连接服务器的资源池的每月上限，现在先保持不变。")}
 // The server feature that lets a published month change, or be scheduled ahead.
 A.succession_enabled=fn(){
     if H.session==nil || H.pool_no_succession {return false}
@@ -5000,7 +5058,7 @@ A.pool_save_state=fn(){
     let max=if s.maxDirty {if e.unlimited {-1} else {A.pool_whole(e.max)}} else {if v.b.ceiling==nil {-1} else {v.b.ceiling}}
     if s.maxDirty && !e.unlimited {
         if max<0 {s.maxError=A.t("Enter a whole amount, such as 1.5 M.","请输入有效额度，例如 1.5 M。")}
-        else if max<v.maxMin {s.maxError=if v.maxMode=="amend" {if v.raiseOnly {A.t("For now it can only go up from ","现在只能从 ")+A.tokens(v.maxMin)+A.t(".","往上调。")} else {A.t("At least ","不能低于本月已承诺的 ")+A.tokens(v.maxMin)+A.t(", already promised this month.","。")}} else {A.t("At least ","不能低于已分给 Agent 的 ")+A.tokens(v.maxMin)+A.t(", which Agents already hold.","。")}}
+        else if max<v.maxMin {s.maxError=if v.maxMode=="amend" {if v.raiseOnly {A.t("For now it can only go up from ","现在只能从 ")+A.tokens(v.maxMin)+A.t(".","往上调。")} else {A.t("At least ","不能低于本月已承诺的 ")+A.tokens(v.maxMin)+A.t(", already promised this month.","。")}} else {A.t("At least ","不能低于已承诺的 ")+A.tokens(v.maxMin)+A.t(", already committed.","。")}}
         else if v.maxMax>=0 && max>v.maxMax {s.maxError=A.t("No more than the account limit of ","不能超过账号上限 ")+A.tokens(v.maxMax)+A.t(".","。")}
         else if v.maxMode=="amend" && v.b.ceiling!=nil && max==v.b.ceiling {s.maxError=A.t("That’s the current maximum.","和现在的每月上限一样。")}
     }
@@ -5008,13 +5066,15 @@ A.pool_save_state=fn(){
     let top=if max>=0 {max} else {v.quotaMax}
     if quota<1 {s.quotaError=A.t("Enter an amount above zero.","请输入大于零的额度。")}
     else if top>=0 && quota>top {s.quotaError=A.t("No more than the monthly maximum of ","不能超过每月上限 ")+A.tokens(top)+A.t(".","。")}
+    let given=if v.quotaMode=="amend" {A.pool_floor(v)} else {nil}
+    if s.quotaError=="" && given!=nil && quota>=1 && quota<given && quota!=v.publishedTokens {s.quotaError=A.t("No less than the "+A.tokens(given)+" given to running Agents.","不能低于已分给正在运行的 Agent 的 "+A.tokens(given)+"。")}
     // A published month: the slider proposes a change now (amend), or keeps a draft for next month.
     s.quotaDirty=(v.quotaMode=="amend" || v.quotaMode=="draft") && quota>=1 && v.publishedTokens!=nil && quota!=v.publishedTokens
     if v.quotaMode=="draft" && s.quotaDirty && s.quotaError=="" {s.draft=A.t("Saved for "+A.pool_next_month_name(v.now)+": each request up to ","已记下："+A.pool_next_month_name(v.now)+"发布时每次最多 ")+A.tokens(quota)+A.t(".","。")}
     s.dirty=s.maxDirty || (v.quotaMode=="amend" && s.quotaDirty)
     s.visible=v.maxMode!="locked" || v.quotaEditable || v.quotaMode=="amend"
     s.label=if !s.maxDirty && v.quotaEditable {A.pool_publish_label(v.now)} else {A.t("Save Changes","保存更改")}
-    s.note=if s.maxDirty && v.maxMode=="amend" {A.t("Confirm it in a window on this computer. Running Agents keep going.","在这台电脑的确认窗口里确认；正在运行的 Agent 不受影响。")} else if s.maxDirty {A.t("Confirm it in a window on this computer.","在这台电脑的确认窗口里确认。")} else if v.quotaMode=="amend" {A.t("Confirm it in a window on this computer; it applies this month right away. Running Agents keep what they have.","在这台电脑的确认窗口里确认，本月立即生效；正在运行的 Agent 保留已有额度。")} else if v.quotaEditable {A.t("After you tap it, choose people and confirm in a window on this computer (keep it on).","点按后，在这台电脑的确认窗口里选人并确认（电脑要开着）。")} else {""}
+    s.note=if s.maxDirty && v.maxMode=="amend" {A.t("Confirm it in a window on this computer. Running Agents keep going.","在这台电脑的确认窗口里确认；正在运行的 Agent 不受影响。")} else if s.maxDirty {A.t("Confirm it in a window on this computer.","在这台电脑的确认窗口里确认。")} else if v.quotaMode=="amend" {A.t("Confirm it in a window on this computer; it applies this month right away. What running Agents were given stays.","在这台电脑的确认窗口里确认，本月立即生效；已分给正在运行的 Agent 的额度不变。")} else if v.quotaEditable {A.t("After you tap it, choose people and confirm in a window on this computer (keep it on).","点按后，在这台电脑的确认窗口里选人并确认（电脑要开着）。")} else {""}
     s.enabled=!H.busy && H.command==nil && s.maxError=="" && (s.maxDirty || (v.quotaEditable && s.quotaError=="") || (v.quotaMode=="amend" && s.quotaDirty && s.quotaError==""))
     return s
 }
@@ -5104,10 +5164,11 @@ A.pool_renew_title=fn(v){
 A.pool_renew_text=fn(v){
     if v.renewal!=nil {
         let tokens=A.recipient_optional(v.renewal,"publishedTokens")
-        return A.t("Each request up to "+A.tokens(tokens)+", from "+A.pool_next_month(v.now)+". The list and monthly maximum carry over; running Agents carry on.","每次最多 "+A.tokens(tokens)+"，"+A.pool_next_month(v.now)+"起生效；名单和每月上限沿用本月，使用中的 Agent 会接着用。")
+        return A.t("Per-request limit "+A.tokens(tokens)+", monthly maximum "+A.pool_carried(v)+" (same as this month), from "+A.pool_next_month(v.now)+". Running Agents carry on.","每次申请上限 "+A.tokens(tokens)+"，每月上限 "+A.pool_carried(v)+"（沿用本月），"+A.pool_next_month(v.now)+"起生效；使用中的 Agent 会接着用。")
     }
-    return A.t("In the last 7 days of a month. From "+A.pool_next_month(v.now)+"; the list and monthly maximum carry over, and running Agents don’t ask again.","每月最后 7 天可用。"+A.pool_next_month(v.now)+"起生效；名单和每月上限沿用本月，使用中的 Agent 不用重新申请。")
+    return A.t("Per-request limit "+A.tokens(v.publishedTokens)+", monthly maximum "+A.pool_carried(v)+" (same as this month) and the same list, from "+A.pool_next_month(v.now)+". Running Agents don’t ask again. Open in the last 7 days of a month.","每次申请上限 "+A.tokens(v.publishedTokens)+"，每月上限 "+A.pool_carried(v)+"（沿用本月），名单不变，"+A.pool_next_month(v.now)+"起生效；使用中的 Agent 不用重新申请。每月最后 7 天可用。")
 }
+A.pool_carried=fn(v){return if v.b.ceiling==nil {A.t("none","未设置")} else {A.tokens(v.b.ceiling)}}
 A.pool_renew=fn(){
     if H.busy || H.command!=nil || H.resource_detail==nil {return}
     let v=A.pool_view(H.resource_detail)
@@ -5208,6 +5269,7 @@ A.pool_save_max=fn(tokens){
     if allowed!=true {H.notice=A.resource_edit_error("management_resource_edit_not_available") A.redraw() return}
     if !(tokens>=0 && tokens<=9007199254740991) {H.notice=A.resource_edit_error("invalid_management_arguments") A.redraw() return}
     if ceiling!=nil && ceiling.period=="monthly" && ceiling.tokens==tokens {return}
+    H.pool_before={rid:row.id max:if ceiling!=nil && ceiling.period=="monthly" {ceiling.tokens} else {nil}}
     A.submit("hagency.resources.edit",{resourceId:row.id expectedRevision:row.revision profile:{kind:"preserve"} ceiling:{kind:"monthly" tokens:tokens}})
 }
 // Monthly maximum of an offered pool: the native amendment, against the sequence the detail showed.
@@ -5216,9 +5278,11 @@ A.pool_amend_max=fn(tokens,quota){
     if H.busy || H.command!=nil || H.resource_detail==nil {return}
     let row=H.resource_detail.resource
     let ceilingAmendment=A.recipient_optional(H.resource_detail,"ceilingAmendment")
-    if !A.pool_amend_allowed(ceilingAmendment) {H.pool_result={tone:"attention" text:A.pool_max_reason(nil,ceilingAmendment)} A.redraw() return}
-    if !(tokens>=1 && tokens<=9007199254740991) {H.pool_result={tone:"attention" text:A.resource_edit_error("invalid_management_arguments")} A.redraw() return}
+    if !A.pool_amend_allowed(ceilingAmendment) {A.pool_say("max","attention",A.t("Not saved: ","没有保存：")+A.pool_max_reason(nil,ceilingAmendment)) return}
+    if !(tokens>=1 && tokens<=9007199254740991) {A.pool_say("max","attention",A.t("Not saved: ","没有保存：")+A.resource_edit_error("invalid_management_arguments")) return}
     H.pool_offer=if quota==nil {nil} else {{rid:row.id tokens:quota}}
+    let {ceiling=nil}=H.resource_detail
+    H.pool_before={rid:row.id max:if ceiling!=nil {ceiling.tokens} else {nil}}
     A.submit("hagency.resources.edit",{resourceId:row.id expectedRevision:row.revision expectedCeilingSequence:A.recipient_optional(ceilingAmendment,"sequence") profile:{kind:"preserve"} ceiling:{kind:"monthly" tokens:tokens}})
 }
 // Per-request quota. A month that isn't published yet: propose the first grant's amount.
@@ -5241,34 +5305,43 @@ A.pool_succeed=fn(kind,tokens,applicants){
     if tokens!=nil {args.proposedTokens=tokens}
     if applicants!=nil && applicants.len()>0 {args.applicants=applicants}
     H.pool_result=nil H.pool_offer=nil
-    A.pool_call("hagency.grants.review",args,fn(g){A.pool_succeed_reply(rid,cid,kind,g,applicants)})
+    let before=A.pool_published_tokens(A.pool_effective_grant(c,p.grant,p.now))
+    let view=if H.resource_detail==nil {nil} else {A.pool_view(H.resource_detail)}
+    let given=if view==nil {nil} else {A.pool_floor(view)}
+    let carried=if view==nil || view.b.ceiling==nil {nil} else {view.b.ceiling}
+    let month=if view==nil {A.t("next month","下个月")} else {A.pool_next_month_name(view.now)}
+    A.pool_call("hagency.grants.review",args,fn(g){A.pool_succeed_reply(rid,cid,kind,g,applicants,{before:before floor:given carried:carried month:month proposed:tokens})})
 }
-A.pool_succeed_reply=fn(rid,cid,kind,r,applicants){
+A.pool_succeed_reply=fn(rid,cid,kind,r,applicants,ctx){
     let note={v:nil}
+    let at=if kind=="renewal" {"renew"} else {"quota"}
     if !r.is_ok {
         if r.error=="management_grant_succession_required" || r.error=="invalid_management_arguments" {H.pool_no_succession=true}
-        note.v={tone:"attention" text:A.pool_succession_error(r.error)}
+        let below=r.error=="owner_grant_below_floor" || r.error=="grant_successor_below_reserved"
+        let why=if below && ctx.floor!=nil && ctx.proposed!=nil && ctx.proposed<ctx.floor {A.t("The per-request limit can’t go below the "+A.tokens(ctx.floor)+" given to running Agents.","每次申请上限不能低于已分给正在运行的 Agent 的 "+A.tokens(ctx.floor)+"。")} else if below && ctx.proposed!=nil {A.t("Running Agents were given more than "+A.tokens(ctx.proposed)+", and the per-request limit can’t go below that. The confirmation window shows the exact figure.","已分给正在运行的 Agent 的额度超过了 "+A.tokens(ctx.proposed)+"，每次申请上限不能低于它；确认窗口里有准确数字。")} else {A.pool_succession_error(r.error)}
+        note.v={at:at tone:"attention" text:(if kind=="renewal" {A.t("Not published ahead: ","没有提前发布：")} else {A.t("Not saved: ","没有保存：")})+why}
     } else {
         // A renewal's summary is next month's; this month's list stays as it is.
         if kind=="amendment" {A.pool_keep_summary(cid,r.data)}
         let {state=nil,serverState=nil,summary=nil}=r.data
         let amount=if summary==nil {nil} else {A.pool_summary_tokens(summary)}
         if state=="review_closed" {note.v=nil}
-        else if state=="server_observed" && serverState=="active" {note.v=if kind=="renewal" {nil} else {{tone:"running" text:A.t("Changed. Each request can now use up to ","已修改。现在每次申请最多 ")+A.tokens(amount)+A.t("; running Agents keep what they have.","；正在运行的 Agent 保留已有额度。")}}}
-        else if state=="outcome_unknown" {note.v={tone:"waiting" text:A.t("The result isn’t known yet. Refresh in a moment to check.","暂时无法确认结果，请稍后刷新查看。")}}
-        else {note.v={tone:"waiting" text:A.t("Saved on this computer; the server hasn’t confirmed it yet. Refresh in a moment.","已在这台电脑上保存，服务器还没确认。请稍后刷新。")}}
+        else if state=="server_observed" && serverState=="active" {note.v=if kind=="renewal" {{at:at tone:"running" text:A.t("Published ahead: "+ctx.month+", per-request limit "+A.tokens(amount)+(if ctx.carried!=nil {", monthly maximum "+A.tokens(ctx.carried)+" (same as this month)"} else {""}),"已提前发布："+ctx.month+"每次申请上限 "+A.tokens(amount)+(if ctx.carried!=nil {"，每月上限 "+A.tokens(ctx.carried)+"（沿用本月）"} else {""}))}} else {{at:at tone:"running" text:A.pool_saved_text("quota",if ctx.before!=amount {ctx.before} else {nil},amount)}}}
+        else if state=="outcome_unknown" {note.v={at:at tone:"waiting" text:A.t("The result isn’t known yet. Refresh in a moment to check.","暂时无法确认结果，请稍后刷新查看。")}}
+        else {note.v={at:at tone:"waiting" text:A.t("Saved on this computer; the server hasn’t confirmed it yet. Refresh in a moment.","已在这台电脑上保存，服务器还没确认。请稍后刷新。")}}
     }
     if H.resource_id!=rid {return}
     // Adding people from Who Can Request stays on that page, with its own result.
     if H.page=="pool_who" {
+        if !r.is_ok && applicants!=nil {note.v={tone:"attention" text:A.t("Not added: ","没有添加：")+A.pool_succession_error(r.error)}}
         if r.is_ok && note.v!=nil && note.v.tone=="running" && applicants!=nil {
             let names={t:""} for i id in applicants {names.t=names.t+(if i>0 {A.t(", ","、")} else {""})+A.pool_person(id)}
-            note.v={tone:"running" text:if applicants.len()==1 {A.t("Added to this month’s list: "+names.t+". They can request now.","已加入本月名单："+names.t+"。对方现在就能申请。")} else {A.t("Added to this month’s list: "+names.t+". They can request now.","已加入本月名单："+names.t+"。他们现在就能申请。")}}
+            note.v={tone:"running" text:if applicants.len()==1 {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。对方现在就能申请。")} else {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。他们现在就能申请。")}}
             H.who.picks=[]
         }
         H.pool_result=note.v A.redraw() return
     }
-    H.pool_saved=if note.v==nil {nil} else {{rid:rid tone:note.v.tone text:note.v.text}}
+    H.pool_saved=if note.v==nil {nil} else {{rid:rid at:note.v.at tone:note.v.tone text:note.v.text}}
     H.pool_edit=nil
     A.open_resource(rid)
 }
@@ -5280,7 +5353,7 @@ A.pool_succession_error=fn(code){
     if code=="owner_grant_succession_pending" {return A.t("An earlier change is still being confirmed. Try again in a moment.","上一次修改还在确认中，请稍后再试。")}
     if code=="owner_grant_successor_exists" || code=="grant_successor_exists" {return A.t("Next month is already published ahead, so this month can’t change now.","下个月的额度已经提前发布，本月不能再改。")}
     if code=="owner_grant_renewal_window_closed" || code=="grant_succession_window_closed" {return A.t("Next month can only be published ahead in the last 7 days of this month.","只有每月最后 7 天可以提前发布下个月的额度。")}
-    if code=="owner_grant_below_floor" || code=="grant_successor_below_reserved" {return A.t("That’s less than running Agents already hold. Choose a larger amount.","低于正在运行的 Agent 已占用的额度，请选大一点。")}
+    if code=="owner_grant_below_floor" || code=="grant_successor_below_reserved" {return A.t("The per-request limit can’t go below what running Agents were given.","每次申请上限不能低于已分给正在运行的 Agent 的额度。")}
     if code=="owner_grant_manager_removed" {return A.t("Accounts can be added to the list, not removed, until the month ends.","月底前，名单只能添加账号，不能删掉已有的账号。")}
     if code=="owner_grant_capacity_unavailable" {return A.t("The monthly maximum doesn’t have room for that. Raise the monthly maximum first.","每月上限不够，请先调高每月上限。")}
     if code=="grant_predecessor_not_effective" {return A.t("This month’s publication has already ended. Publish this month again instead.","本月的发布已经结束，请重新发布本月额度。")}
@@ -5289,13 +5362,17 @@ A.pool_succession_error=fn(code){
 // Plain words for every refusal of a monthly-maximum change; nothing is written by any of them.
 A.ceiling_refusal=fn(code,detail){
     let amend=if detail==nil {nil} else {A.recipient_optional(detail,"ceilingAmendment")}
-    if code=="management_resource_edit_changed" {return A.t("The pool changed a moment ago. It’s been refreshed; try again.","资源池刚刚有变化，已经刷新，请再试一次。")}
-    if code=="management_ceiling_amendment_not_available" {return A.t("The monthly maximum can’t change here right now. The reason is shown under Monthly maximum.","现在不能在这里调整每月上限，原因写在「每月上限」下面。")}
-    if code=="management_ceiling_clear_refused" {return A.t("A pool on a server can’t have its maximum removed. Lower it instead, or stop Agents on the Requests page.","已提交的资源池不能清除每月上限。可以调低它，或在「申请」页面停止部分 Agent。")}
-    if code=="management_ceiling_unchanged" {return A.t("That’s the current maximum; nothing changed.","和现在的每月上限一样，没有改动。")}
-    if code=="management_ceiling_below_commitments" {return A.t("That’s less than this month has already promised to Agents. Choose a larger amount.","低于本月已经承诺给 Agent 的额度，请选大一点。")}
-    if code=="management_ceiling_usage_unsettled" {return A.t("Use is still being counted, so for now the maximum can only go up.","用量还在统计中，现在只能调高每月上限。")}
-    return A.resource_edit_error(code)
+    let least=if amend==nil {nil} else {A.recipient_optional(amend,"minimumTokens")}
+    let now=if detail==nil {nil} else {A.recipient_optional(detail,"ceiling")}
+    let current=if now==nil {nil} else {A.recipient_optional(now,"tokens")}
+    let no=A.t("Not saved: ","没有保存：")
+    if code=="management_resource_edit_changed" {return no+A.t("the pool changed a moment ago. It’s been refreshed; try again.","资源池刚刚有变化，已经刷新，请再试一次。")}
+    if code=="management_ceiling_amendment_not_available" {return no+A.t("the monthly maximum can’t change here right now. The reason is shown under Monthly maximum.","现在不能在这里调整每月上限，原因写在「每月上限」下面。")}
+    if code=="management_ceiling_clear_refused" {return no+(if least!=nil && least>1 {A.t("an offered pool keeps a monthly maximum. Lower it to no less than "+A.tokens(least)+", or stop some Agents.","已连接服务器的资源池不能取消每月上限。可以调低到不低于 "+A.tokens(least)+"，或停止部分 Agent。")} else {A.t("an offered pool keeps a monthly maximum. Lower it instead, or stop some Agents.","已连接服务器的资源池不能取消每月上限。可以调低它，或停止部分 Agent。")})}
+    if code=="management_ceiling_unchanged" {return no+(if current!=nil {A.t("that’s the current maximum, "+A.tokens(current)+".","和现在的每月上限 "+A.tokens(current)+" 一样。")} else {A.t("that’s the current maximum.","和现在的每月上限一样。")})}
+    if code=="management_ceiling_below_commitments" {return no+(if least!=nil && least>1 {A.t("the monthly maximum can’t go below the "+A.tokens(least)+" committed this month.","每月上限不能低于本月已承诺的 "+A.tokens(least)+"。")} else {A.t("the monthly maximum can’t go below what’s committed this month.","每月上限不能低于本月已承诺的额度。")})}
+    if code=="management_ceiling_usage_unsettled" {return no+(if current!=nil {A.t("use is still being counted, so for now it can only go above "+A.tokens(current)+".","用量还在统计中，现在只能调到 "+A.tokens(current)+" 以上。")} else {A.t("use is still being counted, so for now it can only go up.","用量还在统计中，现在只能调高。")})}
+    return no+A.resource_edit_error(code)
 }
 // Publishes this month's capacity for an admitted pool without a live grant:
 // the native panel opens pre-filled and the owner confirms there. The checks
@@ -5347,12 +5424,12 @@ A.pool_publish_row=fn(row){
     })
 }
 A.pool_publish_result=fn(title,r){
-    if !r.is_ok {return {tone:"attention" text:title+A.t(": ","：")+A.pool_grant_error(r.error)}}
+    if !r.is_ok {return {tone:"attention" text:A.t("Not published: "+title+". ","没有发布：「"+title+"」。")+A.pool_grant_error(r.error)}}
     let {state=nil,serverState=nil,summary=nil}=r.data
     if state=="review_closed" {return nil}
     if state=="server_observed" && serverState=="active" {
         let amount=if summary==nil {nil} else {summary.allocatedTokens}
-        return {tone:"running" text:title+A.t(": published. Each request can use up to ","：已发布，每次申请最多 ")+A.tokens(amount)+A.t(".","。")}
+        return {tone:"running" text:A.t("Published: "+title+", per-request limit "+A.tokens(amount)+". Agents can request it now.","已发布：「"+title+"」，每次申请上限 "+A.tokens(amount)+"，Agent 现在可以申请。")}
     }
     if state=="outcome_unknown" {return {tone:"waiting" text:title+A.t(": the result isn’t known yet. Refresh in a moment.","：暂时无法确认结果，请稍后刷新查看。")}}
     return {tone:"waiting" text:title+A.t(": an existing grant was shown; nothing new was published.","：已显示现有授权，没有发布新的额度。")}
@@ -5361,7 +5438,7 @@ A.pool_quota_reply=fn(rid,cid,r){
     if H.resource_id!=rid {return}
     let e=H.pool_edit
     if !r.is_ok {
-        H.pool_result={tone:"attention" text:A.pool_grant_error(r.error)}
+        A.pool_say("quota","attention",A.t("Not published: ","没有发布：")+A.pool_grant_error(r.error))
         A.pool_info_load(rid) return
     }
     let {state=nil,serverState=nil,summary=nil}=r.data
@@ -5369,11 +5446,11 @@ A.pool_quota_reply=fn(rid,cid,r){
     if state=="review_closed" {return}
     if state=="server_observed" && serverState=="active" {
         let amount=if summary==nil {nil} else {summary.allocatedTokens}
-        H.pool_result={tone:"running" text:A.t("Published. Each request can use up to ","已发布。每次申请最多 ")+A.tokens(amount)+A.t(".","。")}
+        A.pool_say("quota","running",A.t("Published: per-request limit "+A.tokens(amount)+". Agents can request it now.","已发布：每次申请上限 "+A.tokens(amount)+"，Agent 现在可以申请。"))
         A.pool_info_load(rid) return
     }
-    if state=="outcome_unknown" {H.pool_result={tone:"waiting" text:A.t("The result isn’t known yet. Refresh in a moment to check.","暂时无法确认结果，请稍后刷新查看。")} A.pool_info_load(rid) return}
-    H.pool_result={tone:"waiting" text:A.t("An existing grant was shown; the new limit wasn’t applied.","已显示现有授权，新的上限没有应用。")}
+    if state=="outcome_unknown" {A.pool_say("quota","waiting",A.t("The result isn’t known yet. Refresh in a moment to check.","暂时无法确认结果，请稍后刷新查看。")) A.pool_info_load(rid) return}
+    A.pool_say("quota","waiting",A.t("Not published: the existing publication was shown, and the new limit wasn’t applied.","没有发布：窗口里显示的是已有的发布，新的上限没有生效。"))
     A.pool_info_load(rid)
 }
 // Publishes this month with the slider's per-request limit (also behind Applicants).
@@ -5837,7 +5914,7 @@ A.pool_quota_pick=fn(amount){
 }
 // When the per-request value takes effect, in the owner's terms.
 A.pool_quota_when=fn(v){
-    if v.quotaMode=="amend" {return if v.agents>0 {A.t("Applies this month once you confirm; it can’t go below what running Agents already hold","确认后本月立即生效；不能低于正在运行的 Agent 已分到的额度")} else {A.t("Applies this month once you confirm","确认后本月立即生效")}}
+    if v.quotaMode=="amend" {let given=A.pool_floor(v) return if given!=nil {A.t("Applies this month once you confirm; no less than the "+A.tokens(given)+" given to running Agents","确认后本月立即生效；不能低于已分给正在运行的 Agent 的 "+A.tokens(given))} else if v.agents>0 {A.t("Applies this month once you confirm; no less than what running Agents were given","确认后本月立即生效；不能低于已分给正在运行的 Agent 的额度")} else {A.t("Applies this month once you confirm","确认后本月立即生效")}}
     if v.quotaMode=="scheduled" {return A.t(A.pool_next_month_name(v.now)+" is published ahead, so this month’s per-request limit can’t change any more",A.pool_next_month_name(v.now)+"已提前发布，本月的每次申请上限不能再改")}
     if v.published {return A.t("Applies when you next publish, from "+A.pool_next_month(v.now),"下次发布（"+A.pool_next_month(v.now)+"起）时生效")}
     if v.quotaEditable {return A.t("Applies when you tap ","点「")+A.pool_publish_label(v.now)+A.t("","」时生效")}
@@ -5853,6 +5930,7 @@ A.pool_clear_max=fn(){
     let {allowed=false}=editing
     if allowed!=true {H.notice=A.resource_edit_error("management_resource_edit_not_available") A.redraw() return}
     if ceiling==nil {return}
+    H.pool_before={rid:row.id max:ceiling.tokens}
     A.submit("hagency.resources.edit",{resourceId:row.id expectedRevision:row.revision profile:{kind:"preserve"} ceiling:{kind:"clear"}})
 }
 A.pool_max_unlimited=fn(){
@@ -6721,16 +6799,26 @@ A.retry_command = fn(){
                 A.redraw() return
             }
             if command.service=="hagency.resources.edit" {
-                if r.error=="resource_edit_cancelled" || r.error=="provider_confirmation_expired" {
+                if (r.error=="resource_edit_cancelled" || r.error=="provider_confirmation_expired") && A.recipient_optional(command.args,"ceiling")!=nil && H.page=="resource_detail" && H.resource_detail!=nil && H.resource_detail.resource.id==command.args.resourceId {
+                    // The maximum's window was closed before confirming: said beside the maximum, nothing changed.
+                    H.command=nil H.pool_before=nil H.pool_offer=nil A.save()
+                    A.pool_say("max","waiting",A.t("Not saved: the confirmation window was closed, so the monthly maximum didn’t change.","没有保存：确认窗口已关闭，每月上限没有改动。"))
+                    host.request("hagency.intent.pending",{},fn(pending){if pending.is_ok {H.saved_commands=pending.data.commands} A.redraw()})
+                } else if r.error=="resource_edit_cancelled" || r.error=="provider_confirmation_expired" {
                     H.command=nil H.notice=A.t("Configuration review closed. Existing saved requests remain available for recovery.","已关闭配置确认，已有的保存请求仍可恢复。") A.save()
                     host.request("hagency.intent.pending",{},fn(pending){if pending.is_ok {H.saved_commands=pending.data.commands} A.redraw()})
                 } else if A.recipient_optional(command.args,"expectedCeilingSequence")!=nil {
                     // A monthly-maximum change of an offered pool: say why inline, beside its controls.
                     let rid=command.args.resourceId
-                    H.pool_offer=nil
-                    H.pool_result={tone:"attention" text:A.ceiling_refusal(r.error,H.resource_detail)}
+                    H.pool_offer=nil H.pool_before=nil
+                    A.pool_say("max","attention",A.ceiling_refusal(r.error,H.resource_detail))
                     if A.resource_edit_not_applied(r.error) {H.command=nil if A.save(){A.acknowledge(command.args.commandId)}}
-                    if (r.error=="management_resource_edit_changed" || r.error=="management_ceiling_amendment_not_available") && H.page=="resource_detail" && H.command==nil {H.pool_saved={rid:rid tone:"attention" text:H.pool_result.text} H.pool_edit=nil A.open_resource(rid)}
+                    if (r.error=="management_resource_edit_changed" || r.error=="management_ceiling_amendment_not_available") && H.page=="resource_detail" && H.command==nil {H.pool_saved={rid:rid at:"max" tone:"attention" text:H.pool_result.text} H.pool_edit=nil A.open_resource(rid)}
+                } else if A.recipient_optional(command.args,"ceiling")!=nil && H.page=="resource_detail" {
+                    // A maximum set before the pool is offered: refused beside the maximum too.
+                    H.pool_before=nil
+                    A.pool_say("max","attention",A.t("Not saved: ","没有保存：")+A.resource_edit_error(r.error))
+                    if A.resource_edit_not_applied(r.error) {H.command=nil if A.save(){A.acknowledge(command.args.commandId)}}
                 } else {
                     H.notice=A.resource_edit_error(r.error)
                     if A.resource_edit_not_applied(r.error) {H.command=nil if A.save(){A.acknowledge(command.args.commandId)}}
@@ -11896,6 +11984,12 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }}}
 
+                    if H.pool_result!=nil && A.pool_result_at(v)=="top" {pool_result_top := View{width:Fill height:Fit padding:Inset{top:4 bottom:2}
+                        pool_result_box := mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
+                            pool_result_text := mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg(H.pool_result.tone)}
+                            pool_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.pool_result_dismiss()}
+                        }
+                    }}
                     mod.widgets.HagencyListLabel{text:A.t("CAPACITY","额度")}
                     mod.widgets.HagencyList{
                         View{width:Fill height:Fit flow:Down spacing:10 padding:Inset{left:16 right:10 top:8 bottom:14}
@@ -11936,12 +12030,13 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                     mod.widgets.HagencyListValue{text:if unpublished {A.t("Usable once published ","发布后可用 ")+A.tokens(b.remaining)+A.t(" of ","，共 ")+A.tokens(b.ceiling)} else {A.t("Left ","剩余 ")+A.tokens(b.remaining)+A.t(" of ","，共 ")+A.tokens(b.ceiling)}}
                                 }
                             }}
-                            if b.ceiling!=nil && b.committed>0 && !unpublished {pool_committed := mod.widgets.HagencyWrapSubtitle{text:A.pool_committed_line(b)}}
                             if b.low {mod.widgets.HagencyWrapSubtitle{text:if v.maxMode!="locked" {A.t("Almost used up. You can raise the monthly maximum below.","快用完了，可在下方调高每月上限。")} else {A.t("Almost used up. New Agent requests may be refused until it resets.","额度快用完了，重置前新的申请可能被拒绝。")} draw_text.color:mod.widgets.RINX_DANGER_FG}}
                             if H.pool_tip=="capacity" {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:12 right:12 top:10 bottom:10} show_bg:true draw_bg +: {color:mod.widgets.RINX_FIELD}
                                 mod.widgets.HagencyWrapSubtitle{text:A.t("Monthly maximum: the most this pool may use in a month.","每月上限：这个资源池一个月最多能用掉的额度。")}
                                 mod.widgets.HagencyWrapSubtitle{text:A.t("Per-request limit: the most one Agent gets per request.","每次申请上限：每个 Agent 每次申请最多能拿到的额度。")}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("Given to Agents, not used yet: capacity Agents hold but haven’t used.","已分给 Agent，尚未用：Agent 已经申请到、还没用掉的额度。")}
+                                mod.widgets.HagencyWrapSubtitle{text:A.t("Given to Agents, not used yet: capacity given to Agents that they haven’t used.","已分给 Agent，尚未用：分给了 Agent、它还没用掉的额度。")}
+                                mod.widgets.HagencyWrapSubtitle{text:A.t("Committed: used plus given to Agents. The monthly maximum can’t go below it.","已承诺：已用 + 已分给 Agent。每月上限不能低于它。")}
+                                if b.ceiling!=nil && b.committed>0 && !unpublished {pool_committed := mod.widgets.HagencyWrapSubtitle{text:A.pool_committed_line(b) draw_text +: {text_style:theme.font_bold{font_size:mod.widgets.RINX_META_SIZE}}}}
                                 mod.widgets.HagencyWrapSubtitle{text:A.t("Amounts are Hagency’s records, not the provider’s balance. 1 M is one million tokens.","额度来自 Hagency 记录，不是服务商余额。1 M 即 100 万 token。")}
                             }}
                         }
@@ -11956,9 +12051,11 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 }
                                 if clearing {View{width:Fill height:Fit flow:Down spacing:6
                                     pool_max_clearing := mod.widgets.HagencyWrapSubtitle{text:A.t("Once saved, sharing pauses: Agents can’t request it. Set a monthly maximum again to resume.","保存后暂停共享：Agent 不能再申请；以后设一个每月上限就能恢复。") draw_text.color:mod.widgets.RINX_WARNING_FG}
+                                    pool_max_error := mod.widgets.HagencyWrapSubtitle{visible:false text:""}
                                 }}
                                 if !clearing {View{width:Fill height:Fit flow:Down spacing:8
-                                    View{width:Fill height:Fit pool_max_tokens := mod.widgets.HagencyPoolSlider{minimum:v.maxMin maximum:v.maxMax text:if e!=nil {e.max} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked unit +: {height:44 align:Align{y:0.5}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked}} on_change:|text| A.pool_max_changed(text)}}
+                                    View{width:Fill height:Fit pool_max_tokens := mod.widgets.HagencyPoolSlider{minimum:v.maxMin maximum:v.maxMax text:if e!=nil {e.max} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked unit +: {margin:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {7} else {0})}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked}} on_change:|text| A.pool_max_changed(text)}}
+                                    pool_max_error := mod.widgets.HagencyWrapSubtitle{visible:save.maxError!="" text:save.maxError draw_text.color:mod.widgets.RINX_DANGER_FG}
                                     if mod.widgets.RINX_TEXT_SCALE<=1.2 {View{width:Fill height:Fit flow:Right spacing:8
                                         mod.widgets.HagencyListValue{text:A.pool_max_floor_text(v)}
                                         View{width:Fill height:1}
@@ -11988,22 +12085,37 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                     pool_max_value := mod.widgets.HagencyListTitle{width:Fit draw_text +: {text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}} text:if b.ceiling==nil {A.t("Not set","未设置")} else {A.tokens(b.ceiling)}}
                                 }
                                 pool_max_reason := mod.widgets.HagencyWrapSubtitle{text:v.maxReason}
+                                pool_max_error := mod.widgets.HagencyWrapSubtitle{visible:false text:""}
                                 if v.another {View{width:Fill height:Fit flow:Right align:Align{y:0.5}
                                     mod.widgets.HagencyWrapSubtitle{width:Fill text:A.pool_account_room(row)}
                                     resource_config_create := mod.widgets.HagencyBarText{text:A.t("Add Another Pool","再建一个资源池") enabled:!H.busy && H.command==nil && !locked on_click:||A.create_resource_configuration()}
                                 }}
                             }}
-                            pool_max_error := mod.widgets.HagencyListValue{width:Fill visible:save.maxError!="" text:save.maxError draw_text.color:mod.widgets.RINX_DANGER_FG}
+                            if H.pool_result!=nil && A.pool_result_at(v)=="max" {View{width:Fill height:Fit padding:Inset{top:2}
+                                pool_result_box := mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
+                                    mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.pool_result.tone=="running" {mod.rinx_icons.check} else {mod.rinx_icons.info} draw_icon.color:A.local_tone_fg(H.pool_result.tone)}
+                                    pool_result_text := mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg(H.pool_result.tone)}
+                                    pool_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.pool_result_dismiss()}
+                                }
+                            }}
+                            if A.pool_offer_quota(v)>0 {RoundedView{width:Fill height:Fit flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:12 padding:Inset{left:12 right:6 top:10 bottom:10} align:Align{y:0.5} show_bg:true draw_bg +: {color:mod.widgets.RINX_FIELD border_radius:theme.corner_radius}
+                                mod.widgets.HagencyListText{
+                                    mod.widgets.HagencyWrapTitle{text:A.t("Raise the per-request limit too?","要同时调高每次申请上限吗？")}
+                                    mod.widgets.HagencyWrapSubtitle{text:A.t("From ","从 ")+A.tokens(v.publishedTokens)+A.t(" to "," 调到 ")+A.tokens(A.pool_offer_quota(v))+A.t("; it applies this month once you confirm.","，确认后本月立即生效。")}
+                                }
+                                View{width:Fit height:Fit pool_offer_quota := mod.widgets.HagencyGetButton{text:A.t("Raise","调高") enabled:!H.busy && H.command==nil on_click:||A.pool_succeed("amendment",A.pool_offer_quota(v),nil)}}
+                            }}
                         }
                         mod.widgets.HagencyListDivider{margin:Inset{left:16}}
-                        View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:16 right:16 top:12 bottom:12}
+                        pool_quota_section := View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:16 right:16 top:12 bottom:12}
                             View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}
                                 mod.widgets.HagencyListTitle{width:Fill text:A.t("Per-request limit","每次申请上限")}
                                 pool_quota_value := mod.widgets.HagencyListValue{visible:unsaved.quota=="" text:if v.publishedTokens!=nil {A.t("Now ","现在 ")+A.tokens(v.publishedTokens)} else {""}}
                                 pool_quota_unsaved := mod.widgets.HagencyListValue{visible:unsaved.quota!="" text:unsaved.quota draw_text +: {color:mod.widgets.RINX_WARNING_FG text_style:theme.font_bold{font_size:mod.widgets.RINX_META_SIZE}}}
                             }
                             mod.widgets.HagencyWrapSubtitle{text:A.t("The most one Agent can get per request.","每个 Agent 每次申请最多可得的额度。")}
-                            View{width:Fill height:Fit pool_quota_tokens := mod.widgets.HagencyPoolSlider{minimum:1 maximum:v.quotaMax text:if e!=nil {e.quota} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked || v.quotaMode=="scheduled" unit +: {height:44 align:Align{y:0.5}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked && v.quotaMode!="scheduled"}} on_change:|text| A.pool_quota_changed(text)}}
+                            View{width:Fill height:Fit pool_quota_tokens := mod.widgets.HagencyPoolSlider{minimum:1 maximum:v.quotaMax text:if e!=nil {e.quota} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked || v.quotaMode=="scheduled" unit +: {margin:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {7} else {0})}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked && v.quotaMode!="scheduled"}} on_change:|text| A.pool_quota_changed(text)}}
+                            pool_quota_error := mod.widgets.HagencyWrapSubtitle{visible:save.quotaError!="" text:save.quotaError draw_text.color:mod.widgets.RINX_DANGER_FG}
                             View{width:Fill height:Fit flow:Down spacing:8
                                 View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}
                                     if v.when!="" {mod.widgets.HagencyPillDot{draw_bg.color:if v.quotaEditable || v.quotaMode=="amend" {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_WARNING_FG}}}
@@ -12016,9 +12128,15 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 pool_quota_draft := mod.widgets.HagencyWrapSubtitle{width:Fill text:save.draft draw_text.color:mod.widgets.RINX_SUCCESS_FG}
                                 pool_quota_undo := mod.widgets.HagencyBarText{text:A.t("Undo","撤销") enabled:!H.busy && H.command==nil on_click:||A.pool_quota_undo()}
                             }
-                            pool_quota_error := mod.widgets.HagencyListValue{width:Fill visible:save.quotaError!="" text:save.quotaError draw_text.color:mod.widgets.RINX_DANGER_FG}
+                            if H.pool_result!=nil && A.pool_result_at(v)=="quota" {View{width:Fill height:Fit padding:Inset{top:2}
+                                pool_result_box := mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
+                                    mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.pool_result.tone=="running" {mod.rinx_icons.check} else {mod.rinx_icons.info} draw_icon.color:A.local_tone_fg(H.pool_result.tone)}
+                                    pool_result_text := mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg(H.pool_result.tone)}
+                                    pool_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.pool_result_dismiss()}
+                                }
+                            }}
                         }
-                        if v.renewOpen || v.renewal!=nil {View{width:Fill height:Fit flow:Down
+                        if v.renewOpen || v.renewal!=nil {pool_renew_section := View{width:Fill height:Fit flow:Down
                             mod.widgets.HagencyListDivider{margin:Inset{left:16}}
                             View{width:Fill height:Fit flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:12 padding:Inset{left:16 right:14 top:12 bottom:12} align:Align{y:0.5}
                                 mod.widgets.HagencyListText{
@@ -12028,6 +12146,17 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 if v.renewal!=nil {mod.widgets.HagencyPill{padding:Inset{left:8 right:8 top:2 bottom:2} draw_bg.color:A.local_tone_bg("running") mod.widgets.HagencyPillText{text:A.t("Scheduled","已安排") draw_text.color:A.local_tone_fg("running")}}}
                                 if v.renewal==nil {View{width:Fit height:Fit pool_renew := mod.widgets.HagencyGetButton{text:A.t("Publish Ahead","提前发布") enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_renew()}}}
                             }
+                            if v.renewal==nil {View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:16 right:14 top:0 bottom:12} align:Align{y:0.0}
+                                mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}
+                                pool_renew_lock := mod.widgets.HagencyWrapSubtitle{text:A.t("Once published ahead, this month’s per-request limit can’t change, and it can’t be withdrawn here.","提前发布后：本月的每次申请上限不能再改；这里不能撤回。") draw_text.color:mod.widgets.RINX_WARNING_FG}
+                            }}
+                            if H.pool_result!=nil && A.pool_result_at(v)=="renew" {View{width:Fill height:Fit padding:Inset{left:16 right:16 bottom:12}
+                                pool_result_box := mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
+                                    mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.pool_result.tone=="running" {mod.rinx_icons.check} else {mod.rinx_icons.info} draw_icon.color:A.local_tone_fg(H.pool_result.tone)}
+                                    pool_result_text := mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg(H.pool_result.tone)}
+                                    pool_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.pool_result_dismiss()}
+                                }
+                            }}
                         }}
                         mod.widgets.HagencyListDivider{margin:Inset{left:16}}
                         mod.widgets.HagencyFitRow{
@@ -12041,17 +12170,6 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             resource_applicants := mod.widgets.HagencyRowCover{enabled:!H.busy && !locked on_click:||A.pool_sub_open("pool_who",row.id)}
                         }
                     }
-                    if H.pool_result!=nil {View{width:Fill height:Fit padding:Inset{top:4 bottom:2} mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
-                        pool_result_text := mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg(H.pool_result.tone)}
-                        pool_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("Done","完成") enabled:!H.busy on_click: || {H.pool_result=nil H.pool_offer=nil A.redraw()}}
-                    }}}
-                    if A.pool_offer_quota(v)>0 {View{width:Fill height:Fit padding:Inset{top:2 bottom:4} mod.widgets.HagencyList{View{width:Fill height:Fit flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:12 padding:Inset{left:16 right:14 top:12 bottom:12} align:Align{y:0.5}
-                        mod.widgets.HagencyListText{
-                            mod.widgets.HagencyWrapTitle{text:A.t("Raise the per-request limit too?","要同时调高每次申请上限吗？")}
-                            mod.widgets.HagencyWrapSubtitle{text:A.t("From ","从 ")+A.tokens(v.publishedTokens)+A.t(" to "," 调到 ")+A.tokens(A.pool_offer_quota(v))+A.t("; it applies this month once you confirm.","，确认后本月立即生效。")}
-                        }
-                        View{width:Fit height:Fit pool_offer_quota := mod.widgets.HagencyGetButton{text:A.t("Raise","调高") enabled:!H.busy && H.command==nil on_click:||A.pool_succeed("amendment",A.pool_offer_quota(v),nil)}}
-                    }}}}
 
 
                     mod.widgets.HagencyListLabel{text:A.t("AGENTS AND PERMISSIONS","Agent 与权限")}
@@ -12521,7 +12639,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:14 right:14 top:10 bottom:12}
                             View{width:Fill height:Fit flow:Right spacing:10 align:Align{y:0.5}
                                 pool_who_name := mod.widgets.HagencyInput{width:Fill text:who.name empty_text:A.t("Someone else? Username, e.g. lisi","其他人？输入用户名，例如 lisi") on_change:|t|{H.who.name=t ui.pool_who_add.set_enabled(A.who_mxid(t)!=nil && !H.busy && H.command==nil) ui.pool_who_name_hint.set_text(A.who_name_hint()) ui.pool_who_name_hint.set_visible(A.who_name_bad()=="") ui.pool_who_name_error.set_text(A.who_name_bad()) ui.pool_who_name_error.set_visible(A.who_name_bad()!="")}}
-                                pool_who_add := mod.widgets.HagencyGetButton{text:A.t("Pick","选上") enabled:A.who_mxid(who.name)!=nil && !H.busy && H.command==nil on_click:||A.who_add()}
+                                pool_who_add := mod.widgets.HagencyGetButton{text:A.t("Add","添加") enabled:A.who_mxid(who.name)!=nil && !H.busy && H.command==nil on_click:||A.who_add()}
                             }
                             pool_who_name_hint := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()=="" text:A.who_name_hint()}
                             pool_who_name_error := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()!="" text:A.who_name_bad() draw_text.color:mod.widgets.RINX_DANGER_FG}
@@ -12530,7 +12648,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                     let added=H.pool_result!=nil && H.pool_result.tone=="running" && who.picks.len()==0
                     if added {View{width:Fill height:Fit padding:Inset{top:6} mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg("running")
                         pool_who_result := mod.widgets.HagencyCopy{text:H.pool_result.text draw_text.color:A.local_tone_fg("running")}
-                        pool_who_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("Done","完成") enabled:!H.busy on_click: || {H.pool_result=nil A.redraw()}}
+                        pool_who_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || {H.pool_result=nil A.redraw()}}
                     }}}
                     if !added {View{width:Fill height:Fit flow:Down spacing:6
                         if H.pool_result!=nil {View{width:Fill height:Fit padding:Inset{top:6} mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
@@ -14828,8 +14946,9 @@ mod.widgets.HagencyCopy = mod.widgets.RinxLabel{width:Fill padding:0 flow:Flow.R
 mod.widgets.HagencyHint = mod.widgets.RinxHint{width:Fill padding:0 flow:Flow.Right{wrap:true}}
 mod.widgets.HagencyInput = mod.widgets.RinxInput{width:Fill{max:640} height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) empty_text:""}
 mod.widgets.HagencyNumberInput = mod.widgets.RinxNumberInput{millions:true slider_mode:true width:Fill{max:640} empty_text:"" input +: {draw_bg +: {border_color:#7f8b9c border_color_2:#7f8b9c}}}
-// The pool page's sliders: at least 300pt of track; in a narrow window the value box moves under it.
-mod.widgets.HagencyPoolSlider = mod.widgets.HagencyNumberInput{flow:Flow.Right{wrap:true}}
+// The pool page's sliders: the track and a compact value box on one row, as in the new-pool sheet;
+// with large text the box drops under a full-width track, as in the native sheets.
+mod.widgets.HagencyPoolSlider = mod.widgets.HagencyNumberInput{flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Right{wrap:true}} else {Flow.Right}) input +: {width:(62+22*mod.widgets.RINX_TEXT_SCALE)}}
 mod.widgets.HagencyChoice = mod.widgets.HagencyButton{draw_bg +: {border_size:1 border_color:mod.widgets.RINX_BORDER border_radius:theme.corner_radius}}
 mod.widgets.HagencyToggle = mod.widgets.RinxToggle{}
 mod.widgets.HagencyDisclosure = mod.widgets.HagencyButton{draw_bg.border_size:0}
