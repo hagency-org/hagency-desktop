@@ -80,6 +80,11 @@ impl MiniAppNumberInput {
     pub(crate) fn set_maximum(&mut self,cx:&mut Cx,maximum:u64){
         self.maximum=maximum.min(Self::MAX) as f64;self.sync_steps(cx);
     }
+    /// A lower bound the native form must not go below, such as what running
+    /// Agents already hold. Typed values below it stay visible and invalid.
+    pub(crate) fn set_minimum(&mut self,cx:&mut Cx,minimum:u64){
+        self.minimum=minimum.min(Self::MAX) as f64;self.sync_steps(cx);
+    }
     fn slide_to(&mut self,cx:&mut Cx,position:f64){
         let max=self.slider_max();
         if self.is_read_only || max==0 || !position.is_finite(){return}

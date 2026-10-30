@@ -5,14 +5,38 @@ use ::hagency::native_owner::{
     OwnerGrantAccess, OwnerGrantChoices, OwnerGrantProgress, OwnerGrantReview,
     OwnerGrantReviewResult, OwnerGrantPublicationReview, OwnerGrantPublicationResult,
     OwnerGrantPublicationProgress, OwnerGrantCancellationReview, OwnerGrantCancellationResult,
-    OwnerGrantState, OwnerGrantForm, OwnerGrantSummary,
+    OwnerGrantState, OwnerGrantForm, OwnerGrantSummary, OwnerGrantSuccessionForm,
+    OwnerGrantSuccessionKind, OwnerGrantSuccessionState,
 };
 use serde::Deserialize;
 use serde_json::Value;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU8, Ordering},
+};
 
 pub(crate) const REVIEW_GRANT: &str = "hagency.grants.review";
 /// Largest grant amount, in tokens, that stays an exact JSON integer.
 pub(crate) const MAX_GRANT_TOKENS: u64 = 9_007_199_254_740_991;
+
+/// A change to the pool's published grant that a script may ask the native
+/// panel to prepare. Only the native form commits it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum Succession {
+    /// The same UTC month: a new per-request limit from now on.
+    Amendment,
+    /// Next UTC month, scheduled in the last days of this one.
+    Renewal,
+}
+impl Succession {
+    pub(crate) fn native(self) -> OwnerGrantSuccessionKind {
+        match self {
+            Self::Amendment => OwnerGrantSuccessionKind::Amendment,
+            Self::Renewal => OwnerGrantSuccessionKind::Renewal,
+        }
+    }
+}
 
 #[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -22,6 +46,17 @@ struct Selector {
     /// A script may only propose an amount for a new grant on this pool. It
     /// fills the native tokens field once; prepare never reads it.
     proposed_tokens: Option<u64>,
+    /// Open the native form for an amendment or a renewal of the pool's
+    /// published grant instead of a new grant.
+    succession: Option<Succession>,
+}
+/// A complete Matrix user ID (`@name:server`), as the native form accepts.
+pub(crate) fn matrix_user(id: &str) -> bool {
+    id.len() <= 255
+        && !id.chars().any(|c| c.is_whitespace() || c.is_control())
+        && id.split_once(':').is_some_and(|(name, server)| {
+            name.starts_with('@') && name.len() > 1 && !server.is_empty()
+        })
 }
 impl Selector {
     fn parse(value: Value) -> Result<Self, String> {
@@ -41,6 +76,9 @@ impl Selector {
             || value.proposed_tokens.is_some_and(|tokens| {
                 value.contribution_id.is_none() || tokens == 0 || tokens > MAX_GRANT_TOKENS
             })
+            || (value.succession.is_some() && value.contribution_id.is_none())
+            // A renewal is offered with next month's renewal support.
+            || value.succession == Some(Succession::Renewal)
         {
             return Err("invalid_management_arguments".into());
         }
@@ -90,13 +128,10 @@ impl GrantChoices {
             return Err("invalid_grant_budget".into());
         }
         let coordinator = self.coordinator.trim().to_owned();
-        if std::iter::once(&coordinator).chain(&managers).any(|id| {
-            id.len() > 255
-                || id.chars().any(|c| c.is_whitespace() || c.is_control())
-                || !id.split_once(':').is_some_and(|(name, server)| {
-                    name.starts_with('@') && name.len() > 1 && !server.is_empty()
-                })
-        }) {
+        if std::iter::once(&coordinator)
+            .chain(&managers)
+            .any(|id| !matrix_user(id))
+        {
             return Err("invalid_grant_manager".into());
         }
         Ok(OwnerGrantChoices {
@@ -111,6 +146,8 @@ impl GrantChoices {
 
 pub(crate) enum GrantResult {
     Choose(OwnerGrantForm),
+    /// Terms for an amendment or renewal of the published grant.
+    ChooseSuccessor(Box<OwnerGrantSuccessionForm>),
     Review(Box<OwnerGrantReview>),
     Progress(Box<OwnerGrantProgress>),
     PublicationReview(Box<OwnerGrantPublicationReview>),
@@ -125,18 +162,52 @@ pub(crate) fn now_ms() -> u64 {
 pub(crate) fn month_ended(summary: &OwnerGrantSummary, now: u64) -> bool {
     summary.period_end_ms <= now
 }
-// Journal order is creation order. Cancelled, canonically closed or ended
-// originals remain in history without hiding a pending, unknown or active original.
+/// A successor original that still names its predecessor: anything but a
+/// cancelled review or a successor the native ledger rejected or cancelled.
+fn live_successor(record: &OwnerGrantProgress) -> bool {
+    record.summary.succession.is_some()
+        && !matches!(record.state, OwnerGrantState::Declined)
+        && !matches!(
+            record.succession_state,
+            Some(OwnerGrantSuccessionState::Rejected | OwnerGrantSuccessionState::Cancelled)
+        )
+}
+/// A successor that still needs the owner: an unattempted or unknown review,
+/// or a recorded change that the server has not been seen to accept.
+pub(crate) fn unfinished_successor(record: &OwnerGrantProgress) -> bool {
+    live_successor(record)
+        && !(matches!(record.state, OwnerGrantState::Recorded)
+            && matches!(record.succession_state, Some(OwnerGrantSuccessionState::Effective)))
+}
+// Journal order is creation order. Cancelled, canonically closed, ended or
+// succeeded originals remain in history without hiding a pending, unknown,
+// active or scheduled original. A grant is succeeded once a live successor
+// names it: an amendment that replaced it, or next month's renewal.
 fn existing_progress(
     records: Vec<OwnerGrantProgress>,
     now: u64,
 ) -> Result<Option<OwnerGrantProgress>, String> {
+    let succeeded: std::collections::BTreeSet<String> = records
+        .iter()
+        .filter(|record| live_successor(record))
+        .filter_map(|record| record.summary.succession.as_ref())
+        .map(|succession| succession.predecessor_grant_id.clone())
+        .collect();
     let mut pending = None;
     let mut declined = None;
     for record in records {
         if matches!(record.state, OwnerGrantState::Declined)
             || (matches!(record.state, OwnerGrantState::Recorded)
-                && (record.closure.is_some() || month_ended(&record.summary, now)))
+                && (record.closure.is_some()
+                    || month_ended(&record.summary, now)
+                    || succeeded.contains(&record.summary.grant_id)
+                    || matches!(
+                        record.succession_state,
+                        Some(
+                            OwnerGrantSuccessionState::Rejected
+                                | OwnerGrantSuccessionState::Cancelled
+                        )
+                    )))
         {
             declined = Some(record);
         } else if pending.replace(record).is_some() {
@@ -153,6 +224,9 @@ pub(crate) struct GrantFlow {
     lease: Lease,
     access: OwnerGrantAccess,
     selector: Selector,
+    /// Whether the server advertises `pool-grant-succession-v1`: 0 not yet
+    /// asked, 1 no, 2 yes. Only gates which native form is offered.
+    succession_support: Arc<AtomicU8>,
 }
 impl GrantFlow {
     async fn form(&self) -> Result<GrantResult, String> {
@@ -183,7 +257,16 @@ impl GrantFlow {
                 records.push(self.access.recover(original.intent_id).await.map_err(|e| e.code)?);
                 self.check()?;
             }
-            if let Some(progress) = existing_progress(records, now_ms())? {
+            let current = existing_progress(records, now_ms())?;
+            if let Some(kind) = self.selector.succession {
+                // An unfinished change is resolved before another one starts:
+                // it is published, recovered or cancelled from its own record.
+                if let Some(progress) = current.filter(unfinished_successor) {
+                    return self.observe_progress(progress).await;
+                }
+                return self.successor_form(kind).await;
+            }
+            if let Some(progress) = current {
                 return self.observe_progress(progress).await;
             }
             self.form().await
@@ -197,6 +280,70 @@ impl GrantFlow {
     /// The script's proposed amount for the native tokens field, if any.
     pub fn proposed_tokens(&self) -> Option<u64> {
         self.selector.proposed_tokens
+    }
+    /// The change the script asked the panel to prepare, if any.
+    pub fn succession(&self) -> Option<Succession> {
+        self.selector.succession
+    }
+    /// Last known server support for amending or renewing a published grant.
+    pub fn succession_supported(&self) -> Option<bool> {
+        match self.succession_support.load(Ordering::Acquire) {
+            1 => Some(false),
+            2 => Some(true),
+            _ => None,
+        }
+    }
+    async fn refresh_succession_support(&self) -> Result<bool, String> {
+        self.check()?;
+        let supported = self.access.supports_succession().await.map_err(|e| e.code)?;
+        self.check()?;
+        self.succession_support
+            .store(if supported { 2 } else { 1 }, Ordering::Release);
+        Ok(supported)
+    }
+    async fn successor_form(&self, kind: Succession) -> Result<GrantResult, String> {
+        self.check()?;
+        let contribution = self
+            .selector
+            .contribution_id
+            .clone()
+            .ok_or("owner_grant_original_intent_required")?;
+        let form = self
+            .access
+            .succession_form(contribution, kind.native())
+            .await
+            .map_err(|e| e.code)?;
+        self.check()?;
+        Ok(GrantResult::ChooseSuccessor(Box::new(form)))
+    }
+    /// Open the amendment or renewal form for this pool's published grant.
+    /// The native form, review and publication still commit everything.
+    pub async fn choose_successor(&self, kind: Succession) -> Result<GrantResult, String> {
+        if !self.can_choose_new_limits() {
+            return Err("owner_grant_original_intent_required".into());
+        }
+        self.successor_form(kind).await
+    }
+    pub async fn prepare_successor(
+        &self,
+        kind: Succession,
+        mut choices: GrantChoices,
+    ) -> Result<GrantResult, String> {
+        self.check()?;
+        choices.coordinator = self.account().to_owned();
+        let choices = choices.parse()?;
+        let contribution = self
+            .selector
+            .contribution_id
+            .clone()
+            .ok_or("owner_grant_original_intent_required")?;
+        let review = self
+            .access
+            .prepare_successor(contribution, kind.native(), choices)
+            .await
+            .map_err(|e| e.code)?;
+        self.check()?;
+        Ok(GrantResult::Review(Box::new(review)))
     }
     /// Closed grants require a currently approved, distinct admission before
     /// reopening choices. A grant whose UTC month ended may instead be followed
@@ -322,6 +469,16 @@ impl GrantFlow {
                 .await.map_err(|e| e.code)?;
             self.check()?;
             if let Some(publication) = publication {
+                // A published grant with a proposal or a requested change can
+                // be amended only if the server advertises succession.
+                // A failed probe leaves support unknown, which keeps today's
+                // read-only answer; it never hides the published grant.
+                if (self.selector.proposed_tokens.is_some() || self.selector.succession.is_some())
+                    && self.succession_supported().is_none()
+                {
+                    let _ = self.refresh_succession_support().await;
+                    self.check()?;
+                }
                 return Ok(GrantResult::PublicationProgress(Box::new(publication)));
             }
         }
@@ -376,6 +533,7 @@ impl Host {
             lease,
             access,
             selector,
+            succession_support: Arc::new(AtomicU8::new(0)),
         };
         flow.check()?;
         Ok(flow)
@@ -390,15 +548,36 @@ mod tests {
         OwnerGrantProgress {
             state,
             closure: None,
+            succession_state: None,
             summary: ::hagency::native_owner::OwnerGrantSummary {
-                intent_id: id.into(), owner_mxid: "@owner:test".into(),
+                intent_id: id.into(), grant_id: format!("grant_{id}"), owner_mxid: "@owner:test".into(),
                 contribution_id: "contribution".into(), resource_id: "resource".into(),
                 coordinator_mxid: "@coordinator:test".into(), allocated_tokens: 700,
                 eligible_managers: vec!["@manager:test".into()], allow_self_approval: false,
                 delegation_expires_at_ms: 1793491200000, period_key: "2026-10".into(),
                 period_start_ms: 1790812800000, period_end_ms: 1793491200000,
+                succession: None,
             },
         }
+    }
+    /// A successor original of `predecessor`, in the given native state.
+    fn successor(
+        id: &str,
+        predecessor: &OwnerGrantProgress,
+        kind: OwnerGrantSuccessionKind,
+        state: OwnerGrantState,
+        native: Option<OwnerGrantSuccessionState>,
+    ) -> OwnerGrantProgress {
+        let mut p = progress(id, state);
+        p.succession_state = native;
+        p.summary.succession = Some(::hagency::native_owner::OwnerGrantSuccessionSummary {
+            kind,
+            predecessor_grant_id: predecessor.summary.grant_id.clone(),
+            predecessor_allocated_tokens: predecessor.summary.allocated_tokens,
+            carried_children: 2,
+            carried_retained_tokens: 300,
+        });
+        p
     }
     /// Inside the fixtures' 2026-10 month, and that month's end (2026-11-01).
     const OCTOBER: u64 = 1_792_000_000_000;
@@ -574,6 +753,88 @@ mod tests {
             json!({"contributionId":"pool_1","proposedTokens":3000000,"allocatedTokens":3000000}),
         ] {
             assert_eq!(proposal(bad.clone()), Err("invalid_management_arguments".into()), "{bad}");
+        }
+    }
+    #[test]
+    fn an_amendment_replaces_the_published_grant_as_the_current_original() {
+        use OwnerGrantSuccessionKind::Amendment;
+        use OwnerGrantSuccessionState::*;
+        let root = progress("root", OwnerGrantState::Recorded);
+        // Every live state of a successor makes it the current original:
+        // its review, an unknown outcome, a saved or an effective change.
+        for (state, native) in [
+            (OwnerGrantState::ReviewRequired, None),
+            (OwnerGrantState::ReviewExpired, None),
+            (OwnerGrantState::OutcomeUnknown, None),
+            (OwnerGrantState::Recorded, Some(Pending)),
+            (OwnerGrantState::Recorded, Some(Effective)),
+        ] {
+            let change = successor("change", &root, Amendment, state.clone(), native);
+            let current = existing_progress(vec![root.clone(), change], OCTOBER).unwrap().unwrap();
+            assert_eq!(current.summary.intent_id, "change");
+            assert_eq!(
+                unfinished_successor(&current),
+                !matches!(native, Some(Effective))
+            );
+        }
+        // A cancelled review or a rejected change leaves the published grant current.
+        for (state, native) in [
+            (OwnerGrantState::Declined, None),
+            (OwnerGrantState::Recorded, Some(Rejected)),
+            (OwnerGrantState::Recorded, Some(Cancelled)),
+        ] {
+            let change = successor("change", &root, Amendment, state, native);
+            assert!(!unfinished_successor(&change));
+            let current = existing_progress(vec![root.clone(), change.clone()], OCTOBER).unwrap().unwrap();
+            assert_eq!(current.summary.intent_id, "root");
+            // A later change after a rejected one is current again.
+            let again = successor("again", &root, Amendment, OwnerGrantState::Recorded, Some(Pending));
+            let current = existing_progress(vec![root.clone(), change, again], OCTOBER).unwrap().unwrap();
+            assert_eq!(current.summary.intent_id, "again");
+        }
+        // A chain of amendments: only its head is current.
+        let first = successor("first", &root, Amendment, OwnerGrantState::Recorded, Some(Effective));
+        let second = successor("second", &first, Amendment, OwnerGrantState::Recorded, Some(Effective));
+        let current = existing_progress(vec![root.clone(), first, second], OCTOBER).unwrap().unwrap();
+        assert_eq!(current.summary.intent_id, "second");
+        // Two live originals that do not succeed each other stay ambiguous.
+        assert!(existing_progress(vec![root.clone(), progress("other", OwnerGrantState::Recorded)], OCTOBER).is_err());
+    }
+    #[test]
+    fn a_scheduled_renewal_is_current_and_survives_the_boundary() {
+        let october = progress("october", OwnerGrantState::Recorded);
+        let mut renewal = successor(
+            "renewal",
+            &october,
+            OwnerGrantSuccessionKind::Renewal,
+            OwnerGrantState::Recorded,
+            Some(OwnerGrantSuccessionState::Effective),
+        );
+        renewal = in_month(renewal, "2026-11", NOVEMBER, 1_796_083_200_000);
+        for now in [OCTOBER, NOVEMBER, NOVEMBER + 1] {
+            let current = existing_progress(vec![october.clone(), renewal.clone()], now).unwrap().unwrap();
+            assert_eq!(current.summary.intent_id, "renewal");
+        }
+        // Once the renewal's own month ends, it is history like any grant.
+        let ended = existing_progress(vec![october, renewal], 1_796_083_200_000).unwrap().unwrap();
+        assert!(matches!(ended.state, OwnerGrantState::Recorded));
+    }
+    #[test]
+    fn succession_is_a_bounded_pool_argument() {
+        let parsed = |value: Value| Selector::parse(value);
+        let s = parsed(json!({"contributionId":"pool_1","proposedTokens":800000,"succession":"amendment"})).unwrap();
+        assert_eq!(s.succession, Some(Succession::Amendment));
+        assert_eq!(s.proposed_tokens, Some(800000));
+        // Scripts cannot request a renewal yet.
+        assert!(parsed(json!({"contributionId":"pool_1","succession":"renewal"})).is_err());
+        for bad in [
+            json!({"intentId":"original_1","succession":"amendment"}),
+            json!({"contributionId":"pool_1","succession":"revoke"}),
+            json!({"contributionId":"pool_1","succession":"Amendment"}),
+            json!({"contributionId":"pool_1","succession":true}),
+            json!({"contributionId":"pool_1","succession":"amendment","eligibleManagers":["@a:test"]}),
+        ] {
+            assert!(parsed(bad.clone()).is_err(), "{bad}");
         }
     }
     #[test]
