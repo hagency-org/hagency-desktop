@@ -123,10 +123,13 @@ class Host:
         # fully inside the window, back up if it is above the content area.
         height = self.req("/s")["w"][0]["sz"][1]
         for _ in range(40):
-            rows = [w for w in self.snap() if w.get("i") == name and w["r"][2] > 0]
+            snap = self.snap()
+            # The scroll area starts under the header; its top moves with the header's height.
+            top = next((w["r"][1] + 4 for w in snap if w.get("i") == "content" and w["r"][3] > 0), 210)
+            rows = [w for w in snap if w.get("i") == name and w["r"][2] > 0]
             if rows:
                 x, y, w, h = rows[0]["r"]
-                if y >= 210 and y + h <= height - 20:
+                if y >= top and y + h <= height - 20:
                     return
                 self.scroll(200 if y + h > height - 20 else -200)
             else:
