@@ -2328,5 +2328,19 @@
   "Next month's renewal is already scheduled. Cancel it, change this month's limit, then renew again.": "Next month's renewal is already scheduled. Cancel it, change this month's limit, then renew again.",
   "Next month's limit can be scheduled only during the last 7 days of this month (UTC).": "Next month's limit can be scheduled only during the last 7 days of this month (UTC).",
   "The new limit is below what running Agents already hold. Choose at least the minimum shown.": "The new limit is below what running Agents already hold. Choose at least the minimum shown.",
-  "Applicants can be added but not removed while Agents may be running. Keep every current applicant.": "Applicants can be added but not removed while Agents may be running. Keep every current applicant."
+  "Applicants can be added but not removed while Agents may be running. Keep every current applicant.": "Applicants can be added but not removed while Agents may be running. Keep every current applicant.",
+  "Monthly maximum (offered pool): {current} → {new}": "Monthly maximum (offered pool): {current} → {new}",
+  "The per-request limit stays {limit} until you change it separately.": "The per-request limit stays {limit} until you change it separately.",
+  "Per-request limits do not change.": "Per-request limits do not change.",
+  "The pool's definition and its server admission do not change.": "The pool's definition and its server admission do not change.",
+  "Running Agents keep running.": "Running Agents keep running.",
+  "Change the monthly maximum": "Change the monthly maximum",
+  "Hagency will recheck this pool's current maximum and this month's commitments before saving. Nothing is sent to the server.": "Hagency will recheck this pool's current maximum and this month's commitments before saving. Nothing is sent to the server.",
+  "This records a new monthly maximum on this device. The pool's definition, its server admission and its running Agents stay as they are. The per-request limit is changed separately.": "This records a new monthly maximum on this device. The pool's definition, its server admission and its running Agents stay as they are. The per-request limit is changed separately.",
+  "Save monthly maximum": "Save monthly maximum",
+  "This resource's monthly maximum cannot be changed here. Close this review and refresh to see the current reason.": "This resource's monthly maximum cannot be changed here. Close this review and refresh to see the current reason.",
+  "The monthly maximum of an offered pool cannot be cleared. Choose a whole number of tokens instead.": "The monthly maximum of an offered pool cannot be cleared. Choose a whole number of tokens instead.",
+  "The monthly maximum already has this value. Nothing was changed.": "The monthly maximum already has this value. Nothing was changed.",
+  "The monthly maximum cannot be lower than this month's published capacity and Agent holds. Close this review and choose a higher value.": "The monthly maximum cannot be lower than this month's published capacity and Agent holds. Close this review and choose a higher value.",
+  "Some Agent usage is still being reported, so the monthly maximum cannot be lowered yet. You can still raise it. Keep this device online, then try again.": "Some Agent usage is still being reported, so the monthly maximum cannot be lowered yet. You can still raise it. Keep this device online, then try again."
 }

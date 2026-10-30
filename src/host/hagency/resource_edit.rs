@@ -1,9 +1,19 @@
 //! Closed native review; the package supplies a proposal, never the old values,
 //! eligibility, provider identity, filesystem paths or confirmation authority.
+//!
+//! The same service amends the monthly maximum of a resource that was offered,
+//! published or retains commitments, when `ceilingAmendment.allowed` in its
+//! detail. The request then changes nothing else and names the reviewed
+//! sequence: `{resourceId, expectedRevision, expectedCeilingSequence,
+//! profile:{kind:"preserve"}, ceiling:{kind:"monthly", tokens}}`. The native
+//! review shows old → new; the definition, its revision, server admission,
+//! running Agents and the per-request limit stay unchanged.
 use super::*;
 use ::hagency::native_owner::{
-    CeilingChange, EditLocalResource, LocalResourceEditReview, ProfileChange,
+    CeilingAmendmentReview, CeilingChange, EditLocalResource, LocalResourceEditReview,
+    ProfileChange,
 };
+use crate::i18n::Language;
 
 pub(crate) const EDIT: &str = "hagency.resources.edit";
 
@@ -25,6 +35,40 @@ fn reasoning_text(value: Option<&str>) -> String {
         Some(other) => return other.to_owned(),
     };
     crate::i18n::tr(key).into()
+}
+
+/// "Monthly maximum (offered pool): old → new" in `language`.
+fn amendment_change(language: Language, previous: u64, tokens: u64) -> String {
+    crate::i18n::format_in(
+        language,
+        "Monthly maximum (offered pool): {current} → {new}",
+        &[
+            ("current", crate::utils::format_token_count(previous)),
+            ("new", crate::utils::format_token_count(tokens)),
+        ],
+    )
+}
+
+/// The native confirmation for a monthly-maximum amendment: only the maximum
+/// changes; the definition, admission, Agents and per-request limit do not.
+pub(crate) fn amendment_details(language: Language, review: &CeilingAmendmentReview) -> String {
+    let text = |english| crate::i18n::text_for(language, english);
+    let per_request = match review.per_request_tokens {
+        Some(limit) => crate::i18n::format_in(
+            language,
+            "The per-request limit stays {limit} until you change it separately.",
+            &[("limit", crate::utils::format_token_count(limit))],
+        ),
+        None => text("Per-request limits do not change.").to_owned(),
+    };
+    format!(
+        "{}\n\n{}\n{}\n{}\n{}",
+        review.name.as_deref().unwrap_or(&review.resource_id),
+        amendment_change(language, review.previous_tokens, review.tokens),
+        text("The pool's definition and its server admission do not change."),
+        text("Running Agents keep running."),
+        per_request,
+    )
 }
 
 pub(crate) struct ResourceEditConsent {
@@ -72,6 +116,10 @@ impl ResourceEditConsent {
     pub fn recovering(&self) -> bool {
         matches!(self.review, Some(LocalResourceEditReview::Recorded(_)))
     }
+    /// The review is an append-only monthly-maximum amendment, not an edit.
+    pub fn amending(&self) -> bool {
+        matches!(self.review, Some(LocalResourceEditReview::CeilingAmendment(_)))
+    }
     fn authorize(&self) -> Result<(), String> {
         if self.expired() {
             return Err("provider_confirmation_expired".into());
@@ -94,14 +142,30 @@ impl ResourceEditConsent {
     pub fn details(&self) -> String {
         let tr = crate::i18n::tr;
         match &self.review {
-            Some(LocalResourceEditReview::Recorded(result)) => format!(
-                "{}\n{}: {}\n{}: {}",
-                self.input.resource_id,
-                tr("Original request"),
-                self.input.command_id,
-                tr("Saved revision"),
-                result.revision
-            ),
+            Some(LocalResourceEditReview::Recorded(result)) => {
+                let saved = format!(
+                    "{}\n{}: {}\n{}: {}",
+                    self.input.resource_id,
+                    tr("Original request"),
+                    self.input.command_id,
+                    tr("Saved revision"),
+                    result.revision
+                );
+                match &result.ceiling_amendment {
+                    Some(amendment) => format!(
+                        "{saved}\n{}",
+                        amendment_change(
+                            crate::i18n::language(),
+                            amendment.previous_tokens,
+                            amendment.tokens
+                        )
+                    ),
+                    None => saved,
+                }
+            }
+            Some(LocalResourceEditReview::CeilingAmendment(review)) => {
+                amendment_details(crate::i18n::language(), review)
+            }
             Some(LocalResourceEditReview::Editable(detail)) => {
                 let old = &detail.resource;
                 let (model, reasoning) = match &self.input.profile {
@@ -171,6 +235,63 @@ impl ResourceEditConsent {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn ceiling_amendment_review_says_only_the_monthly_maximum_changes_in_both_languages() {
+        let review = CeilingAmendmentReview {
+            resource_id: "resource_1".into(),
+            name: Some("写作池".into()),
+            revision: "a".repeat(64),
+            sequence: 2,
+            previous_tokens: 3_000_000,
+            tokens: 5_000_000,
+            per_request_tokens: Some(1_000_000),
+        };
+        assert_eq!(
+            amendment_details(Language::English, &review),
+            "写作池\n\nMonthly maximum (offered pool): 3 M → 5 M\nThe pool's definition and its server admission do not change.\nRunning Agents keep running.\nThe per-request limit stays 1 M until you change it separately."
+        );
+        assert_eq!(
+            amendment_details(Language::Chinese, &review),
+            "写作池\n\n每月总上限（已贡献的资源池）：3 M → 5 M\n资源池的定义及其服务器准入保持不变。\n正在运行的 Agent 会继续运行。\n每次申请上限仍为 1 M，如需调整请另行修改。"
+        );
+        let unnamed = CeilingAmendmentReview {
+            name: None,
+            per_request_tokens: None,
+            ..review
+        };
+        let english = amendment_details(Language::English, &unnamed);
+        assert!(english.starts_with("resource_1\n\n"), "{english}");
+        assert!(english.ends_with("Per-request limits do not change."), "{english}");
+        assert!(amendment_details(Language::Chinese, &unnamed).ends_with("每次申请上限保持不变。"));
+    }
+    #[test]
+    fn ceiling_amendment_input_is_ceiling_only_and_names_its_reviewed_sequence() {
+        let amend = json!({"commandId":"original","resourceId":"resource_1","expectedRevision":"a".repeat(64),"profile":{"kind":"preserve"},"ceiling":{"kind":"monthly","tokens":5_000_000u64},"expectedCeilingSequence":2});
+        let parsed = parse_edit(amend.clone()).unwrap();
+        assert_eq!(parsed.expected_ceiling_sequence, Some(2));
+        assert_eq!(serde_json::to_value(&parsed).unwrap(), amend);
+        for (field, value) in [
+            ("profile", json!({"kind":"select","model":"gpt-5.6-sol","reasoning":"high"})),
+            ("executionPolicy", json!({"yolo":true})),
+            ("ceiling", json!({"kind":"preserve"})),
+            ("ceiling", json!({"kind":"monthly","tokens":0})),
+            ("expectedCeilingSequence", json!(-1)),
+            ("expectedCeilingSequence", json!(9_007_199_254_740_992u64)),
+        ] {
+            let mut invalid = amend.clone();
+            invalid[field] = value;
+            assert!(parse_edit(invalid).is_err(), "{field}");
+        }
+        // A clear stays well-formed: the native review refuses it with its reason.
+        let mut clear = amend.clone();
+        clear["ceiling"] = json!({"kind":"clear"});
+        assert!(parse_edit(clear).is_ok());
+        for key in ["previousTokens", "perRequestTokens", "minimumTokens", "sequence", "allowed"] {
+            let mut injected = amend.clone();
+            injected[key] = json!(1);
+            assert!(parse_edit(injected).is_err(), "{key}");
+        }
+    }
     #[test]
     fn resource_edit_service_has_closed_input_and_only_its_required_permissions() {
         let valid = json!({"commandId":"original","resourceId":"resource_1","expectedRevision":"a".repeat(64),"profile":ProfileChange::Preserve {},"ceiling":CeilingChange::Monthly { tokens:450.try_into().unwrap() }});

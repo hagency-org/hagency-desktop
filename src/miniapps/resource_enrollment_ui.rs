@@ -26,6 +26,7 @@ impl ProviderReview {
             Self::Create(v) if v.recovering() => ("Recover saved configuration creation","This original request already created a configuration. Recover its recorded result without creating another.","The recorded result identifies the new resource. Open its details to see its current configuration.","Recover saved result"),
             Self::Create(_) => ("Create an additional configuration","Hagency will keep the source resource unchanged and create a new configuration using its original account and shared limit.","The new configuration is published locally. Server admission and capacity allocation remain separate. This does not increase the account limit, verify sign-in or start an agent.","Create configuration"),
             Self::Edit(v) if v.recovering() => ("Recover saved resource edit","This original request was already saved. Recover its recorded result without applying another edit.","The recorded result describes that request. Refresh resource details to see the latest configuration.","Recover saved result"),
+            Self::Edit(v) if v.amending() => resource_edit_ui::AMENDMENT_WORDS,
             Self::Edit(_) => ("Review resource configuration","Hagency will recheck this account, model and resource before saving. The same resource and shared account remain in use.","This changes the resource on this device for every profile that uses it. It does not increase the shared account limit or allocate capacity. Clearing its limit leaves available capacity unknown.","Save configuration"),
         }
     }
@@ -111,6 +112,36 @@ mod tests {
             panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&"account_0123456789abcdef0123456789abcdef\nModel and declared capacity\n".repeat(12));
             panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"This changes the resource on this device for every profile that uses it. It does not increase the shared account limit or allocate capacity. Clearing its limit leaves available capacity unknown."));
             panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,"Save configuration"));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
+            let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
+            panel.request_confirmation_redraw(&mut cx);let event=std::mem::take(&mut cx.new_draw_event);assert!(event.will_redraw());
+            let mut draw=CxDraw::new(&mut cx,&event);let mut c=Cx2d::new(&mut draw);c.begin_pass(&pass,None);
+            if list.begin(&mut c,Walk::default()).is_redrawing(){c.begin_root_turtle(dvec2(width,height),Layout::flow_overlay());panel.draw_all(&mut c,&mut Scope::empty());c.end_pass_sized_turtle();list.end(&mut c);}
+            c.end_pass(&pass);drop(c);drop(draw);
+            for path in [ids!(provider_confirmation.buttons.cancel),ids!(provider_confirmation.buttons.connect)] {
+                let button=panel.view.button(&cx,path);let rect=button.area().rect(&cx);
+                assert!(button.visible() && button.area().is_valid(&cx));
+                assert!(rect.size.x>0. && rect.size.y>=40. && rect.pos.y>=0. && rect.pos.y+rect.size.y<=height && rect.pos.x>=0. && rect.pos.x+rect.size.x<=width,"{rect:?}");
+            }
+        }
+    }    #[test]
+    fn native_hagency_ceiling_amendment_footer_survives_long_details_in_both_languages() {
+        for (width,height,language) in [(360.,640.,Language::English),(360.,640.,Language::Chinese),(840.,700.,Language::English),(840.,700.,Language::Chinese)] {
+            let mut cx=Cx::new(Box::new(|_,_|{}));
+            let mut panel=cx.with_vm(|vm|{
+                makepad_widgets::script_mod(vm);crate::i18n::install(vm);makepad_code_editor::script_mod(vm);crate::shared::script_mod(vm);
+                vm.bx.captured_errors=Some(Vec::new());crate::miniapps::script_mod(vm);
+                let value=vm.eval(script!{use mod.prelude.widgets.* use mod.widgets.* MiniAppsPanel{}});
+                let panel=MiniAppsPanel::script_from_value(vm,value);assert!(vm.take_errors().is_empty());panel
+            });
+            for path in [ids!(catalog),ids!(import_form),ids!(hagency_review),ids!(app_content),ids!(notice),ids!(approval)] {panel.view.widget(&cx,path).set_visible(&mut cx,false);}
+            panel.view.widget(&cx,ids!(provider_confirmation)).set_visible(&mut cx,true);
+            let (title,_,warning,confirm)=resource_edit_ui::AMENDMENT_WORDS;
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.heading.title)).set_text(&mut cx,crate::i18n::text_for(language,title));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.account)).set_text(&mut cx,"@original-owner:matrix.example");
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&crate::host::hagency::resource_edit::amendment_details(language,&::hagency::native_owner::CeilingAmendmentReview{resource_id:"resource_0123456789abcdef01234567".into(),name:Some("A long owner-chosen pool name that wraps across lines".repeat(3)),revision:"a".repeat(64),sequence:7,previous_tokens:123_456_789,tokens:987_654_321,per_request_tokens:Some(12_345_678)}).repeat(3));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,warning));
+            panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,confirm));
             panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
             let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
             panel.request_confirmation_redraw(&mut cx);let event=std::mem::take(&mut cx.new_draw_event);assert!(event.will_redraw());
