@@ -2411,7 +2411,7 @@
   "This pool": "这个资源池",
   "People who can request · {count}": "谁可以申请 · {count}",
   "The list carries over. You can add people, not remove them.": "名单沿用本月，只能加人，不能删人。",
-  "This month’s list only grows: people already on it can’t be removed.": "本月名单只能加人：已在名单里的人不能删。",
+  "This month’s list only grows: people already on it can’t be removed.": "本月名单只能加人，不能删人。",
   "Add someone: type a username, for example lisi": "添加：输入用户名，例如 lisi",
   "No one yet. Add at least one person.": "还没有人。请至少添加一个人。",
   "At most {max}.": "最多 {max}。",

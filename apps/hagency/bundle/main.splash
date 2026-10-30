@@ -51,6 +51,9 @@ H.pool_name_after=pool_name_after H.pool_name_note=pool_name_note
 let {who=nil}=H
 if who==nil {who={rid:"" picks:[] name:"" nameError:"" trustOpen:false roomError:""}}
 H.who=who
+// Round 9: this month's list, read from this computer's native grant record (hagency.grants.applicants).
+let {who_list=nil}=H
+H.who_list=who_list
 let {local_list=nil,local_status=nil,local_pending="",local_confirm="",local_error="",local_discard="",local_models=nil,local_after="",local_effort_note="",bar_past=false,local_epoch=0,local_failure="",local_failure_reason="",local_failure_code="",local_kept=nil,local_rechecked=false}=H
 H.local_list=local_list H.local_status=local_status H.local_pending=local_pending H.local_confirm=local_confirm H.local_error=local_error H.local_discard=local_discard H.local_models=local_models
 H.local_after=local_after H.local_effort_note=local_effort_note H.bar_past=bar_past H.local_epoch=local_epoch H.local_failure=local_failure H.local_failure_reason=local_failure_reason H.local_failure_code=local_failure_code H.local_kept=local_kept H.local_rechecked=local_rechecked
@@ -5027,7 +5030,7 @@ A.pool_info_load=fn(rid){
         let found=nil
         for row in rows {if found==nil && row.resourceId==rid && A.pool_mine(row) {found=row}}
         p.conn=found
-        if found==nil {p.connState="none" p.grant=nil p.grantState="none" p.requests=0 rest() return}
+        if found==nil {p.connState="none" p.grant=nil p.grantState="none" p.requests=0 A.who_list_ready(rid) rest() return}
         p.connState="ready"
         let cid=found.id
         if !A.pool_enabled() {p.grant=nil p.grantState="unsupported" p.requests=-2 rest() return}
@@ -5041,6 +5044,7 @@ A.pool_info_load=fn(rid){
             }
             A.pool_edit_sync()
             A.pool_result_show()
+            A.who_list_ready(rid)
             A.pool_enqueue(epoch,"hagency.pools.agents.list",{after:nil needsMyAction:true poolId:cid},fn(r){p.requests=A.pool_count_requests(r,cid)})
             // The Agents running on this pool and what each was given: the per-request floor.
             A.pool_enqueue(epoch,"hagency.pools.agents.list",{after:nil poolId:cid},fn(r){p.using=A.pool_using_rows(r,cid)})
@@ -5736,6 +5740,8 @@ A.pool_succeed_reply=fn(rid,cid,kind,r,applicants,ctx){
             note.v={tone:"running" text:if applicants.len()==1 {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。对方现在就能申请。")} else {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。他们现在就能申请。")}}
             H.who.picks=[]
         }
+        // The list on the page is read again from this computer's record, so it shows who was added.
+        if r.is_ok {A.who_list_load()}
         H.pool_result=note.v A.redraw() return
     }
     H.pool_saved=if note.v==nil {nil} else {{rid:rid at:note.v.at tone:note.v.tone text:note.v.text retry:A.recipient_optional(note.v,"retry")}}
@@ -6386,7 +6392,9 @@ A.pool_model_text=fn(row){
     return out.t
 }
 A.pool_who_text=fn(v){
-    if v.managers!=nil {return A.t("This month’s list · ","本月名单 · ")+A.t(""+v.managers.len()+(if v.managers.len()==1 {" account"} else {" accounts"}),""+v.managers.len()+" 个账号")}
+    let l=A.who_list_view(v.row.id)
+    if v.published && l.state=="here" {return A.t("This month’s list · ","本月名单 · ")+A.t(""+l.people.len()+(if l.people.len()==1 {" person"} else {" people"}),""+l.people.len()+" 人")}
+    if v.managers!=nil {return A.t("This month’s list · ","本月名单 · ")+A.t(""+v.managers.len()+(if v.managers.len()==1 {" person"} else {" people"}),""+v.managers.len()+" 人")}
     if v.published {return A.t("Published · see the list","已发布 · 查看名单")}
     if v.connState=="loading" || v.grantState=="loading" {return ""}
     return A.t("Not published · you can pick people now","尚未发布 · 可以先选好人")
@@ -6395,7 +6403,7 @@ A.pool_sub_page=fn(){return A.has_page(["pool_device","pool_device_setup","pool_
 A.pool_sub_open=fn(page,rid){
     if H.busy {return}
     H.pool_sub_rid=rid H.page=page H.notice="" H.bar_past=false
-    if page=="pool_who" {A.who_open(rid) A.pool_who_load(nil) return}
+    if page=="pool_who" {A.who_open(rid) A.who_list_load() A.pool_who_load(nil) return}
     if page=="pool_advanced" {A.pool_adv_load(rid)}
     A.redraw()
 }
@@ -6429,6 +6437,42 @@ A.pool_adv_delete=fn(){
     if H.busy || H.command!=nil || !A.pool_adv_can_delete() {return}
     A.web_prepare({operation:"retire"})
 }
+// This month's list from this computer's own grant record: read-only, no window. It needs the
+// pool's server connection, which the pool page reads; until then it waits for it.
+A.who_list_load=fn(){
+    let rid=H.pool_sub_rid
+    let p=H.pool_info
+    if p==nil || p.rid!=rid || p.connState=="loading" {H.who_list={rid:rid cid:"" state:"waiting" data:nil code:""} return}
+    if p.conn==nil || p.conn.state!="admitted" {H.who_list={rid:rid cid:"" state:"none" data:nil code:""} return}
+    let cid=p.conn.id
+    H.who_list={rid:rid cid:cid state:"loading" data:nil code:""}
+    host.request("hagency.grants.applicants",{contributionId:cid},fn(r){
+        let l=H.who_list
+        if l==nil || l.cid!=cid {return}
+        if r.is_ok && A.recipient_optional(r.data,"contributionId")==cid {l.state="ready" l.data=r.data} else {l.state="error" l.code=if r.is_ok {"management_response_invalid"} else {r.error}}
+        if H.page=="pool_who" {A.redraw()}
+    })
+}
+// Read it once the pool's connection is known, when the page waits for it.
+A.who_list_ready=fn(rid){if H.page=="pool_who" && H.pool_sub_rid==rid && (H.who_list==nil || H.who_list.rid!=rid || H.who_list.state=="waiting") {A.who_list_load() A.redraw()}}
+// The list as read: {state, people}; state is "reading", "error", "here" (this month's, on the server),
+// "unconfirmed" (the server hasn't confirmed it yet) or "elsewhere" (no record of this month here).
+A.who_list_view=fn(rid){
+    let l=H.who_list
+    if l==nil || l.rid!=rid || l.state=="waiting" || l.state=="loading" {return {state:"reading" people:nil pending:false}}
+    if l.state=="error" {return {state:"error" people:nil pending:false}}
+    if l.state=="none" {return {state:"elsewhere" people:nil pending:false}}
+    let {state="none",applicants=[],changePending=false}=H.who_list.data
+    let people=[] for id in applicants {if id.is_string() {people.push(id)}}
+    if state=="published" {return {state:"here" people:people pending:changePending==true}}
+    if state=="unconfirmed" || state=="unpublished" {return {state:"unconfirmed" people:people pending:changePending==true}}
+    return {state:"elsewhere" people:nil pending:changePending==true}
+}
+// Who is on this month's list, as far as the page knows: the record read here, else a recent confirmation.
+A.who_on_list=fn(v){
+    if v.conn!=nil {let l=A.who_list_view(v.row.id) if l.people!=nil {return l.people}}
+    return v.managers
+}
 // Trusted projects moved here from the catalogue; they use its trust list and change flow.
 A.pool_who_load=fn(after){
     let w=H.web let rid=H.pool_sub_rid
@@ -6454,7 +6498,7 @@ A.pool_sub_back=fn(){
 A.pool_sub_refresh=fn(){
     if H.page=="pool_device_tasks" {A.dev_tasks_load() A.redraw() return}
     if A.dev_page() {A.pool_device_load() return}
-    if H.page=="pool_who" {A.pool_who_load(nil) return}
+    if H.page=="pool_who" {A.who_list_load() A.pool_who_load(nil) return}
     A.redraw()
 }
 A.pool_tip=fn(key){H.pool_tip=if H.pool_tip==key {""} else {key} A.redraw()}
@@ -6478,7 +6522,7 @@ A.pool_model_lock=fn(v){
 // When the list of applicants can change, in the owner's terms.
 A.pool_who_rule=fn(v){
     if v.quotaMode=="scheduled" {return A.t(A.pool_next_month_name(v.now)+" is published ahead, so this month’s list can’t change. You can add people again from "+A.pool_next_month(v.now)+".",A.pool_next_month_name(v.now)+"已提前发布，本月的名单不能再改。"+A.pool_next_month(v.now)+"起可以再加人。")}
-    if v.published && v.quotaMode=="amend" {return A.t("This month’s list only grows: people already on it can’t be removed.","本月名单只能加人：已在名单里的人不能删。")}
+    if v.published && v.quotaMode=="amend" {return A.t("This month’s list only grows: people already on it can’t be removed.","本月名单只能加人，不能删人。")}
     if v.published {return A.t("Chosen when this month was published, so it can’t change this month. You choose again when you next publish, from "+A.pool_next_month(v.now)+".","名单在发布本月额度时选定，本月不能改；"+A.pool_next_month(v.now)+"起下次发布时可以重新选。")}
     if v.quotaEditable {return A.t("You confirm the list in the confirmation window when you publish. After that, people can only be added this month.","发布时在确认窗口中确认名单。发布后，本月只能加人。")}
     return A.t("Once the administrator approves, you pick people in the confirmation window when you publish.","管理员批准后，发布时在确认窗口里选人。")
@@ -6555,7 +6599,7 @@ A.who_toggle=fn(mxid){
     w.picks=out A.redraw()
 }
 // People to choose from: those who asked for this pool, and lists of this owner's other pools.
-A.who_skip=fn(v,out,id){return id==nil || id=="" || (H.session!=nil && id==H.session.account) || A.who_has(v.managers,id) || A.who_has(out,id)}
+A.who_skip=fn(v,out,id){return id==nil || id=="" || (H.session!=nil && id==H.session.account) || A.who_has(A.who_on_list(v),id) || A.who_has(out,id)}
 A.who_candidates=fn(v){
     let out=[]
     let cid=if v.conn==nil {""} else {v.conn.id}
@@ -6570,17 +6614,15 @@ A.who_source=fn(v,mxid){
     let asked={y:false}
     if H.pool_meta!=nil && H.pool_meta.requests!=nil {for q in H.pool_meta.requests {let {poolId=nil,managerMxid=nil}=q if poolId==cid && managerMxid==mxid {asked.y=true}}}
     if H.reqs.items!=nil {for q in H.reqs.items {let {poolId=nil,managerMxid=nil}=q if poolId==cid && managerMxid==mxid {asked.y=true}}}
-    // Until this month's list is read, anyone may already be on it: say so rather than offer them as new.
-    let maybe=if v.published && v.managers==nil {A.t(" · may already be on the list"," · 可能已在名单里")} else {""}
-    if asked.y {return A.t("Asked for this pool","申请过这个资源池")+maybe}
-    for g in H.pool_grants {if A.who_has(A.pool_summary_managers(g.summary),mxid) {return A.t("On another pool’s list","在你其他资源池的名单里")+maybe}}
-    return A.t("Added by you","你添加的")+maybe
+    if asked.y {return A.t("Asked for this pool","申请过这个资源池")}
+    for g in H.pool_grants {if A.who_has(A.pool_summary_managers(g.summary),mxid) {return A.t("On another pool’s list","在你其他资源池的名单里")}}
+    return A.t("Added by you","你添加的")
 }
 // What the page's main button does with the people picked.
 A.who_action=fn(v){
     let n=A.who_count()
     if v.quotaEditable {return {kind:"publish" label:A.pool_publish_label(v.now) note:if n>0 {A.t(""+n+" picked in advance; confirm the list in the window on this computer.","已先选好 "+n+" 人；在这台电脑的确认窗口里确认名单。")} else {A.t("You can also add people in the confirmation window.","也可以在确认窗口里再加人。")} ready:true}}
-    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单")+(if n>0 {A.t(" ("+n+")","（"+n+" 人）")} else {""}) note:if n>0 {A.t(""+n+" picked. Once you confirm in the window on this computer, they can request.","已选 "+n+" 人。在这台电脑的确认窗口里确认后，对方就能申请。")} else {A.t("Tick people above or type a username; they can request once you confirm in the window.","勾选上面的人，或输入用户名；在确认窗口里确认后，对方就能申请。")} ready:n>0}}
+    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单")+(if n>0 {A.t(" ("+n+")","（"+n+" 人）")} else {""}) note:if n>0 {A.t(""+n+" picked. Once you confirm in the window on this computer, they can request.","已选 "+n+" 人。在这台电脑的确认窗口里确认后，对方就能申请。")} else if A.who_candidates(v).len()>0 {A.t("Tick people above or type a username; they can request once you confirm in the window.","勾选上面的人，或输入用户名；在确认窗口里确认后，对方就能申请。")} else {A.t("Type a username; they can request once you confirm in the window.","输入用户名；在确认窗口里确认后，对方就能申请。")} ready:n>0}}
     return {kind:"" label:"" note:"" ready:false}
 }
 A.who_submit=fn(){
@@ -13337,9 +13379,68 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
             if detail!=nil {View{width:Fill height:Fit flow:Down spacing:6
                 let v=A.pool_view(detail)
                 let action=A.who_action(v)
-                let people=A.who_candidates(v)
-                mod.widgets.HagencyListLabel{text:if v.published {A.t("THIS MONTH’S LIST","本月名单")} else {A.t("ACCOUNTS THAT CAN REQUEST","可以申请的账号")}}
-                mod.widgets.HagencyList{
+                let l=A.who_list_view(detail.resource.id)
+                let people=if v.published && l.state=="reading" {[]} else {A.who_candidates(v)}
+                let listed=v.published && (l.state=="here" || l.state=="unconfirmed")
+                let can_add=action.kind!="" && !(v.published && l.state=="elsewhere")
+                mod.widgets.HagencyListLabel{text:if v.published {A.t("THIS MONTH’S LIST","本月名单")+(if listed {A.t(" · "+l.people.len()+(if l.people.len()==1 {" PERSON"} else {" PEOPLE"})," · "+l.people.len()+" 人")} else {""})} else {A.t("ACCOUNTS THAT CAN REQUEST","可以申请的账号")}}
+                // A published month: the list as this computer's grant record has it, read without a window.
+                if v.published {mod.widgets.HagencyList{
+                    if l.state=="reading" {mod.widgets.HagencySwitchRow{
+                        mod.widgets.HagencySkeleton{width:29 height:29}
+                        pool_who_reading := mod.widgets.HagencyListSubtitle{text:A.t("Reading this month’s list…","正在读取本月名单…")}
+                    }}
+                    if l.state=="error" {View{width:Fill height:Fit flow:Down
+                        mod.widgets.HagencySwitchRow{
+                            mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_DANGER_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_DANGER_FG}}
+                            mod.widgets.HagencyListText{
+                                mod.widgets.HagencyWrapTitle{text:A.t("Couldn’t read this month’s list","暂时无法读取本月名单")}
+                                mod.widgets.HagencyWrapSubtitle{text:A.read_error(H.who_list.code)}
+                            }
+                        }
+                        mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                        mod.widgets.HagencyListRow{
+                            pool_who_list_retry := mod.widgets.HagencyListTap{enabled:!H.busy on_click:||{A.who_list_load() A.redraw()}}
+                            mod.widgets.HagencyListBody{mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.refresh}} mod.widgets.HagencyAccentText{text:A.t("Try Again","重试")}}
+                        }
+                    }}
+                    if l.state=="elsewhere" {mod.widgets.HagencySwitchRow{
+                        mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.device}}
+                        mod.widgets.HagencyListText{
+                            pool_who_elsewhere := mod.widgets.HagencyWrapTitle{text:A.t("This month’s record isn’t on this computer","这台电脑上没有本月的发布记录")}
+                            mod.widgets.HagencyWrapSubtitle{text:A.t("This month was published from another computer. See the list and add people there.","本月是在另一台电脑上发布的，要在那台电脑上查看名单和加人。")}
+                        }
+                    }}
+                    if listed {View{width:Fill height:Fit flow:Down
+                        for index mxid in l.people {View{width:Fill height:Fit flow:Down
+                            if index>0 {mod.widgets.HagencyListDivider{}}
+                            mod.widgets.HagencySwitchRow{
+                                mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_INFO_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_INFO_FG}}
+                                pool_who_person := mod.widgets.HagencyWrapTitle{text:A.pool_person(mxid)}
+                                mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.lock draw_icon.color:mod.widgets.RINX_MUTED}
+                            }
+                        }}
+                        if l.people.len()==0 {mod.widgets.HagencySwitchRow{
+                            mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info}}
+                            mod.widgets.HagencyWrapTitle{text:A.t("No one is on this month’s list yet.","本月名单上还没有人。")}
+                        }}
+                        if l.state=="unconfirmed" {View{width:Fill height:Fit flow:Down
+                            mod.widgets.HagencyListDivider{}
+                            mod.widgets.HagencySwitchRow{
+                                mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_WARNING_FG}}
+                                mod.widgets.HagencyWrapSubtitle{text:A.t("The server hasn’t confirmed this list yet; until it does, they can’t request.","服务器还没确认这份名单；确认前，他们还不能申请。")}
+                            }
+                        }}
+                        mod.widgets.HagencyListDivider{}
+                        mod.widgets.HagencySwitchRow{
+                            mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.sync draw_icon.color:mod.widgets.RINX_MUTED}}
+                            mod.widgets.HagencyListTitle{text:A.t("Next month","下个月")}
+                            mod.widgets.HagencyListValue{text:A.t("Carries over if you publish ahead","提前发布时沿用")}
+                        }
+                    }}
+                }}
+                if listed && l.pending {mod.widgets.HagencyListNote{text:A.t("A change to this list isn’t finished yet; the confirmation window opens it first.","名单还有一次修改没完成；打开确认窗口时会先处理它。")}}
+                if !v.published {mod.widgets.HagencyList{
                     if v.managers!=nil {View{width:Fill height:Fit flow:Down
                         for index mxid in v.managers {View{width:Fill height:Fit flow:Down
                             if index>0 {mod.widgets.HagencyListDivider{}}
@@ -13355,27 +13456,16 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             mod.widgets.HagencyListValue{text:A.t("Carries over if you publish ahead","提前发布时沿用")}
                         }
                     }}
-                    if v.managers==nil && v.published {mod.widgets.HagencyFitRow{
-                        mod.widgets.HagencyRowBody{
-                            mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.file}}
-                            mod.widgets.HagencyListText{
-                                mod.widgets.HagencyWrapTitle{text:A.t("Show This Month’s List","显示本月名单")}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("Opens this month’s publication in a window on this computer to read the list. It changes nothing.","在这台电脑的窗口里打开本月的发布记录，读出名单。不会改动任何东西。")}
-                            }
-                            mod.widgets.HagencyChevron{}
-                        }
-                        pool_who_record := mod.widgets.HagencyRowCover{enabled:!H.busy && H.command==nil on_click:||A.pool_open_grant()}
-                    }}
-                    if v.managers==nil && !v.published {mod.widgets.HagencySwitchRow{
+                    if v.managers==nil {mod.widgets.HagencySwitchRow{
                         mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info}}
                         mod.widgets.HagencyListText{
                             mod.widgets.HagencyWrapTitle{text:A.t("Not published yet","还没有发布")}
                             mod.widgets.HagencyWrapSubtitle{text:A.t("No account can request this pool yet.","现在还没有账号可以申请这个资源池。")}
                         }
                     }}
-                }
-                mod.widgets.HagencyListNote{text:A.pool_who_rule(v)}
-                if action.kind!="" {View{width:Fill height:Fit flow:Down spacing:6
+                }}
+                if !(v.published && l.state=="elsewhere") {mod.widgets.HagencyListNote{text:A.pool_who_rule(v)}}
+                if can_add {View{width:Fill height:Fit flow:Down spacing:6
                     mod.widgets.HagencyListLabel{text:if action.kind=="amend" {A.t("ADD PEOPLE","添加可以申请的人")} else {A.t("PICK PEOPLE IN ADVANCE","预先选好可以申请的人")}}
                     mod.widgets.HagencyList{
                         for index mxid in people {View{width:Fill height:Fit flow:Down
@@ -13394,9 +13484,9 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 pool_who_pick := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_toggle(mxid)}
                             }
                         }}
-                        if people.len()>0 && v.published && v.managers==nil {View{width:Fill height:Fit flow:Down
+                        if people.len()>0 && v.published && !listed {View{width:Fill height:Fit flow:Down
                             mod.widgets.HagencyListDivider{margin:Inset{left:16}}
-                            View{width:Fill height:Fit padding:Inset{left:16 right:14 top:10 bottom:10} pool_who_maybe := mod.widgets.HagencyWrapSubtitle{text:A.t("To check who is marked “may already be on the list”, tap Show This Month’s List above.","标着「可能已在名单里」的人，点上面的「显示本月名单」就能确认。")}}
+                            View{width:Fill height:Fit padding:Inset{left:16 right:14 top:10 bottom:10} pool_who_maybe := mod.widgets.HagencyWrapSubtitle{text:A.t("While the list can’t be read, anyone already on it is marked in the confirmation window and isn’t added twice.","名单暂时读不到：已在名单里的人，确认窗口会标出来，不会重复添加。")}}
                         }}
                         if people.len()>0 {mod.widgets.HagencyListDivider{margin:Inset{left:16}}}
                         View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:14 right:14 top:10 bottom:12}
