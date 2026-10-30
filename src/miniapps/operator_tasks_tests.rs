@@ -400,10 +400,55 @@ fn recovery_ux_continue_form_reduces_height_without_losing_multiline_inputs() {
 /// The mini app and the native confirmation windows share one owner vocabulary
 /// (每月上限, 每次申请上限, 这台电脑, Agent, token). Older technical words must not
 /// come back into the bundle's Chinese text.
+///
+/// What Agents hold is 已分给 Agent (verb 分给; its unused part 已分给 Agent，尚未用),
+/// and the committed total is 已承诺 = 已用 + 已分给 Agent. The glossary defines exactly
+/// these terms, and every other word for a hold stays out of the owner's pages.
 #[test]
 fn bundle_uses_the_owner_vocabulary() {
     let source = include_str!("../../apps/hagency/bundle/main.splash");
-    for banned in ["每月总上限", "本设备", "这台设备", "智能体", "令牌", "授权意向", "加密权限详情", "接着原来的启动", "发布时选择"] {
+    for banned in [
+        "每月总上限", "本设备", "这台设备", "智能体", "令牌", "授权意向", "加密权限详情", "接着原来的启动", "发布时选择",
+        // Other words for what Agents hold, and for the committed total.
+        "已分到", "分到了额度", "已占用", "已计入", "承诺给 Agent", "保留已有额度", "已有额度",
+        // Holds worded as reservations on pool, request and approval pages.
+        "为它预留", "为这个 Agent 预留", "没有从资源池预留", "额度已预留", "已有本地预留", "容量预留", "容量已预留",
+        "未能预留额度", "控制新的预留",
+        // One way of confirming a change: "已保存：每月上限 1 M → 2 M", never these.
+        "已保存。每月上限从", "已保存。每月上限现在是", "已修改。现在每次申请最多", "已记下：你知道了",
+        // Restart jargon and the old verb for adding people.
+        "完成上次的启动", "点「选上」",
+    ] {
         assert!(!source.contains(banned), "the bundle says {banned}");
+    }
+    // Manager-side project-reservation pages may still say 预留; the owner's pool, request,
+    // approval, alert and device helpers may not.
+    let owner = ["pool_", "reqs_", "dev_", "alert_", "who_", "health_", "stopped_", "onboarding_", "local_pool"];
+    let mut helper: Option<&str> = None;
+    for (index, line) in source.lines().enumerate() {
+        if let Some(rest) = line.strip_prefix("A.") {
+            let name = rest.split(|c: char| c == '=' || c.is_whitespace()).next().unwrap_or("");
+            if rest[name.len()..].trim_start().strip_prefix('=').is_some_and(|r| r.trim_start().starts_with("fn")) {
+                helper = Some(name);
+            }
+        } else if !line.is_empty() && !line.starts_with(char::is_whitespace) && !line.starts_with('}') {
+            helper = None;
+        }
+        if let Some(name) = helper.filter(|name| owner.iter().any(|prefix| name.starts_with(prefix))) {
+            assert!(!line.contains("预留"), "A.{name} says 预留 on line {}: {line}", index + 1);
+        }
+    }
+    // The glossary is the source of these words.
+    for term in [
+        r#"term:A.t("Given to Agents","已分给 Agent")"#,
+        r#"term:A.t("Given to Agents, not used yet","已分给 Agent，尚未用")"#,
+        r#"term:A.t("Committed","已承诺")"#,
+        "已承诺 = 已用 + 已分给 Agent",
+    ] {
+        assert!(source.contains(term), "the glossary doesn't define {term}");
+    }
+    // Results and refusals use the one pattern.
+    for pattern in ["\"已保存：每月上限 \"", "\"已保存：每次申请上限 \"", "A.t(\"Not saved: \",\"没有保存：\")", "不能低于已分给正在运行的 Agent 的 "] {
+        assert!(source.contains(pattern), "the bundle doesn't say {pattern}");
     }
 }
