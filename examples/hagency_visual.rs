@@ -18,7 +18,12 @@ script_mod! {
                 window.inner_size: #(if std::env::args().any(|a| a == "--narrow") {dvec2(430., 850.)} else {dvec2(1000., 900.)})
                 body +: {
                     flow: Down padding: 20 spacing: 12 show_bg: true draw_bg.color: RINX_PAGE
-                    app := Splash {width: Fill height: Fill}
+                    bundle := View {width: Fill height: Fill
+                        app := Splash {width: Fill height: Fill}
+                    }
+                    // The shipped native confirmation panel, shown only for
+                    // HAGENCY_NATIVE_PANEL previews (ux:native-panel).
+                    panel := MiniAppsPanel {visible: false}
                 }
             }
         }
@@ -103,6 +108,22 @@ impl AppMain for App {
                 let mut preferences = theme::packages::current(cx).unwrap();
                 preferences.package = Some(package);
                 theme::packages::apply(cx, preferences).unwrap();
+            }
+            // Show one native confirmation (grant panel or monthly maximum)
+            // from the JSON file named by HAGENCY_NATIVE_PANEL, through the
+            // production layout and text. It reads no fixtures and replies to nothing.
+            #[cfg(feature = "onboarding-test-support")]
+            if command == "ux:native-panel" {
+                let path = std::env::var_os("HAGENCY_NATIVE_PANEL").expect("HAGENCY_NATIVE_PANEL names the preview JSON");
+                let preview: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+                self.ui.widget(cx, ids!(bundle)).set_visible(cx, false);
+                self.ui.widget(cx, ids!(panel)).set_visible(cx, true);
+                if let Some(mut panel) = self.ui.widget(cx, ids!(panel)).borrow_mut::<rinx::miniapps::ui::MiniAppsPanel>() {
+                    if let Err(error) = panel.preview_confirmation(cx, &preview) {
+                        eprintln!("native panel preview failed: {error}");
+                    }
+                }
+                cx.redraw_all();
             }
             if command == "ux:reload-fixtures" {
                 let path = std::env::var_os("HAGENCY_UX_FIXTURES").unwrap();
