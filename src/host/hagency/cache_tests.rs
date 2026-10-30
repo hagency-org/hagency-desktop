@@ -36,6 +36,33 @@ fn package() -> ManagementPackage {
     }
 }
 
+#[test]
+fn host_request_future_fits_backend_stack() {
+    // Construct on a large test stack so a regression reports its size instead
+    // of aborting the test process before the assertion can run. The real host
+    // dispatch runs on Tokio's ordinary worker stack.
+    let bytes = std::thread::Builder::new().stack_size(16 * 1024 * 1024).spawn(|| {
+        let (host, lease) = host_and_lease();
+        let request = host.request(lease, "hagency.resources.list", json!({}));
+        std::mem::size_of_val(&request)
+    }).unwrap().join().unwrap();
+    assert!(bytes <= 128 * 1024, "host request future is {bytes} bytes");
+}
+
+#[test]
+fn host_request_polls_on_backend_stack() {
+    let runtime = crate::sliding_sync::backend_runtime();
+    runtime.block_on(async {
+        let result = runtime.spawn(async {
+            let (host, lease) = host_and_lease();
+            host.request(lease, "hagency.resources.list", json!({})).await
+        }).await.unwrap();
+        // No SDK session is installed: exercise actual host polling through its
+        // first authorization check, with no account or network mutation.
+        assert!(result.is_err());
+    });
+}
+
 // Uses the real host cache and native OS profile lock. No global SDK account,
 // CURRENT service, production profile, provider process or Matrix room changes.
 #[tokio::test]

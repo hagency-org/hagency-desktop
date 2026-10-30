@@ -3011,7 +3011,14 @@ async fn matrix_worker_task(
 pub(crate) fn backend_runtime() -> &'static tokio::runtime::Runtime {
     /// The single global Tokio runtime that is used by all async tasks.
     static TOKIO_RUNTIME: LazyLock<tokio::runtime::Runtime> = LazyLock::new(||
-        tokio::runtime::Runtime::new().expect("Failed to create Tokio runtime")
+        // Native management dispatch reserves over 2 MiB of stack temporaries
+        // in debug builds, before polling its nested SDK futures. Tokio's 2 MiB
+        // default aborts when opening Hagency; allow headroom for that call tree.
+        tokio::runtime::Builder::new_multi_thread()
+            .thread_stack_size(8 * 1024 * 1024)
+            .enable_all()
+            .build()
+            .expect("Failed to create Tokio runtime")
     );
 
     &TOKIO_RUNTIME

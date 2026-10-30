@@ -1453,6 +1453,7 @@ A.perm_words=fn(value){
 A.perm_info=fn(row){
     let a=row.approval
     let name=a.agentName
+    if A.recipient_optional(row,"encryptedPending")==true {return {title:A.t(name+" is waiting for encrypted permission details",A.sub_join(name,"正在等待加密权限详情")) exact:"" icon:mod.rinx_icons.lock reason:""}}
     let request=A.recipient_optional(a,"request")
     let kind=A.sub_field(request,"kind","")
     let path=A.sub_field(request,"path",nil)
@@ -8490,7 +8491,7 @@ A.render_page = fn(){
                 }}
 
                 if waiting.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListLabel{text:A.t("WAITING FOR THE RESOURCE OWNER","等待资源所有者决定")}
+                    mod.widgets.HagencyListLabel{text:A.t("WAITING","等待中")}
                     mod.widgets.HagencyList{for index row in waiting {View{width:Fill height:Fit flow:Down
                         let info=A.perm_info(row)
                         if index>0 {mod.widgets.HagencyListDivider{}}
@@ -8498,7 +8499,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:info.icon draw_icon.color:mod.widgets.RINX_MUTED}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{text:info.title}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}
+                                mod.widgets.HagencyWrapSubtitle{text:if A.recipient_optional(row,"encryptedPending")==true {A.t("You can review this request after its encrypted details arrive.","收到加密详情后即可核对此请求。")} else {A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}}
                             }
                         }
                     }}}

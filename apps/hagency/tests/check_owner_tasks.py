@@ -38,13 +38,17 @@ assert(H.resources.len()==0)
 H.owner.accountId="" H.owner.poolsReady=false
 plan=A.web_refresh_plan() assert(plan.service=="hagency.resources.list")
 plan.done({resources:[] nextAfter:nil}) assert(H.owner.poolsReady)
-H.page="inbox" H.owner.poolId="pool_original" H.owner.requestAfter="request_page_2"
+H.page="inbox" H.owner.poolId="pool_original" H.reqs.items=[] H.reqs.state="ready" H.reqs.next="request_page_2"
+assert(A.web_refresh_plan()==nil)
+H.reqs.next=nil
 plan=A.web_refresh_plan()
-assert(plan.service=="hagency.pools.agents.list" && plan.args.poolId=="pool_original" && plan.args.after=="request_page_2")
-plan.done({items:[] nextAfter:nil}) assert(H.ux.inboxReady)
+assert(plan.service=="hagency.pools.agents.list" && plan.args.poolId=="pool_original" && plan.args.after==nil)
+plan.done({items:[] nextAfter:nil}) assert(H.reqs.items.len()==0 && H.reqs.next==nil)
 ''',
 
 'account_scope_and_pagination': '''
+// Pool status is fetched separately; this case exercises the account page.
+A.pool_meta_load=fn(){}
 H.page="resources" H.owner.accountId="login_a" H.ux.resourceCursor=nil
 A.owner_load_pools()
 assert(H.calls[0].service=="hagency.accounts.get" && H.calls[0].args.id=="login_a")
@@ -76,13 +80,15 @@ A.owner_requests(connection)
 assert(H.page=="inbox" && H.owner.poolId=="pool_original")
 assert(H.calls[0].service=="hagency.pools.agents.list" && H.calls[0].args.poolId=="pool_original" && H.calls[0].args.needsMyAction)
 reply(0,{items:[] nextAfter:"page_2"})
-A.load_pool_agents(H.pool_agent_after)
+A.reqs_load(H.reqs.next)
 assert(H.calls[1].args.poolId=="pool_original" && H.calls[1].args.after=="page_2")
 reply(1,{items:[] nextAfter:nil})
 A.inbox_filter(false)
 assert(H.calls[2].args.poolId=="pool_original" && !H.calls[2].args.needsMyAction)
 ''',
 'manager_requests_never_inherit_owner_filter': '''
+// The manager also loads personal agents, independent of this pool query.
+A.load_local_list=fn(){}
 H.owner.poolId="owner_pool" H.entry_role="manager" H.page="pool_agents"
 A.load_pool_agents(nil)
 assert(H.calls[0].args.to_json()=={after:nil needsMyAction:false}.to_json())

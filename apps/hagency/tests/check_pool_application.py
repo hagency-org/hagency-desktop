@@ -109,7 +109,7 @@ def main():
     args.output.mkdir(parents=True, exist_ok=True)
     source = (APP / "bundle/main.splash").read_text()
     start = source.index('    if H.page=="pool_apply" && H.pool_draft!=nil{')
-    end = source.index('    if H.page=="pool_agents" || H.page=="inbox"{', start)
+    end = source.index('    if H.page=="pool_agents"{', start)
     setup = SETUP
     page = source[start:end]
     results = []
