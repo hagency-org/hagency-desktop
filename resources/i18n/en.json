@@ -2508,5 +2508,7 @@
   "That’s {date} 0:00 UTC, the date on the pool’s page.": "That’s {date} 0:00 UTC, the date on the pool’s page.",
   "You chose {amount} on the pool’s page; you can still adjust it here.": "You chose {amount} on the pool’s page; you can still adjust it here.",
   "Sharing Period and Technical Details": "Sharing Period and Technical Details",
-  "Choose when sharing ends under Sharing Period.": "Choose when sharing ends under Sharing Period."
+  "Choose when sharing ends under Sharing Period.": "Choose when sharing ends under Sharing Period.",
+  "You were adding {people}.": "You were adding {people}.",
+  "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.": "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again."
 }

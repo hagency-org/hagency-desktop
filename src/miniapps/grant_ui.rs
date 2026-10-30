@@ -34,10 +34,12 @@ pub(super) struct GrantPrompt {
     successor: Option<OwnerGrantSuccessionForm>,
     /// The owner submitted terms here; the result shown is theirs.
     submitted: bool,
-    /// Whether the owner opened the advanced choices and details.
+    /// Whether the owner opened the sharing period, the details or a folded list.
     disclosure: Disclosure,
     /// Why the person last typed into the add field wasn't added.
     add_error: String,
+    /// The owner chose to add people from this month's record in this window.
+    add_people: bool,
 }
 enum Phase {
     Loading,
@@ -48,13 +50,6 @@ enum Phase {
     PublicationProgress(OwnerGrantPublicationProgress),
     CancellationReview(Box<OwnerGrantCancellationReview>),
     Failed(String),
-}
-fn utc(ms: u64) -> String {
-    i64::try_from(ms)
-        .ok()
-        .and_then(chrono::DateTime::from_timestamp_millis)
-        .map(|date| date.format("%Y-%m-%d %H:%M UTC").to_string())
-        .unwrap_or_else(|| crate::i18n::tr("Unavailable").into())
 }
 fn amount(value: Option<u64>) -> String {
     value
@@ -86,38 +81,22 @@ fn ms_month(ms: u64) -> String {
         .map_or(1, |date| date.month());
     month_name(month)
 }
-/// A day and time in the owner's own time zone, for when sharing ends.
+/// A day and time in the owner's own time zone, named as the pool's page
+/// names it: "11 月 1 日 08:00（北京时间）" / "November 1, 8:00 AM (Beijing time)".
 fn local_time(ms: u64) -> String {
     let Some(date) = i64::try_from(ms).ok().and_then(chrono::DateTime::from_timestamp_millis) else {
         return crate::i18n::tr("Unavailable").into();
     };
+    let zone = crate::host::hagency::local_zone::label(Some(ms));
     let date = date.with_timezone(&chrono::Local);
     if crate::i18n::language() == crate::i18n::Language::Chinese {
-        date.format("%-m 月 %-d 日 %H:%M").to_string()
+        format!("{}（{zone}）", date.format("%-m 月 %-d 日 %H:%M"))
     } else {
-        date.format("%B %-d, %-I:%M %p").to_string()
+        format!("{} ({zone})", date.format("%B %-d, %-I:%M %p"))
     }
-}
-/// The same moment as the pool's page names it, "11 月 1 日 0 点（UTC）", said
-/// beside a local month boundary only where the two differ, so the page's
-/// date and the window's time never seem to disagree.
-fn utc_note(ms: u64) -> String {
-    use chrono::{Datelike, Timelike};
-    let Some(date) = i64::try_from(ms).ok().and_then(chrono::DateTime::from_timestamp_millis) else {
-        return String::new();
-    };
-    if date.with_timezone(&chrono::Local).offset().local_minus_utc() == 0 || date.hour() != 0 || date.minute() != 0 {
-        return String::new();
-    }
-    let day = if crate::i18n::language() == crate::i18n::Language::Chinese {
-        format!("{} 月 {} 日", date.month(), date.day())
-    } else {
-        format!("{} {}", month_name(date.month()), date.day())
-    };
-    crate::i18n::format("That’s {date} 0:00 UTC, the date on the pool’s page.", &[("date", day)])
 }
 /// When sharing ends, said the same way in every window and state, in the
-/// owner's own time zone: "11 月 1 日 08:00 前" for a UTC month end in UTC+8.
+/// owner's own time zone: "11 月 1 日 08:00（北京时间）前" for a UTC month end in UTC+8.
 fn ends_at(ms: u64) -> String {
     crate::i18n::format("Before {when}", &[("when", local_time(ms))])
 }
@@ -429,13 +408,14 @@ enum GrantKind {
     /// An existing record opened by itself, such as this month's list.
     Record,
 }
-/// The sheet's disclosures, which start closed: advanced choices while
-/// choosing with the technical details, and a list of people that this
-/// window doesn't change.
+/// The sheet's disclosures, which start closed: the technical details, a
+/// list of people that this window doesn't change, and the sharing period's
+/// choice under its row.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Disclosure {
     pub more: bool,
     pub people: bool,
+    pub sharing: bool,
 }
 /// The native facts one rendering is computed from. The flow's facts are
 /// copied in, so the shipped panel and its offline preview share this code.
@@ -463,6 +443,8 @@ pub(super) struct GrantState<'a> {
     disclosure: Disclosure,
     /// Why the last person typed into the add field wasn't added.
     add_error: &'a str,
+    /// The owner chose to add people from this month's record here.
+    add_people: bool,
 }
 impl GrantState<'_> {
     fn actionable(&self) -> bool {
@@ -567,12 +549,12 @@ fn grant_kind(s: &GrantState) -> GrantKind {
             _ => (s.draft.tokens.trim().parse::<u64>().ok(), managers_of(&s.draft.managers)),
         };
         let only_people = tokens == Some(form.predecessor.allocated_tokens)
-            && (!added_people(form, &managers).is_empty() || !s.applicants.is_empty());
+            && (!added_people(form, &managers).is_empty() || !s.applicants.is_empty() || s.add_people);
         return if only_people { GrantKind::AddPeople } else { GrantKind::Amend };
     }
     match s.requested {
         Some(Succession::Renewal) => GrantKind::Renew,
-        Some(Succession::Amendment) if !s.applicants.is_empty() => GrantKind::AddPeople,
+        Some(Succession::Amendment) if !s.applicants.is_empty() || s.add_people => GrantKind::AddPeople,
         Some(Succession::Amendment) => GrantKind::Amend,
         None if !s.can_choose_new_limits => GrantKind::Record,
         None => GrantKind::Publish,
@@ -774,107 +756,32 @@ fn unknown_failure(code: &str) -> bool {
                 | "management_access_required"
         )
 }
-/// The collapsed technical details: servers, accounts, IDs, revisions and
-/// UTC periods. None of this is needed to decide, so it starts hidden.
-fn technical_rows(s: &GrantState, summary: Option<&OwnerGrantSummary>, now: u64) -> String {
+/// The collapsed technical details: who and where, for a server
+/// administrator. Internal IDs, revisions, local profiles and UTC month
+/// bounds stay out; everything the owner decides on is said above.
+fn technical_rows(s: &GrantState, summary: Option<&OwnerGrantSummary>) -> String {
     let mut rows: Vec<(&str, String)> = vec![("Your account", s.account.to_owned())];
-    let context = s.context().cloned();
-    match s.phase {
-        Phase::PublicationReview(review) => {
-            rows.push(("Server", review.server_origin().to_owned()));
-            rows.push(("Pool revision", review.contribution_revision().to_string()));
-            rows.push(("Read at (UTC)", utc(review.observed_at_ms())));
-        }
-        Phase::CancellationReview(review) => rows.push(("Server", review.server_origin().to_owned())),
-        Phase::PublicationProgress(p) => {
-            if let Some(server) = &p.server_state {
-                let state = match server.as_str() {
-                    "active" if p.summary.period_start_ms > now => "Scheduled",
-                    "active" => "In effect",
-                    "revoked" => "Withdrawn",
-                    "expired" => "Expired",
-                    "superseded" => "Replaced by a newer change",
-                    _ => "Unknown",
-                };
-                rows.push(("Server status", crate::i18n::tr(state).into()));
-            }
-            if let Some(at) = p.observed_at_ms {
-                rows.push(("Read at (UTC)", utc(at)));
-            }
-        }
-        Phase::Progress(p) => {
-            if let Some(closure) = &p.closure {
-                rows.push(("Kept by Agents", amount(Some(closure.retained_tokens))));
-                rows.push(("Confirmed use", amount(Some(closure.known_consumed_tokens))));
-                rows.push(("Not yet confirmed", amount(Some(closure.unresolved_tokens))));
-                rows.push(("Read at (UTC)", utc(closure.observed_at_ms)));
-            }
-        }
-        _ => {}
+    let server = match s.phase {
+        Phase::PublicationReview(review) => Some(review.server_origin().to_owned()),
+        Phase::CancellationReview(review) => Some(review.server_origin().to_owned()),
+        _ => s.context().map(|c| c.server_origin.clone()),
+    };
+    if let Some(server) = server {
+        rows.push(("Server", server));
     }
-    if let Some(c) = &context {
-        rows.push(("Server", c.server_origin.clone()));
-        rows.push(("Local profile", c.profile_id.clone()));
-        rows.push(("Left / total", format!("{} / {}", amount(c.remaining_tokens), amount(c.resource_total_tokens))));
-        if c.shared_account_total_tokens.is_some() {
-            rows.push(("Account limit", amount(c.shared_account_total_tokens)));
-        }
-        rows.push(("Resource revision", c.resource_revision.clone()));
-        rows.push(("Read at (UTC)", utc(c.observed_at_ms)));
+    let pool = summary
+        .map(|summary| summary.contribution_id.clone())
+        .or_else(|| s.successor.map(|form| form.contribution_id.clone()))
+        .or_else(|| s.form.map(|form| form.contribution_id.clone()));
+    if let Some(pool) = pool {
+        rows.push(("Pool ID", pool));
     }
-    match summary {
-        Some(summary) => {
-            rows.push(("Pool ID", summary.contribution_id.clone()));
-            rows.push(("Resource ID", summary.resource_id.clone()));
-            rows.push(("Record ID", summary.intent_id.clone()));
-            rows.push(("Grant ID", summary.grant_id.clone()));
-            rows.push(("Per-request limit", amount(Some(summary.allocated_tokens))));
-            rows.push((
-                "Month (UTC)",
-                format!("{}\n{} → {}", summary.period_key, utc(summary.period_start_ms), utc(summary.period_end_ms)),
-            ));
-            rows.push(("Approves requests", summary.coordinator_mxid.clone()));
-            rows.push(("People who can request", summary.eligible_managers.join("\n")));
-            let until = summary.delegation_expires_at_ms.min(summary.period_end_ms);
-            rows.push(("Shared until (your time)", local_time(until)));
-            rows.push(("Shared until (UTC)", utc(until)));
-            if let Some(succession) = &summary.succession {
-                rows.push((
-                    "Kind of change",
-                    crate::i18n::tr(match succession.kind {
-                        OwnerGrantSuccessionKind::Renewal => "Next month, published ahead",
-                        _ => "Changed this month",
-                    })
-                    .into(),
-                ));
-                rows.push(("Previous grant ID", succession.predecessor_grant_id.clone()));
-                rows.push(("Previous per-request limit", amount(Some(succession.predecessor_allocated_tokens))));
-                rows.push(("Running Agents", succession.carried_children.to_string()));
-                rows.push(("Held by running Agents", amount(Some(succession.carried_retained_tokens))));
-            }
-        }
-        None => {
-            if let Some(form) = s.successor {
-                rows.push(("Pool ID", form.contribution_id.clone()));
-                rows.push(("Resource ID", form.resource_id.clone()));
-                rows.push(("Previous grant ID", form.predecessor.grant_id.clone()));
-                rows.push((
-                    "Month (UTC)",
-                    format!("{}\n{} → {}", form.period_key, utc(form.period_start_ms), utc(form.period_end_ms)),
-                ));
-                rows.push(("Running Agents", form.floor.children.to_string()));
-                rows.push(("Held by running Agents", amount(Some(form.floor.retained_tokens))));
-                rows.push(("People who can request", form.predecessor.eligible_managers.join("\n")));
-            } else if let Some(form) = s.form {
-                rows.push(("Pool ID", form.contribution_id.clone()));
-                rows.push(("Resource ID", form.resource_id.clone()));
-            }
-            if matches!(s.phase, Phase::Choose) {
-                if let Some(bounds) = s.bounds() {
-                    rows.push(("Shared until (your time)", local_time(draft_end(&bounds, &s.draft.expires_utc))));
-                }
-                rows.push(("Shared until (UTC)", s.draft.expires_utc.trim().to_owned()));
-            }
+    // An ended publish: what its Agents kept and used, as last read.
+    if let Phase::Progress(p) = s.phase {
+        if let Some(closure) = &p.closure {
+            rows.push(("Kept by Agents", amount(Some(closure.retained_tokens))));
+            rows.push(("Confirmed use", amount(Some(closure.known_consumed_tokens))));
+            rows.push(("Not yet confirmed", amount(Some(closure.unresolved_tokens))));
         }
     }
     rows.into_iter()
@@ -1005,9 +912,9 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         glyph: kind_glyph(kind),
         pool: pool_line(s),
         choosing,
-        more_label: tr(if choosing { "Sharing Period and Technical Details" } else { "Technical Details" }).into(),
+        more_label: tr("Technical Details").into(),
         more_open: s.disclosure.more,
-        advanced_open: s.disclosure.more,
+        sharing_open: s.disclosure.sharing,
         cancel: tr(if choosing || matches!(s.phase, Phase::Review(_) | Phase::PublicationReview(_) | Phase::CancellationReview(_)) || (matches!(s.phase, Phase::Loading) && !s.submitting) {
             "Cancel"
         } else {
@@ -1017,7 +924,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         recover: tr(if s.original { "Check Again" } else { "Refresh" }).into(),
         recover_visible: s.can_recover(),
         cancel_intent_visible: s.can_cancel_intent(),
-        technical: if matches!(s.phase, Phase::Loading) { String::new() } else { technical_rows(s, summary.as_ref(), now) },
+        technical: if matches!(s.phase, Phase::Loading) { String::new() } else { technical_rows(s, summary.as_ref()) },
         primary_enabled: s.can_primary(now),
         ..GrantView::default()
     };
@@ -1209,11 +1116,10 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                         v.quota_hint.clone(),
                     ]);
                 }
-                v.expiry = fmt("Shared until: {when}", &[("when", shared_until(b, &s.draft.expires_utc))]);
-                let mut notes = vec![
-                    fmt("Sharing ends before {when} at the latest.", &[("when", local_time(b.expiry_until_ms))]),
-                    utc_note(b.expiry_until_ms),
-                ];
+                // When sharing ends is a row of its own; its choice opens under it.
+                v.sharing_visible = true;
+                v.expiry = shared_until(b, &s.draft.expires_utc);
+                let mut notes = vec![fmt("Sharing ends before {when} at the latest.", &[("when", local_time(b.expiry_until_ms))])];
                 let left = b.expiry_until_ms.saturating_sub(now.max(b.expiry_after_ms));
                 if left < 7 * 86_400_000 {
                     notes.push(tr("Fewer than 7 days are left in it, so 7 days isn’t offered.").into());
@@ -1328,7 +1234,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                     }
                     v.facts_label = tr("This pool").into();
                     let until = p.summary.delegation_expires_at_ms.min(p.summary.period_end_ms);
-                    v.facts = vec![Fact::new(tr("Shared until"), ends_at(until)).note(utc_note(until))];
+                    v.facts = vec![Fact::new(tr("Shared until"), ends_at(until))];
                     if let Some(succession) = p.summary.succession.as_ref().filter(|_| kind != GrantKind::AddPeople) {
                         v.facts.push(Fact::new(
                             tr("Held by running Agents"),
@@ -1377,7 +1283,11 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         }
         Phase::Failed(code) => {
             v.tone = if unknown_failure(code) { SheetTone::Unsure } else { SheetTone::Failed };
-            failure_hero(&mut v, code, s, bounds.as_ref());
+            if unknown_failure(code) {
+                unknown_hero(&mut v, kind, s, current, &base);
+            } else {
+                failure_hero(&mut v, code, s, bounds.as_ref());
+            }
             if unchanged_failure(code) {
                 v.status = tr("Nothing was changed.").into();
             }
@@ -1401,7 +1311,20 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         v.people_open = !v.people_collapsible || s.disclosure.people;
         v.people_summary = people_count(people.len());
         v.people = people;
-        v.people_note = if kind == GrantKind::Record || !s.can_choose_new_limits {
+        // This month's record can add people right here, in an amendment that
+        // keeps the per-request limit; elsewhere the pool's page adds them.
+        v.people_add_visible = (kind == GrantKind::Record || !s.can_choose_new_limits)
+            && s.actionable()
+            && s.succession_supported == Some(true)
+            && live_grant_tokens(s.phase, now).is_some();
+        v.people_note = if v.people_add_visible {
+            tr("This month’s list only grows: people already on it can’t be removed.").into()
+        } else if (kind == GrantKind::Record || !s.can_choose_new_limits)
+            && s.succession_supported == Some(false)
+            && live_grant_tokens(s.phase, now).is_some()
+        {
+            tr("This server can’t change a published month or publish ahead yet. Ask its administrator to update the server.").into()
+        } else if kind == GrantKind::Record || !s.can_choose_new_limits {
             tr("To add someone, close this window and use Who Can Request on the pool’s page.").into()
         } else {
             String::new()
@@ -1516,6 +1439,34 @@ fn summary_hero(v: &mut GrantView, kind: GrantKind, summary: &OwnerGrantSummary,
             v.after = Some(Figure::new(amount(Some(summary.allocated_tokens)), if v.before.is_some() { after_tag } else { tr("Now") }));
         }
     }
+}
+/// An outcome that isn't known yet: what was tried, kept in view as the
+/// proposal showed it, and plainly that it may or may not have applied and
+/// that checking only reads the result.
+fn unknown_hero(v: &mut GrantView, kind: GrantKind, s: &GrantState, current: Option<u64>, base: &[String]) {
+    let tr = crate::i18n::tr;
+    let fmt = crate::i18n::format;
+    let tokens = s.draft.tokens.trim().parse::<u64>().ok();
+    let managers = managers_of(&s.draft.managers);
+    let added = s.successor.map(|form| added_people(form, &managers)).unwrap_or_default();
+    let mut lead = Vec::new();
+    match kind {
+        GrantKind::AddPeople if !added.is_empty() => {
+            v.caption = tr("People who can request").into();
+            v.before = Some(Figure::new(people_count(base.len()), tr("Before")));
+            v.after = Some(Figure::new(people_count(base.len() + added.len()), tr("You chose")));
+            lead.push(fmt("You were adding {people}.", &[("people", people_text(&added))]));
+        }
+        GrantKind::AddPeople | GrantKind::Record => {}
+        _ if tokens.is_some() => {
+            v.caption = tr("Per-request limit").into();
+            v.before = current.filter(|c| Some(*c) != tokens).map(|c| Figure::new(amount(Some(c)), tr("Before")));
+            v.after = Some(Figure::new(amount(tokens), tr("You chose")));
+        }
+        _ => {}
+    }
+    lead.push(tr("It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.").into());
+    v.lead = sentences(&lead);
 }
 /// A refusal says why and, where the window knows it, the amount that works.
 fn failure_hero(v: &mut GrantView, code: &str, s: &GrantState, bounds: Option<&Bounds>) {
@@ -1866,6 +1817,7 @@ impl GrantPrompt {
             succession_supported: self.flow.succession_supported(),
             disclosure: self.disclosure,
             add_error: &self.add_error,
+            add_people: self.add_people,
         }
     }
     fn actionable(&self) -> bool {
@@ -1941,6 +1893,7 @@ impl MiniAppsPanel {
             submitted: false,
             disclosure: Disclosure::default(),
             add_error: String::new(),
+            add_people: false,
         });
         self.grant_job(async move { flow.open().await });
         self.present_grant_confirmation(cx);
@@ -1995,9 +1948,9 @@ impl MiniAppsPanel {
         self.apply_sheet_disclosure(cx, id!(grant_confirmation), view.more_open);
         if let Some(inputs) = inputs.filter(|_| view.choosing) {
             for (index, (id, on)) in [
-                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day), ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day_on)),
-                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week), ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week_on)),
-                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month), ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month_on)),
+                (ids!(grant_confirmation.scroll.sharing.period.expiry_presets.day), ids!(grant_confirmation.scroll.sharing.period.expiry_presets.day_on)),
+                (ids!(grant_confirmation.scroll.sharing.period.expiry_presets.week), ids!(grant_confirmation.scroll.sharing.period.expiry_presets.week_on)),
+                (ids!(grant_confirmation.scroll.sharing.period.expiry_presets.month), ids!(grant_confirmation.scroll.sharing.period.expiry_presets.month_on)),
             ]
             .into_iter()
             .enumerate()
@@ -2019,13 +1972,54 @@ impl MiniAppsPanel {
                 .set_text(cx, &inputs.tokens);
         }
     }
-    /// Open or close the single disclosure; the draft is read back first.
+    /// Open or close the technical details; the draft is read back first.
     pub(super) fn grant_disclose(&mut self, cx: &mut Cx) {
         self.capture_grant_choices(cx);
         let Some(prompt) = &mut self.grant_confirmation else {
             return;
         };
         prompt.disclosure.more = !prompt.disclosure.more;
+        self.present_grant_confirmation(cx);
+    }
+    /// Open or close the sharing period's choice under its row.
+    pub(super) fn grant_sharing_toggle(&mut self, cx: &mut Cx) {
+        self.capture_grant_choices(cx);
+        let Some(prompt) = &mut self.grant_confirmation else {
+            return;
+        };
+        prompt.disclosure.sharing = !prompt.disclosure.sharing;
+        self.present_grant_confirmation(cx);
+    }
+    /// From this month's record: add people in this same window. It opens
+    /// the amendment form of the record's own pool, which keeps the
+    /// per-request limit; only that form's own confirmation commits anything.
+    pub(super) fn grant_add_people(&mut self, cx: &mut Cx) {
+        let Some(prompt) = &mut self.grant_confirmation else {
+            return;
+        };
+        if !grant_view(&prompt.state(), now_ms()).people_add_visible {
+            return;
+        }
+        let Some(contribution) = phase_summary(&prompt.phase).map(|summary| summary.contribution_id) else {
+            return;
+        };
+        let Ok(flow) = prompt.flow.for_record_pool(contribution) else {
+            return;
+        };
+        prompt.flow = flow.clone();
+        prompt.add_people = true;
+        prompt.original = None;
+        prompt.publishing = false;
+        prompt.cancelling = false;
+        prompt.submitted = false;
+        prompt.submit_publication = false;
+        prompt.proposal = None;
+        prompt.form = None;
+        prompt.successor = None;
+        prompt.draft = initial_draft(None, &[]);
+        prompt.disclosure = Disclosure::default();
+        prompt.add_error.clear();
+        self.grant_job(async move { flow.choose_successor(Succession::Amendment).await });
         self.present_grant_confirmation(cx);
     }
     /// Open or fold a list of people this window doesn't change.
@@ -2108,6 +2102,8 @@ impl MiniAppsPanel {
                 Err(_) => None,
             });
         let mut changed = false;
+        // Adding people from the record: the name field is ready once the form is.
+        let mut focus_add = false;
         if let Some(result) = result {
             prompt.receiver = None;
             prompt.phase = match result {
@@ -2129,6 +2125,7 @@ impl MiniAppsPanel {
                     prompt.cancelling = false;
                     prompt.submit_publication = false;
                     prompt.submitted = false;
+                    focus_add = prompt.add_people;
                     fill_successor_defaults(&mut prompt.draft, &form, now_ms());
                     prompt.draft.coordinator=prompt.flow.account().into();
                     prompt.form=None;
@@ -2187,6 +2184,10 @@ impl MiniAppsPanel {
         if changed {
             self.continue_grant_publication();
             self.present_grant_confirmation(cx);
+            if focus_add {
+                let field = self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name)).area();
+                cx.set_key_focus(field);
+            }
         }
     }
     /// Advance only the exact native reviews covered by this window's owner
@@ -2450,13 +2451,15 @@ impl MiniAppsPanel {
         let recover = area(self, cx, ids!(grant_confirmation.scroll.actions.recover));
         let cancel_intent = area(self, cx, ids!(grant_confirmation.scroll.actions.cancel_intent));
         let more = area(self, cx, ids!(grant_confirmation.scroll.more.more_row.more_toggle));
+        let sharing = area(self, cx, ids!(grant_confirmation.scroll.sharing.sharing_row.sharing_toggle));
+        let open_add = area(self, cx, ids!(grant_confirmation.scroll.people.list.open_add.open_add_button));
         let add = area(self, cx, ids!(grant_confirmation.scroll.people.list.add.add_button));
         let people_toggle = area(self, cx, ids!(grant_confirmation.scroll.people.list.people_toggle_row.people_toggle));
         let folded = view.people_collapsible && !view.people_open;
         let presets = [
-            (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day), Some(1)),
-            (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week), Some(7)),
-            (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month), None),
+            (ids!(grant_confirmation.scroll.sharing.period.expiry_presets.day), Some(1)),
+            (ids!(grant_confirmation.scroll.sharing.period.expiry_presets.week), Some(7)),
+            (ids!(grant_confirmation.scroll.sharing.period.expiry_presets.month), None),
         ];
         let shown = super::sheet_ui::people_shown(view.people.len());
         let removes: Vec<(usize, Area)> = view
@@ -2476,6 +2479,9 @@ impl MiniAppsPanel {
         if view.people_visible && view.people_collapsible {
             targets.push(people_toggle);
         }
+        if view.people_add_visible {
+            targets.push(open_add);
+        }
         if view.choosing {
             targets.extend(removes.iter().map(|(_, area)| *area));
             if view.people_editable && !folded {
@@ -2493,6 +2499,17 @@ impl MiniAppsPanel {
                 targets.push(self.view.text_input(cx, ids!(grant_confirmation.scroll.quota.tokens.input)).area());
             }
         }
+        if view.sharing_visible {
+            targets.push(sharing);
+            if view.sharing_open {
+                for (id, _) in presets {
+                    let button = self.view.button(cx, id);
+                    if !button.disabled(cx) {
+                        targets.push(button.area());
+                    }
+                }
+            }
+        }
         let recover_row = view.recover_visible && !view.primary_recovers;
         if recover_row {
             targets.push(recover);
@@ -2502,14 +2519,6 @@ impl MiniAppsPanel {
         }
         if view.more_visible() {
             targets.push(more);
-            if view.choosing && view.advanced_open {
-                for (id, _) in presets {
-                    let button = self.view.button(cx, id);
-                    if !button.disabled(cx) {
-                        targets.push(button.area());
-                    }
-                }
-            }
         }
         if !view.cancel.is_empty() {
             targets.push(cancel);
@@ -2527,8 +2536,17 @@ impl MiniAppsPanel {
             return true;
         }
         if matches!(key.key_code, KeyCode::ReturnKey | KeyCode::Space) {
+            if view.sharing_visible && cx.has_key_focus(sharing) {
+                self.grant_sharing_toggle(cx);
+                cx.set_key_focus(sharing);
+                return true;
+            }
+            if view.people_add_visible && cx.has_key_focus(open_add) {
+                self.grant_add_people(cx);
+                return true;
+            }
             if view.choosing {
-                if view.advanced_open {
+                if view.sharing_visible && view.sharing_open {
                     for (id, days) in presets {
                         if cx.has_key_focus(self.view.button(cx, id).area()) {
                             self.grant_expiry_preset(cx, days);
@@ -2616,6 +2634,7 @@ pub(super) struct GrantPreview {
     can_choose_new_limits: bool,
     disclosure: Disclosure,
     add_error: String,
+    add_people: bool,
 }
 #[cfg(any(test, feature = "onboarding-test-support"))]
 impl GrantPreview {
@@ -2641,11 +2660,14 @@ impl GrantPreview {
             succession_supported: Some(true),
             disclosure: self.disclosure,
             add_error: &self.add_error,
+            add_people: self.add_people,
         }
     }
     /// `state`: publish, amend, add_people, renew, published, record, loading
     /// or failed. Amounts are tokens; people are full Matrix IDs. `typed` is
     /// what the owner typed into the add field, checked as the sheet checks it.
+    /// `adding`: the add-people form opened from this month's record, with
+    /// nobody chosen yet. `sharing`: the sharing period's choice is open.
     pub(super) fn from_fixture(f: &Value, now: u64) -> Result<Self, String> {
         use chrono::Datelike;
         let text = |key: &str, default: &str| f[key].as_str().unwrap_or(default).to_owned();
@@ -2797,10 +2819,12 @@ impl GrantPreview {
             submitting: f["submitting"].as_bool().unwrap_or(false),
             can_choose_new_limits: !record,
             disclosure: Disclosure {
-                more: ["more", "advanced", "technical"].iter().any(|key| f[*key].as_bool() == Some(true)),
+                more: ["more", "technical"].iter().any(|key| f[*key].as_bool() == Some(true)),
                 people: f["people"].as_bool() == Some(true),
+                sharing: f["sharing"].as_bool() == Some(true),
             },
             add_error,
+            add_people: f["adding"].as_bool() == Some(true),
         })
     }
 }
@@ -2833,8 +2857,11 @@ mod tests {
         assert_eq!(focus_next(None, 2, true), 1);
     }
     #[test]
-    fn period_display_is_explicit_utc_and_unknown_is_not_zero() {
-        assert_eq!(utc(1790812800000), "2026-10-01 00:00 UTC");
+    fn local_times_name_their_zone_and_unknown_is_not_zero() {
+        // Every local time says which zone it is in, as the pool's page says it.
+        let zone = crate::host::hagency::local_zone::label(Some(1793491200000));
+        assert!(local_time(1793491200000).contains(&format!("({zone})")), "{}", local_time(1793491200000));
+        assert_eq!(ends_at(1793491200000), format!("Before {}", local_time(1793491200000)));
         assert_ne!(amount(None), "0");
         assert_eq!(amount(Some(0)), "0 M");
     }
@@ -3405,6 +3432,7 @@ mod tests {
             succession_supported: Some(true),
             disclosure,
             add_error: "",
+            add_people: false,
         };
         grant_view(&state, now_ms())
     }
@@ -3428,8 +3456,8 @@ mod tests {
         assert!(view.primary_enabled && view.people_editable);
         assert_eq!(names(&view), [("@manager".to_owned(), false, false), ("@lisi".to_owned(), true, true)]);
         // The unchanged limit is a row, never a slider and never "2 M → 2 M".
-        let open = preview_view(&Phase::Choose, &draft, Some(&form), None, &applicants, Disclosure { more: true, ..Disclosure::default() });
-        assert!(!view.quota_visible && !open.quota_visible && open.advanced_open);
+        let open = preview_view(&Phase::Choose, &draft, Some(&form), None, &applicants, Disclosure { sharing: true, ..Disclosure::default() });
+        assert!(!view.quota_visible && !open.quota_visible && open.sharing_visible && open.sharing_open && !view.sharing_open);
         assert_eq!(facts(&view), [("Per-request limit".to_owned(), "2 M (unchanged)".to_owned())]);
         // Someone already on the list: nothing to confirm.
         let already = ["@manager:test".to_owned()];
@@ -3474,7 +3502,7 @@ mod tests {
             requested: Some(Succession::Amendment), applicants: &[], account: "@owner:test", original: false,
             in_flight: false, submitted: false, submitting: false, publishing: false, cancelling: false, regrant: false,
             active: true, can_choose_new_limits: true, succession_supported: Some(true), disclosure: Disclosure::default(),
-            add_error: "@manager is already on the list.",
+            add_error: "@manager is already on the list.", add_people: false,
         };
         assert_eq!(grant_view(&state, now_ms()).add_error, "@manager is already on the list.");
     }
@@ -3491,7 +3519,7 @@ mod tests {
         assert!(!view.primary_enabled && view.primary_visible);
     }
     #[test]
-    fn publishing_names_the_month_and_keeps_ids_and_utc_in_technical_details() {
+    fn publishing_names_the_month_and_keeps_ids_in_technical_details() {
         let form = pool_form(5_000_000);
         let mut draft = initial_draft(Some(500_000), &["@applicant:test".to_owned()]);
         fill_form_defaults(&mut draft, &form);
@@ -3512,13 +3540,17 @@ mod tests {
         ]);
         assert_eq!(view.primary, "Publish");
         assert_eq!(names(&view), [("@applicant".to_owned(), false, true)]);
-        assert_eq!(view.expiry, format!("Shared until: Before {end}"));
+        // When sharing ends is a visible row of its own, its choice folded under it.
+        assert!(view.sharing_visible && !view.sharing_open);
+        assert_eq!(view.expiry, format!("Before {end}"));
         assert!(!view.people_collapsible, "a publish chooses its list here");
         for primary in [&view.title, &view.pool, &view.lead, &view.status, &view.quota_hint, &view.expiry, &view.expiry_note] {
-            let primary = without_page_date(primary);
+            let primary = without_zone(primary);
             assert!(!primary.contains("UTC") && !primary.contains("matrix.test") && !primary.contains("pool_1"), "{primary}");
         }
-        assert!(view.technical.contains("https://matrix.test") && view.technical.contains("pool_1"));
+        // Details are for an administrator: who and where, no revisions or profiles.
+        assert_eq!(view.more_label, "Technical Details");
+        assert_eq!(view.technical, "Your account\n@owner:test\n\nServer\nhttps://matrix.test\n\nPool ID\npool_1");
         assert!(!view.more_open);
         // Nobody chosen yet: the add row says what is missing.
         let mut empty = draft.clone();
@@ -3534,7 +3566,7 @@ mod tests {
             requested: kind.map(|form| succession_arg(form.kind)), applicants: &[], account: "@owner:test",
             original: true, in_flight: false, submitted: true, submitting: false, publishing: true, cancelling: false,
             regrant: false, active: true, can_choose_new_limits: true, succession_supported: Some(true),
-            disclosure: Disclosure::default(), add_error: "",
+            disclosure: Disclosure::default(), add_error: "", add_people: false,
         };
         grant_view(&state, OCTOBER)
     }
@@ -3575,27 +3607,30 @@ mod tests {
         let row = |view: &GrantView| view.facts.iter().find(|f| f.label == "Shared until").map(|f| f.value.clone());
         assert_eq!(row(&finished), Some(format!("Before {}", local_time(end))));
         assert!(proposal.lead.contains(&format!("before {}", local_time(end))), "{}", proposal.lead);
-        assert_eq!(proposal.expiry, format!("Shared until: Before {}", local_time(end)));
-        // Exact local and UTC times stay behind the disclosure.
-        assert!(finished.technical.contains("Shared until (your time)") && finished.technical.contains("Shared until (UTC)"));
+        assert_eq!(proposal.expiry, format!("Before {}", local_time(end)));
+        // The time names its zone, as the pool's page does; no second, UTC date is needed beside it.
+        let zone = crate::host::hagency::local_zone::label(Some(end));
+        assert!(local_time(end).ends_with(&format!("({zone})")), "{}", local_time(end));
+        assert!(finished.facts[0].note.is_empty());
+        assert!(!finished.technical.contains("UTC") && !finished.technical.contains("Shared until"));
         for view in [&proposal, &finished] {
             for text in [&view.lead, &view.status, &view.expiry, &view.expiry_note] {
-                let text = without_page_date(text);
+                let text = without_zone(text);
                 assert!(!text.contains("End of") && !text.contains("UTC"), "{text}");
             }
         }
-        // Beside the local time, the window names the same moment as the pool's page does
-        // (its UTC month boundary), wherever the two differ.
-        assert_eq!(finished.facts[0].note, utc_note(end));
-        assert!(proposal.expiry_note.contains(&utc_note(end)), "{}", proposal.expiry_note);
     }
-    /// The one UTC mention a window makes outside its details: the pool page's own date.
-    fn without_page_date(text: &str) -> String {
-        let tail = "the date on the pool’s page.";
-        match (text.find("That’s "), text.find(tail)) {
-            (Some(start), Some(end)) if end > start => format!("{}{}", &text[..start], &text[end + tail.len()..]),
-            _ => text.to_owned(),
+    /// Local times name the device's zone; where it isn't Beijing time that is
+    /// an offset ("(UTC-7)"), which is a zone, not UTC jargon.
+    fn without_zone(text: &str) -> String {
+        let mut out = text.to_owned();
+        for (open, close) in [("(UTC", ")"), ("（UTC", "）")] {
+            while let Some(start) = out.find(open) {
+                let Some(len) = out[start..].find(close) else { break };
+                out.replace_range(start..start + len + close.len(), "");
+            }
         }
+        out
     }
     #[test]
     fn a_list_the_window_keeps_folds_into_one_row_that_opens_in_place() {
@@ -3615,10 +3650,43 @@ mod tests {
             form: None, successor: None, requested: None, applicants: &[], account: "@owner:test", original: true,
             in_flight: false, submitted: false, submitting: false, publishing: true, cancelling: false, regrant: false,
             active: true, can_choose_new_limits: false, succession_supported: Some(true), disclosure: Disclosure::default(),
-            add_error: "",
+            add_error: "", add_people: false,
         };
         let view = grant_view(&record, OCTOBER);
         assert!(!view.people_collapsible && view.people_open && !view.recover_visible);
+        // This month's record adds people right here, not by a trip to the page.
+        assert!(view.people_add_visible);
+        assert_eq!(view.people_note, "This month’s list only grows: people already on it can’t be removed.");
+        // A server that can't change a published month says so; unknown support keeps the page's way.
+        for (support, note) in [
+            (Some(false), "This server can’t change a published month or publish ahead yet. Ask its administrator to update the server."),
+            (None, "To add someone, close this window and use Who Can Request on the pool’s page."),
+        ] {
+            let view = grant_view(&GrantState { succession_supported: support, ..record }, OCTOBER);
+            assert!(!view.people_add_visible);
+            assert_eq!(view.people_note, note);
+        }
+        // An ended month, or one the server no longer holds, offers nothing to add to.
+        assert!(!grant_view(&record, NOVEMBER).people_add_visible);
+        let revoked = publication(OwnerGrantPublicationState::ServerObserved, Some("revoked"));
+        assert!(!grant_view(&GrantState { phase: &revoked, ..record }, OCTOBER).people_add_visible);
+        // Chosen from the record: the add form keeps the limit and names nobody yet.
+        let form = successor_form(OwnerGrantSuccessionKind::Amendment);
+        let mut adding = initial_draft(None, &[]);
+        fill_successor_defaults(&mut adding, &form, now_ms());
+        let state = GrantState {
+            phase: &Phase::Choose, draft: &adding, successor: Some(&form), requested: Some(Succession::Amendment),
+            original: false, publishing: false, can_choose_new_limits: true, add_people: true, ..record
+        };
+        let view = grant_view(&state, now_ms());
+        assert_eq!(view.title, "Add People Who Can Request");
+        assert_eq!(view.glyph, SheetGlyph::People);
+        assert_eq!(view.lead, "Add someone below.");
+        assert!(view.people_editable && !view.people_collapsible && !view.quota_visible);
+        assert!(!view.primary_enabled, "nobody added yet");
+        // While the form loads, the window already says what it is for.
+        let loading = GrantState { phase: &Phase::Loading, successor: None, in_flight: true, ..state };
+        assert_eq!(grant_view(&loading, now_ms()).title, "Add People Who Can Request");
     }
     #[test]
     fn adding_people_after_next_month_is_published_says_when_it_works_again() {
@@ -3688,7 +3756,7 @@ mod tests {
         for (state, kind, code) in [
             ("publish", "", ""), ("amend", "", ""), ("add_people", "", ""), ("renew", "", ""),
             ("published", "", ""), ("published", "amendment", ""), ("published", "add_people", ""), ("published", "renewal", ""),
-            ("record", "", ""), ("loading", "amendment", ""),
+            ("record", "", ""), ("loading", "amendment", ""), ("add_people", "", "adding"),
             ("failed", "", "owner_grant_capacity_unavailable"), ("failed", "amendment", "owner_grant_below_floor"),
             ("failed", "add_people", "invalid_grant_manager"), ("failed", "renewal", "owner_grant_renewal_window_closed"),
             ("failed", "amendment", "management_outcome_unknown"),
@@ -3698,13 +3766,19 @@ mod tests {
                 "account": "@reviewer:example.test", "current": 200000, "proposed": 250000,
                 "remaining": 800000, "held": 100000, "running": 1,
                 "managers": ["@applicant:example.test", "@designer:example.test"],
-                "added": ["@lisi:example.test"], "kind": kind, "code": code, "typed": "Li Si",
+                "added": if code == "adding" { json!([]) } else { json!(["@lisi:example.test"]) },
+                "kind": kind, "code": code, "typed": "Li Si", "adding": code == "adding", "sharing": true,
             });
             let preview = GrantPreview::from_fixture(&fixture, now).unwrap();
             let view = grant_view(&preview.state(), now);
             assert!(!view.title.is_empty(), "{state}");
             for primary in [&view.title, &view.lead, &view.status, &view.caption, &view.problem] {
+                let primary = without_zone(primary);
                 assert!(!primary.contains(":example.test") && !primary.contains("UTC") && !primary.contains("pool_original"), "{state}: {primary}");
+            }
+            // Details name who and where; internal IDs and revisions stay out.
+            for internal in ["Resource revision", "Local profile", "Resource ID", "Grant ID", "Record ID", "cccc", "profile_owner"] {
+                assert!(!view.technical.contains(internal), "{state}: {}", view.technical);
             }
             for fact in &view.facts {
                 assert!(!fact.label.is_empty() && !fact.value.contains(":example.test"), "{state}: {fact:?}");
@@ -3796,7 +3870,8 @@ mod tests {
             ("Most it can be", "最多可设为"),
             ("What this month can still give out.", "本月还能分出的额度。"),
             ("Nothing was changed.", "什么都没有改动。"),
-            ("Before {when}", "{when} 前"),
+            // The time ends with its zone,「11 月 1 日 08:00（北京时间）」, so 前 follows the bracket.
+            ("Before {when}", "{when}前"),
             ("Monthly Maximum Saved", "已保存每月上限"),
             ("Per-Request Limit Not Saved", "没有保存每次申请上限"),
             // One verb commits a new value in both windows and on the page; one saving line; one
@@ -3896,11 +3971,12 @@ mod layout_tests {
             choosing,
             quota_visible: choosing,
             quota_hint: text("Choose 0.1 M – 0.8 M.", "可选 0.1 M – 0.8 M。"),
-            more_label: text("Advanced Options and Technical Details", "高级选项和技术详情"),
+            more_label: text("Technical Details", "技术详情"),
             more_open: true,
-            advanced_open: true,
-            expiry: text("Shared until: Before November 1, 8:00 AM", "共享到：11 月 1 日 08:00 前"),
-            expiry_note: text("Sharing ends before November 1, 8:00 AM at the latest.", "最晚在 11 月 1 日 08:00 前结束共享。"),
+            sharing_visible: choosing,
+            sharing_open: true,
+            expiry: text("Before November 1, 8:00 AM (Beijing time)", "11 月 1 日 08:00（北京时间）前"),
+            expiry_note: text("Sharing ends before November 1, 8:00 AM (Beijing time) at the latest.", "最晚在 11 月 1 日 08:00（北京时间）前结束共享。"),
             technical: text("Your account\n@reviewer:example.org\n\n", "你的账号\n@reviewer:example.org\n\n").repeat(40),
             recover: text("Check Again", "再查一次"),
             recover_visible: true,

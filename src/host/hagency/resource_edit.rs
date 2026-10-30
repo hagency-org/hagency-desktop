@@ -271,9 +271,6 @@ impl ResourceEditConsent {
     pub fn facts(&self) -> Option<&CeilingFacts> {
         self.facts.as_ref()
     }
-    pub fn resource_id(&self) -> &str {
-        &self.input.resource_id
-    }
     pub fn details(&self) -> String {
         let tr = crate::i18n::tr;
         match &self.review {

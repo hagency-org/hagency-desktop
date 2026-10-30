@@ -119,7 +119,8 @@ script_mod! {
         // With large text the value goes under its name instead of squeezing it.
         body := View {width: Fill height: Fit flow: (if mod.widgets.RINX_TEXT_SCALE > 1.2 {Flow.Down} else {Flow.Right}) spacing: (if mod.widgets.RINX_TEXT_SCALE > 1.2 {2} else {12}) padding: Inset{left: 16 right: 16 top: 12 bottom: 12} align: Align{y: 0.5}
             label := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
-            value := RinxLabel {width: Fit flow: Flow.Right{wrap: true} draw_text +: {color: RINX_MUTED}}
+            // Under its name it takes the row's width, so a long value wraps instead of running off.
+            value := RinxLabel {width: (if mod.widgets.RINX_TEXT_SCALE > 1.2 {Fill} else {Fit}) flow: Flow.Right{wrap: true} draw_text +: {color: RINX_MUTED}}
         }
         note := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5}}
     }
@@ -236,8 +237,46 @@ script_mod! {
                         add_error := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5} draw_text +: {color: RINX_DANGER_FG}}
                         add_hint := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5}}
                     }
+                    // A record of this month's list: add people from here, in this window.
+                    open_add := View {visible: false width: Fill height: Fit flow: Down
+                        SheetLine {}
+                        open_add_button := SheetRowButton {text: #(crate::i18n::tr("Add People Who Can Request")) i18n_text: "Add People Who Can Request"}
+                    }
                 }
                 people_note := SheetCaption {}
+            }
+            // When sharing ends: a row of its own that opens the period choice in place.
+            sharing := View {visible: false width: Fill{max: 640} height: Fit flow: Down
+                SheetGroup {
+                    sharing_row := View {width: Fill height: 48 flow: Overlay
+                        sharing_toggle := SheetRowButton {text: ""}
+                        sharing_body := View {width: Fill height: Fill flow: Right spacing: 8 padding: Inset{left: 16 right: 16} align: Align{y: 0.5}
+                            sharing_label := RinxLabel {width: Fill text: #(crate::i18n::tr("Shared until")) i18n_text: "Shared until"}
+                            sharing_value := RinxLabel {width: Fit draw_text +: {color: RINX_MUTED}}
+                            sharing_closed := View {width: Fit height: Fit
+                                Icon {width: 14 height: 14 icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: mod.rinx_icons.expand color: RINX_MUTED}}
+                            }
+                            sharing_opened := View {visible: false width: Fit height: Fit
+                                Icon {width: 14 height: 14 icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: mod.rinx_icons.collapse color: RINX_MUTED}}
+                            }
+                        }
+                    }
+                    // With large text the time wraps on its own lines under the row's name.
+                    sharing_value_below := RinxLabel {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 6} draw_text +: {color: RINX_MUTED}}
+                    // The chosen period shows selected, in the tint of a selected segment.
+                    period := View {visible: false width: Fill height: Fit flow: Down spacing: 8 padding: Inset{left: 16 right: 16 top: 0 bottom: 12}
+                        SheetLine {margin: 0}
+                        expiry_presets := View {width: Fill height: Fit flow: Right spacing: 8 padding: Inset{top: 4}
+                            day := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
+                            day_on := SheetPresetOn {text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
+                            week := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
+                            week_on := SheetPresetOn {text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
+                            month := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
+                            month_on := SheetPresetOn {text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
+                        }
+                        expiry_note := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                    }
+                }
             }
             // Recovery steps for a saved record, as plain grouped rows.
             actions := SheetGroup {visible: false width: Fill{max: 640}
@@ -246,7 +285,7 @@ script_mod! {
                 cancel_intent := SheetRowButton {text: #(crate::i18n::tr("Discard This Publish…")) i18n_text: "Discard This Publish…"
                     draw_text +: {color: RINX_DANGER_FG color_hover: RINX_DANGER_FG color_down: RINX_DANGER_FG color_focus: RINX_DANGER_FG}}
             }
-            // Advanced choices and technical details live behind one row.
+            // Technical details live behind one row of their own.
             more := SheetGroup {visible: false width: Fill{max: 640}
                 more_row := View {width: Fill height: 48 flow: Overlay
                     more_toggle := SheetRowButton {text: ""}
@@ -259,20 +298,6 @@ script_mod! {
                             Icon {width: 14 height: 14 icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: mod.rinx_icons.collapse color: RINX_MUTED}}
                         }
                     }
-                }
-                advanced := View {visible: false width: Fill height: Fit flow: Down spacing: 8 padding: Inset{left: 16 right: 16 top: 0 bottom: 12}
-                    SheetLine {margin: 0}
-                    expiry := RinxLabel {width: Fill flow: Flow.Right{wrap: true} padding: Inset{top: 6}}
-                    // The chosen period shows selected, in the tint of a selected segment.
-                    expiry_presets := View {width: Fill height: Fit flow: Right spacing: 8
-                        day := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
-                        day_on := SheetPresetOn {text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
-                        week := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
-                        week_on := SheetPresetOn {text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
-                        month := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
-                        month_on := SheetPresetOn {text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
-                    }
-                    expiry_note := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
                 }
                 details := View {visible: false width: Fill height: Fit flow: Down spacing: 6 padding: Inset{left: 16 right: 16 top: 0 bottom: 14}
                     SheetLine {margin: 0}
@@ -1807,9 +1832,11 @@ impl Widget for MiniAppsPanel {
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.primary)).clicked(actions) {self.grant_primary(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.actions.recover)).clicked(actions) {self.grant_recover(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.actions.cancel_intent)).clicked(actions) {self.grant_cancel_intent(cx);}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.period.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.period.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.period.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.sharing_row.sharing_toggle)).clicked(actions) {self.grant_sharing_toggle(cx);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.open_add.open_add_button)).clicked(actions) {self.grant_add_people(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.more.more_row.more_toggle)).clicked(actions) {self.grant_disclose(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.people_toggle_row.people_toggle)).clicked(actions) {self.grant_people_toggle(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.add.add_button)).clicked(actions) || add_field.returned(actions).is_some() {self.grant_add_person(cx);}

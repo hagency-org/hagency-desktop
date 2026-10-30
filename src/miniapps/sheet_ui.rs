@@ -2,7 +2,8 @@
 //! change, add people, publish ahead) and the monthly-maximum window compute
 //! a `SheetView` from native state only and write it through `apply_sheet`,
 //! so every window has the same status icon, before → after hero, grouped
-//! facts, people list, single disclosure and full-width footer.
+//! facts, people list, sharing period row, technical details disclosure and
+//! full-width footer.
 use super::*;
 
 /// What the sheet's status icon and title say.
@@ -101,15 +102,20 @@ pub(super) struct SheetView {
     pub add_placeholder: String,
     pub add_error: String,
     pub add_hint: String,
+    /// A record of this month's list offers to add people in this window.
+    pub people_add_visible: bool,
     pub choosing: bool,
     pub quota_visible: bool,
     /// What the slider sets: the per-request limit or the monthly maximum.
     pub quota_label: String,
     pub quota_hint: String,
-    /// The single disclosure: advanced choices (while choosing) and details.
+    /// The technical details disclosure.
     pub more_label: String,
     pub more_open: bool,
-    pub advanced_open: bool,
+    /// When sharing ends: a visible row (`expiry` is its value) that opens
+    /// the 1 day / 7 days / to month end choice and its note in place.
+    pub sharing_visible: bool,
+    pub sharing_open: bool,
     pub expiry: String,
     pub expiry_note: String,
     pub technical: String,
@@ -132,10 +138,21 @@ impl SheetView {
     pub(super) fn hero_visible(&self) -> bool {
         self.after.is_some() || !self.caption.is_empty() || !self.lead.is_empty()
     }
-    /// Whether the disclosure row has anything behind it.
+    /// Whether the details row has anything behind it.
     pub(super) fn more_visible(&self) -> bool {
-        self.choosing || !self.technical.is_empty()
+        !self.technical.is_empty()
     }
+}
+/// The text scale the sheet's layout reads (`RINX_TEXT_SCALE`), as it is now.
+fn text_scale(cx: &mut Cx) -> f64 {
+    cx.with_vm(|vm| {
+        let widgets = vm.module(id!(widgets));
+        vm.bx
+            .heap
+            .value(widgets, LiveId::from_str("RINX_TEXT_SCALE").into(), NoTrap)
+            .as_number()
+            .unwrap_or(1.0)
+    })
 }
 /// The widget path of `rest` under one sheet root.
 pub(super) fn sheet_path(root: LiveId, rest: &[LiveId]) -> Vec<LiveId> {
@@ -255,13 +272,14 @@ impl MiniAppsPanel {
         };
         text(self, cx, &[id!(scroll), id!(people), id!(list), id!(more_people)], &more_text);
         show(self, cx, &[id!(scroll), id!(people), id!(list), id!(add)], v.people_editable && !folded);
+        show(self, cx, &[id!(scroll), id!(people), id!(list), id!(open_add)], v.people_add_visible && !folded);
         show(self, cx, &[id!(scroll), id!(people), id!(list), id!(add), id!(add_line)], !v.people.is_empty() || v.people_collapsible);
         self.view
             .text_input(cx, &at(&[id!(scroll), id!(people), id!(list), id!(add), id!(add_name)]))
             .set_empty_text(cx, v.add_placeholder.clone());
         text(self, cx, &[id!(scroll), id!(people), id!(list), id!(add), id!(add_error)], &v.add_error);
         text(self, cx, &[id!(scroll), id!(people), id!(list), id!(add), id!(add_hint)], if v.add_error.is_empty() { &v.add_hint } else { "" });
-        show(self, cx, &[id!(scroll), id!(people), id!(list)], !v.people.is_empty() || v.people_editable || v.people_collapsible);
+        show(self, cx, &[id!(scroll), id!(people), id!(list)], !v.people.is_empty() || v.people_editable || v.people_collapsible || v.people_add_visible);
         text(self, cx, &[id!(scroll), id!(people), id!(people_note)], if folded { "" } else { &v.people_note });
         // The per-request limit (or the monthly maximum), chosen with a slider and a value beside it.
         show(self, cx, &[id!(scroll), id!(quota)], v.choosing && v.quota_visible);
@@ -276,16 +294,24 @@ impl MiniAppsPanel {
         self.view.button(cx, &at(&[id!(scroll), id!(actions), id!(recover)])).set_text(cx, &v.recover);
         show(self, cx, &[id!(scroll), id!(actions), id!(actions_line)], recover && v.cancel_intent_visible);
         show(self, cx, &[id!(scroll), id!(actions), id!(cancel_intent)], v.cancel_intent_visible);
-        // One disclosure for advanced choices and technical details.
+        // When sharing ends: its own row, which opens the period choice in place.
+        show(self, cx, &[id!(scroll), id!(sharing)], v.sharing_visible);
+        self.view.label(cx, &at(&[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_label)])).set_text(cx, tr("Shared until"));
+        // With large text the time goes under the row's name, where it can wrap.
+        let large = text_scale(cx) > 1.2;
+        text(self, cx, &[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_value)], if large { "" } else { &v.expiry });
+        text(self, cx, &[id!(scroll), id!(sharing), id!(sharing_value_below)], if large { &v.expiry } else { "" });
+        show(self, cx, &[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_closed)], !v.sharing_open);
+        show(self, cx, &[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_opened)], v.sharing_open);
+        show(self, cx, &[id!(scroll), id!(sharing), id!(period)], v.sharing_visible && v.sharing_open);
+        text(self, cx, &[id!(scroll), id!(sharing), id!(period), id!(expiry_note)], &v.expiry_note);
+        // Technical details, behind a row of their own.
         show(self, cx, &[id!(scroll), id!(more)], v.more_visible());
         self.view.label(cx, &at(&[id!(scroll), id!(more), id!(more_row), id!(more_body), id!(more_label)])).set_text(cx, &v.more_label);
-        show(self, cx, &[id!(scroll), id!(more), id!(advanced)], v.choosing && v.advanced_open);
-        self.view.label(cx, &at(&[id!(scroll), id!(more), id!(advanced), id!(expiry)])).set_text(cx, &v.expiry);
-        text(self, cx, &[id!(scroll), id!(more), id!(advanced), id!(expiry_note)], &v.expiry_note);
         show(self, cx, &[id!(scroll), id!(more), id!(details)], v.more_open && !v.technical.is_empty());
         self.view.label(cx, &at(&[id!(scroll), id!(more), id!(details), id!(copy)])).set_text(cx, &v.technical);
         // A short sheet keeps its buttons right under its last card; a long one keeps them at the foot.
-        let short = !v.choosing && !v.people_visible && !v.more_open && v.facts.len() <= 3;
+        let short = !v.choosing && !v.people_visible && !v.more_open && !v.sharing_visible && v.facts.len() <= 3;
         let scroll = self.view.view(cx, &at(&[id!(scroll)]));
         let height = if short { Size::fit() } else { Size::fill() };
         if let Some(mut walk) = scroll.borrow().map(|view| view.walk.clone()).filter(|walk| walk.height != height) {

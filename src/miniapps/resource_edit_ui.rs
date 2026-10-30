@@ -61,7 +61,6 @@ fn amount(tokens: Option<u64>) -> String {
 /// shipped sheet and its offline preview render through one function.
 pub(super) struct CeilingState<'a> {
     pub account: &'a str,
-    pub resource_id: &'a str,
     /// The amendment under review.
     pub review: Option<&'a CeilingAmendmentReview>,
     /// The same request was already saved: (previous, saved) maximum.
@@ -146,11 +145,9 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
         quota_label: tr("Monthly maximum").into(),
         ..SheetView::default()
     };
-    let mut technical = vec![(tr("Your account"), s.account.to_owned()), (tr("Resource ID"), s.resource_id.to_owned())];
-    if let Some(review) = s.review {
-        technical.push((tr("Change number"), review.sequence.to_string()));
-        technical.push((tr("Resource revision"), review.revision.clone()));
-    }
+    // For a server administrator: who and the account's limit. Internal
+    // IDs, change numbers and revisions stay out of the window.
+    let mut technical = vec![(tr("Your account"), s.account.to_owned())];
     if let Some(limit) = facts.account_limit {
         technical.push((tr("Account limit"), amount(Some(limit))));
     }
@@ -444,7 +441,6 @@ impl CeilingPreview {
         let loading = self.state == "loading";
         CeilingState {
             account: &self.account,
-            resource_id: &self.review.resource_id,
             // A refused or re-chosen value has no clean review.
             review: if self.failure.is_some() || loading || self.retrying { None } else { Some(&self.review) },
             recorded: None,
@@ -479,8 +475,6 @@ pub(super) struct ResourceEditPrompt {
     /// again with another value, since a review writes nothing.
     retry: Option<ResourceEditConsent>,
     failure: Option<String>,
-    /// Kept after confirming, when the consent itself is used up.
-    resource_id: String,
     review: Option<CeilingAmendmentReview>,
     recorded: Option<(u64, u64)>,
     facts: Option<CeilingFacts>,
@@ -505,7 +499,6 @@ impl ResourceEditPrompt {
     pub(super) fn begin(consent: ResourceEditConsent) -> Self {
         let account = consent.account().to_owned();
         let amendment = consent.amendment_requested();
-        let resource_id = consent.resource_id().to_owned();
         let proposed = consent.proposed_tokens();
         let mut prompt = Self {
             account,
@@ -515,7 +508,6 @@ impl ResourceEditPrompt {
             consent: None,
             retry: None,
             failure: None,
-            resource_id,
             review: None,
             recorded: None,
             facts: None,
@@ -635,7 +627,6 @@ impl ResourceEditPrompt {
     fn state(&self) -> CeilingState<'_> {
         CeilingState {
             account: &self.account,
-            resource_id: &self.resource_id,
             review: self.review.as_ref(),
             recorded: self.recorded,
             facts: self.facts.as_ref(),
