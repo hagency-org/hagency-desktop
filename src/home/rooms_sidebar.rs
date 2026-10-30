@@ -6,6 +6,10 @@
 //! * On a wide desktop view, it acts as a permanent tab that is on the left side of the dock.
 //!   * It includes a title label, a search bar and the RoomsList. Spaces are listed
 //!     in the navigation rail rather than behind an "All Chats | Spaces" switch.
+//!
+//! Neither layout repeats a creation or tool shortcut above the list: New workspace
+//! lives in the rail's "New or Join" menu, and File Transfer has its own rail
+//! button on desktop and a Discover row on mobile.
 
 use makepad_widgets::*;
 
@@ -53,20 +57,8 @@ script_mod! {
             CachedWidget {
                 room_filter_input_bar := RoomFilterInputBar {}
             }
-            new_workspace := NavigationBarButton {
-                width: Fill height: 44 flow: Right spacing: 10
-                align: Align{x: 0 y: 0.5} padding: Inset{left: 12 right: 8}
-                tooltip_text: #(crate::i18n::tr("New workspace"))
-                draw_bg +: {color_hover: mod.widgets.RINX_HOVER color_active: mod.widgets.RINX_SELECTED}
-                Icon {icon_walk: Walk{width: 18 height: 18} draw_icon +: {svg: ICON_ADD color: mod.widgets.RINX_ACCENT}}
-                label := Label {width: Fill max_lines: 1 text_overflow: Ellipsis
-                    text: #(crate::i18n::tr("New workspace")) i18n_text: "New workspace"
-                    draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_regular{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}
-                }
-            }
             // No "All Chats | Spaces" switch here: on desktop, spaces live in the
             // navigation rail on the left, and selecting one filters this list.
-            file_transfer_entry := MobileRow {height: 46 title.text: #(crate::i18n::tr("File Transfer")) title.i18n_text: "File Transfer" icon.draw_icon.svg: ICON_FILE}
             conversations := View {
                 width: Fill height: Fill
                 CachedWidget {rooms_list := RoomsList {}}
@@ -95,7 +87,6 @@ script_mod! {
                 }
             }
             ChatViewSwitch {}
-            file_transfer_entry := MobileRow {height: 46 title.text: #(crate::i18n::tr("File Transfer")) title.i18n_text: "File Transfer" icon.draw_icon.svg: ICON_FILE}
             conversations := View {
                 width: Fill height: Fill
                 CachedWidget {rooms_list := RoomsList {}}
@@ -194,12 +185,6 @@ impl Widget for RoomsSideBar {
         // If the main room filter input bar changed keywords, re-emit that action
         // as a MainFilterAction so that other widgets can handle it.
         if let Event::Actions(actions) = event {
-            if self.view.navigation_bar_button(cx, ids!(new_workspace)).clicked(actions) {
-                cx.action(crate::hagency::ui::HagencyAction::NewProject);
-            }
-            if self.view.navigation_bar_button(cx, ids!(file_transfer_entry)).clicked(actions) {
-                cx.action(crate::moments::ui::MomentsAction::FileTransfer);
-            }
             if self.view.navigation_bar_button(cx, ids!(all_chats)).clicked(actions) {
                 cx.global::<ChatsViewState>().spaces = false;
                 cx.action(NavigationBarAction::GoToHome);
@@ -266,5 +251,74 @@ impl Widget for RoomsSideBar {
             }
         }
         step
+    }
+}
+
+/// The rooms list column, built and drawn offscreen in both layouts.
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+
+    fn texts(widget: &WidgetRef, found: &mut Vec<String>) {
+        found.push(widget.text());
+        widget.children(&mut |_, child| texts(&child, found));
+    }
+
+    #[test]
+    fn rooms_list_has_no_new_workspace_button_or_file_transfer_row() {
+        for layout in [id!(Desktop), id!(Mobile)] {
+            let mut cx = Cx::new(Box::new(|_, _| {}));
+            let mut sidebar = cx.with_vm(|vm| {
+                makepad_widgets::script_mod(vm);
+                crate::app::register_widgets(vm);
+                vm.bx.captured_errors = Some(Vec::new());
+                let value = script_eval!(vm, {mod.widgets.RoomsSideBar {}});
+                let sidebar = RoomsSideBar::script_from_value(vm, value);
+                let errors = vm.take_errors();
+                assert!(errors.is_empty(), "Rooms sidebar registration: {errors:?}");
+                sidebar
+            });
+            sidebar.view.set_variant_selector(move |_, _| layout);
+            let size = dvec2(320.0, 760.0);
+            cx.redraw_all();
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, size);
+            let mut list = DrawList2d::new(&mut cx);
+            let event = DrawEvent::default();
+            {
+                let mut draw = CxDraw::new(&mut cx, &event);
+                let mut cx2d = Cx2d::new(&mut draw);
+                cx2d.begin_pass(&pass, None);
+                list.begin_always(&mut cx2d);
+                cx2d.begin_root_turtle(size, Layout::flow_overlay());
+                // The rooms list reads the selected room from the app state.
+                let mut state = crate::app::AppState::default();
+                sidebar.draw_walk_all(&mut cx2d, &mut Scope::with_data(&mut state), Walk {
+                    width: Size::Fixed(size.x),
+                    height: Size::Fixed(size.y),
+                    ..Walk::default()
+                });
+                cx2d.end_pass_sized_turtle();
+                list.end(&mut cx2d);
+                cx2d.end_pass(&pass);
+            }
+            assert_eq!(sidebar.view.active_variant(), Some(layout));
+            for removed in [ids!(new_workspace), ids!(file_transfer_entry)] {
+                assert!(sidebar.view.widget(&mut cx, removed).is_empty(), "{layout:?}: {removed:?} is gone");
+            }
+            let mut found = Vec::new();
+            sidebar.children(&mut |_, child| texts(&child, &mut found));
+            assert!(found.iter().any(|text| !text.is_empty()), "{layout:?}: the walk reaches the column's labels");
+            for label in ["New workspace", "File Transfer"] {
+                assert!(!found.iter().any(|text| text == crate::i18n::tr(label)), "{layout:?}: no {label} entry above the list: {found:?}");
+            }
+            // The conversation list now starts right under the search field.
+            let conversations = sidebar.view.view(&mut cx, ids!(conversations)).area().rect(&cx);
+            let search = sidebar.view.widget(&mut cx, ids!(room_filter_input_bar)).area().rect(&cx);
+            assert!(conversations.size.y > 400.0, "{layout:?}: the list keeps the column: {conversations:?}");
+            assert!(conversations.pos.y > search.pos.y && conversations.pos.y - (search.pos.y + search.size.y) < 60.0,
+                "{layout:?}: nothing sits between search and list: {search:?} {conversations:?}");
+        }
     }
 }

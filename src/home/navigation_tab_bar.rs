@@ -15,8 +15,11 @@
 //! The order in Desktop view (vertically from top to bottom) is:
 //! 1. Profile/Settings
 //! 2. Home
-//! 3. Add/Join
-//! 4. ----- separator -----
+//! 3. Contacts, Moments, Mini apps
+//! 4. File Transfer (opens the same private File Transfer chat as before)
+//! 5. New or Join: a menu with New workspace, New room or space and
+//!    Join or explore rooms (see `sidebar_action_menu`)
+//! 6. ----- separator -----
 //!      SpacesBar content
 //!
 
@@ -25,6 +28,7 @@ use makepad_widgets::*;
 use serde::{Deserialize, Serialize};
 use crate::{
     home::account_menu::{is_desktop_layout, AccountMenuAction},
+    home::sidebar_action_menu::{SidebarMenuAction, SidebarMenuKind},
     avatar_cache::{self, AvatarCacheEntry},
     login::login_screen::LoginAction,
     logout::logout_confirm_modal::LogoutAction,
@@ -57,7 +61,11 @@ script_mod! {
     // white when selected via the animator below (DrawSvg has no per-state color).
     mod.widgets.NavigationTabButton = mod.widgets.NavigationBarButton {
         width: Fill,
-        height: (NAVIGATION_TAB_BAR_SIZE - 12),
+        // Normally (NAVIGATION_TAB_BAR_SIZE - 12) tall and never taller. In a short
+        // window every rail button gives up height evenly, down to a 44-point
+        // target, before the bottom buttons would be pushed off the rail.
+        height: Fill{weight: 0.0 basis: FitBound.Abs((NAVIGATION_TAB_BAR_SIZE - 12)) shrink: 1.0},
+        min_height: FitBound.Abs(44.0),
         padding: (SPACE_XS),
         margin: Inset{top: 2, bottom: 2, left: (SPACE_XS), right: (SPACE_XS)},
         align: Align{x: 0.5, y: 0.5}
@@ -201,14 +209,16 @@ script_mod! {
     }
 
     mod.widgets.HomeButton = mod.widgets.NavigationTabButton {
-        tooltip_text: "All Rooms"
+        tooltip_text: #(crate::i18n::tr("All Rooms"))
         icon +: {
             draw_icon +: { svg: (ICON_HOME) }
         }
     }
 
-    mod.widgets.AddRoomButton = mod.widgets.NavigationTabButton {
-        tooltip_text: "Add/Join Room"
+    // Opens the "New or Join" menu: New workspace, New room or space, and
+    // Join or explore rooms. Stays marked while the Explore Rooms page is open.
+    mod.widgets.NewOrJoinButton = mod.widgets.NavigationTabButton {
+        tooltip_text: #(crate::i18n::tr("New or Join"))
         icon +: {
             icon_walk: Walk{width: 20 height: 20}
             draw_icon +: { svg: (ICON_ADD) }
@@ -220,7 +230,7 @@ script_mod! {
     // avatar, and this keeps the rail's icon language consistent with Home / "+".
     // The top avatar keeps opening Settings directly.
     mod.widgets.AccountSwitcherButton = mod.widgets.NavigationTabButton {
-        tooltip_text: "Account"
+        tooltip_text: #(crate::i18n::tr("Account"))
         icon +: {
             draw_icon +: { svg: (mod.widgets.ICON_PEOPLE) }
         }
@@ -284,15 +294,20 @@ script_mod! {
                 icon.draw_icon.svg: ICON_PEOPLE
             }
             moments_button := mod.widgets.NavigationTabButton {
-                tooltip_text: "Moments"
+                tooltip_text: #(crate::i18n::tr("Moments"))
                 icon.draw_icon.svg: ICON_GLOBE
             }
             octoscript_apps_button := mod.widgets.NavigationTabButton {
-                tooltip_text: "Mini apps"
+                tooltip_text: #(crate::i18n::tr("Mini apps"))
                 icon.draw_icon.svg: ICON_SQUARES
             }
+            // The one desktop entry to File Transfer (mobile: Discover).
+            file_transfer_button := mod.widgets.NavigationTabButton {
+                tooltip_text: #(crate::i18n::tr("File Transfer"))
+                icon.draw_icon.svg: ICON_FILE
+            }
             CachedWidget {
-                add_room_button := mod.widgets.AddRoomButton {}
+                new_or_join_button := mod.widgets.NewOrJoinButton {}
             }
 
             mod.widgets.Separator {}
@@ -598,7 +613,8 @@ impl NavigationTabBar {
         }
         let home    = self.view.navigation_bar_button(cx, ids!(home_button));
         let contacts = self.view.navigation_bar_button(cx, ids!(contacts_button));
-        let add     = self.view.navigation_bar_button(cx, ids!(add_room_button));
+        // "New or Join" stays marked while its Explore Rooms page is open.
+        let add     = self.view.navigation_bar_button(cx, ids!(new_or_join_button));
         let profile = self.view.profile_icon(cx, ids!(profile_icon));
         home.set_selected(cx, self.selected_tab == SelectedTab::Home);
         contacts.set_selected(cx, self.selected_tab == SelectedTab::Contacts);
@@ -653,9 +669,15 @@ impl Widget for NavigationTabBar {
                 self.apply_selected_tab(cx, Some(SelectedTab::Home));
                 cx.action(NavigationBarAction::GoToHome);
             }
-            else if self.view.navigation_bar_button(cx, ids!(add_room_button)).clicked(actions) {
-                self.apply_selected_tab(cx, Some(SelectedTab::AddRoom));
-                cx.action(NavigationBarAction::GoToAddRoom);
+            else if self.view.navigation_bar_button(cx, ids!(new_or_join_button)).clicked(actions) {
+                // Opens the "New or Join" menu beside the button, top-aligned with it.
+                // Only its "Join or explore rooms" row changes the selected tab
+                // (through the HomeScreen's `TabSelected`), so nothing is marked here.
+                let rect = self.view.widget(cx, ids!(new_or_join_button)).area().rect(cx);
+                cx.action(SidebarMenuAction::Open {
+                    kind: SidebarMenuKind::Add,
+                    pos: dvec2(rect.pos.x + rect.size.x + 4.0, rect.pos.y),
+                });
             }
             else {
                 // ProfileIcon's inner NavigationBarButton emits the click action,
@@ -685,6 +707,9 @@ impl Widget for NavigationTabBar {
                 cx.action(crate::moments::ui::MomentsAction::Open {author: None});
             }
             if self.view.navigation_bar_button(cx,ids!(octoscript_apps_button)).clicked(actions) {cx.action(crate::octoscript_apps::MiniAppsAction::Open);}
+            if self.view.navigation_bar_button(cx, ids!(file_transfer_button)).clicked(actions) {
+                cx.action(crate::moments::ui::MomentsAction::FileTransfer);
+            }
             if self.view.navigation_bar_button(cx, ids!(appearance_button)).clicked(actions) {
                 cx.action(crate::settings::appearance::OpenAppearance);
             }
@@ -729,9 +754,16 @@ impl Widget for NavigationTabBar {
         // first draw so a new mobile bar doesn't remain visually unselected
         // until a tap or an unrelated sync signal arrives.
         self.apply_selected_tab(cx, None);
+        // Every rail tooltip follows the interface language, including after a switch.
         for (id, tooltip) in [
+            (ids!(home_button), crate::i18n::tr("All Rooms")),
             (ids!(contacts_button), crate::i18n::tr("Contacts")),
+            (ids!(moments_button), crate::i18n::tr("Moments")),
+            (ids!(octoscript_apps_button), crate::i18n::tr("Mini apps")),
+            (ids!(file_transfer_button), crate::i18n::tr("File Transfer")),
+            (ids!(new_or_join_button), crate::i18n::tr("New or Join")),
             (ids!(appearance_button), crate::i18n::tr("App appearance")),
+            (ids!(account_switcher_button), crate::i18n::tr("Account")),
         ] {
             if let Some(mut button) = self.view.navigation_bar_button(cx, id).borrow_mut() {
                 button.set_tooltip_text(tooltip);
@@ -808,7 +840,8 @@ pub enum NavigationBarAction {
     NewChat,
     /// Go to the main rooms content view.
     GoToHome,
-    /// Go the add/join/explore room view.
+    /// Go to the Explore Rooms view (join, search or preview rooms).
+    /// On desktop it comes from the rail's "New or Join" menu.
     GoToAddRoom,
     /// Leave Explore Rooms and restore the tab that opened it.
     CloseAddRoom,
@@ -953,5 +986,160 @@ impl Widget for HagencyAccountBar {
             self.view.avatar(cx, ids!(avatar)).show_user_text(cx, &id, name);
         }
         self.view.draw_walk(cx, scope, walk)
+    }
+}
+
+/// The desktop left rail, built and drawn offscreen.
+#[cfg(test)]
+mod rail_tests {
+    use super::*;
+    use crate::i18n::{text_for, Language};
+    use crate::shared::navigation_bar_button::NavigationBarButtonAction;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+
+    fn rail() -> (Cx, NavigationTabBar) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        // A desktop-sized window, so the bar is the left rail.
+        cx.display_context.screen_size = dvec2(1280.0, 800.0);
+        let bar = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, {mod.widgets.NavigationTabBar {}});
+            let bar = NavigationTabBar::script_from_value(vm, value);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "Navigation bar registration: {errors:?}");
+            bar
+        });
+        (cx, bar)
+    }
+
+    fn draw(cx: &mut Cx, bar: &mut NavigationTabBar) {
+        draw_at(cx, bar, 800.0)
+    }
+
+    fn draw_at(cx: &mut Cx, bar: &mut NavigationTabBar, height: f64) {
+        cx.redraw_all();
+        let size = dvec2(1280.0, height);
+        let pass = DrawPass::new(cx);
+        pass.set_size(cx, size);
+        let mut list = DrawList2d::new(cx);
+        let event = DrawEvent::default();
+        let mut draw = CxDraw::new(cx, &event);
+        let mut cx2d = Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass, None);
+        list.begin_always(&mut cx2d);
+        cx2d.begin_root_turtle(size, Layout::flow_right());
+        bar.draw_walk_all(&mut cx2d, &mut Scope::empty(), Walk {
+            width: Size::Fixed(76.0),
+            height: Size::Fixed(size.y),
+            ..Walk::default()
+        });
+        cx2d.end_pass_sized_turtle();
+        list.end(&mut cx2d);
+        cx2d.end_pass(&pass);
+    }
+
+    fn click(cx: &mut Cx, bar: &mut NavigationTabBar, button: &[LiveId; 1]) -> ActionsBuf {
+        let uid = bar.view.navigation_bar_button(cx, button).widget_uid();
+        let clicked = cx.capture_actions(|cx| cx.widget_action(uid, NavigationBarButtonAction::Clicked));
+        cx.capture_actions(|cx| bar.handle_event(cx, &Event::Actions(clicked), &mut Scope::empty()))
+    }
+
+    fn selected(cx: &mut Cx, bar: &NavigationTabBar, button: &[LiveId; 1]) -> bool {
+        let button = bar.view.navigation_bar_button(cx, button);
+        let inner = button.borrow().expect("rail button exists");
+        inner.animator_in_state(cx, ids!(active.on))
+    }
+
+    #[test]
+    fn rail_has_file_transfer_and_one_new_or_join_entry() {
+        let (mut cx, mut bar) = rail();
+        draw(&mut cx, &mut bar);
+        assert_eq!(bar.view.active_variant(), Some(id!(Desktop)));
+        assert!(bar.view.widget(&mut cx, ids!(add_room_button)).is_empty(), "the old direct add-room button is replaced");
+
+        // Mini apps, then File Transfer, then New or Join: each a full rail target
+        // with a tooltip in the interface language (English in unit tests).
+        let mut above = 0.0;
+        for (button, english, chinese) in [
+            (ids!(octoscript_apps_button), "Mini apps", "小应用"),
+            (ids!(file_transfer_button), "File Transfer", "文件传输助手"),
+            (ids!(new_or_join_button), "New or Join", "新建或加入"),
+        ] {
+            let found = bar.view.navigation_bar_button(&mut cx, button);
+            assert_eq!(found.borrow().expect("rail button exists").tooltip_text(), english);
+            assert_eq!(text_for(Language::Chinese, english), chinese);
+            let rect = found.area().rect(&cx);
+            assert!(rect.size.x >= 44.0 && rect.size.y >= 44.0, "{english} is a full target: {rect:?}");
+            assert!(rect.pos.y > above && rect.pos.x + rect.size.x <= 76.5, "{english} sits in order in the rail: {rect:?}");
+            above = rect.pos.y;
+        }
+
+        // File Transfer opens the same private File Transfer as before; nothing else.
+        let emitted = click(&mut cx, &mut bar, ids!(file_transfer_button));
+        assert_eq!(emitted.iter().filter(|a| matches!(a.downcast_ref(), Some(crate::moments::ui::MomentsAction::FileTransfer))).count(), 1);
+        assert!(!emitted.iter().any(|a| a.downcast_ref::<NavigationBarAction>().is_some() || a.downcast_ref::<SidebarMenuAction>().is_some()));
+
+        // New or Join opens its menu beside the button instead of navigating.
+        let rect = bar.view.widget(&mut cx, ids!(new_or_join_button)).area().rect(&cx);
+        let emitted = click(&mut cx, &mut bar, ids!(new_or_join_button));
+        let menus: Vec<_> = emitted.iter().filter_map(|a| match a.downcast_ref() {
+            Some(SidebarMenuAction::Open {kind, pos}) => Some((*kind, *pos)),
+            _ => None,
+        }).collect();
+        assert_eq!(menus, vec![(SidebarMenuKind::Add, dvec2(rect.pos.x + rect.size.x + 4.0, rect.pos.y))]);
+        assert!(!emitted.iter().any(|a| a.downcast_ref::<NavigationBarAction>().is_some()), "the menu row, not the button, navigates");
+    }
+
+    #[test]
+    fn short_windows_keep_every_rail_button_on_screen_and_at_least_44_points() {
+        let buttons = [
+            ids!(home_button), ids!(contacts_button), ids!(moments_button), ids!(octoscript_apps_button),
+            ids!(file_transfer_button), ids!(new_or_join_button), ids!(appearance_button), ids!(account_switcher_button),
+        ];
+        // The default window keeps the full 64-point buttons; shorter ones share
+        // the shortfall evenly instead of pushing Appearance and Account off the rail.
+        for (height, full) in [(800.0, true), (668.0, true), (600.0, false), (520.0, false)] {
+            let (mut cx, mut bar) = rail();
+            draw_at(&mut cx, &mut bar, height);
+            let mut above = 0.0;
+            for button in buttons {
+                let rect = bar.view.widget(&mut cx, button).area().rect(&cx);
+                assert!(rect.size.y >= 44.0 && rect.size.x >= 44.0, "{height}: {button:?} {rect:?}");
+                assert_eq!((rect.size.y - 64.0).abs() < 0.5, full, "{height}: {button:?} {rect:?}");
+                assert!(rect.pos.y >= above && rect.pos.y + rect.size.y <= height, "{height}: {button:?} is on the rail: {rect:?}");
+                above = rect.pos.y + rect.size.y;
+            }
+        }
+        // Below that, targets stop at 44 points rather than shrinking further.
+        let (mut cx, mut bar) = rail();
+        draw_at(&mut cx, &mut bar, 440.0);
+        for button in buttons {
+            let rect = bar.view.widget(&mut cx, button).area().rect(&cx);
+            assert!((rect.size.y - 44.0).abs() < 0.5, "{button:?} {rect:?}");
+        }
+    }
+
+    #[test]
+    fn new_or_join_is_marked_while_explore_rooms_is_open() {
+        let (mut cx, mut bar) = rail();
+        draw(&mut cx, &mut bar);
+        assert!(selected(&mut cx, &bar, ids!(home_button)));
+        // Opening the menu does not move the selection by itself.
+        click(&mut cx, &mut bar, ids!(new_or_join_button));
+        assert!(selected(&mut cx, &bar, ids!(home_button)) && !selected(&mut cx, &bar, ids!(new_or_join_button)));
+        // The HomeScreen confirms the Explore Rooms page; the rail marks New or Join.
+        for (tab, marked) in [
+            (SelectedTab::AddRoom, ids!(new_or_join_button)),
+            (SelectedTab::Contacts, ids!(contacts_button)),
+            (SelectedTab::Home, ids!(home_button)),
+        ] {
+            let confirmed = cx.capture_actions(|cx| cx.action(NavigationBarAction::TabSelected(tab.clone())));
+            bar.handle_event(&mut cx, &Event::Actions(confirmed), &mut Scope::empty());
+            for button in [ids!(home_button), ids!(contacts_button), ids!(new_or_join_button), ids!(file_transfer_button)] {
+                assert_eq!(selected(&mut cx, &bar, button), button == marked, "{tab:?}: {button:?}");
+            }
+        }
     }
 }

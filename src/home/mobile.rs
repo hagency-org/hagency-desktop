@@ -169,6 +169,9 @@ script_mod! {
                     mod.widgets.MobileDivider {}
                     discover_moments := mod.widgets.MobileRow {title.text: #(crate::i18n::tr("Moments")) title.i18n_text: "Moments" icon.draw_icon.svg: ICON_GLOBE}
                     mod.widgets.MobileDivider {}
+                    // Mobile has no rail: File Transfer sits with the rail's other tools here.
+                    discover_file_transfer := mod.widgets.MobileRow {title.text: #(crate::i18n::tr("File Transfer")) title.i18n_text: "File Transfer" icon.draw_icon.svg: ICON_FILE}
+                    mod.widgets.MobileDivider {}
                     explore := mod.widgets.MobileRow {title.text: #(crate::i18n::tr("Explore Groups & Spaces")) title.i18n_text: "Explore Groups & Spaces" icon.draw_icon.svg: ICON_GLOBE}
                 }
             }
@@ -506,6 +509,9 @@ impl Widget for MobileHub {
             if self.view.navigation_bar_button(cx, ids!(discover_moments)).clicked(actions) {
                 cx.action(crate::moments::ui::MomentsAction::Open {author: None});
             }
+            if self.view.navigation_bar_button(cx, ids!(discover_file_transfer)).clicked(actions) {
+                cx.action(crate::moments::ui::MomentsAction::FileTransfer);
+            }
             if self.view.navigation_bar_button(cx, ids!(my_posts)).clicked(actions) {
                 cx.action(crate::moments::ui::MomentsAction::Open {author: current_user_id()});
             }
@@ -655,5 +661,58 @@ mod new_chat_tests {
         assert!(hub.query.is_empty());
         assert_eq!(hub.view.text_input(&mut cx, ids!(search)).text(), "");
         assert_ne!(hub.request, request, "Opening search invalidates old requests without sending a search or message");
+    }
+}
+
+/// Mobile has no left rail. Its Discover page carries the rail's tools, File Transfer included.
+#[cfg(test)]
+mod discover_tests {
+    use super::*;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+
+    #[test]
+    fn discover_keeps_file_transfer_reachable_on_mobile() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut hub = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, {mod.widgets.MobileHub {kind: 1}});
+            let hub = MobileHub::script_from_value(vm, value);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "Discover registration: {errors:?}");
+            hub
+        });
+        let size = dvec2(375.0, 700.0);
+        cx.redraw_all();
+        let pass = DrawPass::new(&mut cx);
+        pass.set_size(&mut cx, size);
+        let mut list = DrawList2d::new(&mut cx);
+        let event = DrawEvent::default();
+        {
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(size, Layout::flow_overlay());
+            hub.draw_walk_all(&mut cx2d, &mut Scope::empty(), Walk {
+                width: Size::Fixed(size.x),
+                height: Size::Fixed(size.y),
+                ..Walk::default()
+            });
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+        // Moments, then File Transfer, then Explore: the rail's tools in one list.
+        let rows = [ids!(discover_moments), ids!(discover_file_transfer), ids!(explore)]
+            .map(|id| hub.view.navigation_bar_button(&mut cx, id).area().rect(&cx));
+        assert!(rows[0].pos.y < rows[1].pos.y && rows[1].pos.y < rows[2].pos.y, "{rows:?}");
+        assert!(rows[1].size.x >= 44.0 && rows[1].size.y >= 44.0, "a full target: {:?}", rows[1]);
+        assert_eq!(hub.view.label(&mut cx, ids!(discover_file_transfer.title)).text(), crate::i18n::tr("File Transfer"));
+        let uid = hub.view.navigation_bar_button(&mut cx, ids!(discover_file_transfer)).widget_uid();
+        let clicked = cx.capture_actions(|cx| cx.widget_action(uid, crate::shared::navigation_bar_button::NavigationBarButtonAction::Clicked));
+        let emitted = cx.capture_actions(|cx| hub.handle_event(cx, &Event::Actions(clicked), &mut Scope::empty()));
+        assert_eq!(emitted.iter().filter(|a| matches!(a.downcast_ref(), Some(crate::moments::ui::MomentsAction::FileTransfer))).count(), 1);
     }
 }

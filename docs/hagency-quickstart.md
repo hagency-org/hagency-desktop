@@ -168,8 +168,11 @@ Agent Unlimited does not bypass finite Room/member limits or explicit request de
 
 **Chats** includes search, attachments, Room information, members and invitations.
 **Contacts** opens ordinary conversations. **Mini apps** keeps non-Palpo built-ins,
-App Hub, local import, permission review and scoped execution. **More** opens
-Discover, Explore rooms, Moments, File Transfer, Article editor, Browser and Settings.
+App Hub, local import, permission review and scoped execution. In the left bar,
+**File Transfer** opens your private File Transfer chat (on mobile it is under
+Discover), and **+** (New or Join) holds New workspace, New room or space, and
+Join or explore rooms. **More** opens Discover, Explore rooms, Moments, Article
+editor, Browser and Settings.
 
 Settings has Account, Preferences, Privacy and About. Generic external Agent
 Access/BotFather controls are separate tools, not part of native Hagency Agent
