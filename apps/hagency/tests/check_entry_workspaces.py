@@ -38,8 +38,12 @@ H.busy=true A.entry_choose("admin") A.entry_switch() assert(H.entry_role=="manag
 H.pool_agents=[{id:"managed" managerMxid:"@me:test" resourceOwnerMxid:"@other:test"},{id:"owned" managerMxid:"@other:test" resourceOwnerMxid:"@me:test"},{id:"both" managerMxid:"@me:test" resourceOwnerMxid:"@me:test"}]
 H.entry_role="manager" assert(A.pool_agent_rows().len()==2 && A.pool_agent_rows()[0].id=="managed")
 H.entry_role="owner" assert(A.pool_agent_rows().len()==2 && A.pool_agent_rows()[0].id=="owned")
-H.page="inbox" A.inbox_filter(true)
+// Owner requests use the scoped sub-page reader; changing the active filter
+// fetches once, while selecting it again preserves the current page.
+A.sub_read=fn(service,args,done,failed){H.calls.push({service:service args:args}) H.callback=done return true}
+H.page="inbox" H.reqs.filter="all" A.inbox_filter(true)
 assert(H.calls[0].service=="hagency.pools.agents.list" && H.calls[0].args.needsMyAction)
+A.inbox_filter(true) assert(H.calls.len()==1)
 A.inbox_filter(false) assert(!H.calls[1].args.needsMyAction)
 ''',
     "admin_inbox_has_only_admission": '''

@@ -97,8 +97,9 @@ impl SharedPermissionNotice {
         self.view.set_visible(cx,true);
         self.view.label(cx,ids!(title)).set_text(cx,&format!("{} · Permission request / 权限请求",a["agentName"].as_str().unwrap_or("Agent")));
         self.view.label(cx,ids!(context)).set_text(cx,&format!("{} · {}",a["requesterMxid"].as_str().unwrap_or(""),a["eventId"].as_str().unwrap_or("")));
-        self.view.label(cx,ids!(details)).set_text(cx,&serde_json::to_string_pretty(&a["request"]).unwrap_or_default());
+        self.view.label(cx,ids!(details)).set_text(cx,&if row["encryptedPending"]==true {"Waiting for encrypted permission details… / 正在等待加密的权限详情…".into()}else{serde_json::to_string_pretty(&a["request"]).unwrap_or_default()});
         let hint=if !pending {"Decision sent; waiting for Agent / 决定已发送，等待 Agent".to_owned()}
+        else if row["encryptedPending"]==true {"Approval becomes available after the encrypted details arrive. / 收到加密详情后才能批准。".into()}
         else if row["canDecide"]!=true {format!("Waiting for resource owner {} / 等待资源所有者批准",a["ownerMxid"].as_str().unwrap_or(""))}
         else {"Session approval covers this Codex session only. It ends when this run stops. / 会话批准仅限当前 Codex 会话，运行结束即失效。".into()};
         self.view.label(cx,ids!(hint)).set_text(cx,if self.error.is_empty(){&hint}else{&self.error});

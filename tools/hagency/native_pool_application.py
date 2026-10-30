@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import http.client
 import socket
 import subprocess
 import time
@@ -176,7 +177,11 @@ class App:
 
     def stop(self):
         if self.process.poll() is None:
-            self.req("/quit")
+            try:
+                self.req("/quit")
+            except (OSError, http.client.HTTPException):
+                # The harness may exit before it answers /quit; its exit is what matters.
+                pass
             self.process.wait(timeout=10)
         self.log.close()
         (self.out / getattr(self, "trace_name", "input-trace.json")).write_text(json.dumps(self.trace, indent=2))

@@ -35,7 +35,12 @@ fn main() {
                 let children = vm.vec_with(object, |_vm, values| {
                     values.iter().map(|v| v.key.as_id().expect("named root child").to_string()).collect::<Vec<_>>()
                 });
-                assert_eq!(children, ["heading", "navigation", "notice", "content"], "full bundle lost or misplaced root children");
+                assert_eq!(children, ["shell", "alert_layer"], "full bundle lost or misplaced root children");
+                let shell = vm.vec_with(object, |_vm, values| values[0].value.as_object().expect("shell widget"));
+                let shell_children = vm.vec_with(shell, |_vm, values| {
+                    values.iter().map(|v| v.key.as_id().expect("named shell child").to_string()).collect::<Vec<_>>()
+                });
+                assert_eq!(shell_children, ["heading", "navigation", "page_bar", "notice", "content"], "full bundle lost or misplaced shell children");
                 println!("root children: {}", children.join(", "));
             } else {
                 assert_eq!(result.as_bool(), Some(true), "{result:?}");

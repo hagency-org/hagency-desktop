@@ -117,6 +117,7 @@
     "hagency.templates.delete",
     "hagency.templates.command.get",
     "hagency.templates.command.apply",
+    "hagency.templates.command.cancel",
     "hagency.web.workforce",
     "hagency.web.capability",
     "hagency.web.usage",
@@ -162,7 +163,7 @@
   ],
   "id": "im.palpo.operations",
   "integrity": {
-    "bundle_blake3": "6976952b55d6cc8c45d1dd5e73c06de15f04d3a3686a4d92d18e439f40bd7dd1"
+    "bundle_blake3": "0258bbb52bb710c0e2ab8902b29a0dc4552940c98db2274f730d2decfdc6f88c"
   },
   "name": "Hagency",
   "requires": [

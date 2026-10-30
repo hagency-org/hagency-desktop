@@ -9,7 +9,7 @@ def main():
     source=(APP/'bundle/main.splash').read_text()
     helpers=source[source.index('A.begin_setup = fn('):source.index('A.load_providers = fn(')]
     start=source.index('        if H.page == "provider_accounts" ||')
-    pages=source[start:source.index('        if H.page=="resource_alerts" ||',start)]
+    pages=source[start:source.index('        if A.sub_page() &&',start)]
     fixture='''
 let Down=3
 mod.widgets.RINX_FIELD=1
@@ -19,6 +19,7 @@ H.owner={accountId:"" accountLabel:"" accountTab:"login" creatingPool:false setu
 A.resource_title=fn(r){return r.model}
 A.tokens=fn(v){return ""+v+" M"}
 mod.rinx_icons.person=1
+mod.rinx_icons.device=1
 H.account_list_epoch=0 H.account_pending_open=true
 H.enrollment_models_open=false
 H.account_models=nil H.account_models_attempted=false H.account_models_epoch=0 H.enrollment_draft=nil

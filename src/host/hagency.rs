@@ -781,6 +781,7 @@ impl Host {
                 }).collect::<Vec<_>>()})),
             (None, Some(ResourceCall::Retry(id))) => manager.retry_saved_command(id).await.map_err(|e|e.code),
             (None, Some(ResourceCall::Acknowledge(id))) => manager.acknowledge_command(id).await.map(|()|json!({"acknowledged":true})).map_err(|e|e.code),
+            (Some(command @ (ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..})),None) => Box::pin(crate::hagency::backend::Service::for_current()?.shared_permissions_with(manager.clone(),command)).await,
             (Some(command), None) => manager.central(command).await.map_err(|e| e.code),
             (None, Some(ResourceCall::Providers)) => manager.providers().await.map_err(|e| e.code),
             (None, Some(ResourceCall::Enroll(input))) => manager

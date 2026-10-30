@@ -220,6 +220,7 @@ mod shared_intake;
 mod shared_budget;
 
 struct Inner {
+    encrypted_approvals: Option<::hagency::encrypted_approvals::Inbox>,
     origin: String,
     owner: String,
     epoch: u64,
@@ -302,6 +303,7 @@ impl Service {
         }
         let state = Self::state_for(&origin, &owner)?;
         let service = Self(Arc::new(Inner {
+            encrypted_approvals: Some(::hagency::encrypted_approvals::Inbox::attach(&client)),
             origin,
             owner,
             epoch,
@@ -604,7 +606,40 @@ impl Service {
         use ::hagency::native_owner::{ManagementCommand,ManagementPackage,ManagementPermission};
         if !matches!(&command,ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..}) {return Err("invalid_permission_command".into());}
         let manager=self.management(ManagementPackage{digest:blake3::hash(b"hagency-native-chat-permissions-v1").to_hex().to_string(),instance:1,account_epoch:1,permissions:vec![ManagementPermission::ReadAgentWork,ManagementPermission::DecideAgentRequests]}).await?;
-        let result=manager.central(command).await.map_err(|e|e.code)?;self.check()?;Ok(result)
+        self.shared_permissions_with(manager,command).await
+    }
+    pub(crate) async fn shared_permissions_with(&self,manager:Arc<::hagency::native_owner::NativeManagement>,command: ::hagency::native_owner::ManagementCommand)->Result<Value,String> {
+        use ::hagency::native_owner::ManagementCommand;
+        self.check()?;
+        if !matches!(&command,ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..}) {return Err("invalid_permission_command".into());}
+        if let ManagementCommand::SharedApprovalDecide{id,digest,decision}=&command {
+            let row=match manager.central(ManagementCommand::SharedApprovalGet{id:id.clone()}).await {
+                Ok(row)=>row,
+                // Older servers have only plaintext approvals.
+                Err(e) if e.status==404=>{let result=manager.central(command).await.map_err(|e|e.code)?;self.check()?;return Ok(result);},
+                Err(e)=>return Err(e.code),
+            };
+            self.check()?;
+            if row["approval"]["id"]!=*id || row["digest"]!=*digest {return Err("permission_request_changed".into());}
+            if row["approval"]["request"].get("encrypted").is_some() {
+                if row["canDecide"]!=true || self.0.encrypted_approvals.as_ref().ok_or("encrypted_approval_unavailable")?.details(&row).map_err(str::to_owned)?.is_none(){return Err("encrypted_approval_details_pending".into());}
+                let client=crate::sliding_sync::get_client().ok_or("matrix_sign_in_required")?;
+                // Keep the SDK crypto future out of every mini-app host request's
+                // inline state, including requests that never send a decision.
+                tokio::time::timeout(std::time::Duration::from_secs(15),Box::pin(::hagency::encrypted_approvals::send_decision(&client,&row,decision))).await.map_err(|_|"encrypted_approval_delivery_pending")?.map_err(str::to_owned)?;
+                self.check()?;
+            }
+        }
+        let mut result=manager.central(command).await.map_err(|e|e.code)?;self.check()?;
+        if let Some(rows)=result.get_mut("approvals").and_then(Value::as_array_mut) {
+            for row in rows {
+                if row["approval"]["request"].get("encrypted").is_none(){continue;}
+                let details=self.0.encrypted_approvals.as_ref().ok_or("encrypted_approval_unavailable")?.details(row).map_err(str::to_owned)?;
+                row["encryptedPending"]=Value::Bool(details.is_none());
+                if let Some(details)=details {row["approval"]["request"]=details;}else{row["canDecide"]=Value::Bool(false);}
+            }
+        }
+        Ok(result)
     }
     pub async fn management(&self, mut package: ::hagency::native_owner::ManagementPackage) -> Result<Arc<::hagency::native_owner::NativeManagement>, String> {
         self.check()?;

@@ -23,13 +23,16 @@ let Fit=2
 let FitBound={Abs:fn(value){return value}}
 let Down=3
 let Right=4
+let Overlay=5
 let Flow={Right:{}}
+let MouseCursor={Default:0 Hand:1}
+let TextOverflow={Ellipsis:0}
 let Walk={}
 let Align={}
 let Inset={}
 let instance=fn(value){return value}
 let uniform=fn(value){return value}
-let theme={corner_radius:4 font_bold:{}}
+let theme={corner_radius:4 font_bold:{} font_regular:{} font_code:{}}
 mod.widgets={}
 mod.rinx_icons={}
 mod.rinx_theme={reloading:fn(){return false}}
@@ -40,7 +43,7 @@ let start_timeout=fn(delay,callback){timers.push(callback)}
 let host={request:fn(service,args,callback){}}
 '''
  for key in sorted(set(re.findall(r'mod\.widgets\.([A-Za-z_0-9]+)',source))):
-  value='1' if key.startswith('RINX_') else '{..base body:{page:{}}}' if key=='RinxPageScroll' else 'base'
+  value='1' if key.startswith('RINX_') else '{..base body:{page:{}}}' if key=='RinxPageScroll' else '{..base input:base}' if key=='RinxNumberInput' else 'base'
   prefix+=f'mod.widgets.{key}={value}\n'
  for key in sorted(set(re.findall(r'mod\.rinx_icons\.([A-Za-z_0-9]+)',source))):prefix+=f'mod.rinx_icons.{key}=1\n'
  return prefix+'View{\n'+source+'\n}\n'
