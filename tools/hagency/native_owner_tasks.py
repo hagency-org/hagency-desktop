@@ -39,6 +39,12 @@ class Owner(Accounts):
   return super().visible(name)
  def set_fixtures(self,data):
   self.fixture_path.write_text(json.dumps(data));self.req('/event',data='ux:reload-fixtures')
+ def pool_top(self):
+  # Back restores the pool page where it was scrolled; return to its top.
+  self.wait(lambda:any(r.get('i')=='resource_back' and r['r'][2]>0 for r in self.snap()))
+  width,height=self.req('/s')['w'][0]['sz']
+  self.req('/m',k='scroll',x=width/2,y=height-100,dy=-10000,wait=1)
+  self.wait(lambda:self.row('resource_alerts_open')['r'][2]>0)
  def text_present(self,text):return any(text in r.get('t','') for r in self.snap())
  def run(self):
   f=fixtures();self.set_fixtures(f)
@@ -90,7 +96,7 @@ class Owner(Accounts):
   self.click('resource_advanced');self.wait(lambda:self.row('resource_publish_review')['r'][2]>0)
   self.click('resource_publish_review');self.wait(lambda:self.row('resource_publish_confirm')['r'][2]>0);self.shot('07b-catalogue-alert')
   self.click('resource_publish_cancel')
-  self.click('sub_back');self.wait(lambda:self.row('resource_alerts_open')['r'][2]>0)
+  self.click('sub_back');self.pool_top()
   # The status pill opens Server and publishing; there is no Servers tile.
   assert not any(r.get('i')=='resource_all_connections' for r in self.snap())
   self.visible('resource_alerts_open');self.shot('07c-pool-manage-tiles')
