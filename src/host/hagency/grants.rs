@@ -16,6 +16,8 @@ use std::sync::{
 };
 
 pub(crate) const REVIEW_GRANT: &str = "hagency.grants.review";
+/// Read-only: who may request from a pool this month, from the native record.
+pub(crate) const APPLICANTS: &str = "hagency.grants.applicants";
 /// Largest grant amount, in tokens, that stays an exact JSON integer.
 pub(crate) const MAX_GRANT_TOKENS: u64 = 9_007_199_254_740_991;
 
@@ -64,6 +66,14 @@ pub(crate) fn matrix_user(id: &str) -> bool {
 fn server_of(id: &str) -> Option<&str> {
     id.split_once(':').map(|(_, server)| server)
 }
+/// A pool or record ID a script may name: 1-128 ASCII letters, digits, `_` or `-`.
+fn grant_key(key: &str) -> bool {
+    !key.is_empty()
+        && key.len() <= 128
+        && key
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
+}
 impl Selector {
     fn parse(value: Value) -> Result<Self, String> {
         let mut value: Self = parse(value)?;
@@ -72,13 +82,7 @@ impl Selector {
             .flatten()
             .collect();
         if keys.len() != 1
-            || keys.iter().any(|key| {
-                key.is_empty()
-                    || key.len() > 128
-                    || !key
-                        .bytes()
-                        .all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-')
-            })
+            || keys.iter().any(|key| !grant_key(key))
             || value.proposed_tokens.is_some_and(|tokens| {
                 value.contribution_id.is_none() || tokens == 0 || tokens > MAX_GRANT_TOKENS
             })
@@ -208,6 +212,88 @@ pub(crate) fn unfinished_successor(record: &OwnerGrantProgress) -> bool {
         && !(matches!(record.state, OwnerGrantState::Recorded)
             && matches!(record.succession_state, Some(OwnerGrantSuccessionState::Effective)))
 }
+/// `hagency.grants.applicants`: one pool, named by its contribution. Nothing
+/// else a script sends can widen or steer the read.
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct ApplicantsQuery {
+    contribution_id: String,
+}
+impl ApplicantsQuery {
+    pub(crate) fn parse(value: Value) -> Result<Self, String> {
+        let query: Self = parse(value)?;
+        if !grant_key(&query.contribution_id) {
+            return Err("invalid_management_arguments".into());
+        }
+        Ok(query)
+    }
+}
+/// This UTC month's grant in force for one pool, among its native records in
+/// journal (creation) order: recorded, not closed, in its month now, a root or
+/// a successor the native ledger marked effective, and not replaced by an
+/// effective amendment. A pending change or next month's scheduled renewal
+/// never stands in for it; the latest such record wins.
+pub(crate) fn effective_original(
+    records: &[OwnerGrantProgress],
+    now: u64,
+) -> Option<&OwnerGrantProgress> {
+    let in_force = |record: &OwnerGrantProgress| {
+        matches!(record.state, OwnerGrantState::Recorded)
+            && record.closure.is_none()
+            && matches!(
+                record.succession_state,
+                None | Some(OwnerGrantSuccessionState::Effective)
+            )
+    };
+    let replaced: std::collections::BTreeSet<&str> = records
+        .iter()
+        .filter(|record| in_force(record) && record.summary.period_start_ms <= now)
+        .filter_map(|record| record.summary.succession.as_ref())
+        .map(|succession| succession.predecessor_grant_id.as_str())
+        .collect();
+    records.iter().rev().find(|record| {
+        in_force(record)
+            && record.summary.period_start_ms <= now
+            && now < record.summary.period_end_ms
+            && !replaced.contains(record.summary.grant_id.as_str())
+    })
+}
+/// The page's read of this month's list. `state` says whether the server has
+/// it: `published`, `unconfirmed` (not known yet), `unpublished` (recorded on
+/// this computer only, or refused) or `none` (nothing in force this month).
+fn applicants_reply(
+    contribution: &str,
+    current: Option<&OwnerGrantProgress>,
+    state: &str,
+    change_pending: bool,
+) -> Value {
+    let summary = current.map(|record| &record.summary);
+    let mut applicants = summary.map(|s| s.eligible_managers.clone()).unwrap_or_default();
+    applicants.sort();
+    applicants.dedup();
+    serde_json::json!({
+        "contributionId": contribution,
+        "state": if summary.is_some() { state } else { "none" },
+        "periodKey": summary.map(|s| s.period_key.clone()),
+        "periodStartMs": summary.map(|s| s.period_start_ms),
+        "periodEndMs": summary.map(|s| s.period_end_ms),
+        "grantId": summary.map(|s| s.grant_id.clone()),
+        "applicants": applicants,
+        "changePending": change_pending,
+    })
+}
+/// What the server was last seen to hold for a recorded root grant.
+fn publication_state(publication: Option<&OwnerGrantPublicationProgress>) -> &'static str {
+    use ::hagency::native_owner::OwnerGrantPublicationState as Seen;
+    match publication {
+        None => "unpublished",
+        Some(p) => match (&p.state, p.server_state.as_deref()) {
+            (Seen::ServerObserved, Some("active")) => "published",
+            (Seen::ServerObserved, Some("revoked" | "expired")) | (Seen::Rejected, _) => "unpublished",
+            _ => "unconfirmed",
+        },
+    }
+}
 // Journal order is creation order. Cancelled, canonically closed, ended or
 // succeeded originals remain in history without hiding a pending, unknown,
 // active or scheduled original. A grant is succeeded once a live successor
@@ -305,6 +391,25 @@ impl GrantFlow {
     }
     pub fn can_choose_new_limits(&self) -> bool {
         self.selector.contribution_id.is_some()
+    }
+    /// The owner, reading a record opened by its intent, chose in the native
+    /// window to add people to that record's own pool. The pool comes from
+    /// the native record shown, never from the script; the amendment form,
+    /// its review and confirmation still commit everything natively.
+    pub fn for_record_pool(&self, contribution: String) -> Result<Self, String> {
+        if self.selector.intent_id.is_none() || !grant_key(&contribution) {
+            return Err("owner_grant_original_intent_required".into());
+        }
+        let mut flow = self.clone();
+        flow.selector = Selector {
+            contribution_id: Some(contribution),
+            intent_id: None,
+            proposed_tokens: None,
+            succession: Some(Succession::Amendment),
+            applicants: None,
+        };
+        flow.check()?;
+        Ok(flow)
     }
     /// The script's proposed amount for the native tokens field, if any.
     pub fn proposed_tokens(&self) -> Option<u64> {
@@ -504,10 +609,13 @@ impl GrantFlow {
             self.check()?;
             if let Some(publication) = publication {
                 // A published grant with a proposal or a requested change can
-                // be amended only if the server advertises succession.
+                // be amended only if the server advertises succession, and a
+                // record opened by itself offers to add people only then.
                 // A failed probe leaves support unknown, which keeps today's
                 // read-only answer; it never hides the published grant.
-                if (self.selector.proposed_tokens.is_some() || self.selector.succession.is_some())
+                if (self.selector.proposed_tokens.is_some()
+                    || self.selector.succession.is_some()
+                    || self.selector.intent_id.is_some())
                     && self.succession_supported().is_none()
                 {
                     let _ = self.refresh_succession_support().await;
@@ -537,14 +645,11 @@ impl GrantFlow {
     }
 }
 impl Host {
-    pub fn grant_handoff(&self, lease: Lease, args: Value) -> Result<GrantFlow, String> {
-        let selector = Selector::parse(args)?;
-        let account = self.check(&lease)?;
-        lease.authorize(&account, REVIEW_GRANT, None)?;
-        selector.check_applicants(&account)?;
-        // Only the native adoption handoff or authenticated descriptor reload
-        // can supply this qualified registry/session. This script selector
-        // cannot choose a path or initialize a new resource authority.
+    /// The owner's native grant access, bound to this host and package lease.
+    /// Only the native adoption handoff or authenticated descriptor reload can
+    /// supply this qualified registry/session; a script cannot choose a path
+    /// or initialize a new resource authority.
+    fn host_grant_access(&self, lease: &Lease) -> Result<OwnerGrantAccess, String> {
         let access = self
             .0
             .grant_access
@@ -554,7 +659,7 @@ impl Host {
             .ok_or("owner_source_adoption_required")?;
         let weak = std::sync::Arc::downgrade(&self.0);
         let gate_lease = lease.clone();
-        let access = access
+        access
             .restrict_to_host(move || {
                 weak.upgrade().is_some_and(|host| {
                     !host.retired.load(std::sync::atomic::Ordering::Acquire)
@@ -562,7 +667,61 @@ impl Host {
                         && gate_lease.check(&host.identity.account).is_ok()
                 })
             })
-            .map_err(|error| error.code)?;
+            .map_err(|error| error.code)
+    }
+    /// `hagency.grants.applicants`: this month's people who may request from
+    /// one pool, read from the native records the native grant window reads.
+    /// Read-only: it lists and recovers records and observes a root's
+    /// publication; it never prepares, confirms, publishes or retries.
+    pub(crate) async fn grant_applicants(&self, lease: &Lease, args: Value) -> Result<Value, String> {
+        let account = self.check(lease)?;
+        lease.authorize(&account, APPLICANTS, None)?;
+        let query = ApplicantsQuery::parse(args)?;
+        // The adopted grant access is attached when the manager starts.
+        self.manager(lease).await?;
+        let access = self.host_grant_access(lease)?;
+        let check = |access: &OwnerGrantAccess| -> Result<(), String> {
+            let account = self.check(lease)?;
+            lease.authorize(&account, APPLICANTS, None)?;
+            if access.retired() {
+                return Err("management_scope_changed".into());
+            }
+            Ok(())
+        };
+        let originals = access.list_existing().await.map_err(|e| e.code)?;
+        check(&access)?;
+        let mut records = Vec::new();
+        for original in originals
+            .into_iter()
+            .filter(|original| original.contribution_id == query.contribution_id)
+        {
+            records.push(access.recover(original.intent_id).await.map_err(|e| e.code)?);
+            check(&access)?;
+        }
+        let change_pending = records.iter().any(unfinished_successor);
+        let current = effective_original(&records, now_ms());
+        let state = match current {
+            // The native ledger marks a successor effective only once the
+            // server was seen to accept it.
+            Some(record) if record.summary.succession.is_some() => "published",
+            Some(record) => {
+                let seen = access
+                    .observe_publication(record.summary.intent_id.clone())
+                    .await
+                    .map_err(|e| e.code)?;
+                check(&access)?;
+                publication_state(seen.as_ref())
+            }
+            None => "none",
+        };
+        Ok(applicants_reply(&query.contribution_id, current, state, change_pending))
+    }
+    pub fn grant_handoff(&self, lease: Lease, args: Value) -> Result<GrantFlow, String> {
+        let selector = Selector::parse(args)?;
+        let account = self.check(&lease)?;
+        lease.authorize(&account, REVIEW_GRANT, None)?;
+        selector.check_applicants(&account)?;
+        let access = self.host_grant_access(&lease)?;
         let flow = GrantFlow {
             host: self.clone(),
             lease,
@@ -622,6 +781,121 @@ mod tests {
         p.summary.period_start_ms = start;
         p.summary.period_end_ms = end;
         p
+    }
+    #[test]
+    fn applicants_read_names_one_pool_and_nothing_else() {
+        let query = ApplicantsQuery::parse(json!({"contributionId": "pool_original-2"})).unwrap();
+        assert_eq!(query.contribution_id, "pool_original-2");
+        for forged in [
+            json!({}),
+            json!({"contributionId": ""}),
+            json!({"contributionId": "../pool"}),
+            json!({"contributionId": "pool one"}),
+            json!({"contributionId": "p".repeat(129)}),
+            json!({"contributionId": 7}),
+            json!({"contributionId": "pool", "intentId": "intent"}),
+            json!({"contributionId": "pool", "applicants": ["@a:test"]}),
+            json!({"contributionId": "pool", "proposedTokens": 1}),
+            json!({"contributionId": "pool", "grantId": "grant"}),
+            json!({"contributionId": "pool", "ownerMxid": "@owner:test"}),
+            json!({"contributionId": "pool", "succession": "amendment"}),
+            json!(["pool"]),
+        ] {
+            assert_eq!(ApplicantsQuery::parse(forged.clone()).unwrap_err(), "invalid_management_arguments", "{forged}");
+        }
+        assert_eq!(ApplicantsQuery::parse(json!({"contributionId": "p".repeat(128)})).unwrap().contribution_id.len(), 128);
+        assert!(octosense_app_contract::hagency::SERVICES.contains(&APPLICANTS));
+        assert!(octosense_app_contract::KNOWN_CAPABILITIES.contains(&APPLICANTS));
+        assert!(octosense_app_contract::hagency::words(APPLICANTS).is_some());
+        let shipped: Value = serde_json::from_str(include_str!("../../../apps/hagency/bundle/manifest.json")).unwrap();
+        assert!(shipped["capabilities"].as_array().unwrap().iter().any(|cap| cap == APPLICANTS));
+        // A read, like grants.review: no management permission comes with it.
+        let identity = crate::miniapps::InstanceId {
+            app: octosense_app_contract::hagency::APP_ID.into(),
+            account: "@owner:test".into(),
+            room: None,
+            generation: 1,
+        };
+        let lease = rinx_miniapp_core::SessionAuthority::default().issue(
+            identity,
+            [APPLICANTS.to_owned()].into(),
+            Default::default(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        assert!(super::super::permissions(&lease).is_empty());
+    }
+    #[test]
+    fn this_months_list_comes_from_the_grant_in_force() {
+        let id = |record: Option<&OwnerGrantProgress>| record.map(|r| r.summary.grant_id.clone());
+        let root = progress("root", OwnerGrantState::Recorded);
+        assert_eq!(id(effective_original(std::slice::from_ref(&root), OCTOBER)), Some("grant_root".into()));
+        // An amendment the ledger marked effective replaces it; a pending one doesn't.
+        let mut amended = successor("amend", &root, OwnerGrantSuccessionKind::Amendment, OwnerGrantState::Recorded,
+            Some(OwnerGrantSuccessionState::Effective));
+        amended.summary.eligible_managers = vec!["@manager:test".into(), "@lisi:test".into()];
+        assert_eq!(id(effective_original(&[root.clone(), amended.clone()], OCTOBER)), Some("grant_amend".into()));
+        let pending = successor("amend", &root, OwnerGrantSuccessionKind::Amendment, OwnerGrantState::Recorded,
+            Some(OwnerGrantSuccessionState::Pending));
+        assert_eq!(id(effective_original(&[root.clone(), pending], OCTOBER)), Some("grant_root".into()));
+        for rejected in [OwnerGrantSuccessionState::Rejected, OwnerGrantSuccessionState::Cancelled] {
+            let change = successor("amend", &root, OwnerGrantSuccessionKind::Amendment, OwnerGrantState::Recorded, Some(rejected));
+            assert_eq!(id(effective_original(&[root.clone(), change], OCTOBER)), Some("grant_root".into()));
+        }
+        // A change still under review, or one whose outcome isn't known, isn't in force.
+        let unknown = successor("amend", &root, OwnerGrantSuccessionKind::Amendment, OwnerGrantState::OutcomeUnknown, None);
+        assert_eq!(id(effective_original(&[root.clone(), unknown], OCTOBER)), Some("grant_root".into()));
+        // Next month's renewal, even scheduled and effective, never stands in for this month.
+        let renewal = in_month(
+            successor("renew", &amended, OwnerGrantSuccessionKind::Renewal, OwnerGrantState::Recorded, Some(OwnerGrantSuccessionState::Effective)),
+            "2026-11", NOVEMBER, 1_796_083_200_000,
+        );
+        let chain = [root.clone(), amended.clone(), renewal];
+        assert_eq!(id(effective_original(&chain, OCTOBER)), Some("grant_amend".into()));
+        // Once November starts, the renewal is the grant in force.
+        assert_eq!(id(effective_original(&chain, NOVEMBER + 1)), Some("grant_renew".into()));
+        // A month that has ended, a closed grant and a discarded publish give nothing.
+        assert!(effective_original(std::slice::from_ref(&root), NOVEMBER).is_none());
+        let mut closed = root.clone();
+        closed.closure = Some(::hagency::native_owner::OwnerGrantClosure {
+            retained_tokens: 0, known_consumed_tokens: 0, unresolved_tokens: 0, observed_at_ms: 1,
+        });
+        assert!(effective_original(&[closed], OCTOBER).is_none());
+        for state in [OwnerGrantState::Declined, OwnerGrantState::ReviewRequired, OwnerGrantState::ReviewExpired, OwnerGrantState::OutcomeUnknown] {
+            assert!(effective_original(&[progress("root", state)], OCTOBER).is_none());
+        }
+        // Last month's grant stays history beside this month's regrant.
+        let september = in_month(progress("sep", OwnerGrantState::Recorded), "2026-09", 1_788_220_800_000, 1_790_812_800_000);
+        assert_eq!(id(effective_original(&[september, root.clone()], OCTOBER)), Some("grant_root".into()));
+        // The reply lists the people in force, sorted, and says whether the server has them.
+        let reply = applicants_reply("contribution", Some(&amended), "published", true);
+        assert_eq!(reply, json!({
+            "contributionId": "contribution", "state": "published", "periodKey": "2026-10",
+            "periodStartMs": 1790812800000u64, "periodEndMs": 1793491200000u64, "grantId": "grant_amend",
+            "applicants": ["@lisi:test", "@manager:test"], "changePending": true,
+        }));
+        assert_eq!(applicants_reply("contribution", None, "published", false), json!({
+            "contributionId": "contribution", "state": "none", "periodKey": null, "periodStartMs": null,
+            "periodEndMs": null, "grantId": null, "applicants": [], "changePending": false,
+        }));
+    }
+    #[test]
+    fn a_root_list_is_published_only_once_the_server_holds_it_active() {
+        use ::hagency::native_owner::OwnerGrantPublicationState as Seen;
+        let seen = |state: Seen, server: Option<&str>| OwnerGrantPublicationProgress {
+            summary: progress("root", OwnerGrantState::Recorded).summary,
+            state,
+            server_state: server.map(str::to_owned),
+            server_revision: server.map(|_| 1),
+            observed_at_ms: server.map(|_| 1),
+        };
+        assert_eq!(publication_state(None), "unpublished");
+        assert_eq!(publication_state(Some(&seen(Seen::ServerObserved, Some("active")))), "published");
+        assert_eq!(publication_state(Some(&seen(Seen::ServerObserved, Some("revoked")))), "unpublished");
+        assert_eq!(publication_state(Some(&seen(Seen::ServerObserved, Some("expired")))), "unpublished");
+        assert_eq!(publication_state(Some(&seen(Seen::ServerObserved, Some("superseded")))), "unconfirmed");
+        assert_eq!(publication_state(Some(&seen(Seen::ServerObserved, None))), "unconfirmed");
+        assert_eq!(publication_state(Some(&seen(Seen::OutcomeUnknown, None))), "unconfirmed");
+        assert_eq!(publication_state(Some(&seen(Seen::Rejected, None))), "unpublished");
     }
     #[test]
     fn closed_originals_never_hide_pending_unknown_or_recorded_effects() {

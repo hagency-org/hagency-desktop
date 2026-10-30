@@ -43,6 +43,7 @@ mod budget;
 mod allocations;
 pub(crate) mod grants;
 pub(crate) mod execution;
+pub(crate) mod local_zone;
 
 pub(crate) const CONNECT_PROVIDER: &str = "hagency.providers.connect";
 
@@ -477,6 +478,7 @@ impl Host {
             return Err("shared_intake_disabled".into());
         }
         if service == execution::LIST { return self.execution_assignments(&lease,args).await; }
+        if service == grants::APPLICANTS { return rinx_miniapp_core::bounded_reply(self.grant_applicants(&lease, args).await?); }
         if service == execution::REVIEW || service == execution::RESUME {let _ = execution::Selection::parse(args)?;return Err("native_execution_confirmation_required".into());}
         if service == "hagency.onboarding.status" {
             let _:Empty=parse(args)?;
@@ -808,7 +810,7 @@ impl Host {
         };
         self.check(&lease)?;
         lease.authorize(&account, service, None)?;
-        rinx_miniapp_core::bounded_reply(budget::display_reply(service, control::display_reply(service, allocations::display_reply(service, agents::display_reply(service, result?)?)?)?)?)
+        rinx_miniapp_core::bounded_reply(budget::display_reply(service, control::display_reply(service, allocations::display_reply(service, agents::display_reply(service, local_zone::display(service, result?))?)?)?)?)
     }
 }
 fn value(input: impl serde::Serialize) -> Result<Value, String> {

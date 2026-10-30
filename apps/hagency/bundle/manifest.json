@@ -34,6 +34,7 @@
     "hagency.onboarding.status",
     "hagency.onboarding.review",
     "hagency.grants.review",
+    "hagency.grants.applicants",
     "hagency.agents.settlement.get",
     "hagency.agents.settlement.request",
     "hagency.agents.removal.get",
