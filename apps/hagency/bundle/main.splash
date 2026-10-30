@@ -4543,7 +4543,8 @@ A.pool_meta_load=fn(){
     let counts=[]
     for index item in rids {let rid=item if index<16 {
         A.pool_enqueue_run(epoch,fn(done){A.tools_attention(rid,fn(t){A.health_attention(rid,fn(c){
-            if epoch==H.pool_epoch {counts.push({rid:rid tools:A.pool_tools_count(t) own:A.pool_part(t.tools) shared:A.pool_part(t.shared) alerts:A.pool_part(c.alerts) stopped:A.pool_part(c.stopped) workspaces:A.pool_part(c.workspaces)}) m.counts=counts}
+            // Shown together once every pool is counted, so rows don't shift one pool at a time.
+            if epoch==H.pool_epoch {counts.push({rid:rid tools:A.pool_tools_count(t) own:A.pool_part(t.tools) shared:A.pool_part(t.shared) alerts:A.pool_part(c.alerts) stopped:A.pool_part(c.stopped) workspaces:A.pool_part(c.workspaces)}) if counts.len()>=min(16,rids.len()) {m.counts=counts}}
             done()
         })})})
     }}
@@ -4639,6 +4640,8 @@ A.pool_todo=fn(){
     if pending>0 {out.push({kind:"requests" count:pending rid:"" row:nil fix:false})}
     for row in A.pool_lapsed_rows() {out.push({kind:"publish" count:1 rid:row.id row:row fix:false})}
     if m==nil {return out}
+    // Per-pool rows join once every pool's counts are in, so the list doesn't grow under a finger.
+    if m.counts.len()<min(16,H.resources.len()) {return out}
     let shared={n:0 rid:""}
     for row in H.resources {for c in m.counts {if c.rid==row.id {
         let own=A.recipient_optional(c,"own")
