@@ -85,6 +85,8 @@ pub(crate) struct CeilingFacts {
     pub committed: Option<u64>,
     /// The live per-request limit, which this change never touches.
     pub per_request: Option<u64>,
+    /// The coding account's limit, the highest the maximum can go.
+    pub account_limit: Option<u64>,
 }
 
 /// A review that could not be shown, with the facts read beside it so the
@@ -163,27 +165,67 @@ impl ResourceEditConsent {
         let account = self.host.check(&self.lease)?;
         self.lease.authorize(&account, EDIT, None)
     }
-    pub async fn load(mut self) -> Result<Self, EditRefusal> {
-        self.authorize().map_err(EditRefusal::plain)?;
-        let manager = self.host.manager(&self.lease).await.map_err(EditRefusal::plain)?;
-        self.authorize().map_err(EditRefusal::plain)?;
+    /// Read back the request for review. The consent always comes back, so
+    /// a refused monthly-maximum amendment can be reviewed again with
+    /// another value: a review writes nothing, and the writer repeats every
+    /// check when the owner confirms.
+    pub async fn review(mut self) -> (Self, Result<(), EditRefusal>) {
+        self.review = None;
+        if let Err(code) = self.authorize() {
+            return (self, Err(EditRefusal::plain(code)));
+        }
+        let manager = match self.host.manager(&self.lease).await {
+            Ok(manager) => manager,
+            Err(code) => return (self, Err(EditRefusal::plain(code))),
+        };
+        if let Err(code) = self.authorize() {
+            return (self, Err(EditRefusal::plain(code)));
+        }
         let review = manager.review_local_resource_edit(&self.input).await;
-        // A monthly-maximum request also reads the pool's committed total, so
-        // the sheet can name the floor before and after a refusal.
+        // A monthly-maximum request also reads the pool's floor, so the
+        // sheet can name it before and after a refusal.
         let facts = if self.amendment_requested() {
             self.ceiling_facts(&manager).await
         } else {
             None
         };
-        self.authorize().map_err(EditRefusal::plain)?;
+        if let Err(code) = self.authorize() {
+            return (self, Err(EditRefusal::plain(code)));
+        }
         match review {
             Ok(review) => {
                 self.review = Some(review);
                 self.facts = facts;
-                Ok(self)
+                (self, Ok(()))
             }
-            Err(error) => Err(EditRefusal { code: error.code, facts }),
+            Err(error) => {
+                self.facts = facts.clone();
+                (self, Err(EditRefusal { code: error.code, facts }))
+            }
         }
+    }
+    /// The monthly maximum this request proposes.
+    pub fn proposed_tokens(&self) -> Option<u64> {
+        match &self.input.ceiling {
+            CeilingChange::Monthly { tokens } => Some(u64::from(*tokens)),
+            _ => None,
+        }
+    }
+    /// Choose another monthly maximum natively, for a monthly-maximum
+    /// amendment only. The previous review no longer applies; the request
+    /// must be reviewed again before it can be saved.
+    pub fn set_ceiling_tokens(&mut self, tokens: u64) -> Result<(), String> {
+        if !self.amendment_requested() {
+            return Err("invalid_management_arguments".into());
+        }
+        let tokens = tokens.try_into().map_err(|_| "invalid_management_arguments".to_owned())?;
+        let previous = std::mem::replace(&mut self.input.ceiling, CeilingChange::Monthly { tokens });
+        if self.input.validate().is_err() {
+            self.input.ceiling = previous;
+            return Err("invalid_management_arguments".into());
+        }
+        self.review = None;
+        Ok(())
     }
     /// The pool's maximum, committed total and per-request limit, read from
     /// its own record. A failed read only leaves the sheet without them.
@@ -206,6 +248,7 @@ impl ResourceEditConsent {
             },
             committed: detail.ceiling_amendment.minimum_tokens,
             per_request: detail.ceiling_amendment.per_request_tokens,
+            account_limit: detail.resource.budget.seat.quota.map(u64::from),
         })
     }
     /// The amendment shown for confirmation, when this is one.

@@ -203,6 +203,20 @@ script_mod! {
             people := View {visible: false width: Fill{max: 640} height: Fit flow: Down spacing: 6
                 people_label := SheetCaption {}
                 list := SheetGroup {
+                    // A list the window doesn't change: one row that opens in place.
+                    people_toggle_row := View {visible: false width: Fill height: 48 flow: Overlay
+                        people_toggle := SheetRowButton {text: ""}
+                        people_toggle_body := View {width: Fill height: Fill flow: Right spacing: 8 padding: Inset{left: 16 right: 16} align: Align{y: 0.5}
+                            people_toggle_label := RinxLabel {width: Fill}
+                            people_toggle_value := RinxLabel {width: Fit draw_text +: {color: RINX_MUTED}}
+                            people_closed := View {width: Fit height: Fit
+                                Icon {width: 14 height: 14 icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: mod.rinx_icons.expand color: RINX_MUTED}}
+                            }
+                            people_opened := View {visible: false width: Fit height: Fit
+                                Icon {width: 14 height: 14 icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: mod.rinx_icons.collapse color: RINX_MUTED}}
+                            }
+                        }
+                    }
                     p0 := SheetPerson {} p1 := SheetPerson {} p2 := SheetPerson {} p3 := SheetPerson {}
                     p4 := SheetPerson {} p5 := SheetPerson {} p6 := SheetPerson {} p7 := SheetPerson {}
                     more_people := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 top: 5 bottom: 5}}
@@ -817,6 +831,8 @@ impl MiniAppsPanel {
         if let Some(sheet) = &ceiling {
             self.apply_sheet(cx, id!(ceiling_confirmation), sheet);
             self.apply_sheet_disclosure(cx, id!(ceiling_confirmation), sheet.more_open);
+            let inputs = self.provider_confirmation.as_ref().and_then(|pending| pending.consent.ceiling()).and_then(|prompt| prompt.inputs());
+            self.apply_ceiling_inputs(cx, inputs);
             self.view.view(cx, ids!(app_content)).set_visible(cx, false);
             self.view.view(cx, ids!(approval)).set_visible(cx, false);
         } else if let Some(pending) = &self.provider_confirmation {
@@ -864,9 +880,12 @@ impl MiniAppsPanel {
         match fixture["panel"].as_str() {
             Some("grant") => self.preview_grant(cx, fixture)?,
             Some("maximum") => {
-                let sheet = resource_edit_ui::preview(fixture)?;
+                let preview = resource_edit_ui::CeilingPreview::from_fixture(fixture)?;
+                let state = preview.state();
+                let sheet = resource_edit_ui::ceiling_view(&state);
                 self.apply_sheet(cx, id!(ceiling_confirmation), &sheet);
                 self.apply_sheet_disclosure(cx, id!(ceiling_confirmation), sheet.more_open);
+                self.apply_ceiling_inputs(cx, resource_edit_ui::ceiling_inputs(&state));
                 self.view.view(cx, ids!(ceiling_confirmation)).set_visible(cx, true);
             }
             _ => return Err("unknown preview panel".into()),
@@ -904,15 +923,25 @@ impl MiniAppsPanel {
     /// then it shows the result; closing answers the mini app exactly once.
     /// Returns false when the ordinary consent path should handle the tap.
     fn finish_ceiling(&mut self, cx: &mut Cx, approved: bool) -> bool {
+        self.capture_ceiling_choice(cx);
         let Some(prompt) = self.provider_confirmation.as_mut().and_then(|pending| pending.consent.ceiling_mut()) else { return false; };
-        let settled = prompt.saving() || prompt.sheet().primary_closes;
-        if approved && !settled {
-            if !prompt.save() { return false; }
+        let sheet = prompt.sheet();
+        // After a refusal at review: back to the slider at the amount that works.
+        if approved && sheet.primary_recovers {
+            prompt.rechoose();
             self.present_provider_confirmation(cx);
             self.request_confirmation_redraw(cx);
             return true;
         }
-        if !settled { return false; }
+        if approved && !prompt.saving() && !sheet.primary_closes {
+            if !prompt.save() { return true; }
+            self.present_provider_confirmation(cx);
+            self.request_confirmation_redraw(cx);
+            return true;
+        }
+        // Closing after a refusal, while saving or once done answers through
+        // the sheet, so the mini app hears the refusal or the result.
+        if !(prompt.saving() || sheet.primary_closes || prompt.refused()) { return false; }
         let close = prompt.close();
         let Some(pending) = self.provider_confirmation.take() else { return true; };
         match close {
@@ -936,6 +965,30 @@ impl MiniAppsPanel {
         self.view.redraw(cx);
         true
     }
+    /// The monthly-maximum slider: its bounds and the value the sheet stands for.
+    fn apply_ceiling_inputs(&mut self, cx: &mut Cx, inputs: Option<(u64, u64, u64)>) {
+        let Some((minimum, maximum, value)) = inputs else { return; };
+        let widget = self.view.widget(cx, ids!(ceiling_confirmation.scroll.quota.tokens));
+        if let Some(mut editor) = widget.borrow_mut::<crate::miniapps::design::MiniAppNumberInput>() {
+            editor.set_minimum(cx, minimum);
+            editor.set_maximum(cx, maximum);
+        }
+        widget.set_text(cx, &value.to_string());
+    }
+    /// Read the monthly-maximum slider back into the sheet, which then
+    /// shows the new value, its checks and its Save without refilling the
+    /// field the owner is using.
+    fn capture_ceiling_choice(&mut self, cx: &mut Cx) {
+        let choosing = self.provider_confirmation.as_ref().and_then(|pending| pending.consent.ceiling()).is_some_and(|prompt| prompt.sheet().choosing);
+        if !choosing { return; }
+        let text = self.view.widget(cx, ids!(ceiling_confirmation.scroll.quota.tokens)).text();
+        let tokens = text.trim().parse::<u64>().ok();
+        let Some(prompt) = self.provider_confirmation.as_mut().and_then(|pending| pending.consent.ceiling_mut()) else { return; };
+        if !prompt.choose(tokens) { return; }
+        let sheet = prompt.sheet();
+        self.apply_sheet(cx, id!(ceiling_confirmation), &sheet);
+        self.request_confirmation_redraw(cx);
+    }
     /// Keyboard for the monthly-maximum sheet: Escape closes, Tab moves
     /// between the disclosure and the footer, Return or Space activates.
     fn ceiling_key(&mut self, cx: &mut Cx, event: &Event) -> bool {
@@ -949,6 +1002,12 @@ impl MiniAppsPanel {
         let cancel = self.view.button(cx, ids!(ceiling_confirmation.buttons.cancel)).area();
         let primary = self.view.button(cx, ids!(ceiling_confirmation.buttons.primary)).area();
         let mut targets = Vec::new();
+        if sheet.choosing && sheet.quota_visible {
+            if let Some(slider) = self.view.widget(cx, ids!(ceiling_confirmation.scroll.quota.tokens.slider_wrap.amount_slider)).borrow::<crate::miniapps::design::MiniAppAmountSlider>() {
+                targets.push(slider.focus_area());
+            }
+            targets.push(self.view.text_input(cx, ids!(ceiling_confirmation.scroll.quota.tokens.input)).area());
+        }
         if sheet.more_visible() {targets.push(more);}
         if !sheet.cancel.is_empty() {targets.push(cancel);}
         if sheet.primary_visible && sheet.primary_enabled {targets.push(primary);}
@@ -1741,6 +1800,7 @@ impl Widget for MiniAppsPanel {
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.more.more_row.more_toggle)).clicked(actions) {self.grant_disclose(cx);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.people_toggle_row.people_toggle)).clicked(actions) {self.grant_people_toggle(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.add.add_button)).clicked(actions) || add_field.returned(actions).is_some() {self.grant_add_person(cx);}
                 else if add_field.changed(actions).is_some() {self.grant_add_typing(cx);}
                 else {
@@ -1754,6 +1814,7 @@ impl Widget for MiniAppsPanel {
             self.handle_account_login_actions(cx,actions);
             if self.provider_confirmation.is_some() {
                 self.handle_personal_controls(cx,actions);
+                self.capture_ceiling_choice(cx);
                 if self.view.button(cx, ids!(ceiling_confirmation.buttons.primary)).clicked(actions) {
                     self.finish_provider_confirmation(cx, true);
                 } else if self.view.button(cx, ids!(ceiling_confirmation.buttons.cancel)).clicked(actions) {

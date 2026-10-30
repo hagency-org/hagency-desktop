@@ -1,7 +1,8 @@
 //! Load canonical readback before enabling the existing native consent footer.
 //! A monthly-maximum amendment has its own sheet in the confirmation family:
-//! it stays open while the change saves and then shows what changed, or why
-//! nothing did and which amount would work.
+//! the owner can adjust the maximum with a slider, it stays open while the
+//! change saves and then shows what changed, or why nothing did and which
+//! amount would work, with that amount one tap away.
 use super::*;
 use super::sheet_ui::{Fact, Figure, SheetGlyph, SheetTone, SheetView};
 use crate::host::hagency::resource_edit::{CeilingFacts, EditRefusal, ResourceEditConsent};
@@ -26,7 +27,7 @@ fn failure_text(code: Option<&str>, amendment: bool) -> &'static str {
         Some("management_ceiling_amendment_not_available") => "This pool’s monthly maximum can’t change right now. Close this window and refresh to see why.",
         Some("management_ceiling_clear_refused") => "A pool already offered to a server can’t drop its monthly maximum. You can lower it instead.",
         Some("management_ceiling_unchanged") => "The monthly maximum already has this value. Nothing was changed.",
-        Some("management_ceiling_below_commitments") => "The monthly maximum can’t be lower than what this month has committed: what was used plus what’s given to Agents.",
+        Some("management_ceiling_below_commitments") => "The monthly maximum can’t be lower than what this month has used and given out.",
         Some("management_ceiling_usage_unsettled") => "Some Agent use is still being reported, so the monthly maximum can only go up for now. Keep this computer online, then try again.",
         Some(_) => "The current settings couldn’t be confirmed. Close this window and refresh, then try again.",
     }
@@ -42,6 +43,14 @@ fn ceiling_refusal(code: &str) -> bool {
             | "management_ceiling_unchanged"
             | "management_ceiling_below_commitments"
             | "management_ceiling_usage_unsettled"
+    )
+}
+/// Refusals at review that the owner can fix in this window by choosing
+/// another value: a review writes nothing, so it can simply run again.
+fn ceiling_fixable(code: &str) -> bool {
+    matches!(
+        code,
+        "management_ceiling_unchanged" | "management_ceiling_below_commitments" | "management_ceiling_usage_unsettled"
     )
 }
 fn amount(tokens: Option<u64>) -> String {
@@ -64,6 +73,49 @@ pub(super) struct CeilingState<'a> {
     /// What saving returned: the saved amendment, or why it was refused.
     pub saved: Option<&'a Result<Value, String>>,
     pub more: bool,
+    /// The value the request proposed, known before its review arrives.
+    pub proposed: Option<u64>,
+    /// The value the owner chose with the slider here, if they moved it.
+    pub chosen: Option<u64>,
+    /// After a refusal the owner chose to pick again: the slider shows.
+    pub retrying: bool,
+    /// The chosen value is being reviewed before it saves.
+    pub reviewing: bool,
+    /// What the owner typed isn't an amount.
+    pub invalid: bool,
+}
+impl CeilingState<'_> {
+    fn previous(&self) -> Option<u64> {
+        self.review.map(|review| review.previous_tokens).or(self.facts.and_then(|facts| facts.current))
+    }
+    /// The value the sheet stands for now: the slider's, else the request's.
+    fn value(&self) -> Option<u64> {
+        self.chosen
+            .or(self.review.map(|review| review.tokens))
+            .or(self.facts.and_then(|facts| facts.proposed))
+            .or(self.proposed)
+    }
+    /// The lowest maximum allowed now: what this month used and gave out,
+    /// or the current maximum while use is still being reported.
+    fn floor(&self) -> u64 {
+        match self.facts {
+            Some(facts) => facts.committed.or(facts.current).unwrap_or(1).max(1),
+            None => 1,
+        }
+    }
+    /// The highest the slider reaches: the account limit when it is known.
+    fn top(&self) -> u64 {
+        let known = self.facts.and_then(|facts| facts.account_limit).filter(|limit| *limit > 0);
+        known.unwrap_or_else(|| self.previous().unwrap_or(0).max(self.value().unwrap_or(0)).saturating_mul(2).max(10_000_000))
+    }
+    /// The slider is shown: a review to confirm, or choosing again after a refusal.
+    fn choosing(&self) -> bool {
+        self.saved.is_none() && !self.saving && self.recorded.is_none() && (self.review.is_some() || self.retrying || self.reviewing)
+    }
+}
+/// The slider's (minimum, maximum, value) while the sheet shows it.
+pub(super) fn ceiling_inputs(s: &CeilingState) -> Option<(u64, u64, u64)> {
+    s.choosing().then(|| (s.floor(), s.top(), s.value().unwrap_or(0)))
 }
 /// Everything the monthly-maximum sheet shows, from native state only.
 pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
@@ -76,8 +128,8 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
         .or_else(|| facts.name.clone())
         .map(|name| name.trim().to_owned())
         .filter(|name| !name.is_empty());
-    let previous = s.review.map(|review| review.previous_tokens).or(facts.current);
-    let proposed = s.review.map(|review| review.tokens).or(facts.proposed);
+    let previous = s.previous();
+    let value = s.value();
     let per_request = s.review.and_then(|review| review.per_request_tokens).or(facts.per_request);
     let mut v = SheetView {
         glyph: SheetGlyph::Maximum,
@@ -88,12 +140,16 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
         more_open: s.more,
         cancel: tr("Cancel").into(),
         primary: tr("Save Monthly Maximum").into(),
+        quota_label: tr("Monthly maximum").into(),
         ..SheetView::default()
     };
     let mut technical = vec![(tr("Your account"), s.account.to_owned()), (tr("Resource ID"), s.resource_id.to_owned())];
     if let Some(review) = s.review {
         technical.push((tr("Change number"), review.sequence.to_string()));
         technical.push((tr("Resource revision"), review.revision.clone()));
+    }
+    if let Some(limit) = facts.account_limit {
+        technical.push((tr("Account limit"), amount(Some(limit))));
     }
     v.technical = technical
         .into_iter()
@@ -110,30 +166,31 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
                 None => tr("Unchanged").into(),
             },
         );
-        if done && proposed.zip(previous).is_some_and(|(new, old)| new > old) {
+        if done && value.zip(previous).is_some_and(|(new, old)| new > old) {
             fact.note(tr("To let each Agent get more at a time, raise it on the pool’s page."))
         } else {
             fact.note(tr("Change it separately on the pool’s page if you need to."))
         }
     };
-    let committed_fact = || match facts.committed {
+    // The floor, in the mini app's words: what this month used and gave out.
+    let floor_fact = || match facts.committed {
         Some(committed) => Some(
-            Fact::new(tr("Committed this month"), amount(Some(committed)))
-                .note(tr("Used plus given to Agents. The monthly maximum can’t go below it.")),
+            Fact::new(tr("Used and given out this month"), amount(Some(committed)))
+                .note(tr("The monthly maximum can’t go below it.")),
         ),
         None if s.facts.is_some() => Some(
-            Fact::new(tr("Committed this month"), tr("Still being reported"))
+            Fact::new(tr("Used and given out this month"), tr("Still being reported"))
                 .note(tr("Until it’s known, the monthly maximum can only go up.")),
         ),
         None => None,
     };
     let saved = s.saved.map(|result| result.as_ref().map_err(String::as_str));
-    match (saved, s.saving, s.failure) {
+    match (saved, s.saving, s.failure.filter(|_| !s.retrying)) {
         // Saved: what changed, in the same words as the page's result.
         (Some(Ok(result)), _, _) => {
             let amended = &result["ceilingAmendment"];
             let before = amended["previousTokens"].as_u64().or(previous);
-            let after = amended["tokens"].as_u64().or(proposed);
+            let after = amended["tokens"].as_u64().or(value);
             v.tone = SheetTone::Done;
             v.title = tr("Monthly Maximum Saved").into();
             v.before = before.map(|n| Figure::new(amount(Some(n)), tr("Before")));
@@ -147,29 +204,52 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
             v.primary_closes = true;
             v.cancel.clear();
         }
-        // Refused, at review or when saving: why, and the amount that works.
-        (Some(Err(code)), _, _) | (None, false, Some(code)) => {
-            refusal(&mut v, code, previous, proposed, &facts);
-            if let Some(fact) = committed_fact() {
-                v.facts_label = tr("This pool").into();
-                v.facts = vec![Fact::new(tr("Monthly maximum now"), amount(previous)), fact];
-            }
+        // Refused when saving: the request was used, so nothing more here.
+        (Some(Err(code)), _, _) => {
+            refusal(&mut v, code, previous, value, &facts);
+            v.facts_label = tr("This pool").into();
+            v.facts = vec![Fact::new(tr("Monthly maximum now"), amount(previous))];
             v.primary = tr("OK").into();
             v.primary_visible = true;
             v.primary_enabled = true;
             v.primary_closes = true;
             v.cancel.clear();
         }
+        // Refused at review: why, and the amount that works one tap away.
+        (None, false, Some(code)) => {
+            refusal(&mut v, code, previous, value, &facts);
+            v.facts_label = tr("This pool").into();
+            v.facts = vec![Fact::new(tr("Monthly maximum now"), amount(previous))];
+            v.primary_visible = true;
+            v.primary_enabled = true;
+            match (code, facts.committed) {
+                ("management_ceiling_below_commitments", Some(committed)) => {
+                    v.primary = fmt("Change to {amount}", &[("amount", amount(Some(committed)))]);
+                    v.primary_recovers = true;
+                    v.cancel = tr("Close").into();
+                }
+                (code, _) if ceiling_fixable(code) && previous.is_some() => {
+                    v.primary = tr("Choose Again").into();
+                    v.primary_recovers = true;
+                    v.cancel = tr("Close").into();
+                }
+                _ => {
+                    v.primary = tr("OK").into();
+                    v.primary_closes = true;
+                    v.cancel.clear();
+                }
+            }
+        }
         // Saving: the change being saved stays in view.
         (None, true, _) => {
             v.tone = SheetTone::Working;
             v.before = previous.map(|n| Figure::new(amount(Some(n)), tr("Now")));
-            v.after = Some(Figure::new(amount(proposed), tr("Being saved")));
+            v.after = Some(Figure::new(amount(value), tr("Being saved")));
             v.status = sentences(&[tr("Saving…").into(), tr("Closing this window doesn’t cancel it.").into()]);
             v.cancel = tr("Close").into();
         }
-        (None, false, None) => match (s.review, s.recorded) {
-            (_, Some((before, after))) => {
+        (None, false, None) => match (s.recorded, s.choosing()) {
+            (Some((before, after)), _) => {
                 v.tone = SheetTone::Done;
                 v.title = tr("Already Saved").into();
                 v.before = Some(Figure::new(amount(Some(before)), tr("Before")));
@@ -180,31 +260,64 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
                 v.primary_enabled = true;
                 v.cancel.clear();
             }
-            (Some(review), None) => {
+            // The change, with a slider to adjust it before saving.
+            (None, true) => {
                 v.tone = SheetTone::Proposal;
-                v.before = Some(Figure::new(amount(Some(review.previous_tokens)), tr("Now")));
-                v.after = Some(Figure::new(amount(Some(review.tokens)), tr("After you confirm")));
-                v.lead = if review.tokens > review.previous_tokens {
-                    fmt("Agents can use up to {amount} in total this month.", &[("amount", amount(Some(review.tokens)))])
-                } else {
-                    fmt(
-                        "Agents can use up to {amount} in total this month. New requests beyond it can’t be approved.",
-                        &[("amount", amount(Some(review.tokens)))],
-                    )
+                v.choosing = true;
+                v.quota_visible = true;
+                v.before = previous.map(|n| Figure::new(amount(Some(n)), tr("Now")));
+                v.after = Some(Figure::new(amount(value), tr("After you confirm")));
+                let lowering = value.zip(previous).is_some_and(|(new, old)| new < old);
+                v.lead = fmt(
+                    if lowering {
+                        "Once you confirm, Agents can use up to {amount} in total this month; running Agents aren’t affected. New requests beyond it can’t be approved."
+                    } else {
+                        "Once you confirm, Agents can use up to {amount} in total this month; running Agents aren’t affected."
+                    },
+                    &[("amount", amount(value))],
+                );
+                let (floor, top) = (s.floor(), s.top());
+                let limit = facts.account_limit.filter(|limit| *limit > 0);
+                v.quota_hint = match limit {
+                    Some(limit) => fmt("Choose {min} – {max}.", &[("min", amount(Some(floor))), ("max", amount(Some(limit)))]),
+                    None => fmt("At least {min}.", &[("min", amount(Some(floor)))]),
                 };
+                v.problem = match value {
+                    _ if s.invalid => tr("Enter an amount, for example 1.5.").into(),
+                    None | Some(0) => tr("Choose a monthly maximum above 0.").into(),
+                    Some(n) if facts.committed.is_some_and(|committed| n < committed) => fmt(
+                        "It can’t be lower than the {committed} used and given out this month.",
+                        &[("committed", amount(facts.committed))],
+                    ),
+                    Some(n) if s.facts.is_some() && facts.committed.is_none() && previous.is_some_and(|old| n < old) => {
+                        tr("While use is still being reported, it can only go up.").into()
+                    }
+                    Some(n) if Some(n) == previous => tr("That’s the current monthly maximum. Choose another amount.").into(),
+                    Some(n) if limit.is_some_and(|limit| n > limit) || n > top => fmt(
+                        "It can’t be more than the account limit of {max}.",
+                        &[("max", amount(Some(top)))],
+                    ),
+                    Some(_) => String::new(),
+                };
+                if s.reviewing {
+                    v.status = tr("Checking this amount…").into();
+                }
                 v.facts_label = tr("This pool").into();
-                v.facts = vec![per_request_fact(false), Fact::new(tr("Running Agents"), tr("Not affected"))];
-                if let Some(fact) = committed_fact() {
+                v.facts = vec![per_request_fact(false)];
+                if let Some(fact) = floor_fact() {
                     v.facts.push(fact);
                 }
-                v.facts.push(Fact::new(tr("Takes effect"), tr("When you confirm")));
                 v.primary_visible = true;
-                v.primary_enabled = true;
+                v.primary_enabled = v.problem.is_empty() && !s.reviewing;
             }
-            (None, None) => {
+            // Reading: the change asked for stays in view.
+            (None, false) => {
                 v.tone = SheetTone::Working;
-                v.caption.clear();
                 v.technical.clear();
+                v.after = s.proposed.map(|n| Figure::new(amount(Some(n)), tr("You chose")));
+                if v.after.is_none() {
+                    v.caption.clear();
+                }
                 v.status = tr("Reading this pool…").into();
             }
         },
@@ -221,13 +334,13 @@ fn refusal(v: &mut SheetView, code: &str, previous: Option<u64>, proposed: Optio
     match (code, facts.committed) {
         ("management_ceiling_below_commitments", Some(committed)) => {
             v.caption = tr("The monthly maximum must be at least").into();
-            v.after = Some(Figure::new(amount(Some(committed)), tr("Committed this month")));
+            v.after = Some(Figure::new(amount(Some(committed)), tr("Used and given out this month")));
             v.lead = match proposed {
                 Some(chosen) => fmt(
-                    "You chose {chosen}, which is less than the {committed} this month has committed. Choose {committed} or more on the pool’s page.",
+                    "You chose {chosen}, which is less than the {committed} used and given out this month.",
                     &[("chosen", amount(Some(chosen))), ("committed", amount(Some(committed)))],
                 ),
-                None => fmt("Choose {committed} or more on the pool’s page.", &[("committed", amount(Some(committed)))]),
+                None => fmt("Choose {committed} or more.", &[("committed", amount(Some(committed)))]),
             };
         }
         ("management_ceiling_usage_unsettled", _) if previous.is_some() => {
@@ -237,8 +350,7 @@ fn refusal(v: &mut SheetView, code: &str, previous: Option<u64>, proposed: Optio
         }
         ("management_ceiling_unchanged", _) if previous.is_some() => {
             v.after = Some(Figure::new(amount(previous), tr("Now")));
-            v.lead = tr(failure_text(Some(code), true)).into();
-            v.status.clear();
+            v.lead = tr("The monthly maximum already has this value.").into();
         }
         _ => {
             v.caption.clear();
@@ -252,47 +364,90 @@ fn sentences(parts: &[String]) -> String {
 }
 
 /// Offline review only: the monthly maximum sheet for a fixture, through the
-/// same view as the real window. `state`: proposal (default), saving, saved,
-/// or refused with `error`. Amounts are tokens.
+/// same view as the real window. `state`: proposal (default), loading,
+/// saving or saved; `error` a refusal (at review unless `state` is saved);
+/// `chosen` the slider's value; `retrying` after 改成 or 重新选择;
+/// `reviewing` while the chosen value is checked. Amounts are tokens.
+#[cfg(any(test, feature = "onboarding-test-support"))]
+pub(super) struct CeilingPreview {
+    review: CeilingAmendmentReview,
+    facts: CeilingFacts,
+    state: String,
+    failure: Option<String>,
+    saved: Option<Result<Value, String>>,
+    account: String,
+    more: bool,
+    chosen: Option<u64>,
+    retrying: bool,
+    reviewing: bool,
+}
+#[cfg(any(test, feature = "onboarding-test-support"))]
+impl CeilingPreview {
+    pub(super) fn from_fixture(fixture: &Value) -> Result<Self, String> {
+        let tokens = |key: &str| fixture[key].as_u64();
+        let review = CeilingAmendmentReview {
+            resource_id: fixture["resource"].as_str().unwrap_or("resource_original").into(),
+            name: fixture["label"].as_str().map(str::to_owned),
+            revision: "0".repeat(64),
+            sequence: 1,
+            previous_tokens: tokens("current").ok_or("preview field current missing")?,
+            tokens: tokens("proposed").ok_or("preview field proposed missing")?,
+            per_request_tokens: tokens("perRequest"),
+        };
+        let facts = CeilingFacts {
+            name: review.name.clone(),
+            current: Some(review.previous_tokens),
+            proposed: Some(review.tokens),
+            committed: tokens("committed"),
+            per_request: review.per_request_tokens,
+            account_limit: tokens("accountLimit"),
+        };
+        let state = fixture["state"].as_str().unwrap_or("proposal").to_owned();
+        let failure = fixture["error"].as_str().map(str::to_owned);
+        let chosen = tokens("chosen");
+        let saved = match (state.as_str(), &failure) {
+            ("saved", None) => Some(Ok(json!({"resourceId": review.resource_id, "ceilingAmendment": {"sequence": 2,
+                "previousTokens": review.previous_tokens, "tokens": chosen.unwrap_or(review.tokens)}}))),
+            ("saved", Some(code)) => Some(Err(code.clone())),
+            _ => None,
+        };
+        Ok(Self {
+            review,
+            facts,
+            state,
+            failure,
+            saved,
+            account: fixture["account"].as_str().unwrap_or_default().to_owned(),
+            more: fixture["technical"].as_bool().unwrap_or(false),
+            chosen,
+            retrying: fixture["retrying"].as_bool().unwrap_or(false),
+            reviewing: fixture["reviewing"].as_bool().unwrap_or(false),
+        })
+    }
+    pub(super) fn state(&self) -> CeilingState<'_> {
+        let loading = self.state == "loading";
+        CeilingState {
+            account: &self.account,
+            resource_id: &self.review.resource_id,
+            // A refused or re-chosen value has no clean review.
+            review: if self.failure.is_some() || loading || self.retrying { None } else { Some(&self.review) },
+            recorded: None,
+            facts: if loading { None } else { Some(&self.facts) },
+            failure: if self.state == "saved" { None } else { self.failure.as_deref() },
+            saving: self.state == "saving",
+            saved: self.saved.as_ref(),
+            more: self.more,
+            proposed: Some(self.review.tokens),
+            chosen: self.chosen,
+            retrying: self.retrying,
+            reviewing: self.reviewing,
+            invalid: false,
+        }
+    }
+}
 #[cfg(any(test, feature = "onboarding-test-support"))]
 pub(super) fn preview(fixture: &Value) -> Result<SheetView, String> {
-    let tokens = |key: &str| fixture[key].as_u64();
-    let review = CeilingAmendmentReview {
-        resource_id: fixture["resource"].as_str().unwrap_or("resource_original").into(),
-        name: fixture["label"].as_str().map(str::to_owned),
-        revision: "0".repeat(64),
-        sequence: 1,
-        previous_tokens: tokens("current").ok_or("preview field current missing")?,
-        tokens: tokens("proposed").ok_or("preview field proposed missing")?,
-        per_request_tokens: tokens("perRequest"),
-    };
-    let facts = CeilingFacts {
-        name: review.name.clone(),
-        current: Some(review.previous_tokens),
-        proposed: Some(review.tokens),
-        committed: tokens("committed"),
-        per_request: review.per_request_tokens,
-    };
-    let state = fixture["state"].as_str().unwrap_or("proposal");
-    let failure = fixture["error"].as_str();
-    let saved = match (state, failure) {
-        ("saved", None) => Some(Ok(json!({"resourceId": review.resource_id, "ceilingAmendment": {"sequence": 2, "previousTokens": review.previous_tokens, "tokens": review.tokens}}))),
-        ("saved", Some(code)) => Some(Err(code.to_owned())),
-        _ => None,
-    };
-    let account = fixture["account"].as_str().unwrap_or_default();
-    let view = ceiling_view(&CeilingState {
-        account,
-        resource_id: &review.resource_id,
-        review: if failure.is_some() || state == "loading" { None } else { Some(&review) },
-        recorded: None,
-        facts: if state == "loading" { None } else { Some(&facts) },
-        failure: if state == "saved" { None } else { failure },
-        saving: state == "saving",
-        saved: saved.as_ref(),
-        more: fixture["technical"].as_bool().unwrap_or(false),
-    });
-    Ok(view)
+    Ok(ceiling_view(&CeilingPreview::from_fixture(fixture)?.state()))
 }
 
 pub(super) struct ResourceEditPrompt {
@@ -300,8 +455,13 @@ pub(super) struct ResourceEditPrompt {
     /// The request asked for a monthly-maximum amendment.
     amendment: bool,
     expires: Instant,
-    receiver: Option<Receiver<Result<ResourceEditConsent, EditRefusal>>>,
+    /// A review on its way. The consent always comes back with its result.
+    receiver: Option<Receiver<(ResourceEditConsent, Result<(), EditRefusal>)>>,
+    /// A consent whose review came back clean: it can be confirmed.
     consent: Option<ResourceEditConsent>,
+    /// A monthly-maximum consent refused at review: it can be reviewed
+    /// again with another value, since a review writes nothing.
+    retry: Option<ResourceEditConsent>,
     failure: Option<String>,
     /// Kept after confirming, when the consent itself is used up.
     resource_id: String,
@@ -315,24 +475,29 @@ pub(super) struct ResourceEditPrompt {
     replied: bool,
     /// The sheet's single disclosure is open.
     more: bool,
+    /// The maximum the request proposed, and the one chosen here.
+    proposed: Option<u64>,
+    chosen: Option<u64>,
+    /// After a refusal the owner chose to pick again.
+    retrying: bool,
+    /// Save as soon as the review of the chosen value comes back clean.
+    save_after_review: bool,
+    /// The field holds something that isn't an amount.
+    invalid: bool,
 }
 impl ResourceEditPrompt {
     pub(super) fn begin(consent: ResourceEditConsent) -> Self {
         let account = consent.account().to_owned();
         let amendment = consent.amendment_requested();
         let resource_id = consent.resource_id().to_owned();
-        let (tx, receiver) = mpsc::sync_channel(1);
-        crate::sliding_sync::spawn_async_task(async move {
-            let result = consent.load().await;
-            let _ = tx.try_send(result);
-            SignalToUI::set_ui_signal();
-        });
-        Self {
+        let proposed = consent.proposed_tokens();
+        let mut prompt = Self {
             account,
             amendment,
             expires: Instant::now() + Duration::from_secs(300),
-            receiver: Some(receiver),
+            receiver: None,
             consent: None,
+            retry: None,
             failure: None,
             resource_id,
             review: None,
@@ -342,28 +507,62 @@ impl ResourceEditPrompt {
             saved: None,
             replied: false,
             more: false,
-        }
+            proposed,
+            chosen: None,
+            retrying: false,
+            save_after_review: false,
+            invalid: false,
+        };
+        prompt.review_now(consent);
+        prompt
+    }
+    fn review_now(&mut self, consent: ResourceEditConsent) {
+        let (tx, receiver) = mpsc::sync_channel(1);
+        crate::sliding_sync::spawn_async_task(async move {
+            let result = consent.review().await;
+            let _ = tx.try_send(result);
+            SignalToUI::set_ui_signal();
+        });
+        self.receiver = Some(receiver);
     }
     pub(super) fn poll(&mut self) -> bool {
         let mut changed = false;
         if let Some(receiver) = &self.receiver {
             let result = match receiver.try_recv() {
-                Ok(result) => Some(result),
+                Ok(result) => Some(Some(result)),
                 Err(mpsc::TryRecvError::Empty) => None,
-                Err(mpsc::TryRecvError::Disconnected) => Some(Err(EditRefusal { code: "management_unavailable".into(), facts: None })),
+                Err(mpsc::TryRecvError::Disconnected) => Some(None),
             };
             if let Some(result) = result {
                 self.receiver = None;
+                self.retrying = false;
                 match result {
-                    Ok(consent) => {
+                    Some((consent, Ok(()))) => {
                         self.review = consent.ceiling_review().cloned();
                         self.recorded = consent.recorded_amendment();
-                        self.facts = consent.facts().cloned();
+                        if let Some(facts) = consent.facts() {
+                            self.facts = Some(facts.clone());
+                        }
+                        self.failure = None;
                         self.consent = Some(consent);
+                        if std::mem::take(&mut self.save_after_review) {
+                            self.start_save();
+                        }
                     }
-                    Err(refusal) => {
+                    Some((consent, Err(refusal))) => {
+                        self.review = None;
                         self.failure = Some(refusal.code);
-                        self.facts = refusal.facts;
+                        if refusal.facts.is_some() {
+                            self.facts = refusal.facts;
+                        }
+                        self.save_after_review = false;
+                        if self.amendment {
+                            self.retry = Some(consent);
+                        }
+                    }
+                    None => {
+                        self.save_after_review = false;
+                        self.failure = Some("management_unavailable".into());
                     }
                 }
                 changed = true;
@@ -417,9 +616,8 @@ impl ResourceEditPrompt {
         }
         crate::i18n::tr(failure_text(self.failure.as_deref(), self.amendment)).into()
     }
-    /// The sheet for this monthly-maximum request, from native state only.
-    pub(super) fn sheet(&self) -> SheetView {
-        ceiling_view(&CeilingState {
+    fn state(&self) -> CeilingState<'_> {
+        CeilingState {
             account: &self.account,
             resource_id: &self.resource_id,
             review: self.review.as_ref(),
@@ -429,14 +627,85 @@ impl ResourceEditPrompt {
             saving: self.saving.is_some(),
             saved: self.saved.as_ref(),
             more: self.more,
-        })
+            proposed: self.proposed,
+            chosen: self.chosen,
+            retrying: self.retrying,
+            reviewing: self.receiver.is_some() && self.save_after_review,
+            invalid: self.invalid,
+        }
+    }
+    /// The sheet for this monthly-maximum request, from native state only.
+    pub(super) fn sheet(&self) -> SheetView {
+        ceiling_view(&self.state())
+    }
+    /// The slider's (minimum, maximum, value) while the sheet shows it.
+    pub(super) fn inputs(&self) -> Option<(u64, u64, u64)> {
+        ceiling_inputs(&self.state())
     }
     pub(super) fn toggle_more(&mut self) {
         self.more = !self.more;
     }
-    /// Confirm the amendment shown and keep the sheet: it saves, then shows
-    /// the result. Only a ready, unrecovered amendment review starts saving.
+    /// The owner moved the slider or typed into the field: an amount, or
+    /// None for text that isn't one. Nothing is reviewed or saved until
+    /// they tap Save. Returns whether what the sheet shows changed.
+    pub(super) fn choose(&mut self, tokens: Option<u64>) -> bool {
+        if self.saving.is_some() || self.saved.is_some() || self.save_after_review {
+            return false;
+        }
+        let Some(tokens) = tokens else {
+            return !std::mem::replace(&mut self.invalid, true);
+        };
+        let was_invalid = std::mem::replace(&mut self.invalid, false);
+        if self.chosen == Some(tokens) {
+            return was_invalid;
+        }
+        if self.chosen.is_none() && self.state().value() == Some(tokens) {
+            return was_invalid;
+        }
+        self.chosen = Some(tokens);
+        true
+    }
+    /// 改成 0.25 M or 重新选择 after a refusal: back to the slider, set to
+    /// the amount that works where it is known. The refusal is kept for the
+    /// reply until something saves.
+    pub(super) fn rechoose(&mut self) {
+        if self.saving.is_some() || self.saved.is_some() || self.receiver.is_some() {
+            return;
+        }
+        if let (Some("management_ceiling_below_commitments"), Some(committed)) =
+            (self.failure.as_deref(), self.facts.as_ref().and_then(|facts| facts.committed))
+        {
+            self.chosen = Some(committed);
+        }
+        self.retrying = true;
+    }
+    /// Confirm the maximum shown and keep the sheet: it saves, then shows
+    /// the result. A value chosen here is reviewed again first, then saved
+    /// once that review comes back clean.
     pub(super) fn save(&mut self) -> bool {
+        if self.saving.is_some() || self.saved.is_some() || self.receiver.is_some() || self.invalid {
+            return false;
+        }
+        let reviewed = self.review.as_ref().map(|review| review.tokens);
+        if self.chosen.is_none() || self.chosen == reviewed {
+            return self.start_save();
+        }
+        let Some(tokens) = self.chosen else {
+            return false;
+        };
+        let Some(mut consent) = self.consent.take().or_else(|| self.retry.take()) else {
+            return false;
+        };
+        if consent.set_ceiling_tokens(tokens).is_err() {
+            self.retry = Some(consent);
+            return false;
+        }
+        self.review = None;
+        self.save_after_review = true;
+        self.review_now(consent);
+        true
+    }
+    fn start_save(&mut self) -> bool {
         if self.saving.is_some() || self.saved.is_some() || !self.ready() || !self.amending() {
             return false;
         }
@@ -456,6 +725,10 @@ impl ResourceEditPrompt {
     }
     pub(super) fn saving(&self) -> bool {
         self.saving.is_some()
+    }
+    /// The last review was refused; closing replies with why.
+    pub(super) fn refused(&self) -> bool {
+        self.failure.as_deref().is_some_and(ceiling_refusal)
     }
     /// The save's result for the mini app, once, as soon as it is known.
     pub(super) fn take_reply(&mut self) -> Option<Result<Value, String>> {
@@ -536,7 +809,8 @@ mod tests {
             assert_ne!(text_for(Language::Chinese, english), english, "{code} is translated");
             assert!(ceiling_refusal(code), "{code} reaches the page as itself");
         }
-        assert!(failure_text(Some("management_ceiling_below_commitments"), true).contains("what was used plus what’s given to Agents"));
+        assert!(failure_text(Some("management_ceiling_below_commitments"), true).contains("used and given out"));
+        assert_eq!(text_for(Language::Chinese, "Used and given out this month"), "本月已用和已分出");
         assert_eq!(
             text_for(Language::Chinese, failure_text(Some("management_ceiling_usage_unsettled"), true)),
             "部分 Agent 的用量还在上报，所以暂时只能调高、不能调低每月上限。请保持这台电脑在线，稍后再试。"
@@ -546,7 +820,8 @@ mod tests {
 
     fn fixture(extra: Value) -> Value {
         let mut base = json!({"panel": "maximum", "account": "@owner:test", "label": "Research",
-            "current": 1_000_000u64, "proposed": 2_000_000u64, "perRequest": 200_000u64, "committed": 250_000u64});
+            "current": 1_000_000u64, "proposed": 2_000_000u64, "perRequest": 200_000u64, "committed": 250_000u64,
+            "accountLimit": 5_000_000u64});
         for (key, value) in extra.as_object().unwrap() {
             base[key] = value.clone();
         }
@@ -561,13 +836,18 @@ mod tests {
         assert_eq!(view.pool, "Research");
         assert_eq!(view.before, Some(Figure::new("1 M", "Now")));
         assert_eq!(view.after, Some(Figure::new("2 M", "After you confirm")));
+        assert_eq!(view.lead, "Once you confirm, Agents can use up to 2 M in total this month; running Agents aren’t affected.");
         let rows: Vec<(&str, &str)> = view.facts.iter().map(|f| (f.label.as_str(), f.value.as_str())).collect();
         assert_eq!(rows, [
             ("Per-request limit", "0.2 M (unchanged)"),
-            ("Running Agents", "Not affected"),
-            ("Committed this month", "0.25 M"),
-            ("Takes effect", "When you confirm"),
+            ("Used and given out this month", "0.25 M"),
         ]);
+        assert_eq!(view.facts[1].note, "The monthly maximum can’t go below it.");
+        // The slider adjusts it here, between the floor and the account limit.
+        assert!(view.choosing && view.quota_visible && view.problem.is_empty());
+        assert_eq!((view.quota_label.as_str(), view.quota_hint.as_str()), ("Monthly maximum", "Choose 0.25 M – 5 M."));
+        let preview = CeilingPreview::from_fixture(&fixture(json!({}))).unwrap();
+        assert_eq!(ceiling_inputs(&preview.state()), Some((250_000, 5_000_000, 2_000_000)));
         // The account is labelled and behind the disclosure, never a bare ID.
         for shown in [&view.title, &view.pool, &view.lead, &view.status] {
             assert!(!shown.contains("@owner") && !shown.contains("resource_original"), "{shown}");
@@ -587,12 +867,62 @@ mod tests {
         let refused = preview(&fixture(json!({"error": "management_ceiling_below_commitments", "proposed": 200_000u64}))).unwrap();
         assert_eq!(refused.tone, SheetTone::Failed);
         assert_eq!(refused.title, "Monthly Maximum Not Saved");
-        assert_eq!(refused.after, Some(Figure::new("0.25 M", "Committed this month")));
-        assert!(refused.lead.contains("0.2 M") && refused.lead.contains("0.25 M"), "{}", refused.lead);
-        assert_eq!((refused.primary.as_str(), refused.cancel.as_str()), ("OK", ""));
+        assert_eq!(refused.after, Some(Figure::new("0.25 M", "Used and given out this month")));
+        assert_eq!(refused.lead, "You chose 0.2 M, which is less than the 0.25 M used and given out this month.");
+        assert_eq!(refused.status, "Nothing was changed.");
+        // The amount that works is one tap away, in this window.
+        assert_eq!((refused.primary.as_str(), refused.cancel.as_str()), ("Change to 0.25 M", "Close"));
+        assert!(refused.primary_recovers && refused.primary_enabled && !refused.primary_closes);
+        // A refusal when saving used the request up: OK only.
+        let late = preview(&fixture(json!({"state": "saved", "error": "management_ceiling_below_commitments", "proposed": 200_000u64}))).unwrap();
+        assert_eq!((late.primary.as_str(), late.cancel.as_str()), ("OK", ""));
+        assert!(late.primary_closes && !late.primary_recovers);
         let saving = preview(&fixture(json!({"state": "saving"}))).unwrap();
         assert_eq!(saving.tone, SheetTone::Working);
         assert!(!saving.primary_visible && saving.cancel == "Close");
         assert!(saving.status.contains("doesn’t cancel"), "{}", saving.status);
+    }
+
+    #[test]
+    fn the_owner_adjusts_the_maximum_in_the_window_and_fixes_a_refusal_there() {
+        // Moved on the slider: the hero follows, and Save stays one tap.
+        let moved = preview(&fixture(json!({"chosen": 1_500_000u64}))).unwrap();
+        assert_eq!(moved.after, Some(Figure::new("1.5 M", "After you confirm")));
+        assert!(moved.primary_enabled && moved.problem.is_empty());
+        // Below the floor, equal to now, or above the account limit: said beside it.
+        for (chosen, problem) in [
+            (200_000u64, "It can’t be lower than the 0.25 M used and given out this month."),
+            (1_000_000, "That’s the current monthly maximum. Choose another amount."),
+            (6_000_000, "It can’t be more than the account limit of 5 M."),
+        ] {
+            let view = preview(&fixture(json!({"chosen": chosen}))).unwrap();
+            assert_eq!(view.problem, problem, "{chosen}");
+            assert!(!view.primary_enabled, "{chosen}");
+        }
+        // Lowering says what it means for new requests.
+        let lower = preview(&fixture(json!({"chosen": 500_000u64}))).unwrap();
+        assert!(lower.lead.ends_with("New requests beyond it can’t be approved."), "{}", lower.lead);
+        // After 改成 0.25 M: back to the slider at the floor, ready to save.
+        let fixed = preview(&fixture(json!({"error": "management_ceiling_below_commitments", "proposed": 200_000u64,
+            "retrying": true, "chosen": 250_000u64}))).unwrap();
+        assert_eq!(fixed.tone, SheetTone::Proposal);
+        assert_eq!((fixed.before.clone().unwrap().value, fixed.after.clone().unwrap().value), ("1 M".into(), "0.25 M".into()));
+        assert!(fixed.choosing && fixed.primary_enabled && fixed.primary == "Save Monthly Maximum");
+        // While that value is checked, Save waits.
+        let checking = preview(&fixture(json!({"chosen": 1_500_000u64, "reviewing": true, "retrying": true,
+            "error": "management_ceiling_below_commitments"}))).unwrap();
+        assert!(!checking.primary_enabled && checking.status == "Checking this amount…");
+        // Saved: the value chosen here is what the window and the page report.
+        let saved = preview(&fixture(json!({"state": "saved", "chosen": 1_500_000u64}))).unwrap();
+        assert_eq!(saved.after, Some(Figure::new("1.5 M", "Now")));
+        // Use still being reported: it can only go up.
+        let unsettled = preview(&fixture(json!({"committed": null, "chosen": 800_000u64}))).unwrap();
+        assert_eq!(unsettled.problem, "While use is still being reported, it can only go up.");
+        // Text that isn't an amount can't be saved as the last good value.
+        let preview = CeilingPreview::from_fixture(&fixture(json!({}))).unwrap();
+        let typed = CeilingState { invalid: true, ..preview.state() };
+        let view = ceiling_view(&typed);
+        assert_eq!(view.problem, "Enter an amount, for example 1.5.");
+        assert!(!view.primary_enabled);
     }
 }

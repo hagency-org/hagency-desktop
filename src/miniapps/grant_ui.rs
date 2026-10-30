@@ -86,18 +86,6 @@ fn ms_month(ms: u64) -> String {
         .map_or(1, |date| date.month());
     month_name(month)
 }
-/// The calendar day a UTC month starts on, as the mini app names it:
-/// "11 月 1 日" or "November 1". Months here are UTC months.
-fn month_day(ms: u64) -> String {
-    let Some(date) = i64::try_from(ms).ok().and_then(chrono::DateTime::from_timestamp_millis) else {
-        return crate::i18n::tr("Unavailable").into();
-    };
-    if crate::i18n::language() == crate::i18n::Language::Chinese {
-        date.format("%-m 月 %-d 日").to_string()
-    } else {
-        date.format("%B %-d").to_string()
-    }
-}
 /// A day and time in the owner's own time zone, for when sharing ends.
 fn local_time(ms: u64) -> String {
     let Some(date) = i64::try_from(ms).ok().and_then(chrono::DateTime::from_timestamp_millis) else {
@@ -109,6 +97,18 @@ fn local_time(ms: u64) -> String {
     } else {
         date.format("%B %-d, %-I:%M %p").to_string()
     }
+}
+/// When sharing ends, said the same way in every window and state, in the
+/// owner's own time zone: "11 月 1 日 08:00 前" for a UTC month end in UTC+8.
+fn ends_at(ms: u64) -> String {
+    crate::i18n::format("Before {when}", &[("when", local_time(ms))])
+}
+/// The end of sharing a draft would commit, else the end of its month.
+fn draft_end(bounds: &Bounds, expires_utc: &str) -> u64 {
+    chrono::DateTime::parse_from_rfc3339(expires_utc.trim())
+        .ok()
+        .and_then(|at| u64::try_from(at.timestamp_millis()).ok())
+        .unwrap_or(bounds.expiry_until_ms)
 }
 /// A person on the list as the mini app shows them: "@lisi". Every applicant
 /// is on the owner's own server, so the server part only appears in details.
@@ -379,7 +379,7 @@ const PENDING_NOTE: &str = "An unfinished publish is waiting, so this amount isn
 /// without succession support.
 const PUBLISHED_NOTE: &str = "This pool is already published this month and the server takes one publish a month, so this amount wasn’t applied. Nothing was withdrawn or changed.";
 /// Beside a published grant on a server that supports amendments.
-const AMENDABLE_NOTE: &str = "Not applied yet. Tap Change Per-Request Limit to continue; what’s given to running Agents stays as it is.";
+const AMENDABLE_NOTE: &str = "Not applied yet. Tap Change Per-Request Limit to continue; what running Agents hold stays as it is.";
 /// Beside a revoked, superseded or expired grant this month.
 const NOT_AMENDABLE_NOTE: &str = "This publish no longer applies, so it can’t be changed.";
 /// Beside next month's scheduled renewal: this month can no longer change here.
@@ -411,11 +411,13 @@ enum GrantKind {
     /// An existing record opened by itself, such as this month's list.
     Record,
 }
-/// The sheet's single disclosure, which starts closed: advanced choices
-/// while choosing, and the technical details.
+/// The sheet's disclosures, which start closed: advanced choices while
+/// choosing with the technical details, and a list of people that this
+/// window doesn't change.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub(super) struct Disclosure {
     pub more: bool,
+    pub people: bool,
 }
 /// The native facts one rendering is computed from. The flow's facts are
 /// copied in, so the shipped panel and its offline preview share this code.
@@ -662,7 +664,7 @@ fn draft_problem(bounds: &Bounds, draft: &GrantChoices, renewing: Option<&str>, 
     }
     if tokens < bounds.minimum {
         return Some(fmt(
-            "It can’t be lower than the {held} given to running Agents.",
+            "It can’t be lower than the {held} held by running Agents.",
             &[("held", amount(Some(bounds.minimum)))],
         ));
     }
@@ -815,7 +817,9 @@ fn technical_rows(s: &GrantState, summary: Option<&OwnerGrantSummary>, now: u64)
             ));
             rows.push(("Approves requests", summary.coordinator_mxid.clone()));
             rows.push(("People who can request", summary.eligible_managers.join("\n")));
-            rows.push(("Shared until (UTC)", utc(summary.delegation_expires_at_ms.min(summary.period_end_ms))));
+            let until = summary.delegation_expires_at_ms.min(summary.period_end_ms);
+            rows.push(("Shared until (your time)", local_time(until)));
+            rows.push(("Shared until (UTC)", utc(until)));
             if let Some(succession) = &summary.succession {
                 rows.push((
                     "Kind of change",
@@ -828,7 +832,7 @@ fn technical_rows(s: &GrantState, summary: Option<&OwnerGrantSummary>, now: u64)
                 rows.push(("Previous grant ID", succession.predecessor_grant_id.clone()));
                 rows.push(("Previous per-request limit", amount(Some(succession.predecessor_allocated_tokens))));
                 rows.push(("Running Agents", succession.carried_children.to_string()));
-                rows.push(("Given to running Agents", amount(Some(succession.carried_retained_tokens))));
+                rows.push(("Held by running Agents", amount(Some(succession.carried_retained_tokens))));
             }
         }
         None => {
@@ -841,13 +845,16 @@ fn technical_rows(s: &GrantState, summary: Option<&OwnerGrantSummary>, now: u64)
                     format!("{}\n{} → {}", form.period_key, utc(form.period_start_ms), utc(form.period_end_ms)),
                 ));
                 rows.push(("Running Agents", form.floor.children.to_string()));
-                rows.push(("Given to running Agents", amount(Some(form.floor.retained_tokens))));
+                rows.push(("Held by running Agents", amount(Some(form.floor.retained_tokens))));
                 rows.push(("People who can request", form.predecessor.eligible_managers.join("\n")));
             } else if let Some(form) = s.form {
                 rows.push(("Pool ID", form.contribution_id.clone()));
                 rows.push(("Resource ID", form.resource_id.clone()));
             }
             if matches!(s.phase, Phase::Choose) {
+                if let Some(bounds) = s.bounds() {
+                    rows.push(("Shared until (your time)", local_time(draft_end(&bounds, &s.draft.expires_utc))));
+                }
                 rows.push(("Shared until (UTC)", s.draft.expires_utc.trim().to_owned()));
             }
         }
@@ -911,12 +918,17 @@ pub(super) fn applicant_from_input(text: &str, account: &str, current: &[String]
     }
     Ok(id)
 }
-/// Facts about the pool the Choose sheet shows beside the change.
-fn choose_facts(kind: GrantKind, s: &GrantState, bounds: Option<&Bounds>, month: Option<&str>, now: u64) -> Vec<Fact> {
+/// Facts about the pool the Choose sheet shows beside the change. Each fact
+/// is said once: when the change applies is in the hero's sentence, and the
+/// slider's bounds sit under the slider.
+fn choose_facts(kind: GrantKind, s: &GrantState, bounds: Option<&Bounds>, month: Option<&str>) -> Vec<Fact> {
     let tr = crate::i18n::tr;
     let fmt = crate::i18n::format;
     let mut facts = Vec::new();
-    if let Some(total) = s.context().and_then(|c| c.resource_total_tokens) {
+    // The monthly maximum bounds a publish. A change this month is bounded
+    // by what's left, shown as how high it can go, and next month's lead
+    // already says the maximum carries over.
+    if let Some(total) = s.context().and_then(|c| c.resource_total_tokens).filter(|_| matches!(kind, GrantKind::Publish | GrantKind::Record)) {
         let value = if kind == GrantKind::Renew {
             fmt("{amount} (carried over)", &[("amount", amount(Some(total)))])
         } else {
@@ -935,13 +947,14 @@ fn choose_facts(kind: GrantKind, s: &GrantState, bounds: Option<&Bounds>, month:
             amount(remaining),
         )),
         (GrantKind::Amend, _) => facts.push(
-            Fact::new(tr("Most it can be"), amount(remaining))
-                .note(tr("What’s left this month, plus what this limit holds now.")),
+            Fact::new(tr("Most it can be"), amount(remaining)).note(tr("What this month can still give out.")),
         ),
         _ => facts.push(Fact::new(tr("Left this month"), amount(remaining))),
     }
-    if let Some(form) = s.successor {
-        let fact = Fact::new(tr("Given to running Agents"), held_value(form.floor.retained_tokens, form.floor.children));
+    // What running Agents hold: the floor of a new limit, and what carries
+    // into next month. Adding people changes neither.
+    if let Some(form) = s.successor.filter(|_| matches!(kind, GrantKind::Amend | GrantKind::Renew)) {
+        let fact = Fact::new(tr("Held by running Agents"), held_value(form.floor.retained_tokens, form.floor.children));
         facts.push(match kind {
             GrantKind::Amend if form.floor.retained_tokens > 0 => fact.note(tr("The per-request limit can’t go below it.")),
             GrantKind::Renew if form.floor.children > 0 => fact.note(fmt(
@@ -951,32 +964,13 @@ fn choose_facts(kind: GrantKind, s: &GrantState, bounds: Option<&Bounds>, month:
             _ => fact,
         });
     }
-    match kind {
-        GrantKind::Renew => facts.push(Fact::new(
-            tr("Starts"),
-            month_day(s.successor.map_or(now, |form| form.period_start_ms)),
-        )),
-        GrantKind::Amend | GrantKind::AddPeople => facts.push(Fact::new(tr("Takes effect"), tr("When you confirm"))),
-        _ => {
-            if let Some(b) = bounds {
-                facts.push(Fact::new(tr("Shared until"), shared_until(b, &s.draft.expires_utc)));
-            }
-        }
-    }
     facts
 }
-/// When sharing ends, in the owner's own words and time zone.
+/// When sharing ends, in the owner's own time zone: "11 月 1 日 08:00 前".
 fn shared_until(bounds: &Bounds, expires_utc: &str) -> String {
-    let expiry = chrono::DateTime::parse_from_rfc3339(expires_utc.trim())
-        .ok()
-        .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
-    match expiry {
-        Some(at) if at == bounds.expiry_until_ms => crate::i18n::format(
-            "End of {month}",
-            &[("month", ms_month(bounds.expiry_until_ms.saturating_sub(1)))],
-        ),
-        Some(at) => local_time(at),
-        None => crate::i18n::tr("Not chosen").into(),
+    match chrono::DateTime::parse_from_rfc3339(expires_utc.trim()) {
+        Ok(_) => ends_at(draft_end(bounds, expires_utc)),
+        Err(_) => crate::i18n::tr("Not chosen").into(),
     }
 }
 /// Everything one rendering of the panel shows. Pure: it reads native state
@@ -1043,6 +1037,13 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                     }
                     _ => {}
                 }
+            } else if kind == GrantKind::AddPeople && !s.applicants.is_empty() {
+                // While reading, what the window is about stays in view.
+                v.caption = tr("People who can request").into();
+                v.lead = fmt("Adds {people} once you confirm.", &[("people", people_text(s.applicants))]);
+            } else if let Some(proposed) = s.proposal.filter(|_| kind != GrantKind::AddPeople) {
+                v.caption = tr("Per-request limit").into();
+                v.after = Some(Figure::new(amount(Some(proposed)), tr("You chose")));
             }
         }
         Phase::Choose => {
@@ -1056,10 +1057,14 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                     v.caption = tr("Per-request limit").into();
                     v.before = Some(Figure::new(tr("Not published"), tr("Now")));
                     v.after = Some(Figure::new(amount(tokens), tr("After you confirm")));
-                    v.lead = fmt(
-                        "People on the list can request up to {amount} at a time until the end of {month}.",
-                        &[("amount", amount(tokens)), ("month", month_text.clone())],
-                    );
+                    let until = bounds.as_ref().map(|b| local_time(draft_end(b, &s.draft.expires_utc)));
+                    v.lead = match until {
+                        Some(when) => fmt(
+                            "People on the list can request up to {amount} at a time, before {when}.",
+                            &[("amount", amount(tokens)), ("when", when)],
+                        ),
+                        None => fmt("People on the list can request up to {amount} at a time.", &[("amount", amount(tokens))]),
+                    };
                 }
                 GrantKind::Amend => {
                     v.caption = tr("Per-request limit").into();
@@ -1070,7 +1075,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                         v.before = Some(Figure::new(amount(current), tr("Now")));
                         v.after = Some(Figure::new(amount(tokens), tr("After you confirm")));
                         v.lead = sentences(&[
-                            tr("Applies this month as soon as you confirm. What’s given to running Agents stays as it is.").into(),
+                            tr("Applies this month as soon as you confirm. What running Agents hold stays as it is.").into(),
                             if added.is_empty() {
                                 String::new()
                             } else {
@@ -1102,10 +1107,13 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                     v.before = current.map(|c| Figure::new(amount(Some(c)), this_month.clone()));
                     v.after = Some(Figure::new(amount(tokens), month_text.clone()));
                     v.lead = sentences(&[
-                        fmt(
-                            "Starts {date}. The list and the monthly maximum carry over.",
-                            &[("date", month_day(s.successor.map_or(now, |form| form.period_start_ms)))],
-                        ),
+                        match s.successor {
+                            Some(form) => fmt(
+                                "Starts {when}. The list and the monthly maximum carry over.",
+                                &[("when", local_time(form.period_start_ms))],
+                            ),
+                            None => tr("The list and the monthly maximum carry over.").into(),
+                        },
                         if added.is_empty() {
                             String::new()
                         } else {
@@ -1113,7 +1121,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                         },
                     ]);
                     v.caution = fmt(
-                        "Once {month} is published ahead, this month’s per-request limit can’t change any more, and you can’t withdraw it in the app.",
+                        "Once {month} is published ahead, this month’s per-request limit and list can’t change any more, and it can’t be withdrawn.",
                         &[("month", month_text.clone())],
                     );
                 }
@@ -1132,13 +1140,22 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                 v.problem = problem;
             }
             v.facts_label = tr("This pool").into();
-            v.facts = choose_facts(kind, s, bounds.as_ref(), month.as_deref(), now);
+            v.facts = choose_facts(kind, s, bounds.as_ref(), month.as_deref());
             v.people_visible = true;
             v.people = choose_people(s);
             v.people_label = fmt(
                 "People who can request · {count}",
                 &[("count", people_count(v.people.len()))],
             );
+            // A change that keeps the list as it is folds it into one row;
+            // the add field opens with it.
+            v.people_collapsible = matches!(kind, GrantKind::Amend | GrantKind::Renew)
+                && added.is_empty()
+                && s.applicants.is_empty()
+                && s.add_error.is_empty();
+            v.people_open = !v.people_collapsible || s.disclosure.people;
+            v.people_summary = people_count(v.people.len());
+            v.quota_label = tr("Per-request limit").into();
             v.people_note = match kind {
                 GrantKind::Renew => tr("The list carries over. You can add people, not remove them."),
                 GrantKind::Amend | GrantKind::AddPeople => tr("This month’s list only grows: people already on it can’t be removed."),
@@ -1157,21 +1174,19 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
             // The unchanged limit never shows in a window that only adds people.
             v.quota_visible = kind != GrantKind::AddPeople;
             if let Some(b) = &bounds {
-                let mut hint = Vec::new();
-                if let Some(remaining) = b.remaining {
-                    hint.push(fmt("At most {max}.", &[("max", amount(Some(remaining)))]));
-                }
-                if b.minimum > 1 {
-                    hint.push(fmt(
-                        "At least {held}, which is given to running Agents.",
-                        &[("held", amount(Some(b.minimum)))],
-                    ));
-                }
-                v.quota_hint = sentences(&hint);
+                // One short line under the slider; the facts above say why.
+                v.quota_hint = match b.remaining {
+                    Some(remaining) if b.minimum > 1 => fmt(
+                        "Choose {min} – {max}.",
+                        &[("min", amount(Some(b.minimum))), ("max", amount(Some(remaining)))],
+                    ),
+                    Some(remaining) => fmt("At most {max}.", &[("max", amount(Some(remaining)))]),
+                    None => String::new(),
+                };
                 v.expiry = fmt("Shared until: {when}", &[("when", shared_until(b, &s.draft.expires_utc))]);
                 let mut notes = vec![fmt(
-                    "Sharing can’t go past the end of {month}.",
-                    &[("month", ms_month(b.expiry_until_ms.saturating_sub(1)))],
+                    "Sharing ends before {when} at the latest.",
+                    &[("when", local_time(b.expiry_until_ms))],
                 )];
                 let left = b.expiry_until_ms.saturating_sub(now.max(b.expiry_after_ms));
                 if left < 7 * 86_400_000 {
@@ -1210,7 +1225,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                 v.tone = SheetTone::Unsure;
                 v.title = tr("The Previous Publish Ended").into();
                 v.lead = tr("The previous publish has ended.").into();
-                v.status = tr("What Agents were given still counts. To publish again, the server administrator must approve this pool again.").into();
+                v.status = tr("What was used and given out still counts. To publish again, the server administrator must approve this pool again.").into();
                 primary = "Publish Again";
             } else {
                 match p.state {
@@ -1252,7 +1267,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                 (OwnerGrantPublicationState::ServerObserved, Some("active")) => {
                     v.tone = SheetTone::Done;
                     summary_hero(&mut v, kind, &p.summary, &base, &this_month, true);
-                    let date = month_day(p.summary.period_start_ms);
+                    let start = local_time(p.summary.period_start_ms);
                     let limit = amount(Some(p.summary.allocated_tokens));
                     let added: Vec<String> = if base.is_empty() {
                         Vec::new()
@@ -1265,14 +1280,14 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                             &[("people", people_text(&added)), ("month", month_text.clone())],
                         ),
                         (true, GrantKind::Amend, _) => sentences(&[
-                            fmt("New requests now get up to {amount}. What’s given to running Agents stays as it is.", &[("amount", limit.clone())]),
+                            fmt("New requests now get up to {amount}. What running Agents hold stays as it is.", &[("amount", limit.clone())]),
                             if added.is_empty() {
                                 String::new()
                             } else {
                                 fmt("Also added {people} to this month’s list.", &[("people", people_text(&added))])
                             },
                         ]),
-                        (_, _, false) => fmt("Starts {date}. Running Agents carry on without requesting again.", &[("date", date.clone())]),
+                        (_, _, false) => fmt("Starts {when}. Running Agents carry on without requesting again.", &[("when", start.clone())]),
                         (true, _, true) => fmt(
                             "People on the list can request now, up to {amount} at a time.",
                             &[("amount", limit.clone())],
@@ -1283,16 +1298,16 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                         ),
                     };
                     if !started {
-                        v.status = tr("This month’s per-request limit can’t change any more.").into();
+                        v.status = tr("This month’s per-request limit and list can’t change any more.").into();
                     }
                     v.facts_label = tr("This pool").into();
                     v.facts = vec![Fact::new(
                         tr("Shared until"),
-                        local_time(p.summary.delegation_expires_at_ms.min(p.summary.period_end_ms)),
+                        ends_at(p.summary.delegation_expires_at_ms.min(p.summary.period_end_ms)),
                     )];
-                    if let Some(succession) = &p.summary.succession {
+                    if let Some(succession) = p.summary.succession.as_ref().filter(|_| kind != GrantKind::AddPeople) {
                         v.facts.push(Fact::new(
-                            tr("Given to running Agents"),
+                            tr("Held by running Agents"),
                             held_value(succession.carried_retained_tokens, succession.carried_children),
                         ));
                     }
@@ -1321,13 +1336,14 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                 (OwnerGrantPublicationState::Rejected, _) => {
                     v.tone = SheetTone::Failed;
                     v.lead = tr("The server didn’t accept this publish.").into();
-                    v.status = tr("No capacity is held and nothing changed.").into();
+                    v.status = tr("Nothing was changed.").into();
                 }
             }
             let done = matches!(p.state, OwnerGrantPublicationState::ServerObserved)
                 && p.server_state.as_deref() == Some("active");
+            // A record that is in effect needs no check: the window ends with Done.
             if done {
-                v.recover_visible = v.recover_visible && !s.submitted;
+                v.recover_visible = false;
             }
         }
         Phase::CancellationReview(_) => {
@@ -1339,7 +1355,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
             v.tone = if unknown_failure(code) { SheetTone::Unsure } else { SheetTone::Failed };
             failure_hero(&mut v, code, s, bounds.as_ref());
             if unchanged_failure(code) {
-                v.status = tr("Capacity and the list were not changed.").into();
+                v.status = tr("Nothing was changed.").into();
             }
             if unknown_failure(code) {
                 v.title = tr("Not Confirmed Yet").into();
@@ -1349,11 +1365,17 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
     if v.title.is_empty() {
         v.title = grant_title(kind, v.tone, s, month.as_deref());
     }
-    // People: who the change affects. Results list the people now on it.
+    // People: who the change affects. Results list the people now on it,
+    // folded into one row unless this window added someone.
     if let Some(summary) = summary.as_ref().filter(|_| !choosing) {
         let people = listed_people(&base, &summary.eligible_managers, s.successor.is_some(), false);
         v.people_visible = !people.is_empty();
         v.people_label = fmt("People who can request · {count}", &[("count", people_count(people.len()))]);
+        // A record opened to read the list shows it; a finished change that
+        // kept the list folds it.
+        v.people_collapsible = kind != GrantKind::Record && !people.iter().any(|person| person.added);
+        v.people_open = !v.people_collapsible || s.disclosure.people;
+        v.people_summary = people_count(people.len());
         v.people = people;
         v.people_note = if kind == GrantKind::Record || !s.can_choose_new_limits {
             tr("To add someone, close this window and use Who Can Request on the pool’s page.").into()
@@ -1382,7 +1404,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         v.caption = tr("Per-request limit").into();
         v.before = Some(Figure::new(amount(live), tr("Now")));
         v.after = Some(Figure::new(amount(s.proposal), tr("Proposed")));
-        v.lead = tr("Not applied yet. Continue to choose the amount; what’s given to running Agents stays as it is.").into();
+        v.lead = tr("Not applied yet. Continue to choose the amount; what running Agents hold stays as it is.").into();
         primary = "Change Per-Request Limit";
         primary_text = None;
     }
@@ -1477,13 +1499,33 @@ fn failure_hero(v: &mut GrantView, code: &str, s: &GrantState, bounds: Option<&B
         "owner_grant_below_floor" | "grant_successor_below_reserved" if bounds.is_some_and(|b| b.minimum > 1) => {
             let held = bounds.map_or(0, |b| b.minimum);
             v.caption = tr("The per-request limit must be at least").into();
-            v.after = Some(Figure::new(amount(Some(held)), tr("Given to running Agents")));
+            v.after = Some(Figure::new(amount(Some(held)), tr("Held by running Agents")));
             v.lead = match chosen {
                 Some(chosen) => fmt(
-                    "You chose {chosen}, which is less than the {held} given to running Agents. Choose {held} or more.",
+                    "You chose {chosen}, which is less than the {held} held by running Agents. Choose {held} or more.",
                     &[("chosen", amount(Some(chosen))), ("held", amount(Some(held)))],
                 ),
                 None => fmt("Choose {held} or more.", &[("held", amount(Some(held)))]),
+            };
+        }
+        // Next month is published ahead: say when this month's list (or
+        // limit) can change again, at the start of next month.
+        "owner_grant_successor_exists" | "grant_successor_exists" => {
+            let next = s.successor.map_or_else(
+                || publication_period_end().timestamp_millis() as u64,
+                |form| if renewal(form) { form.period_start_ms } else { form.period_end_ms },
+            );
+            let when = local_time(next);
+            v.lead = match grant_kind(s) {
+                GrantKind::AddPeople => fmt(
+                    "Next month is already published ahead, so this month’s list can’t change. You can add people again from {when}.",
+                    &[("when", when)],
+                ),
+                GrantKind::Renew => tr("Next month is already published ahead.").into(),
+                _ => fmt(
+                    "Next month is already published ahead, so this month can’t change. You can change it again from {when}.",
+                    &[("when", when)],
+                ),
             };
         }
         "owner_grant_capacity_unavailable" if bounds.and_then(|b| b.remaining).is_some() => {
@@ -1727,7 +1769,7 @@ fn failure_message(code: &str) -> &'static str {
             "Next month can be published ahead only in the last 7 days of this month."
         }
         "owner_grant_below_floor" | "grant_successor_below_reserved" => {
-            "The new limit is less than what’s given to running Agents. Choose a larger amount."
+            "The new limit is less than what running Agents hold. Choose a larger amount."
         }
         "owner_grant_manager_removed" => {
             "This month’s list can only grow: keep everyone already on it."
@@ -1937,6 +1979,15 @@ impl MiniAppsPanel {
             return;
         };
         prompt.disclosure.more = !prompt.disclosure.more;
+        self.present_grant_confirmation(cx);
+    }
+    /// Open or fold a list of people this window doesn't change.
+    pub(super) fn grant_people_toggle(&mut self, cx: &mut Cx) {
+        self.capture_grant_choices(cx);
+        let Some(prompt) = &mut self.grant_confirmation else {
+            return;
+        };
+        prompt.disclosure.people = !prompt.disclosure.people;
         self.present_grant_confirmation(cx);
     }
     /// Add the person typed into the native add field, one at a time. Only
@@ -2349,6 +2400,8 @@ impl MiniAppsPanel {
         let cancel_intent = area(self, cx, ids!(grant_confirmation.scroll.actions.cancel_intent));
         let more = area(self, cx, ids!(grant_confirmation.scroll.more.more_row.more_toggle));
         let add = area(self, cx, ids!(grant_confirmation.scroll.people.list.add.add_button));
+        let people_toggle = area(self, cx, ids!(grant_confirmation.scroll.people.list.people_toggle_row.people_toggle));
+        let folded = view.people_collapsible && !view.people_open;
         let presets = [
             (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day), Some(1)),
             (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week), Some(7)),
@@ -2369,9 +2422,12 @@ impl MiniAppsPanel {
             })
             .collect();
         let mut targets = Vec::new();
+        if view.people_visible && view.people_collapsible {
+            targets.push(people_toggle);
+        }
         if view.choosing {
             targets.extend(removes.iter().map(|(_, area)| *area));
-            if view.people_editable {
+            if view.people_editable && !folded {
                 targets.push(self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name)).area());
                 targets.push(add);
             }
@@ -2435,11 +2491,16 @@ impl MiniAppsPanel {
                         return true;
                     }
                 }
-                if view.people_editable && cx.has_key_focus(add) {
+                if view.people_editable && !folded && cx.has_key_focus(add) {
                     self.grant_add_person(cx);
                     cx.set_key_focus(add);
                     return true;
                 }
+            }
+            if view.people_visible && view.people_collapsible && cx.has_key_focus(people_toggle) {
+                self.grant_people_toggle(cx);
+                cx.set_key_focus(people_toggle);
+                return true;
             }
             if view.more_visible() && cx.has_key_focus(more) {
                 self.grant_disclose(cx);
@@ -2685,7 +2746,8 @@ impl GrantPreview {
             submitting: f["submitting"].as_bool().unwrap_or(false),
             can_choose_new_limits: !record,
             disclosure: Disclosure {
-                more: ["more", "advanced", "technical", "people"].iter().any(|key| f[*key].as_bool() == Some(true)),
+                more: ["more", "advanced", "technical"].iter().any(|key| f[*key].as_bool() == Some(true)),
+                people: f["people"].as_bool() == Some(true),
             },
             add_error,
         })
@@ -3067,8 +3129,7 @@ mod tests {
         fill_successor_defaults(&mut plain, &form, now_ms());
         assert_eq!(plain.tokens, "2000000");
         assert_eq!(plain.managers, "@manager:test");
-        // The hero shows before → after; the rows name the maximum, how high
-        // it can go and what running Agents were given, the floor.
+        // The hero shows before → after.
         let applicants = ["@new:test".to_owned()];
         let view = preview_view(&Phase::Choose, &draft, Some(&form), None, &applicants, Disclosure::default());
         assert_eq!(view.tone, SheetTone::Proposal);
@@ -3077,18 +3138,22 @@ mod tests {
         assert_eq!(view.caption, "Per-request limit");
         assert_eq!(view.before, Some(Figure::new("2 M", "Now")));
         assert_eq!(view.after, Some(Figure::new("0.8 M", "After you confirm")));
-        assert_eq!(view.lead, "Applies this month as soon as you confirm. What’s given to running Agents stays as it is. Also adds @new to this month’s list.");
+        assert_eq!(view.lead, "Applies this month as soon as you confirm. What running Agents hold stays as it is. Also adds @new to this month’s list.");
+        // When it applies is the lead's; the rows say how high it can go and
+        // what running Agents hold, the floor.
         assert_eq!(facts(&view), [
-            ("Monthly maximum".to_owned(), "20 M".to_owned()),
             ("Most it can be".to_owned(), "5 M".to_owned()),
-            ("Given to running Agents".to_owned(), "0.6 M · 2 Agents".to_owned()),
-            ("Takes effect".to_owned(), "When you confirm".to_owned()),
+            ("Held by running Agents".to_owned(), "0.6 M · 2 Agents".to_owned()),
         ]);
+        assert_eq!(view.facts[0].note, "What this month can still give out.");
+        assert_eq!(view.facts[1].note, "The per-request limit can’t go below it.");
         assert_eq!(view.primary, "Confirm Changes");
         assert!(view.primary_enabled && !view.primary_closes && !view.primary_recovers);
         // Listed people are locked; the person this window adds can be removed.
         assert_eq!(names(&view), [("@manager".to_owned(), false, false), ("@new".to_owned(), true, true)]);
-        assert_eq!(view.quota_hint, "At most 5 M. At least 0.6 M, which is given to running Agents.");
+        assert_eq!(view.quota_hint, "Choose 0.6 M – 5 M.");
+        // Someone is being added, so the list shows with its add field.
+        assert!(!view.people_collapsible && view.people_open);
         assert_eq!(view.caution, "Waiting requests above 0.8 M can’t be approved after this.");
         assert!(view.problem.is_empty() && view.quota_visible);
         // Unknown capacity keeps the form unconfirmable.
@@ -3135,9 +3200,14 @@ mod tests {
         assert_eq!(view.glyph, SheetGlyph::Renew);
         assert_eq!(view.before, Some(Figure::new("2 M", this)));
         assert_eq!(view.after, Some(Figure::new("2 M", month.clone())));
-        assert_eq!(view.lead, format!("Starts {}. The list and the monthly maximum carry over.", month_day(form.period_start_ms)));
-        assert_eq!(view.caution, format!("Once {month} is published ahead, this month’s per-request limit can’t change any more, and you can’t withdraw it in the app."));
-        assert!(facts(&view).contains(&("Monthly maximum".to_owned(), "20 M (carried over)".to_owned())));
+        assert_eq!(view.lead, format!("Starts {}. The list and the monthly maximum carry over.", local_time(form.period_start_ms)));
+        assert_eq!(view.caution, format!("Once {month} is published ahead, this month’s per-request limit and list can’t change any more, and it can’t be withdrawn."));
+        // The list carries over unchanged: one row that opens in place.
+        assert!(view.people_collapsible && !view.people_open);
+        assert_eq!(view.people_summary, "1 person");
+        // The lead says the maximum carries over; the rows say what next month has.
+        assert!(!facts(&view).iter().any(|(label, _)| label == "Monthly maximum"));
+        assert!(facts(&view).contains(&(format!("Available in {month}"), "5 M".to_owned())));
         assert_eq!(view.primary, "Publish Ahead");
         let mut raised = draft.clone();
         raised.tokens = "3000000".into();
@@ -3307,9 +3377,9 @@ mod tests {
         assert!(view.primary_enabled && view.people_editable);
         assert_eq!(names(&view), [("@manager".to_owned(), false, false), ("@lisi".to_owned(), true, true)]);
         // The unchanged limit is a row, never a slider and never "2 M → 2 M".
-        let open = preview_view(&Phase::Choose, &draft, Some(&form), None, &applicants, Disclosure { more: true });
+        let open = preview_view(&Phase::Choose, &draft, Some(&form), None, &applicants, Disclosure { more: true, ..Disclosure::default() });
         assert!(!view.quota_visible && !open.quota_visible && open.advanced_open);
-        assert!(facts(&view).contains(&("Per-request limit".to_owned(), "2 M (unchanged)".to_owned())));
+        assert_eq!(facts(&view), [("Per-request limit".to_owned(), "2 M (unchanged)".to_owned())]);
         // Someone already on the list: nothing to confirm.
         let already = ["@manager:test".to_owned()];
         let mut same = initial_draft(Some(2_000_000), &already);
@@ -3381,15 +3451,18 @@ mod tests {
         assert_eq!(view.glyph, SheetGlyph::Publish);
         assert_eq!(view.before, Some(Figure::new("Not published", "Now")));
         assert_eq!(view.after, Some(Figure::new("0.5 M", "After you confirm")));
-        assert_eq!(view.lead, format!("People on the list can request up to 0.5 M at a time until the end of {month}."));
+        // When sharing ends is one local time, the same in every state.
+        let end = local_time(publication_period_end().timestamp_millis() as u64);
+        assert_eq!(view.lead, format!("People on the list can request up to 0.5 M at a time, before {end}."));
+        // The lead says when sharing ends; the rows don't repeat it.
         assert_eq!(facts(&view), [
             ("Monthly maximum".to_owned(), "20 M".to_owned()),
             ("Left this month".to_owned(), "5 M".to_owned()),
-            ("Shared until".to_owned(), format!("End of {month}")),
         ]);
         assert_eq!(view.primary, "Publish");
         assert_eq!(names(&view), [("@applicant".to_owned(), false, true)]);
-        assert_eq!(view.expiry, format!("Shared until: End of {month}"));
+        assert_eq!(view.expiry, format!("Shared until: Before {end}"));
+        assert!(!view.people_collapsible, "a publish chooses its list here");
         for primary in [&view.title, &view.pool, &view.lead, &view.status, &view.quota_hint, &view.expiry, &view.expiry_note] {
             assert!(!primary.contains("UTC") && !primary.contains("matrix.test") && !primary.contains("pool_1"), "{primary}");
         }
@@ -3425,6 +3498,80 @@ mod tests {
         assert_eq!((view.primary.as_str(), view.cancel.as_str()), ("Done", ""));
         assert!(view.primary_closes && view.primary_enabled && view.primary_visible);
         assert_eq!(names(&view), [("@manager".to_owned(), false, false)]);
+        // The list was chosen in the proposal, so the result folds it, and a
+        // finished publish offers no re-check row beside Done.
+        assert!(view.people_collapsible && !view.people_open && !view.recover_visible);
+        assert_eq!(facts(&view), [("Shared until".to_owned(), format!("Before {}", local_time(1793491200000)))]);
+    }
+    #[test]
+    fn every_state_says_when_sharing_ends_in_the_same_local_words() {
+        // The proposal's row and the finished window's row for one month end.
+        let form = pool_form(5_000_000);
+        let mut draft = initial_draft(Some(500_000), &["@applicant:test".to_owned()]);
+        fill_form_defaults(&mut draft, &form);
+        draft.coordinator = "@owner:test".into();
+        let proposal = preview_view(&Phase::Choose, &draft, None, Some(&form), &[], Disclosure::default());
+        let end = publication_period_end().timestamp_millis() as u64;
+        let mut live = summary(500_000);
+        live.period_end_ms = end;
+        live.delegation_expires_at_ms = end;
+        let done = Phase::PublicationProgress(OwnerGrantPublicationProgress {
+            summary: live, state: OwnerGrantPublicationState::ServerObserved, server_state: Some("active".into()),
+            server_revision: Some(1), observed_at_ms: Some(1),
+        });
+        let finished = finished(&done, None, Some(&form));
+        let row = |view: &GrantView| view.facts.iter().find(|f| f.label == "Shared until").map(|f| f.value.clone());
+        assert_eq!(row(&finished), Some(format!("Before {}", local_time(end))));
+        assert!(proposal.lead.contains(&format!("before {}", local_time(end))), "{}", proposal.lead);
+        assert_eq!(proposal.expiry, format!("Shared until: Before {}", local_time(end)));
+        // Exact local and UTC times stay behind the disclosure.
+        assert!(finished.technical.contains("Shared until (your time)") && finished.technical.contains("Shared until (UTC)"));
+        for view in [&proposal, &finished] {
+            for text in [&view.lead, &view.status, &view.expiry, &view.expiry_note] {
+                assert!(!text.contains("End of") && !text.contains("UTC"), "{text}");
+            }
+        }
+    }
+    #[test]
+    fn a_list_the_window_keeps_folds_into_one_row_that_opens_in_place() {
+        let form = successor_form(OwnerGrantSuccessionKind::Amendment);
+        let mut draft = initial_draft(Some(800_000), &[]);
+        fill_successor_defaults(&mut draft, &form, now_ms());
+        draft.coordinator = "@owner:test".into();
+        let folded = preview_view(&Phase::Choose, &draft, Some(&form), None, &[], Disclosure::default());
+        assert!(folded.people_collapsible && !folded.people_open && folded.people_editable);
+        assert_eq!(folded.people_summary, "1 person");
+        let open = preview_view(&Phase::Choose, &draft, Some(&form), None, &[], Disclosure { people: true, ..Disclosure::default() });
+        assert!(open.people_collapsible && open.people_open);
+        assert_eq!(names(&open), [("@manager".to_owned(), false, false)]);
+        // A record opened to read the list shows it.
+        let record = GrantState {
+            phase: &publication(OwnerGrantPublicationState::ServerObserved, Some("active")), draft: &draft, proposal: None,
+            form: None, successor: None, requested: None, applicants: &[], account: "@owner:test", original: true,
+            in_flight: false, submitted: false, submitting: false, publishing: true, cancelling: false, regrant: false,
+            active: true, can_choose_new_limits: false, succession_supported: Some(true), disclosure: Disclosure::default(),
+            add_error: "",
+        };
+        let view = grant_view(&record, OCTOBER);
+        assert!(!view.people_collapsible && view.people_open && !view.recover_visible);
+    }
+    #[test]
+    fn adding_people_after_next_month_is_published_says_when_it_works_again() {
+        let form = successor_form(OwnerGrantSuccessionKind::Amendment);
+        let applicants = ["@lisi:test".to_owned()];
+        let mut draft = initial_draft(Some(2_000_000), &applicants);
+        fill_successor_defaults(&mut draft, &form, now_ms());
+        let view = preview_view(&Phase::Failed("owner_grant_successor_exists".into()), &draft, Some(&form), None, &applicants, Disclosure::default());
+        assert_eq!(view.title, "No One Was Added");
+        assert_eq!(view.lead, format!(
+            "Next month is already published ahead, so this month’s list can’t change. You can add people again from {}.",
+            local_time(form.period_end_ms)
+        ));
+        assert_eq!(view.status, "Nothing was changed.");
+        // Opened without a form (the server refused before it loaded): the
+        // next month's start comes from the clock.
+        let early = preview_view(&Phase::Failed("grant_successor_exists".into()), &draft, None, None, &applicants, Disclosure::default());
+        assert!(early.lead.ends_with(&format!("from {}.", local_time(publication_period_end().timestamp_millis() as u64))), "{}", early.lead);
     }
     #[test]
     fn proposal_success_and_failure_look_different_and_failure_names_what_works() {
@@ -3438,9 +3585,9 @@ mod tests {
         assert_ne!(proposal.title, failed.title);
         assert_eq!(failed.title, "Per-Request Limit Not Saved");
         assert_eq!(failed.caption, "The per-request limit must be at least");
-        assert_eq!(failed.after, Some(Figure::new("0.6 M", "Given to running Agents")));
-        assert_eq!(failed.lead, "You chose 0.5 M, which is less than the 0.6 M given to running Agents. Choose 0.6 M or more.");
-        assert_eq!(failed.status, "Capacity and the list were not changed.");
+        assert_eq!(failed.after, Some(Figure::new("0.6 M", "Held by running Agents")));
+        assert_eq!(failed.lead, "You chose 0.5 M, which is less than the 0.6 M held by running Agents. Choose 0.6 M or more.");
+        assert_eq!(failed.status, "Nothing was changed.");
         // The way forward is the primary button: back to the form.
         assert!(failed.primary_recovers && failed.primary_enabled);
         assert_eq!((failed.primary.as_str(), failed.cancel.as_str()), ("Choose Again", "Close"));
@@ -3464,7 +3611,9 @@ mod tests {
         assert_eq!(view.title, "Per-Request Limit Saved");
         assert_eq!((view.before.clone().unwrap().value, view.after.clone().unwrap().value), ("2 M".into(), "0.8 M".into()));
         assert!(view.lead.starts_with("New requests now get up to 0.8 M."), "{}", view.lead);
-        assert!(facts(&view).contains(&("Given to running Agents".to_owned(), "0.6 M · 2 Agents".to_owned())));
+        assert!(facts(&view).contains(&("Held by running Agents".to_owned(), "0.6 M · 2 Agents".to_owned())));
+        // The list didn't change: folded into one row, and no re-check row.
+        assert!(view.people_collapsible && !view.people_open && !view.recover_visible);
     }
     #[test]
     fn every_preview_state_renders_through_the_shipped_view() {
@@ -3520,16 +3669,20 @@ mod tests {
         }
         out
     }
-    /// The native windows speak the mini app's words: one term for what
-    /// Agents hold (已分给 Agent) and one for the committed total (已承诺).
+    /// The native windows speak the mini app's words: what running Agents
+    /// hold is 正在运行的 Agent 已拿到 (the per-request floor), and the
+    /// monthly maximum's floor is 已用和已分出. 已承诺 is retired.
     #[test]
     fn native_pool_windows_use_the_mini_apps_words_in_chinese() {
         use crate::i18n::{Language, text_for};
-        const BANNED: [&str; 21] = [
+        const BANNED: [&str; 26] = [
             "每月总上限", "本设备", "智能体", "令牌", "授权意向", "准入", "协调者", "发布额度",
             "M tokens", "申请者", "已贡献", "结算周期", "资源池发布",
             // Retired words for what Agents hold and the committed total.
             "已分到", "已占用", "预留", "已计入", "承诺给", "已有额度", "保留已有", "已占",
+            "已承诺", "承诺", "所占的部分", "已分给正在运行的",
+            // Month ends are one local time ("11 月 1 日 08:00 前"), never "10 月底".
+            "{month}底",
         ];
         let cut = |source: &'static str, from: &str, to: &str| -> &'static str {
             let start = source.find(from).unwrap_or(0);
@@ -3566,8 +3719,12 @@ mod tests {
             ("Publish {month} Ahead", "提前发布 {month}额度"),
             ("Per-request limit", "每次申请上限"),
             ("Change the Monthly Maximum", "修改每月上限"),
-            ("Given to running Agents", "已分给正在运行的 Agent"),
-            ("Committed this month", "本月已承诺"),
+            ("Held by running Agents", "正在运行的 Agent 已拿到"),
+            ("Used and given out this month", "本月已用和已分出"),
+            ("Most it can be", "最多可设为"),
+            ("What this month can still give out.", "本月还能分出的额度。"),
+            ("Nothing was changed.", "什么都没有改动。"),
+            ("Before {when}", "{when} 前"),
             ("Monthly Maximum Saved", "已保存每月上限"),
             ("Per-Request Limit Not Saved", "没有保存每次申请上限"),
         ] {
@@ -3635,7 +3792,7 @@ mod layout_tests {
             caption: text("Per-request limit", "每次申请上限"),
             before: Some(Figure::new("0.2 M", text("Now", "现在"))),
             after: Some(Figure::new("0.25 M", text("After you confirm", "确认后"))),
-            lead: text("Applies this month as soon as you confirm. What’s given to running Agents stays as it is.", "确认后本月立即生效；已分给正在运行的 Agent 的额度不变。").repeat(3),
+            lead: text("Applies this month as soon as you confirm. What running Agents hold stays as it is.", "确认后本月立即生效；正在运行的 Agent 已拿到的额度不变。").repeat(3),
             caution: text("Waiting requests above 0.25 M can’t be approved after this.", "改完后，超过 0.25 M 的待批准申请不能再批准。"),
             facts: (0..6).map(|n| Fact::new(format!("Fact {n}"), "0.8 M").note(if n == 2 { "note" } else { "" })).collect(),
             facts_label: text("This pool", "这个资源池"),
@@ -3648,12 +3805,12 @@ mod layout_tests {
             add_error: text("Only people on your server (example.org) can be added.", "只能添加你所在服务器（example.org）上的人。"),
             choosing,
             quota_visible: choosing,
-            quota_hint: text("At most 0.8 M. At least 0.1 M, which is given to running Agents.", "最多 0.8 M。至少 0.1 M：这是已分给正在运行的 Agent 的额度。"),
+            quota_hint: text("Choose 0.1 M – 0.8 M.", "可选 0.1 M – 0.8 M。"),
             more_label: text("Advanced Options and Technical Details", "高级选项和技术详情"),
             more_open: true,
             advanced_open: true,
-            expiry: text("Shared until: End of October", "共享到：10 月底"),
-            expiry_note: text("Sharing can’t go past the end of October.", "共享最晚到 10 月底。"),
+            expiry: text("Shared until: Before November 1, 8:00 AM", "共享到：11 月 1 日 08:00 前"),
+            expiry_note: text("Sharing ends before November 1, 8:00 AM at the latest.", "最晚在 11 月 1 日 08:00 前结束共享。"),
             technical: text("Your account\n@reviewer:example.org\n\n", "你的账号\n@reviewer:example.org\n\n").repeat(40),
             recover: text("Check Again", "再查一次"),
             recover_visible: true,

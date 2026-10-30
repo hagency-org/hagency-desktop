@@ -91,6 +91,11 @@ pub(super) struct SheetView {
     pub people_label: String,
     pub people: Vec<Person>,
     pub people_note: String,
+    /// A list this window doesn't change folds into one row ("People who
+    /// can request · 3 people") that opens in place.
+    pub people_collapsible: bool,
+    pub people_open: bool,
+    pub people_summary: String,
     /// The add-one-person row under the list.
     pub people_editable: bool,
     pub add_placeholder: String,
@@ -98,6 +103,8 @@ pub(super) struct SheetView {
     pub add_hint: String,
     pub choosing: bool,
     pub quota_visible: bool,
+    /// What the slider sets: the per-request limit or the monthly maximum.
+    pub quota_label: String,
     pub quota_hint: String,
     /// The single disclosure: advanced choices (while choosing) and details.
     pub more_label: String,
@@ -208,16 +215,28 @@ impl MiniAppsPanel {
             text(self, cx, &[id!(scroll), id!(facts), *slot, id!(body), id!(value)], &fact.value);
             text(self, cx, &[id!(scroll), id!(facts), *slot, id!(note)], &fact.note);
         }
-        // People: listed people locked, people added here removable.
+        // People: listed people locked, people added here removable. A list
+        // this window doesn't change starts folded into one row.
         show(self, cx, &[id!(scroll), id!(people)], v.people_visible);
-        text(self, cx, &[id!(scroll), id!(people), id!(people_label)], &v.people_label);
-        let shown = people_shown(v.people.len());
+        let folded = v.people_collapsible && !v.people_open;
+        text(self, cx, &[id!(scroll), id!(people), id!(people_label)], if v.people_collapsible { "" } else { &v.people_label });
+        let toggle = [id!(scroll), id!(people), id!(list), id!(people_toggle_row)];
+        show(self, cx, &toggle, v.people_collapsible);
+        self.view
+            .label(cx, &at(&[id!(scroll), id!(people), id!(list), id!(people_toggle_row), id!(people_toggle_body), id!(people_toggle_label)]))
+            .set_text(cx, tr("People who can request"));
+        self.view
+            .label(cx, &at(&[id!(scroll), id!(people), id!(list), id!(people_toggle_row), id!(people_toggle_body), id!(people_toggle_value)]))
+            .set_text(cx, &v.people_summary);
+        show(self, cx, &[id!(scroll), id!(people), id!(list), id!(people_toggle_row), id!(people_toggle_body), id!(people_closed)], !v.people_open);
+        show(self, cx, &[id!(scroll), id!(people), id!(list), id!(people_toggle_row), id!(people_toggle_body), id!(people_opened)], v.people_open);
+        let shown = if folded { 0 } else { people_shown(v.people.len()) };
         for (index, slot) in PEOPLE.iter().enumerate() {
             let person = v.people.get(index).filter(|_| index < shown);
             let row = [id!(scroll), id!(people), id!(list), *slot];
             show(self, cx, &row, person.is_some());
             let person = person.cloned().unwrap_or_default();
-            show(self, cx, &[id!(scroll), id!(people), id!(list), *slot, id!(line)], index > 0);
+            show(self, cx, &[id!(scroll), id!(people), id!(list), *slot, id!(line)], index > 0 || v.people_collapsible);
             self.view.label(cx, &at(&[id!(scroll), id!(people), id!(list), *slot, id!(body), id!(name)])).set_text(cx, &person.name);
             show(self, cx, &[id!(scroll), id!(people), id!(list), *slot, id!(body), id!(tag)], person.added);
             self.view
@@ -226,24 +245,27 @@ impl MiniAppsPanel {
             show(self, cx, &[id!(scroll), id!(people), id!(list), *slot, id!(body), id!(locked)], !person.removable && !person.added);
             show(self, cx, &[id!(scroll), id!(people), id!(list), *slot, id!(body), id!(remove)], person.removable);
         }
-        let more = v.people.len().saturating_sub(shown);
+        let more = if folded { 0 } else { v.people.len().saturating_sub(shown) };
         let more_text = if more > 0 {
             crate::i18n::format("And {count} more", &[("count", more.to_string())])
         } else {
             String::new()
         };
         text(self, cx, &[id!(scroll), id!(people), id!(list), id!(more_people)], &more_text);
-        show(self, cx, &[id!(scroll), id!(people), id!(list), id!(add)], v.people_editable);
-        show(self, cx, &[id!(scroll), id!(people), id!(list), id!(add), id!(add_line)], !v.people.is_empty());
+        show(self, cx, &[id!(scroll), id!(people), id!(list), id!(add)], v.people_editable && !folded);
+        show(self, cx, &[id!(scroll), id!(people), id!(list), id!(add), id!(add_line)], !v.people.is_empty() || v.people_collapsible);
         self.view
             .text_input(cx, &at(&[id!(scroll), id!(people), id!(list), id!(add), id!(add_name)]))
             .set_empty_text(cx, v.add_placeholder.clone());
         text(self, cx, &[id!(scroll), id!(people), id!(list), id!(add), id!(add_error)], &v.add_error);
         text(self, cx, &[id!(scroll), id!(people), id!(list), id!(add), id!(add_hint)], if v.add_error.is_empty() { &v.add_hint } else { "" });
-        show(self, cx, &[id!(scroll), id!(people), id!(list)], !v.people.is_empty() || v.people_editable);
-        text(self, cx, &[id!(scroll), id!(people), id!(people_note)], &v.people_note);
-        // The per-request limit, chosen with a slider and a value beside it.
+        show(self, cx, &[id!(scroll), id!(people), id!(list)], !v.people.is_empty() || v.people_editable || v.people_collapsible);
+        text(self, cx, &[id!(scroll), id!(people), id!(people_note)], if folded { "" } else { &v.people_note });
+        // The per-request limit (or the monthly maximum), chosen with a slider and a value beside it.
         show(self, cx, &[id!(scroll), id!(quota)], v.choosing && v.quota_visible);
+        self.view
+            .label(cx, &at(&[id!(scroll), id!(quota), id!(quota_label)]))
+            .set_text(cx, if v.quota_label.is_empty() { tr("Per-request limit") } else { &v.quota_label });
         text(self, cx, &[id!(scroll), id!(quota), id!(quota_hint)], &v.quota_hint);
         // Recovery steps for a saved record.
         let recover = v.recover_visible && !v.primary_recovers;
