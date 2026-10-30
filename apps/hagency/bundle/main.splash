@@ -2300,7 +2300,7 @@ A.alert_split=fn(q){
 // The alert's figures are a record; say when, and how the pool stands now.
 A.alert_now_line=fn(row,q,live){
     let when=A.alert_when(row,"lastSeen")
-    let head=if when=="" {A.t("These are the figures recorded with the alert.","上面是告警时记录的数字。")} else {A.t("Recorded "+when+".","这是"+when+" 的记录。")}
+    let head=if when=="" {A.t("These are the figures recorded with the alert.","上面是告警时记录的数字。")} else {A.t("Recorded "+when+".","记录于"+when+"。")}
     if live==nil || live.ceiling==nil || live.remaining==nil {return head}
     if live.remaining>0 {return head+A.t(" Now it’s back under the maximum, with "+A.tokens(live.remaining)+" left; the alert clears by itself.","现在已回到上限以内，还剩 "+A.tokens(live.remaining)+"；告警会自动解除。")}
     return head+A.t(" It’s still at or over the maximum now.","现在仍达到或超出上限。")
@@ -2321,11 +2321,11 @@ A.alert_when=fn(row,field){
     if parts.len()<2 {return local}
     let date=parts[0].split("-")
     let clock=parts[1]
-    if day==0 {return A.t("Today ","今天 ")+clock}
-    if day==1 {return A.t("Yesterday ","昨天 ")+clock}
-    if day==-1 {return A.t("Tomorrow ","明天 ")+clock}
-    if date.len()==3 {return A.t(date[1]+"/"+date[2]+" "+clock,""+date[1].to_f64()+" 月 "+date[2].to_f64()+" 日 "+clock)}
-    return local
+    if day==0 {return A.t("Today ","今天 ")+clock+A.zone_note_local()}
+    if day==1 {return A.t("Yesterday ","昨天 ")+clock+A.zone_note_local()}
+    if day==-1 {return A.t("Tomorrow ","明天 ")+clock+A.zone_note_local()}
+    if date.len()==3 {return A.t(date[1]+"/"+date[2]+" "+clock,""+date[1].to_f64()+" 月 "+date[2].to_f64()+" 日 "+clock)+A.zone_note_local()}
+    return local+A.zone_note_local()
 }
 // The pool's live remaining capacity, to sit beside an alert's snapshot.
 A.alert_live_left=fn(rid){
@@ -2376,7 +2376,7 @@ A.alert_status_line=fn(row){
 // When the alert's figures were recorded, for a pool that has since recovered.
 A.alert_when_line=fn(row){
     let when=A.alert_when(row,"lastSeen")
-    return if when=="" {A.t("These are the figures recorded with the alert.","上面是告警时记录的数字。")} else {A.t("Recorded "+when+".","这是"+when+" 的记录。")}
+    return if when=="" {A.t("These are the figures recorded with the alert.","上面是告警时记录的数字。")} else {A.t("Recorded "+when+".","记录于"+when+"。")}
 }
 A.alert_saved_text=fn(state){
     if state=="acknowledged" {return A.t("Marked “Got It”.","已标记为「知道了」。")}
@@ -5172,20 +5172,75 @@ A.pool_month_name=fn(m){
     let names=["January","February","March","April","May","June","July","August","September","October","November","December"]
     return names[max(0,min(11,m-1))]
 }
-A.pool_reset_text=fn(key,observed){
-    let s={m:0}
-    if observed!=nil {s.m=A.pool_civil(observed).m}
-    if s.m==0 && key!=nil && key.is_string() {let c=key.to_chars() if c.len()>=7 {s.m=A.pool_digits(c,5,7)}}
-    if !(s.m>=1 && s.m<=12) {return ""}
-    let next=s.m%12+1
-    return A.t("Resets "+A.pool_month_name(next)+" 1 (UTC)",""+next+" 月 1 日（UTC）重置")
+// The device's clock, as the confirmation windows show it: its offset from UTC and its zone's
+// name ("北京时间", "UTC+8"), from the session. Without them the page says UTC.
+A.zone_offset=fn(){if H.session==nil {return nil} return A.recipient_optional(H.session,"localUtcOffsetMinutes")}
+A.zone_name=fn(){
+    let label=if H.session==nil {nil} else {A.recipient_optional(H.session,"localZoneLabel")}
+    if label!=nil {
+        let en=A.recipient_optional(label,"en") let zh=A.recipient_optional(label,"zh")
+        if en!=nil && zh!=nil {return A.t(en,zh)}
+    }
+    return if A.zone_offset()==nil {"UTC"} else {A.t("local time","本机时间")}
 }
-// "December 1 (UTC)" / "12 月 1 日（UTC）": the first day of next UTC month, or "next month". The
-// confirmation windows show the same moment in the owner's time zone, so the page names its zone.
+A.zone_note=fn(){return A.t(" ("+A.zone_name()+")","（"+A.zone_name()+"）")}
+// For a time the host already put on this device's clock (alerts): its zone, else "this computer's time".
+A.zone_note_local=fn(){
+    let name=if A.zone_offset()==nil {A.t("this computer’s time","本机时间")} else {A.zone_name()}
+    return A.t(" ("+name+")","（"+name+"）")
+}
+A.clock2=fn(n){return if n<10 {"0"+n} else {""+n}}
+// A moment on the owner's clock: date and time of day, in the device's zone when known, else UTC.
+A.local_parts=fn(ms){
+    let off=A.zone_offset()
+    let t=ms+(if off==nil {0} else {off*60000})
+    let c=A.pool_civil(t)
+    let mins=A.pool_div(t-A.pool_div(t,86400000)*86400000,60000)
+    let hh=A.pool_div(mins,60)
+    return {y:c.y m:c.m d:c.d hh:hh mm:mins-hh*60}
+}
+// "11 月 1 日 08:00" / "November 1, 8:00 AM", the words the confirmation windows use.
+A.local_moment=fn(ms){
+    let c=A.local_parts(ms)
+    let h12=if c.hh%12==0 {12} else {c.hh%12}
+    return A.t(A.pool_month_name(c.m)+" "+c.d+", "+h12+":"+A.clock2(c.mm)+(if c.hh<12 {" AM"} else {" PM"}),""+c.m+" 月 "+c.d+" 日 "+A.clock2(c.hh)+":"+A.clock2(c.mm))
+}
+// With its zone: "11 月 1 日 08:00（北京时间）".
+A.local_moment_zoned=fn(ms){return A.local_moment(ms)+A.zone_note()}
+// The first instant of a UTC month, y-m-01 00:00 UTC (days-from-civil).
+A.pool_month_ms=fn(y,m){
+    let yy=if m<=2 {y-1} else {y}
+    let era=A.pool_div(yy,400)
+    let yoe=yy-era*400
+    let mp=if m>2 {m-3} else {m+9}
+    let doy=A.pool_div(153*mp+2,5)
+    let doe=yoe*365+A.pool_div(yoe,4)-A.pool_div(yoe,100)+doy
+    return (era*146097+doe-719468)*86400000
+}
+// When the month's capacity resets, on the owner's clock: "11 月 1 日 08:00（北京时间）重置".
+A.pool_reset_text=fn(key,observed){
+    let s={t:nil}
+    if observed!=nil {s.t=A.pool_month_end(observed)}
+    if s.t==nil && key!=nil && key.is_string() {let c=key.to_chars() if c.len()>=7 {
+        let y=A.pool_digits(c,0,4) let m=A.pool_digits(c,5,7)
+        if m>=1 && m<=12 {s.t=A.pool_month_ms(if m==12 {y+1} else {y},m%12+1)}
+    }}
+    if s.t==nil {return ""}
+    return A.t("Resets "+A.local_moment_zoned(s.t),A.local_moment_zoned(s.t)+"重置")
+}
+// The same reset as a rule, for the glossary: "每月 1 日 08:00（北京时间）".
+A.pool_reset_rule=fn(){
+    let off=A.zone_offset()
+    if off==nil {return A.t("on the 1st of each month at 0:00 UTC","每月 1 日 0 点（UTC）")}
+    let mins=if off>=0 {off%1440} else {1440+off%1440}
+    let at=A.clock2(A.pool_div(mins,60))+":"+A.clock2(mins%60)
+    if off>=0 {return A.t("on the 1st of each month at "+at+A.zone_note(),"每月 1 日 "+at+A.zone_note())}
+    return A.t("on the last day of each month at "+at+A.zone_note(),"每月最后一天 "+at+A.zone_note())
+}
+// When next month starts, on the owner's clock: "11 月 1 日 08:00（北京时间）", or "next month".
 A.pool_next_month=fn(now){
-    if now==nil {return A.t("the 1st of next month (UTC)","下月 1 日（UTC）")}
-    let next=A.pool_civil(now).m%12+1
-    return A.t(A.pool_month_name(next)+" 1 (UTC)",""+next+" 月 1 日（UTC）")
+    if now==nil {return A.t("the start of next month","下个月开始时")}
+    return A.local_moment_zoned(A.pool_month_end(now))
 }
 // After publishing ahead, when this month's limit and list can change again.
 A.pool_change_again=fn(){
@@ -5308,14 +5363,7 @@ A.pool_month_end=fn(now){
     let c=A.pool_civil(now)
     let y=if c.m==12 {c.y+1} else {c.y}
     let m=if c.m==12 {1} else {c.m+1}
-    // Days from 1970-01-01 to y-m-01 (days-from-civil).
-    let yy=if m<=2 {y-1} else {y}
-    let era=A.pool_div(yy,400)
-    let yoe=yy-era*400
-    let mp=if m>2 {m-3} else {m+9}
-    let doy=A.pool_div(153*mp+2,5)
-    let doe=yoe*365+A.pool_div(yoe,4)-A.pool_div(yoe,100)+doy
-    return (era*146097+doe-719468)*86400000
+    return A.pool_month_ms(y,m)
 }
 // One view model for the detail page: what is shown, what can change and why not.
 A.pool_view=fn(detail){
@@ -6675,7 +6723,7 @@ A.pool_glossary=fn(){
         {key:"quota" term:A.t("Per-request limit","每次申请上限") gist:A.t("The most one Agent gets at a time","一个 Agent 一次最多拿多少") text:A.t("The most one Agent gets per request. It can’t go below what running Agents hold; a change applies this month once you confirm.","每个 Agent 每次申请最多能拿到的额度。不能低于正在运行的 Agent 已拿到的；确认后本月立即生效。")},
         {key:"used" term:A.t("Used","已用") gist:A.t("Used this month","本月已经用掉的") text:A.t("What Agents have used from this pool this month.","本月 Agent 从这个资源池已经用掉的额度。")},
         {key:"given" term:A.t("Given out","已分出") gist:A.t("Given to Agents, not used yet","分给了 Agent、还没用掉的") text:A.t("What you gave Agents when you approved their requests and they haven’t used yet. It isn’t given to anyone else.","你批准申请后分给 Agent、它们还没用掉的额度，不会再分给别人。")},
-        {key:"left" term:A.t("Left","剩余") gist:A.t("What this month can still give out","本月还能分出的") text:A.t("The monthly maximum minus used and given out. It resets on the 1st of each month, at 0:00 UTC; the confirmation windows show that time in your time zone.","每月上限减去已用和已分出。每月 1 日 0 点（UTC）重置；确认窗口里显示的是你所在时区的时间。")},
+        {key:"left" term:A.t("Left","剩余") gist:A.t("What this month can still give out","本月还能分出的") text:A.t("The monthly maximum minus used and given out. It resets "+A.pool_reset_rule()+".","每月上限减去已用和已分出。"+A.pool_reset_rule()+"重置。")},
         {key:"held" term:A.t("Held by running Agents","正在运行的 Agent 已拿到") gist:A.t("The lowest the per-request limit can go","每次申请上限最低只能调到这里") text:A.t("What running Agents were given, including what they already used. The per-request limit can’t go below it. The pool’s page shows an estimate; the confirmation window has the exact figure.","正在运行的 Agent 拿到的额度，包括已经用掉的部分。每次申请上限不能低于它；资源池页面上是估计值，确认窗口里有准确数字。")},
         {key:"publish" term:A.t("Publish","发布") gist:A.t("Lets people on the list request","让名单上的人能申请") text:A.t("Hands this month’s capacity to the server so people on the list can request it, once a month. In the last 7 days you can publish next month ahead.","把本月额度交给服务器，名单上的人才能申请，每月一次。每月最后 7 天还能提前发布下个月。")},
         {key:"m" term:"1 M" gist:A.t("One million tokens","100 万 token") text:A.t("Tokens are how model use is counted. Amounts are Hagency’s records, not the provider’s balance. Pools on one account share its account limit.","token 是模型用量的计算单位。额度来自 Hagency 的记录，不是服务商余额。同一账号下的资源池共用账号上限。")}

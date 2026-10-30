@@ -445,8 +445,12 @@ fn bundle_uses_the_owner_vocabulary() {
         let chinese = catalog.get(english).unwrap_or_else(|| panic!("no translation for {english}")).replace("{amount}", "");
         assert!(source.contains(&chinese), "the windows say {chinese:?} for {english:?}, the bundle doesn't");
     }
-    // The page's dates are UTC month boundaries and say so; the windows give the same moment locally.
-    assert!(source.contains("月 1 日（UTC）"), "the pool page doesn't name the zone of its dates");
+    // The page's dates are on this device's clock and name its zone, as the windows do: the
+    // session carries the offset and the zone's label ("北京时间", "UTC+8").
+    assert!(
+        source.contains("localUtcOffsetMinutes") && source.contains("localZoneLabel"),
+        "the pool page doesn't name the zone of its dates"
+    );
     // Manager-side project-reservation pages may still say 预留; the owner's pool, request,
     // approval, alert and device helpers may not.
     let owner = ["pool_", "reqs_", "dev_", "alert_", "who_", "health_", "stopped_", "onboarding_", "local_pool"];
