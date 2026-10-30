@@ -67,7 +67,7 @@ assert(has(A.t("Resource ID · ","资源标识 · ")+H.resources[1].id))
 assert(!has(A.t("Resource ID · ","资源标识 · ")+"res_…xxxxxxxx"))'''),
       'zero_and_unknown':('H.resources=[resource("short-id"),resource("other-id")] H.resources[0].budget.remainingTokens=0 H.resources[0].budget.pool.ceiling=0 H.resources[1].budget.remainingTokens=nil H.resources[1].budget.pool.ceiling=nil H.resources[1].budget.pool.period=nil','''assert(has("0 / 0"))
 assert(has(A.t("Unknown / Unknown","未知 / 未知")))
-assert(has(A.t("Not declared","未声明")))
+assert(has(A.t("Not declared","未填写")))
 assert(has(A.t("Resource ID · ","资源标识 · ")+"short-id"))'''),
       'busy_paging':('H.busy=true H.resources=[resource("res_aaaaaaaaaaaa11111111")] H.resource_after="cursor"','''assert(find(root,"all").enabled == false)
 assert(find(root,"coding").enabled == false)

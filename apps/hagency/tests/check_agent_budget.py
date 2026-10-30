@@ -24,7 +24,7 @@ let find=fn(name){for row in widgets{if row.name==name{return row.value}} return
 CASES={
 'approval_rejection_cancellation_have_distinct_explanations': '''
 A.review_topup_action("approve") let approve=A.topup_review_hint()
-assert(approve==A.t("Approval authorizes this increase. The execution device must confirm application before it can be used. Current resource authority and budget are checked when submitted.","批准后允许追加此额度，执行设备确认应用后才能使用。提交时会核对当前资源权限与预算。"))
+assert(approve==A.t("Approval authorizes this increase. The execution device must confirm application before it can be used. Current resource authority and budget are checked when submitted.","批准后可以追加这些额度，运行 Agent 的电脑确认后才能使用。提交时会再检查权限和额度。"))
 A.review_topup_action("reject") let reject=A.topup_review_hint() assert(reject!=approve)
 A.review_topup_action("cancel") assert(A.topup_review_hint()!=reject && A.topup_review_hint()!=approve && calls.len()==0)
 assert(A.topup_application_hint("applied")!=A.topup_application_hint("unknown"))

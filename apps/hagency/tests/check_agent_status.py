@@ -36,14 +36,14 @@ assert(has("@_hagency_agent:test"))
 assert(has("!project:test"))
 assert(has(A.t("Runtime qualification recorded","已记录运行环境资格检查")))
 assert(has(A.t("Qualification checks the provider process. It does not prove that the agent is currently online or performing work.","资格检查用于验证模型服务进程，并不证明 Agent 当前在线或正在执行任务。")))'''),
-      'execution_legacy_absent':('H.agent_status=status','assert(has(A.t("No shared text-execution observation in this response","此响应暂无共享文本执行观测")))'),
+      'execution_legacy_absent':('H.agent_status=status','assert(has(A.t("No shared text-execution observation in this response","这次没有文本执行的记录")))'),
       'execution_disabled':('H.agent_status=status status.execution=execution execution.supported=false execution.observedAtUtc=nil execution.record=nil','assert(has(A.t("Not enabled on this server","此服务器尚未启用")))\nassert(!has("1970-01-01 00:00:01 UTC"))'),
       'execution_no_record':('H.agent_status=status status.execution=execution execution.record=nil','assert(has(A.t("No stage result recorded","尚无此阶段的结果记录")))\nassert(has("1970-01-01 00:00:01 UTC"))'),
       'execution_pending':('H.agent_status=status status.execution=execution execution.record.state="pending"','assert(has(A.t("Waiting for a text-execution process","等待文本执行进程")))'),
       'execution_issued':('H.agent_status=status status.execution=execution execution.record.state="issued"','assert(has(A.t("Process start issued","已发出进程启动请求")))'),
-      'execution_qualified_not_available':('H.agent_status=status status.execution=execution','assert(has(A.t("Text-execution process qualified at observation","观测时文本执行进程已通过检查")))\nassert(has(A.t("Not available when checked","检查时不可用")))\nassert(has(A.t("Codex · text only","Codex · 仅文本")))\nassert(has("1970-01-01 00:00:05 UTC"))'),
-      'execution_available_observation':('H.agent_status=status status.execution=execution execution.record.workAvailable=true','assert(has(A.t("Available when checked","检查时可用")))\nassert(has(A.t("Readiness is a finite server observation and can change. It does not mean a task is running; refresh before relying on it.","就绪状态是有时限的服务器观测，可能变化，并不代表有任务正在运行，请刷新后再判断。")))'),
-      'execution_unknown':('H.agent_status=status status.execution=execution execution.record.state="outcome_unknown" execution.record.activityExpiresAtUtc=nil','assert(has(A.t("Result unknown · recovery required","结果未知 · 需要恢复")))\nassert(has(A.t("No current expiry observation","暂无当前有效期观测")))'),
+      'execution_qualified_not_available':('H.agent_status=status status.execution=execution','assert(has(A.t("Text-execution process qualified at observation","记录时文本执行进程已通过检查")))\nassert(has(A.t("Not available when checked","检查时不可用")))\nassert(has(A.t("Codex · text only","Codex · 仅文本")))\nassert(has("1970-01-01 00:00:05 UTC"))'),
+      'execution_available_observation':('H.agent_status=status status.execution=execution execution.record.workAvailable=true','assert(has(A.t("Available when checked","检查时可用")))\nassert(has(A.t("Readiness is a finite server observation and can change. It does not mean a task is running; refresh before relying on it.","就绪状态是有时限的服务器记录，可能变化，并不代表有任务正在运行，请刷新后再判断。")))'),
+      'execution_unknown':('H.agent_status=status status.execution=execution execution.record.state="outcome_unknown" execution.record.activityExpiresAtUtc=nil','assert(has(A.t("Result unknown · recovery required","结果未知 · 需要恢复")))\nassert(has(A.t("No current expiry observation","暂无当前有效期的记录")))'),
       'execution_stopped':('H.agent_status=status status.execution=execution execution.record.state="stopped"','assert(has(A.t("Stop or cleanup recorded","已记录停止或清理结果")))'),
       'execution_cleanup':('H.agent_status=status status.execution=execution execution.record.state="cleanup_pending"','assert(has(A.t("New work blocked · cleanup pending","已阻止新任务 · 等待清理")))'),
       'cleanup_link':('H.agent_status=status H.session.features=["agent-admission-v1","agent-cleanup-v1"]','assert(button("agent_status_removal")!=nil)\nbutton("agent_status_removal").on_click()\nassert(H.calls[0].service=="hagency.agents.removal.get" && H.calls[0].args.id=="request")\nassert(H.page=="agent_removal")\nH.calls=[]'),
@@ -84,9 +84,9 @@ true
             results.append({'case':f'{name}-{language}','passed':result.returncode==0})
     feature_cases=[
       ([], "This server has not enabled project setup or agent requests in this mini app.", "此服务器尚未在小程序中启用项目设置或 Agent 申请。"),
-      (["project-setup-v1"], "Open Project setup to review current prerequisites. Agent requests are not enabled on this server.", "请打开“项目设置”查看当前要求。此服务器尚未启用 Agent 申请。"),
-      (["agent-admission-v1"], "Open Project agents to review current request prerequisites. Project setup is not enabled on this server.", "请打开“项目 Agent”查看当前申请要求。此服务器尚未启用项目设置。"),
-      (["project-setup-v1", "agent-admission-v1"], "Open Project setup and Project agents to review this server's current prerequisites. Capacity must be confirmed separately.", "请打开“项目设置”和“项目 Agent”查看服务器当前要求。容量需另行确认。"),
+      (["project-setup-v1"], "Open Project setup to review current prerequisites. Agent requests are not enabled on this server.", "请打开「项目设置」查看当前要求。此服务器尚未启用 Agent 申请。"),
+      (["agent-admission-v1"], "Open Project agents to review current request prerequisites. Project setup is not enabled on this server.", "请打开「项目 Agent」查看当前申请要求。此服务器尚未启用项目设置。"),
+      (["project-setup-v1", "agent-admission-v1"], "Open Project setup and Project agents to review this server's current prerequisites. Capacity must be confirmed separately.", "请打开「项目设置」和「项目 Agent」查看服务器当前要求。容量需另行确认。"),
     ]
     for language in ['en','zh']:
         for i,(features,en,zh) in enumerate(feature_cases):
