@@ -15,7 +15,13 @@ pub(super) fn call(service:&str,args:Value)->Result<Option<Call>,String>{
     }))
 }
 fn date(row:&mut Value,key:&str,target:&str){
-    row[target]=row.get(key).and_then(Value::as_u64).and_then(|v|i64::try_from(v).ok()).and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis).map(|v|Value::String(v.format("%Y-%m-%d %H:%M:%S UTC").to_string())).unwrap_or(Value::Null);
+    let at=row.get(key).and_then(Value::as_u64).and_then(|v|i64::try_from(v).ok()).and_then(chrono::DateTime::<chrono::Utc>::from_timestamp_millis);
+    row[target]=at.map(|v|Value::String(v.format("%Y-%m-%d %H:%M:%S UTC").to_string())).unwrap_or(Value::Null);
+    // The same moment on this device's clock, and how many local calendar days
+    // ago it was (0 today, 1 yesterday, negative ahead), so the page can say "today 16:12".
+    let local=at.map(|v|v.with_timezone(&chrono::Local));
+    row[format!("{target}Local")]=local.map(|v|Value::String(v.format("%Y-%m-%d %H:%M").to_string())).unwrap_or(Value::Null);
+    row[format!("{target}Day")]=local.map(|v|Value::from((chrono::Local::now().date_naive()-v.date_naive()).num_days())).unwrap_or(Value::Null);
 }
 fn alert(row:&mut Value){date(row,"firstSeenMs","firstSeen");date(row,"lastSeenMs","lastSeen");date(row,"suppressUntilMs","suppressUntil");}
 pub(super) fn display(mut value:Value)->Value{
@@ -38,5 +44,6 @@ mod tests{
         assert!(call(LIST,json!({"resourceId":"resource"})).is_ok());
         for cap in [LIST,GET,TRIAGE]{assert!(octosense_app_contract::hagency::SERVICES.contains(&cap));assert!(octosense_app_contract::KNOWN_CAPABILITIES.contains(&cap));assert!(octosense_app_contract::hagency::words(cap).is_some());}
         let view=display(json!({"alert":{"firstSeenMs":0,"lastSeenMs":1000,"suppressUntilMs":null},"notes":[{"atMs":2000}]}));assert_eq!(view["alert"]["lastSeen"],"1970-01-01 00:00:01 UTC");assert!(view["alert"]["suppressUntil"].is_null());assert_eq!(view["notes"][0]["at"],"1970-01-01 00:00:02 UTC");
+        assert_eq!(view["alert"]["lastSeenLocal"].as_str().map(str::len),Some(16));assert!(view["alert"]["lastSeenDay"].as_i64().is_some_and(|d|d>365*50));assert!(view["alert"]["suppressUntilLocal"].is_null() && view["alert"]["suppressUntilDay"].is_null());assert!(view["notes"][0]["atLocal"].is_string());
     }
 }

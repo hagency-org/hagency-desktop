@@ -424,6 +424,10 @@ pub struct MiniAppPageScroll {
     past_mark: bool,
     #[rust]
     mark_frame: NextFrame,
+    /// A named section to bring to the top once it has been laid out, for
+    /// rows that deep-link into a long page. Cleared by `reset_scroll`.
+    #[rust]
+    anchor: Option<LiveId>,
 }
 impl Widget for MiniAppPageScroll {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
@@ -459,6 +463,18 @@ impl Widget for MiniAppPageScroll {
                 self.view.view(cx, ids!(body)).set_scroll_pos(cx, pos);
                 self.restore_frame = cx.new_next_frame();
             }
+            if let Some(anchor) = self.anchor {
+                // Only a section that was drawn has a position; until then the
+                // anchor waits for the render that adds it.
+                let target = self.view.widget(cx, &[anchor]);
+                let rect = target.area().rect(cx);
+                if !target.is_empty() && rect.size.y > 0.0 {
+                    self.anchor = None;
+                    let offset = (self.last_scroll.y + rect.pos.y - viewport.pos.y - 8.0).max(0.0);
+                    self.view.view(cx, ids!(body)).set_scroll_pos(cx, dvec2(0.0, offset));
+                    self.restore_frame = cx.new_next_frame();
+                }
+            }
         }
         step
     }
@@ -481,7 +497,22 @@ impl Widget for MiniAppPageScroll {
             }
             return ScriptAsyncResult::Return(NIL);
         }
+        if method == id!(scroll_to) {
+            let name = args.as_object().and_then(|args| {
+                let trap = vm.bx.threads.cur().trap.pass();
+                let value = vm.bx.heap.vec_value(args, 0, trap);
+                vm.bx.heap.cast_to_owned_string(value, "mini app scroll anchor")
+            });
+            if let Some(name) = name.filter(|name| !name.is_empty() && name.len() <= 64) {
+                vm.with_cx_mut(|cx| {
+                    self.anchor = Some(LiveId::from_str(&name));
+                    self.view.redraw(cx);
+                });
+            }
+            return ScriptAsyncResult::Return(NIL);
+        }
         if method == id!(reset_scroll) {
+            self.anchor = None;
             self.restore_position = None;
             self.last_scroll = dvec2(0.0, 0.0);
             vm.with_cx_mut(|cx| {
