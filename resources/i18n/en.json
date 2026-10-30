@@ -2510,5 +2510,9 @@
   "Sharing Period and Technical Details": "Sharing Period and Technical Details",
   "Choose when sharing ends under Sharing Period.": "Choose when sharing ends under Sharing Period.",
   "You were adding {people}.": "You were adding {people}.",
-  "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.": "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again."
+  "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.": "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.",
+  "{month} capacity": "{month} capacity",
+  "Up to {amount} per request": "Up to {amount} per request",
+  "Starts {when}. The list, the monthly maximum and the per-request limit carry over.": "Starts {when}. The list, the monthly maximum and the per-request limit carry over.",
+  "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.": "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over."
 }

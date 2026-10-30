@@ -2510,5 +2510,9 @@
   "Sharing Period and Technical Details": "共享期限和技术详情",
   "Choose when sharing ends under Sharing Period.": "请点「共享到」，选择什么时候结束共享。",
   "You were adding {people}.": "这次要添加 {people}。",
-  "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.": "可能已经生效，也可能没有。「再查一次」只会查看结果，不会重复修改。"
+  "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.": "可能已经生效，也可能没有。「再查一次」只会查看结果，不会重复修改。",
+  "{month} capacity": "{month}额度",
+  "Up to {amount} per request": "每次最多 {amount}",
+  "Starts {when}. The list, the monthly maximum and the per-request limit carry over.": "{when}起生效，名单、每月上限和每次申请上限都不变。",
+  "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.": "{month}额度 {amount}，{when}起生效，名单和每月上限不变。"
 }

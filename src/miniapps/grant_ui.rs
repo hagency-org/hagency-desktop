@@ -867,6 +867,8 @@ fn choose_facts(kind: GrantKind, s: &GrantState, bounds: Option<&Bounds>, month:
             tr("Per-request limit"),
             fmt("{amount} (unchanged)", &[("amount", amount(Some(form.predecessor.allocated_tokens)))]),
         )),
+        // Next month's capacity leads the hero; the row stays only to say it isn't known.
+        (GrantKind::Renew, _) if remaining.is_some() => {}
         (GrantKind::Renew, _) => facts.push(Fact::new(
             fmt("Available in {month}", &[("month", month.unwrap_or_default().to_owned())]),
             amount(remaining),
@@ -932,6 +934,8 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
     let base: Vec<String> = s.successor.map(|form| form.predecessor.eligible_managers.clone()).unwrap_or_default();
     let this_month = s.successor.map(|form| ms_month(form.predecessor.period_start_ms)).unwrap_or_else(|| ms_month(now));
     let renew_month = month.clone().filter(|_| kind == GrantKind::Renew);
+    // What next month can share, for a renewal's hero, when its form is known.
+    let renew_capacity = s.successor.filter(|_| kind == GrantKind::Renew).and_then(|form| successor_bounds(form).remaining);
     let month_text = month.clone().unwrap_or_else(|| tr("next month").into());
     let mut primary = "Publish";
     let mut primary_text: Option<String> = None;
@@ -1028,16 +1032,24 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                     }
                 }
                 GrantKind::Renew => {
-                    v.caption = tr("Per-request limit").into();
-                    v.before = current.map(|c| Figure::new(amount(Some(c)), this_month.clone()));
-                    v.after = Some(Figure::new(amount(tokens), month_text.clone()));
+                    let capacity = bounds.as_ref().and_then(|b| b.remaining);
+                    renew_hero(&mut v, capacity, current, tokens, &this_month, &month_text);
+                    let changed = tokens.is_some_and(|n| current.is_some_and(|c| n != c));
                     v.lead = sentences(&[
-                        match s.successor {
-                            Some(form) => fmt(
+                        match (s.successor, capacity) {
+                            (Some(form), Some(capacity)) if changed => fmt(
+                                "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.",
+                                &[("month", month_text.clone()), ("amount", amount(Some(capacity))), ("when", local_time(form.period_start_ms))],
+                            ),
+                            (Some(form), Some(_)) => fmt(
+                                "Starts {when}. The list, the monthly maximum and the per-request limit carry over.",
+                                &[("when", local_time(form.period_start_ms))],
+                            ),
+                            (Some(form), None) => fmt(
                                 "Starts {when}. The list and the monthly maximum carry over.",
                                 &[("when", local_time(form.period_start_ms))],
                             ),
-                            None => tr("The list and the monthly maximum carry over.").into(),
+                            (None, _) => tr("The list and the monthly maximum carry over.").into(),
                         },
                         if added.is_empty() {
                             String::new()
@@ -1142,13 +1154,13 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         }
         Phase::Review(review) => {
             let s2 = review.summary();
-            summary_hero(&mut v, kind, &s2, &base, &this_month, false);
+            summary_hero(&mut v, kind, &s2, &base, &this_month, false, renew_capacity);
             v.status = tr(if review.capacity_available() { "Not published yet. Publish to finish." } else { UNKNOWN_CAPACITY_STATUS }).into();
             if kind == GrantKind::Renew { primary = "Publish Ahead"; }
         }
         Phase::PublicationReview(review) => {
             let s2 = review.summary();
-            summary_hero(&mut v, kind, &s2, &base, &this_month, false);
+            summary_hero(&mut v, kind, &s2, &base, &this_month, false, renew_capacity);
             v.status = tr("Not published yet. Publish to finish.").into();
             if kind == GrantKind::Renew { primary = "Publish Ahead"; }
         }
@@ -1162,7 +1174,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
             } else {
                 match p.state {
                     OwnerGrantState::Recorded => {
-                        summary_hero(&mut v, kind, &p.summary, &base, &this_month, false);
+                        summary_hero(&mut v, kind, &p.summary, &base, &this_month, false, renew_capacity);
                         v.status = tr("Saved on this computer but not published yet. Publish to finish.").into();
                         if kind == GrantKind::Renew { primary = "Publish Ahead"; }
                     }
@@ -1198,7 +1210,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
             match (&p.state, p.server_state.as_deref()) {
                 (OwnerGrantPublicationState::ServerObserved, Some("active")) => {
                     v.tone = SheetTone::Done;
-                    summary_hero(&mut v, kind, &p.summary, &base, &this_month, true);
+                    summary_hero(&mut v, kind, &p.summary, &base, &this_month, true, renew_capacity);
                     let start = local_time(p.summary.period_start_ms);
                     let limit = amount(Some(p.summary.allocated_tokens));
                     let added: Vec<String> = if base.is_empty() {
@@ -1391,6 +1403,11 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                 Some(tokens) => fmt("Change to {amount}", &[("amount", amount(Some(tokens)))]),
                 None => tr(if fixable { "Choose Again" } else { "Check Again" }).into(),
             };
+            // With the amount that works one tap away, choosing another one stays a row of its own.
+            if v.fix_tokens.is_some() && fixable {
+                v.recover = tr("Choose Again").into();
+                v.recover_secondary = true;
+            }
             v.primary_recovers = true;
             v.primary_enabled = true;
         } else {
@@ -1412,9 +1429,32 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
     }
     v
 }
+/// Publishing next month ahead: the hero leads with that month's capacity and
+/// says the per-request limit under it. The limit's before → after shows only
+/// when it changes, never an arrow between two equal amounts.
+fn renew_hero(v: &mut GrantView, capacity: Option<u64>, before: Option<u64>, after: Option<u64>, this_month: &str, month: &str) {
+    let tr = crate::i18n::tr;
+    let fmt = crate::i18n::format;
+    v.before = None;
+    match (before, after, capacity) {
+        (Some(old), Some(new), _) if old != new => {
+            v.caption = tr("Per-request limit").into();
+            v.before = Some(Figure::new(amount(Some(old)), this_month.to_owned()));
+            v.after = Some(Figure::new(amount(Some(new)), month.to_owned()));
+        }
+        (_, _, Some(capacity)) => {
+            v.caption = fmt("{month} capacity", &[("month", month.to_owned())]);
+            v.after = Some(Figure::new(amount(Some(capacity)), fmt("Up to {amount} per request", &[("amount", amount(after))])));
+        }
+        _ => {
+            v.caption = tr("Per-request limit").into();
+            v.after = Some(Figure::new(amount(after), month.to_owned()));
+        }
+    }
+}
 /// The hero of a saved, reviewed or published record: its per-request
 /// limit, the previous one for a change, or the list for added people.
-fn summary_hero(v: &mut GrantView, kind: GrantKind, summary: &OwnerGrantSummary, base: &[String], this_month: &str, done: bool) {
+fn summary_hero(v: &mut GrantView, kind: GrantKind, summary: &OwnerGrantSummary, base: &[String], this_month: &str, done: bool, capacity: Option<u64>) {
     let tr = crate::i18n::tr;
     let added = if base.is_empty() { 0 } else { summary.eligible_managers.iter().filter(|id| !base.contains(id)).count() };
     let after_tag = tr(if done { "Now" } else { "After you confirm" });
@@ -1424,11 +1464,14 @@ fn summary_hero(v: &mut GrantView, kind: GrantKind, summary: &OwnerGrantSummary,
             v.before = Some(Figure::new(people_count(summary.eligible_managers.len() - added), tr(if done { "Before" } else { "Now" })));
             v.after = Some(Figure::new(people_count(summary.eligible_managers.len()), after_tag));
         }
-        GrantKind::Renew => {
-            v.caption = tr("Per-request limit").into();
-            v.before = summary.succession.as_ref().map(|s| Figure::new(amount(Some(s.predecessor_allocated_tokens)), this_month.to_owned()));
-            v.after = Some(Figure::new(amount(Some(summary.allocated_tokens)), key_month(&summary.period_key).unwrap_or_default()));
-        }
+        GrantKind::Renew => renew_hero(
+            v,
+            capacity,
+            summary.succession.as_ref().map(|s| s.predecessor_allocated_tokens),
+            Some(summary.allocated_tokens),
+            this_month,
+            &key_month(&summary.period_key).unwrap_or_default(),
+        ),
         _ => {
             v.caption = tr("Per-request limit").into();
             v.before = summary
@@ -1511,6 +1554,7 @@ fn failure_hero(v: &mut GrantView, code: &str, s: &GrantState, bounds: Option<&B
             let most = bounds.and_then(|b| b.remaining);
             v.caption = tr("The per-request limit can be at most").into();
             v.after = Some(Figure::new(amount(most), tr("Left this month")));
+            v.fix_tokens = most.filter(|most| *most > 0 && chosen.is_some_and(|chosen| chosen > *most));
             v.lead = match chosen {
                 Some(chosen) => fmt(
                     "You chose {chosen}, which is more than is left this month. Choose {most} or less.",
@@ -2510,7 +2554,7 @@ impl MiniAppsPanel {
                 }
             }
         }
-        let recover_row = view.recover_visible && !view.primary_recovers;
+        let recover_row = view.recover_row();
         if recover_row {
             targets.push(recover);
         }
@@ -2755,8 +2799,9 @@ impl GrantPreview {
             "add_people" | "renew" => Some(current),
             _ => None,
         };
-        // A refused change keeps what the owner typed in the fields.
-        let typed = if state == "failed" { f["proposed"].as_u64() } else { proposal };
+        // A refused change keeps what the owner typed in the fields; `chosen` is the amount
+        // the owner moved the window's slider to.
+        let typed = f["chosen"].as_u64().or(if state == "failed" { f["proposed"].as_u64() } else { proposal });
         let mut draft = initial_draft(typed, if kind.is_some() { &added } else { &managers });
         match (&successor, &form) {
             (Some(successor), _) => fill_successor_defaults(&mut draft, successor, now),
@@ -3276,21 +3321,27 @@ mod tests {
         let this = ms_month(form.predecessor.period_start_ms);
         assert_eq!(view.title, format!("Publish {month} Ahead"));
         assert_eq!(view.glyph, SheetGlyph::Renew);
-        assert_eq!(view.before, Some(Figure::new("2 M", this)));
-        assert_eq!(view.after, Some(Figure::new("2 M", month.clone())));
-        assert_eq!(view.lead, format!("Starts {}. The list and the monthly maximum carry over.", local_time(form.period_start_ms)));
+        // The hero leads with next month's capacity and the per-request limit under it; no arrow
+        // between two equal limits.
+        assert_eq!(view.caption, format!("{month} capacity"));
+        assert_eq!(view.before, None);
+        assert_eq!(view.after, Some(Figure::new("5 M", "Up to 2 M per request")));
+        assert_eq!(view.lead, format!("Starts {}. The list, the monthly maximum and the per-request limit carry over.", local_time(form.period_start_ms)));
         assert_eq!(view.caution, format!("Once {month} is published ahead, this month’s per-request limit and list can’t change any more, and it can’t be withdrawn."));
         // The list carries over unchanged: one row that opens in place.
         assert!(view.people_collapsible && !view.people_open);
         assert_eq!(view.people_summary, "1 person");
-        // The lead says the maximum carries over; the rows say what next month has.
-        assert!(!facts(&view).iter().any(|(label, _)| label == "Monthly maximum"));
-        assert!(facts(&view).contains(&(format!("Available in {month}"), "5 M".to_owned())));
+        // The hero says what next month has, so the rows don't repeat it.
+        assert!(!facts(&view).iter().any(|(label, _)| label == "Monthly maximum" || label.starts_with("Available in")));
         assert_eq!(view.primary, "Publish Ahead");
+        // Moving the slider shows the change: this month's limit → next month's.
         let mut raised = draft.clone();
         raised.tokens = "3000000".into();
         let view = preview_view(&Phase::Choose, &raised, Some(&form), None, &[], Disclosure::default());
-        assert_eq!(view.after.unwrap().value, "3 M");
+        assert_eq!(view.caption, "Per-request limit");
+        assert_eq!(view.before, Some(Figure::new("2 M", this)));
+        assert_eq!(view.after, Some(Figure::new("3 M", month.clone())));
+        assert!(view.lead.starts_with(&format!("{month} capacity is 5 M. Starts ")), "{}", view.lead);
     }
     #[test]
     fn a_proposal_beside_an_active_grant_opens_the_amendment_when_the_server_supports_it() {
@@ -3726,6 +3777,17 @@ mod tests {
         // The fix is a known amount, so the button offers it in the verb that commits it.
         assert_eq!((failed.primary.as_str(), failed.cancel.as_str()), ("Change to 0.6 M", "Close"));
         assert_eq!(failed.fix_tokens, Some(600_000));
+        // Choosing another amount stays one row away.
+        assert!(failed.recover_row() && failed.recover == "Choose Again");
+        // Publishing more than is left: the most that works, one tap away, as in the other windows.
+        let publish = pool_form(2_000_000);
+        let mut over = initial_draft(Some(2_500_000), &[]);
+        fill_form_defaults(&mut over, &publish);
+        let refused = preview_view(&Phase::Failed("owner_grant_capacity_unavailable".into()), &over, None, Some(&publish), &[], Disclosure::default());
+        assert_eq!(refused.after, Some(Figure::new("2 M", "Left this month")));
+        assert_eq!((refused.primary.as_str(), refused.cancel.as_str()), ("Change to 2 M", "Close"));
+        assert_eq!(refused.fix_tokens, Some(2_000_000));
+        assert!(refused.primary_recovers && refused.recover_row() && refused.recover == "Choose Again");
         // An unknown outcome is amber and asks to check before anything else.
         let unsure = preview_view(&Phase::Failed("management_outcome_unknown".into()), &draft, Some(&form), None, &[], Disclosure::default());
         assert_eq!(unsure.tone, SheetTone::Unsure);

@@ -132,6 +132,9 @@ pub(super) struct SheetView {
     pub cancel: String,
     /// The amount a refusal's primary button ("Change to 0.6 M") puts back in the form.
     pub fix_tokens: Option<u64>,
+    /// The recovery step stays a row of its own beside a primary that also recovers:
+    /// "Choose Again" under "Change to 2 M".
+    pub recover_secondary: bool,
 }
 impl SheetView {
     /// Whether the hero card has anything to show.
@@ -141,6 +144,11 @@ impl SheetView {
     /// Whether the details row has anything behind it.
     pub(super) fn more_visible(&self) -> bool {
         !self.technical.is_empty()
+    }
+    /// Whether the recovery step shows as its own row: when the primary button
+    /// isn't that step, or when it fixes the value and this row picks again.
+    pub(super) fn recover_row(&self) -> bool {
+        self.recover_visible && (!self.primary_recovers || self.recover_secondary)
     }
 }
 /// The text scale the sheet's layout reads (`RINX_TEXT_SCALE`), as it is now.
@@ -288,7 +296,7 @@ impl MiniAppsPanel {
             .set_text(cx, if v.quota_label.is_empty() { tr("Per-request limit") } else { &v.quota_label });
         text(self, cx, &[id!(scroll), id!(quota), id!(quota_hint)], &v.quota_hint);
         // Recovery steps for a saved record.
-        let recover = v.recover_visible && !v.primary_recovers;
+        let recover = v.recover_row();
         show(self, cx, &[id!(scroll), id!(actions)], recover || v.cancel_intent_visible);
         show(self, cx, &[id!(scroll), id!(actions), id!(recover)], recover);
         self.view.button(cx, &at(&[id!(scroll), id!(actions), id!(recover)])).set_text(cx, &v.recover);
