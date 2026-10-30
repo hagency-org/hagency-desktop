@@ -9398,7 +9398,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:info.icon draw_icon.color:mod.widgets.RINX_MUTED}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{text:info.title}
-                                mod.widgets.HagencyWrapSubtitle{text:if A.recipient_optional(row,"encryptedPending")==true {A.t("You can review this request after its encrypted details arrive.","加密详情送达后，就能查看这个请求。")} else {A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}}
+                                mod.widgets.HagencyWrapSubtitle{text:if A.recipient_optional(row,"encryptedPending")==true {A.t("You can review this request after its encrypted details arrive.","加密详情送达后就能查看。")} else {A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}}
                             }
                         }
                     }}}
@@ -11425,7 +11425,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                     View{width:Fill height:Fit flow:Right align:Align{x:0.5}
                         template_command_later := mod.widgets.HagencyBarText{text:A.t("Decide Later","稍后再决定") enabled:!H.busy && t.phase=="saved" on_click: || A.open_templates(t.resourceId,t.after)}
                     }
-                    mod.widgets.HagencyListNote{text:A.t("This change was sent but isn’t saved yet. Discarding withdraws it; if you decide later, it waits, and templates can be edited again once it’s settled.","这项更改已经发出，但还没有保存。放弃会把它撤回；稍后再决定的话，它会一直等你，处理完之后才能再次编辑模板。")}
+                    mod.widgets.HagencyListNote{text:A.t("This change was sent but isn’t saved yet. Discarding withdraws it; if you decide later, it waits, and templates can be edited again once it’s settled.","这项更改已发出，还没有保存。放弃会撤回它；稍后再决定的话，它会一直等你处理，之后才能再编辑模板。")}
                 }}
                 if done && A.recipient_optional(t,"late")==true {View{width:Fill height:Fit padding:Inset{top:6} mod.widgets.HagencyStatus{draw_bg.color:mod.widgets.RINX_INFO_BG
                     template_command_late := mod.widgets.HagencyCopy{text:A.t("It had already been applied, so it couldn’t be discarded.","放弃之前，这项更改已经生效，所以没有撤回。") draw_text.color:mod.widgets.RINX_INFO_FG}
