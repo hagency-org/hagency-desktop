@@ -592,15 +592,17 @@ mod.widgets.RinxToggle = mod.widgets.RinxKeyButton{height:max(44,mod.widgets.RIN
         }
     }
 }
-mod.widgets.RinxSwitch = mod.widgets.RinxKeyButton{width:51 height:31 text:"" padding:0
+// The track is iOS's 51 x 31; the tap target is the full 44 pt tall around it.
+mod.widgets.RinxSwitch = mod.widgets.RinxKeyButton{width:51 height:44 text:"" padding:0
     draw_bg +: {selected:instance(0.0) on_color:uniform(#x1f9d55) off_color:uniform(#x7f8b9c) knob:uniform(#fff)
         pixel:fn(){
             let sdf=Sdf2d.viewport(self.pos * self.rect_size)
-            let h=self.rect_size.y
-            sdf.box(0.0,0.0,self.rect_size.x,h,h*0.5)
+            let h=min(31.0,self.rect_size.y)
+            let y0=(self.rect_size.y-h)*0.5
+            sdf.box(0.0,y0,self.rect_size.x,h,h*0.5)
             sdf.fill(self.off_color.mix(self.on_color,self.selected))
             let r=h*0.5-2.5
-            sdf.circle(2.5+r+(self.rect_size.x-5.0-2.0*r)*self.selected,h*0.5,r)
+            sdf.circle(2.5+r+(self.rect_size.x-5.0-2.0*r)*self.selected,y0+h*0.5,r)
             sdf.fill(self.knob)
             // Disabled switches fade as a whole, in either position.
             return sdf.result*(1.0-0.5*self.disabled)
