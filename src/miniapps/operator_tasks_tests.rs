@@ -401,9 +401,11 @@ fn recovery_ux_continue_form_reduces_height_without_losing_multiline_inputs() {
 /// (每月上限, 每次申请上限, 这台电脑, Agent, token). Older technical words must not
 /// come back into the bundle's Chinese text.
 ///
-/// What Agents hold is 已分给 Agent (verb 分给; its unused part 已分给 Agent，尚未用),
-/// and the committed total is 已承诺 = 已用 + 已分给 Agent. The glossary defines exactly
-/// these terms, and every other word for a hold stays out of the owner's pages.
+/// The capacity legend has three parts that add up to the monthly maximum: 已用 (used),
+/// 已分出 (given to Agents, not used yet) and 剩余 (left). The maximum can't go below
+/// 已用和已分出; the per-request limit can't go below what 正在运行的 Agent 已拿到. The
+/// glossary defines exactly these terms, and the retired words (已承诺, 已分给 Agent，尚未用,
+/// 已分给正在运行的 Agent, 所占的部分) stay out of every page.
 #[test]
 fn bundle_uses_the_owner_vocabulary() {
     let source = include_str!("../../apps/hagency/bundle/main.splash");
@@ -418,6 +420,10 @@ fn bundle_uses_the_owner_vocabulary() {
         "已保存。每月上限从", "已保存。每月上限现在是", "已修改。现在每次申请最多", "已记下：你知道了",
         // Restart jargon and the old verb for adding people.
         "完成上次的启动", "点「选上」",
+        // Retired in round 7: the committed total, the second name for what Agents hold,
+        // the catalogue and approval-room jargon, and the second Add on Who Can Request.
+        "已承诺", "尚未用", "已分给正在运行的", "所占的部分", "对外展示", "审批聊天", "在目录中列出",
+        "点「添加」会把对方", "审批对话（高级）",
     ] {
         assert!(!source.contains(banned), "the bundle says {banned}");
     }
@@ -440,15 +446,19 @@ fn bundle_uses_the_owner_vocabulary() {
     }
     // The glossary is the source of these words.
     for term in [
-        r#"term:A.t("Given to Agents","已分给 Agent")"#,
-        r#"term:A.t("Given to Agents, not used yet","已分给 Agent，尚未用")"#,
-        r#"term:A.t("Committed","已承诺")"#,
-        "已承诺 = 已用 + 已分给 Agent",
+        r#"term:A.t("Used","已用")"#,
+        r#"term:A.t("Given out","已分出")"#,
+        r#"term:A.t("Left","剩余")"#,
+        r#"term:A.t("Held by running Agents","正在运行的 Agent 已拿到")"#,
+        "不能低于已用和已分出",
     ] {
         assert!(source.contains(term), "the glossary doesn't define {term}");
     }
-    // Results and refusals use the one pattern.
-    for pattern in ["\"已保存：每月上限 \"", "\"已保存：每次申请上限 \"", "A.t(\"Not saved: \",\"没有保存：\")", "不能低于已分给正在运行的 Agent 的 "] {
+    // The legend, floors and refusals quote the same words.
+    for pattern in [
+        "\"已保存：每月上限 \"", "\"已保存：每次申请上限 \"", "A.t(\"Not saved: \",\"没有保存：\")",
+        "不能低于正在运行的 Agent 已拿到的 ", "不能低于本月已用和已分出的 ", "（已用和已分出）", "\"已分出 \"", "\"已用 \"",
+    ] {
         assert!(source.contains(pattern), "the bundle doesn't say {pattern}");
     }
 }
