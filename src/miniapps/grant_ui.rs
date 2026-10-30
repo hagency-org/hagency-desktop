@@ -1,11 +1,13 @@
 //! Trusted native owner grant screen. The package cannot render or acknowledge
 //! this confirmation; its reply contains only public progress and original IDs.
 use super::*;
-use crate::host::hagency::grants::{GrantChoices, GrantFlow, GrantResult, month_ended, now_ms};
+use crate::host::hagency::grants::{
+    GrantChoices, GrantFlow, GrantResult, Succession, month_ended, now_ms,
+};
 use ::hagency::native_owner::{
     OwnerGrantProgress, OwnerGrantReview, OwnerGrantState, OwnerGrantPublicationReview,
     OwnerGrantPublicationProgress, OwnerGrantPublicationState, OwnerGrantCancellationReview,
-    OwnerGrantSummary, OwnerGrantForm,
+    OwnerGrantSummary, OwnerGrantForm, OwnerGrantSuccessionForm, OwnerGrantSuccessionKind,
 };
 
 pub(super) struct GrantPrompt {
@@ -26,6 +28,9 @@ pub(super) struct GrantPrompt {
     proposal: Option<u64>,
     /// The owner asked for this month's limits after a grant's month ended.
     regrant: bool,
+    /// While choosing an amendment or renewal: the native successor facts.
+    /// `form` then stays empty; the Choose phase reads one or the other.
+    successor: Option<OwnerGrantSuccessionForm>,
 }
 enum Phase {
     Loading,
@@ -62,20 +67,118 @@ fn publication_expiry(days: Option<i64>) -> String {
 fn publication_preset_available(days: Option<i64>) -> bool {
     days.is_none_or(|n| chrono::Utc::now()+chrono::Duration::days(n)<=publication_period_end())
 }
-fn form_choices_valid(form: &OwnerGrantForm, draft: &GrantChoices) -> bool {
+/// What the native choose form may commit, from a new grant's form or from
+/// an amendment or renewal form. The writer re-checks every bound natively.
+#[derive(Clone, Debug, PartialEq)]
+struct Bounds {
+    /// Most tokens the grant may hold; None while capacity is unknown.
+    remaining: Option<u64>,
+    total_known: bool,
+    /// Fewest tokens: 1, or what Agents carried into a successor already hold.
+    minimum: u64,
+    /// Applicants a successor must keep: they can be added, never removed.
+    keep_managers: Vec<String>,
+    /// The delegation must end after this instant (a renewal's month start)
+    expiry_after_ms: u64,
+    /// and no later than the end of the month being granted.
+    expiry_until_ms: u64,
+}
+fn root_bounds(form: &OwnerGrantForm) -> Bounds {
+    Bounds {
+        remaining: form.context.remaining_tokens,
+        total_known: form.context.resource_total_tokens.is_some(),
+        minimum: 1,
+        keep_managers: Vec::new(),
+        expiry_after_ms: 0,
+        expiry_until_ms: publication_period_end().timestamp_millis() as u64,
+    }
+}
+fn renewal(form: &OwnerGrantSuccessionForm) -> bool {
+    form.kind == OwnerGrantSuccessionKind::Renewal
+}
+fn successor_bounds(form: &OwnerGrantSuccessionForm) -> Bounds {
+    Bounds {
+        remaining: form.context.remaining_tokens,
+        total_known: form.context.resource_total_tokens.is_some(),
+        minimum: form.floor.retained_tokens.max(1),
+        keep_managers: form.predecessor.eligible_managers.clone(),
+        expiry_after_ms: if renewal(form) { form.period_start_ms } else { 0 },
+        expiry_until_ms: form.period_end_ms,
+    }
+}
+fn choices_valid(bounds: &Bounds, draft: &GrantChoices) -> bool {
     draft.clone().parse().is_ok_and(|choices| {
-        form.context.resource_total_tokens.is_some()
-            && form.context.remaining_tokens.is_some_and(|n| n>=choices.allocated_tokens)
-            && choices.delegation_expires_at_ms<=publication_period_end().timestamp_millis() as u64
+        bounds.total_known
+            && bounds.remaining.is_some_and(|n| n >= choices.allocated_tokens)
+            && choices.allocated_tokens >= bounds.minimum
+            && bounds
+                .keep_managers
+                .iter()
+                .all(|manager| choices.eligible_managers.contains(manager))
+            && choices.delegation_expires_at_ms > bounds.expiry_after_ms
+            && choices.delegation_expires_at_ms <= bounds.expiry_until_ms
     })
 }
-/// A script proposal only seeds the native tokens field; the owner can edit it
-/// and the committed value is always read back from that widget.
-fn initial_draft(proposal: Option<u64>) -> GrantChoices {
+fn form_choices_valid(form: &OwnerGrantForm, draft: &GrantChoices) -> bool {
+    choices_valid(&root_bounds(form), draft)
+}
+fn rfc3339(ms: u64) -> String {
+    i64::try_from(ms)
+        .ok()
+        .and_then(chrono::DateTime::from_timestamp_millis)
+        .map(|date| date.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
+        .unwrap_or_default()
+}
+/// The expiry an amendment or renewal preset fills in, if it is inside the
+/// month being granted: `days` from now (capped at its end), or its end.
+fn successor_preset(form: &OwnerGrantSuccessionForm, days: Option<i64>, now: u64) -> Option<String> {
+    let bounds = successor_bounds(form);
+    let value = match days {
+        Some(days) => {
+            let at = now.saturating_add(u64::try_from(days).ok()?.saturating_mul(86_400_000));
+            if at > bounds.expiry_until_ms {
+                return None;
+            }
+            at
+        }
+        None => bounds.expiry_until_ms,
+    };
+    (value > bounds.expiry_after_ms.max(now)).then(|| rfc3339(value))
+}
+/// A script proposal only seeds the native tokens field, and its applicants
+/// only the applicants field; the owner can edit both and the committed values
+/// are always read back from those widgets.
+fn initial_draft(proposal: Option<u64>, applicants: &[String]) -> GrantChoices {
     GrantChoices {
         tokens: proposal.map(|tokens| tokens.to_string()).unwrap_or_default(),
+        managers: applicants.join(" "),
         ..GrantChoices::default()
     }
+}
+/// Defaults for an amendment or renewal: the current limit unless a proposal
+/// filled the field, the current applicants plus any typed or proposed ones
+/// (applicants are never removed), and the current delegation for an
+/// amendment or the end of the new month for a renewal.
+fn fill_successor_defaults(draft: &mut GrantChoices, form: &OwnerGrantSuccessionForm, now: u64) {
+    if draft.tokens.is_empty() {
+        draft.tokens = form.predecessor.allocated_tokens.to_string();
+    }
+    let mut managers: Vec<String> = form
+        .predecessor
+        .eligible_managers
+        .iter()
+        .cloned()
+        .chain(draft.managers.split_whitespace().map(str::to_owned))
+        .collect();
+    managers.sort();
+    managers.dedup();
+    draft.managers = managers.join(" ");
+    let current = form.predecessor.delegation_expires_at_ms;
+    draft.expires_utc = if !renewal(form) && current > now && current <= form.period_end_ms {
+        rfc3339(current)
+    } else {
+        rfc3339(form.period_end_ms)
+    };
 }
 /// Defaults for fields that are still empty when the form opens. A proposal
 /// is kept exactly, even above the available capacity: the form then shows it
@@ -88,22 +191,27 @@ fn fill_form_defaults(draft: &mut GrantChoices, form: &OwnerGrantForm) {
         draft.expires_utc = publication_expiry(None);
     }
 }
-/// Whether a phase offers the native primary action. A proposal never changes
-/// this; in particular a published grant is only shown, never replaced here.
+/// Whether a phase offers the native primary action. A proposal never commits
+/// anything here: beside a published grant it can only open the native
+/// amendment form (`amendable`), and only when the server supports it.
 /// A grant whose UTC month ended can be followed by this month's grant.
 fn primary_available(
     phase: &Phase,
-    form: Option<&OwnerGrantForm>,
+    bounds: Option<&Bounds>,
     draft: &GrantChoices,
     has_original: bool,
     can_choose_new_limits: bool,
+    amendable: bool,
     now: u64,
 ) -> bool {
     if ended_grant(phase, now) {
         return can_choose_new_limits;
     }
+    if published_grant(phase, now) {
+        return amendable && can_choose_new_limits && live_grant_tokens(phase, now).is_some();
+    }
     match phase {
-        Phase::Choose => form.is_some_and(|f| form_choices_valid(f, draft)),
+        Phase::Choose => bounds.is_some_and(|b| choices_valid(b, draft)),
         Phase::Review(review) => !review.expired() && review.capacity_available(),
         Phase::Progress(progress)
             if progress.closure.is_some() && matches!(progress.state, OwnerGrantState::Recorded) =>
@@ -150,27 +258,32 @@ fn published_grant(phase: &Phase, now: u64) -> bool {
         && !ended_grant(phase, now)
 }
 /// The pool's current per-request limit: the tokens of a grant the server last
-/// reported as active. Reserved, rejected, revoked or expired grants set none.
+/// reported as active whose month has started. Reserved, rejected, revoked,
+/// superseded, expired or scheduled grants set none.
 fn live_grant_tokens(phase: &Phase, now: u64) -> Option<u64> {
     match phase {
         Phase::PublicationProgress(p)
-            if published_grant(phase, now) && p.server_state.as_deref() == Some("active") =>
+            if published_grant(phase, now)
+                && p.server_state.as_deref() == Some("active")
+                && p.summary.period_start_ms <= now =>
         {
             Some(p.summary.allocated_tokens)
         }
         _ => None,
     }
 }
-/// What the mini app learns when the panel closes. A proposal still pending
-/// beside this month's published grant was never applied: say why.
+/// What the mini app learns when the panel closes. A proposal beside this
+/// month's published grant on a server that cannot amend it was never
+/// applied: say why. Otherwise the reply is the public progress shown.
 fn close_reply(
     phase: &Phase,
     proposal: Option<u64>,
     in_flight: bool,
     original: Option<&str>,
+    succession_supported: bool,
     now: u64,
 ) -> Result<String, String> {
-    if proposal.is_some() && published_grant(phase, now) {
+    if proposal.is_some() && published_grant(phase, now) && !succession_supported {
         return Err("pool_grant_already_published".into());
     }
     match phase {
@@ -181,8 +294,58 @@ fn close_reply(
 }
 /// An unattempted original reserves nothing; cancelling it reopens new limits.
 const PENDING_NOTE: &str = "The proposed limit is not applied to this pending reservation. To use it, cancel the pending reservation, then choose new limits.";
-/// One grant per admission per UTC month, even after revocation.
+/// One grant per admission per UTC month, even after revocation, on a server
+/// without succession support.
 const PUBLISHED_NOTE: &str = "This pool already has a published grant for this month on its current admission, and the server accepts one grant per admission each month, so the proposed limit is not applied. Nothing was revoked or changed.";
+/// Beside a published grant on a server that supports amendments.
+const AMENDABLE_NOTE: &str = "Not applied yet. Choose Change per-request limit to review it. Running Agents keep their budgets.";
+/// Beside a revoked, superseded or expired grant this month.
+const NOT_AMENDABLE_NOTE: &str = "The proposed limit is not applied: this grant is no longer active, so it cannot be changed.";
+/// Beside next month's scheduled renewal (Q7: cancel, amend, renew again).
+const SCHEDULED_NOTE: &str = "The proposed limit is not applied: next month's renewal is already scheduled. To change this month's limit, cancel the renewal, change the limit, then renew again.";
+/// A published grant whose month has not started: a scheduled renewal.
+fn scheduled_grant(phase: &Phase, now: u64) -> bool {
+    matches!(phase, Phase::PublicationProgress(p) if p.summary.period_start_ms > now)
+        && published_grant(phase, now)
+}
+/// The native successor terms shown above the form while choosing: the
+/// limit change, the Agents that keep running and their floor, and what the
+/// new limit means for pending requests.
+fn successor_notice(form: &OwnerGrantSuccessionForm, draft_tokens: &str) -> String {
+    let new = amount(draft_tokens.trim().parse::<u64>().ok());
+    let current = amount(Some(form.predecessor.allocated_tokens));
+    let held = amount(Some(form.floor.retained_tokens));
+    let count = form.floor.children.to_string();
+    let lines = if renewal(form) {
+        vec![
+            crate::i18n::format(
+                "Renew for {month}: per-request limit {current} → {new}",
+                &[("month", form.period_key.clone()), ("current", current), ("new", new)],
+            ),
+            crate::i18n::format(
+                "Agents that continue: {count}. They hold {held} (minimum).",
+                &[("count", count), ("held", held)],
+            ),
+            crate::i18n::format("Takes effect {start}.", &[("start", utc(form.period_start_ms))]),
+        ]
+    } else {
+        vec![
+            crate::i18n::format(
+                "Per-request limit: {current} → {new} (applies now, until {end})",
+                &[("current", current), ("new", new.clone()), ("end", utc(form.period_end_ms))],
+            ),
+            crate::i18n::format(
+                "Agents that keep running: {count}. The limit cannot go below {held}, which Agents already hold this month.",
+                &[("count", count), ("held", held)],
+            ),
+            crate::i18n::format(
+                "Pending requests above {new} cannot be approved.",
+                &[("new", new)],
+            ),
+        ]
+    };
+    lines.join("\n")
+}
 /// Shown for a grant whose month ended: the pool is closed until the owner
 /// publishes this month's grant, which needs last month's Agents settled.
 const ENDED_STATUS: &str = "This grant's UTC month has ended, so the pool has no capacity. Choose this month's limits to publish it again. Last month's Agents must first stop and report their final usage, which happens only while this device is online after the month ends (00:00 UTC).";
@@ -194,6 +357,7 @@ fn proposal_notice(
     phase: &Phase,
     proposal: Option<u64>,
     draft_tokens: &str,
+    succession_supported: bool,
     now: u64,
 ) -> Option<String> {
     let proposal = proposal?;
@@ -205,7 +369,14 @@ fn proposal_notice(
             Some(proposal),
             Some("The proposed limit is filled in when you choose this month's limits."),
         ),
-        phase if published_grant(phase, now) => (Some(proposal), Some(PUBLISHED_NOTE)),
+        phase if published_grant(phase, now) && !succession_supported => {
+            (Some(proposal), Some(PUBLISHED_NOTE))
+        }
+        phase if scheduled_grant(phase, now) => (Some(proposal), Some(SCHEDULED_NOTE)),
+        phase if published_grant(phase, now) && live_grant_tokens(phase, now).is_some() => {
+            (Some(proposal), Some(AMENDABLE_NOTE))
+        }
+        phase if published_grant(phase, now) => (Some(proposal), Some(NOT_AMENDABLE_NOTE)),
         Phase::Progress(p)
             if matches!(p.state, OwnerGrantState::Declined)
                 || (matches!(p.state, OwnerGrantState::Recorded) && p.closure.is_some()) =>
@@ -245,6 +416,17 @@ fn same_publication_resource(form: &OwnerGrantForm, review: &OwnerGrantReview) -
         && form.context.server_origin==c.server_origin && form.context.profile_id==c.profile_id
         && form.context.resource_revision==c.resource_revision
         && form.context.framework==c.framework && form.context.model==c.model
+}
+/// The successor review continues one owner submission only if it is the
+/// change of the same resource, kind and predecessor the owner was shown.
+fn same_successor_resource(form: &OwnerGrantSuccessionForm, review: &OwnerGrantReview) -> bool {
+    let c=review.context();let s=review.summary();
+    form.contribution_id==s.contribution_id && form.resource_id==s.resource_id
+        && form.context.server_origin==c.server_origin && form.context.profile_id==c.profile_id
+        && form.context.resource_revision==c.resource_revision
+        && form.context.framework==c.framework && form.context.model==c.model
+        && s.succession.as_ref().is_some_and(|succession| succession.kind==form.kind
+            && succession.predecessor_grant_id==form.predecessor.grant_id)
 }
 /// Only exact reviewed native codes may enter diagnostics. A prefix match would
 /// allow arbitrary provider errors, paths or credentials to escape into logs.
@@ -316,6 +498,19 @@ fn grant_failure_code(code: &str) -> &'static str {
         "invalid_grant_budget" => "invalid_grant_budget",
         "invalid_grant_expiry" => "invalid_grant_expiry",
         "invalid_grant_manager" => "invalid_grant_manager",
+        "management_grant_succession_required" => "management_grant_succession_required",
+        "pool_grant_succession_unavailable" => "pool_grant_succession_unavailable",
+        "owner_grant_predecessor_required" => "owner_grant_predecessor_required",
+        "owner_grant_succession_pending" => "owner_grant_succession_pending",
+        "owner_grant_successor_exists" => "owner_grant_successor_exists",
+        "owner_grant_renewal_window_closed" => "owner_grant_renewal_window_closed",
+        "owner_grant_below_floor" => "owner_grant_below_floor",
+        "owner_grant_manager_removed" => "owner_grant_manager_removed",
+        "grant_predecessor_not_effective" => "grant_predecessor_not_effective",
+        "grant_successor_exists" => "grant_successor_exists",
+        "grant_successor_below_reserved" => "grant_successor_below_reserved",
+        "grant_succession_window_closed" => "grant_succession_window_closed",
+        "invalid_grant_succession" => "invalid_grant_succession",
         _ => "owner_grant_unclassified_failure",
     }
 }
@@ -365,6 +560,27 @@ fn failure_message(code: &str) -> &'static str {
         "invalid_grant_manager" => {
             "Enter complete Matrix IDs for the Agent applicants."
         }
+        "management_grant_succession_required" | "pool_grant_succession_unavailable" => {
+            "This server cannot change or renew a published pool yet. Ask its administrator to update the server."
+        }
+        "owner_grant_predecessor_required" | "grant_predecessor_not_effective" => {
+            "This pool has no active published limit to change. Publish the pool first."
+        }
+        "owner_grant_succession_pending" => {
+            "A change to this pool is not finished. Publish, recover or cancel it first."
+        }
+        "owner_grant_successor_exists" | "grant_successor_exists" => {
+            "Next month's renewal is already scheduled. Cancel it, change this month's limit, then renew again."
+        }
+        "owner_grant_renewal_window_closed" | "grant_succession_window_closed" => {
+            "Next month's limit can be scheduled only during the last 7 days of this month (UTC)."
+        }
+        "owner_grant_below_floor" | "grant_successor_below_reserved" => {
+            "The new limit is below what running Agents already hold. Choose at least the minimum shown."
+        }
+        "owner_grant_manager_removed" => {
+            "Applicants can be added but not removed while Agents may be running. Keep every current applicant."
+        }
         _ => {
             "The result is not confirmed. Recover the original intent before trying another allocation."
         }
@@ -380,14 +596,28 @@ impl GrantPrompt {
         self.submit_publication = true;
         self.proposal = None;
     }
+    /// The bounds of whichever native form the Choose phase shows.
+    fn bounds(&self) -> Option<Bounds> {
+        match (&self.successor, &self.form) {
+            (Some(form), _) => Some(successor_bounds(form)),
+            (None, Some(form)) => Some(root_bounds(form)),
+            _ => None,
+        }
+    }
+    /// A proposal beside this month's published grant may open the native
+    /// amendment form, but only once the server is known to support it.
+    fn amendable(&self) -> bool {
+        self.proposal.is_some() && self.flow.succession_supported() == Some(true)
+    }
     fn can_primary(&self) -> bool {
         self.actionable()
             && primary_available(
                 &self.phase,
-                self.form.as_ref(),
+                self.bounds().as_ref(),
                 &self.draft,
                 self.original.is_some(),
                 self.flow.can_choose_new_limits(),
+                self.amendable(),
                 now_ms(),
             )
     }
@@ -412,6 +642,44 @@ impl GrantPrompt {
                 _ => false,
             }
     }
+}
+/// The panel's own argument for the native successor kind.
+fn succession_arg(kind: OwnerGrantSuccessionKind) -> Succession {
+    match kind {
+        OwnerGrantSuccessionKind::Renewal => Succession::Renewal,
+        _ => Succession::Amendment,
+    }
+}
+/// Review rows that say what a successor changes and what it carries.
+fn succession_details(
+    s: &::hagency::native_owner::OwnerGrantSuccessionSummary,
+    allocated_tokens: u64,
+) -> String {
+    let tr = crate::i18n::tr;
+    [
+        (
+            "Kind of change",
+            tr(match s.kind {
+                OwnerGrantSuccessionKind::Renewal => "Renewal for next month",
+                _ => "New per-request limit this month",
+            })
+            .to_owned(),
+        ),
+        (
+            "Per-request limit",
+            format!(
+                "{} → {}",
+                amount(Some(s.predecessor_allocated_tokens)),
+                amount(Some(allocated_tokens))
+            ),
+        ),
+        ("Running Agents carried", s.carried_children.to_string()),
+        ("Held by running Agents (minimum)", amount(Some(s.carried_retained_tokens))),
+    ]
+    .into_iter()
+    .map(|(label, value)| format!("{}\n{}", tr(label), value))
+    .collect::<Vec<_>>()
+    .join("\n\n")
 }
 fn cancellation_details(server: &str, s: OwnerGrantSummary) -> String {
     let tr = crate::i18n::tr;
@@ -467,13 +735,14 @@ impl MiniAppsPanel {
             phase: Phase::Loading,
             original: None,
             receiver: None,
-            draft: initial_draft(proposal),
+            draft: initial_draft(proposal, flow.applicants()),
             publishing: false,
             cancelling: false,
             form: None,
             submit_publication: false,
             proposal,
             regrant: false,
+            successor: None,
         });
         self.grant_job(async move { flow.open().await });
         self.present_grant_confirmation(cx);
@@ -521,9 +790,30 @@ impl MiniAppsPanel {
         let choosing = matches!(prompt.phase, Phase::Choose);
         if choosing {
             for (id,days) in [(ids!(grant_confirmation.scroll.choices.expiry_presets.day),Some(1)),(ids!(grant_confirmation.scroll.choices.expiry_presets.week),Some(7)),(ids!(grant_confirmation.scroll.choices.expiry_presets.month),None)] {
-                self.view.button(cx,id).set_disabled(cx,!publication_preset_available(days));
+                let available=match &prompt.successor {
+                    Some(form)=>successor_preset(form,days,now).is_some(),
+                    None=>publication_preset_available(days),
+                };
+                self.view.button(cx,id).set_disabled(cx,!available);
             }
-            if let Some(form)=&prompt.form {
+            let widget=self.view.widget(cx,ids!(grant_confirmation.scroll.choices.tokens));
+            if let Some(mut editor)=widget.borrow_mut::<crate::miniapps::design::MiniAppNumberInput>() {
+                editor.set_minimum(cx,prompt.bounds().map_or(1,|b|b.minimum));
+            }
+            if let Some(form)=&prompt.successor {
+                let widget=self.view.widget(cx,ids!(grant_confirmation.scroll.choices.tokens));
+                if let Some(mut editor)=widget.borrow_mut::<crate::miniapps::design::MiniAppNumberInput>() {
+                    editor.set_maximum(cx,form.context.remaining_tokens.unwrap_or(0));
+                }
+                let available=if renewal(form) {
+                    crate::i18n::format("Available in {month}",&[("month",form.period_key.clone())])
+                } else {crate::i18n::tr("Available for this month's limit").into()};
+                self.view.label(cx,ids!(grant_confirmation.scroll.choices.capacity)).set_text(cx,
+                    &format!("{} · {}\n{}\n{}: {} M",form.label,form.context.model,form.context.server_origin,
+                        available,form.context.remaining_tokens.map(crate::utils::token_millions)
+                            .unwrap_or_else(||crate::i18n::tr("Unavailable").into())));
+            }
+            if let Some(form)=prompt.form.as_ref().filter(|_|prompt.successor.is_none()) {
                 let widget=self.view.widget(cx,ids!(grant_confirmation.scroll.choices.tokens));
                 if let Some(mut editor)=widget.borrow_mut::<crate::miniapps::design::MiniAppNumberInput>() {
                     editor.set_maximum(cx,form.context.remaining_tokens.unwrap_or(0));
@@ -562,8 +852,22 @@ impl MiniAppsPanel {
         let mut details = String::new();
         let mut primary = if prompt.cancelling {"Review cancellation"} else {"Publish resource pool"};
         let tr = crate::i18n::tr;
+        let succession_supported = prompt.flow.succession_supported() == Some(true);
+        let mut notice = proposal_notice(&prompt.phase, prompt.proposal, &prompt.draft.tokens, succession_supported, now);
         match &prompt.phase {
             Phase::Loading=>status=tr(if prompt.submit_publication {"Publishing resource pool…"} else {"Loading publication status…"}).into(),
+            Phase::Choose if prompt.successor.is_some()=>{
+                let form=prompt.successor.as_ref().unwrap();
+                primary=if renewal(form) {"Publish renewal"} else {"Publish new limit"};
+                notice=Some(successor_notice(form,&prompt.draft.tokens));
+                status=if form.context.remaining_tokens.is_none() || form.context.resource_total_tokens.is_none() {
+                    tr("Available capacity is unknown or insufficient. This review cannot be confirmed.").into()
+                } else if renewal(form) {
+                    tr("Choose next month's limit and applicants. Running Agents continue into the new month with the budgets they have; applicants can be added but not removed.").into()
+                } else {
+                    tr("Choose this month's new per-request limit and applicants. It applies as soon as the server accepts it. Running Agents keep their budgets; applicants can be added but not removed.").into()
+                };
+            }
             Phase::Choose=>status=tr(if prompt.form.as_ref().is_some_and(|f| f.context.remaining_tokens.is_some_and(|n|n>0)) {
                 "Set who can apply, the token budget and expiry. Publish once to make this capacity available on the server."
             } else if prompt.regrant && prompt.form.as_ref().is_some_and(|f| f.context.remaining_tokens.is_none()) {
@@ -583,12 +887,25 @@ impl MiniAppsPanel {
                     ("Observed at",utc(c.observed_at_ms)),("Resource revision",c.resource_revision.clone())];
                 details=rows.into_iter().map(|(label,value)|format!("{}\n{}",tr(label),value)).collect::<Vec<_>>().join("\n\n");
                 status=tr(if review.capacity_available() {"Publish these saved limits to the server. Capacity is checked automatically during publication."} else {"Available capacity is unknown or insufficient. This review cannot be confirmed."}).into();
+                if let Some(succession)=&s.succession {
+                    details=format!("{}\n\n{}",succession_details(succession,s.allocated_tokens),details);
+                    if review.capacity_available() {
+                        status=tr(match succession.kind {
+                            OwnerGrantSuccessionKind::Renewal=>"Publish this renewal. It takes effect when the new month starts; running Agents continue.",
+                            _=>"Publish this change. The new limit applies as soon as the server accepts it; running Agents keep their budgets.",
+                        }).into();
+                    }
+                }
             },
             Phase::Progress(p)=>{
                 if matches!(p.state,OwnerGrantState::Recorded) { primary="Publish resource pool"; }
                 if matches!(p.state,OwnerGrantState::Declined) { primary="Choose new limits"; }
                 details=cancellation_details("",p.summary.clone());
-                status=tr(match p.state {OwnerGrantState::Recorded=>"Capacity is reserved. Publish these saved limits to make the pool available on the server.",
+                if let Some(succession)=&p.summary.succession {
+                    details=format!("{}\n\n{}",succession_details(succession,p.summary.allocated_tokens),details);
+                }
+                status=tr(match p.state {OwnerGrantState::Recorded if p.summary.succession.is_some()=>"This change is saved on this device. Publish it to apply it on the server.",
+                    OwnerGrantState::Recorded=>"Capacity is reserved. Publish these saved limits to make the pool available on the server.",
                     OwnerGrantState::ReviewRequired=>"The original intent is waiting for a fresh review.",
                     OwnerGrantState::OutcomeUnknown=>"The outcome is unknown. Recover this original intent; do not create a replacement.",
                     OwnerGrantState::Declined=>"This pending reservation was closed without reserving capacity. Its original record is kept.",OwnerGrantState::ReviewExpired=>"The original accounting period ended. This intent cannot move to a new month."}).into();
@@ -624,6 +941,9 @@ impl MiniAppsPanel {
             },
             Phase::PublicationProgress(p)=>{
                 details=cancellation_details("",p.summary.clone());
+                if let Some(succession)=&p.summary.succession {
+                    details=format!("{}\n\n{}",succession_details(succession,p.summary.allocated_tokens),details);
+                }
                 details.push_str(&format!("\n\n{}\n{}",tr("Expires (UTC)"),utc(p.summary.delegation_expires_at_ms.min(p.summary.period_end_ms))));
                 status=tr(match p.state {
                     OwnerGrantPublicationState::OutcomeUnknown=>"Publication is not confirmed. Recover the original command. This action does not change the local reservation.",
@@ -631,7 +951,7 @@ impl MiniAppsPanel {
                     OwnerGrantPublicationState::ServerObserved=>"The server state below is the latest observation. Recovery does not renew or reactivate this grant.",
                 }).into();
                 if let Some(server)=&p.server_state {
-                    details.push_str(&format!("\n\n{}\n{}\n\n{}\n{}",tr("Server grant state"),tr(match server.as_str(){"active"=>"Active","revoked"=>"Revoked","expired"=>"Expired",_=>"Unavailable"}),tr("Observed at"),p.observed_at_ms.map(utc).unwrap_or_default()));
+                    details.push_str(&format!("\n\n{}\n{}\n\n{}\n{}",tr("Server grant state"),tr(match server.as_str(){"active" if p.summary.period_start_ms>now=>"Scheduled","active"=>"Active","revoked"=>"Revoked","expired"=>"Expired","superseded"=>"Replaced by a newer limit",_=>"Unavailable"}),tr("Observed at"),p.observed_at_ms.map(utc).unwrap_or_default()));
                 }
             },
             Phase::Failed(code)=>status=tr(failure_message(code)).into(),
@@ -640,6 +960,9 @@ impl MiniAppsPanel {
             primary = "Choose this month's limits";
             status = tr(ENDED_STATUS).into();
         }
+        if published_grant(&prompt.phase, now) && prompt.amendable() && live_grant_tokens(&prompt.phase, now).is_some() {
+            primary = "Change per-request limit";
+        }
         if !prompt.flow.active() {
             status =
                 tr("The account or session changed. Open a fresh review after signing in.").into();
@@ -647,7 +970,6 @@ impl MiniAppsPanel {
         self.view
             .label(cx, ids!(grant_confirmation.scroll.status))
             .set_text(cx, &status);
-        let notice = proposal_notice(&prompt.phase, prompt.proposal, &prompt.draft.tokens, now);
         self.view
             .widget(cx, ids!(grant_confirmation.scroll.change))
             .set_visible(cx, notice.is_some());
@@ -705,15 +1027,32 @@ impl MiniAppsPanel {
                     prompt.publishing = false;
                     prompt.cancelling = false;
                     prompt.submit_publication = false;
+                    prompt.successor = None;
                     fill_form_defaults(&mut prompt.draft, &form);
                     prompt.draft.coordinator=prompt.flow.account().into();
                     prompt.form=Some(form);
                     Phase::Choose
                 }
+                Ok(GrantResult::ChooseSuccessor(form)) => {
+                    prompt.original = None;
+                    prompt.publishing = false;
+                    prompt.cancelling = false;
+                    prompt.submit_publication = false;
+                    fill_successor_defaults(&mut prompt.draft, &form, now_ms());
+                    prompt.draft.coordinator=prompt.flow.account().into();
+                    prompt.form=None;
+                    prompt.successor=Some(*form);
+                    Phase::Choose
+                }
                 Ok(GrantResult::Review(review)) => {
                     prompt.original = Some(review.summary().intent_id);
                     prompt.cancelling = false;
-                    if prompt.submit_publication && prompt.form.as_ref().is_some_and(|f| !same_publication_resource(f,&review)) {
+                    let same=match (&prompt.successor,&prompt.form) {
+                        (Some(form),_)=>same_successor_resource(form,&review),
+                        (None,Some(form))=>same_publication_resource(form,&review),
+                        _=>true,
+                    };
+                    if prompt.submit_publication && !same {
                         prompt.submit_publication=false;
                     }
                     Phase::Review(review)
@@ -782,8 +1121,14 @@ impl MiniAppsPanel {
     pub(super) fn grant_expiry_preset(&mut self,cx:&mut Cx,days:Option<i64>){
         self.capture_grant_choices(cx);
         let Some(prompt)=&mut self.grant_confirmation else{return};
-        if !matches!(prompt.phase,Phase::Choose) || !publication_preset_available(days){return}
-        prompt.draft.expires_utc=publication_expiry(days);
+        if !matches!(prompt.phase,Phase::Choose){return}
+        if let Some(form)=&prompt.successor {
+            let Some(value)=successor_preset(form,days,now_ms()) else{return};
+            prompt.draft.expires_utc=value;
+        } else {
+            if !publication_preset_available(days){return}
+            prompt.draft.expires_utc=publication_expiry(days);
+        }
         self.present_grant_confirmation(cx);
     }
     pub(super) fn capture_grant_choices(&mut self, cx: &mut Cx) {
@@ -810,12 +1155,16 @@ impl MiniAppsPanel {
             self_approval: false,
         };
         // Keep the shown new amount equal to what the tokens field would commit.
-        let notice = proposal_notice(
-            &prompt.phase,
-            prompt.proposal,
-            &prompt.draft.tokens,
-            now_ms(),
-        );
+        let notice = match &prompt.successor {
+            Some(form) => Some(successor_notice(form, &prompt.draft.tokens)),
+            None => proposal_notice(
+                &prompt.phase,
+                prompt.proposal,
+                &prompt.draft.tokens,
+                prompt.flow.succession_supported() == Some(true),
+                now_ms(),
+            ),
+        };
         self.view
             .label(cx, ids!(grant_confirmation.scroll.change))
             .set_text(cx, notice.as_deref().unwrap_or_default());
@@ -839,6 +1188,16 @@ impl MiniAppsPanel {
                 prompt.regrant = true;
                 self.grant_job(async move { flow.choose_new_limits().await });
             }
+            // A proposal beside this month's active grant opens the native
+            // amendment form; nothing is reserved or published until the
+            // owner submits that form.
+            phase
+                if published_grant(&phase, now)
+                    && prompt.amendable()
+                    && live_grant_tokens(&phase, now).is_some() =>
+            {
+                self.grant_job(async move { flow.choose_successor(Succession::Amendment).await });
+            }
             Phase::Choose => {
                 let choices = prompt.draft.clone();
                 if let Err(code) = choices.clone().parse() {
@@ -852,8 +1211,14 @@ impl MiniAppsPanel {
                     return;
                 }
                 // Validate native input before consuming the one possible prepare.
+                let kind = prompt.successor.as_ref().map(|form| succession_arg(form.kind));
                 prompt.submit();
-                self.grant_job(async move { flow.prepare(choices).await });
+                match kind {
+                    Some(kind) => {
+                        self.grant_job(async move { flow.prepare_successor(kind, choices).await })
+                    }
+                    None => self.grant_job(async move { flow.prepare(choices).await }),
+                }
             }
             Phase::Review(review) => {
                 prompt.submit();
@@ -927,12 +1292,17 @@ impl MiniAppsPanel {
         let id = prompt.original.clone();
         let publishing = prompt.publishing;
         // This month's form refreshes its capacity, e.g. once last month's
-        // Agents have reported their final usage.
+        // Agents have reported their final usage; a successor form refreshes
+        // its headroom and carried floor.
         let regrant = prompt.regrant;
+        let successor = prompt.successor.as_ref().map(|form| succession_arg(form.kind));
         self.grant_job(async move {
             match id {
                 Some(id) if publishing => flow.publication_review(id).await,
                 Some(id) => flow.recover(id).await,
+                None if successor.is_some() => {
+                    flow.choose_successor(successor.unwrap_or(Succession::Amendment)).await
+                }
                 None if regrant => flow.choose_new_limits().await,
                 None => flow.open().await,
             }
@@ -950,6 +1320,7 @@ impl MiniAppsPanel {
             prompt.proposal,
             prompt.receiver.is_some(),
             prompt.original.as_deref(),
+            prompt.flow.succession_supported() == Some(true),
             now_ms(),
         );
         splash_host_respond(
@@ -1113,12 +1484,13 @@ mod tests {
     }
     fn summary(tokens: u64) -> OwnerGrantSummary {
         OwnerGrantSummary {
-            intent_id: "original".into(), owner_mxid: "@owner:test".into(),
+            intent_id: "original".into(), grant_id: "grant_original".into(), owner_mxid: "@owner:test".into(),
             contribution_id: "pool_1".into(), resource_id: "resource".into(),
             coordinator_mxid: "@owner:test".into(), allocated_tokens: tokens,
             eligible_managers: vec!["@manager:test".into()], allow_self_approval: false,
             delegation_expires_at_ms: 1793491200000, period_key: "2026-10".into(),
             period_start_ms: 1790812800000, period_end_ms: 1793491200000,
+            succession: None,
         }
     }
     fn publication(state: OwnerGrantPublicationState, server: Option<&str>) -> Phase {
@@ -1129,7 +1501,7 @@ mod tests {
     }
     fn progress(state: OwnerGrantState, closed: bool) -> Phase {
         Phase::Progress(OwnerGrantProgress {
-            summary: summary(2_000_000), state,
+            summary: summary(2_000_000), state, succession_state: None,
             closure: closed.then_some(::hagency::native_owner::OwnerGrantClosure {
                 retained_tokens: 0, known_consumed_tokens: 0, unresolved_tokens: 0, observed_at_ms: 1,
             }),
@@ -1141,18 +1513,18 @@ mod tests {
     #[test]
     fn proposal_prefills_only_the_native_tokens_field_and_is_never_lowered() {
         let form = pool_form(10_000_000);
-        let mut draft = initial_draft(Some(3_000_000));
+        let mut draft = initial_draft(Some(3_000_000), &[]);
         assert_eq!(draft.tokens, "3000000");
         fill_form_defaults(&mut draft, &form);
         assert_eq!(draft.tokens, "3000000");
         // Applicants are still typed natively; expiry keeps today's default.
         assert!(draft.managers.is_empty());
         assert_eq!(draft.expires_utc, publication_expiry(None));
-        let mut default = initial_draft(None);
+        let mut default = initial_draft(None, &[]);
         fill_form_defaults(&mut default, &form);
         assert_eq!(default.tokens, "1000000");
         // Above the available capacity the proposal stays visible and unconfirmable.
-        let mut above = initial_draft(Some(12_000_000));
+        let mut above = initial_draft(Some(12_000_000), &[]);
         fill_form_defaults(&mut above, &form);
         above.coordinator = "@owner:test".into();
         above.managers = "@manager:test".into();
@@ -1161,7 +1533,7 @@ mod tests {
         above.tokens = "3000000".into();
         assert!(form_choices_valid(&form, &above));
         // A reopened form keeps what the owner typed over the proposal.
-        let mut edited = initial_draft(Some(3_000_000));
+        let mut edited = initial_draft(Some(3_000_000), &[]);
         edited.tokens = "2500000".into();
         fill_form_defaults(&mut edited, &form);
         assert_eq!(edited.tokens, "2500000");
@@ -1172,17 +1544,17 @@ mod tests {
         // is whatever the native tokens field holds now.
         for (field, shown) in [("3000000", "3 M"), ("2500000", "2.5 M"), ("2.5", "Unavailable")] {
             assert_eq!(
-                proposal_notice(&Phase::Choose, Some(3_000_000), field, OCTOBER).as_deref(),
+                proposal_notice(&Phase::Choose, Some(3_000_000), field, false, OCTOBER).as_deref(),
                 Some(format!("Per-request limit: None active → {shown}").as_str())
             );
         }
-        assert!(proposal_notice(&Phase::Choose, None, "3000000", OCTOBER).is_none());
-        assert!(proposal_notice(&Phase::Loading, Some(3_000_000), "", OCTOBER).is_none());
-        let declined = proposal_notice(&progress(OwnerGrantState::Declined, false), Some(3_000_000), "", OCTOBER).unwrap();
+        assert!(proposal_notice(&Phase::Choose, None, "3000000", false, OCTOBER).is_none());
+        assert!(proposal_notice(&Phase::Loading, Some(3_000_000), "", false, OCTOBER).is_none());
+        let declined = proposal_notice(&progress(OwnerGrantState::Declined, false), Some(3_000_000), "", false, OCTOBER).unwrap();
         assert_eq!(declined, "Per-request limit: None active → 3 M\nThe proposed limit is filled in when you choose new limits.");
-        let closed = proposal_notice(&progress(OwnerGrantState::Recorded, true), Some(3_000_000), "", OCTOBER).unwrap();
+        let closed = proposal_notice(&progress(OwnerGrantState::Recorded, true), Some(3_000_000), "", false, OCTOBER).unwrap();
         assert!(closed.ends_with("filled in when you choose new limits."), "{closed}");
-        let failed = proposal_notice(&Phase::Failed("owner_grant_prior_intent_required".into()), Some(3_000_000), "", OCTOBER).unwrap();
+        let failed = proposal_notice(&Phase::Failed("owner_grant_prior_intent_required".into()), Some(3_000_000), "", false, OCTOBER).unwrap();
         assert!(failed.ends_with("\nThe proposed limit was not applied."), "{failed}");
     }
     #[test]
@@ -1190,7 +1562,7 @@ mod tests {
         let live = publication(OwnerGrantPublicationState::ServerObserved, Some("active"));
         assert_eq!(live_grant_tokens(&live, OCTOBER), Some(2_000_000));
         assert_eq!(
-            proposal_notice(&live, Some(3_000_000), "", OCTOBER).unwrap(),
+            proposal_notice(&live, Some(3_000_000), "", false, OCTOBER).unwrap(),
             format!("Per-request limit: 2 M → 3 M\n{PUBLISHED_NOTE}")
         );
         // A grant revoked, or expired by its delegation, within its month still
@@ -1200,24 +1572,24 @@ mod tests {
             let used = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
             assert_eq!(live_grant_tokens(&used, OCTOBER), None);
             assert_eq!(
-                proposal_notice(&used, Some(3_000_000), "", OCTOBER).unwrap(),
+                proposal_notice(&used, Some(3_000_000), "", false, OCTOBER).unwrap(),
                 format!("Per-request limit: None active → 3 M\n{PUBLISHED_NOTE}")
             );
         }
         // No proposal, applicant or selector flag offers a commit beside a
         // published grant: nothing is revoked, reserved or published from here.
         let form = pool_form(10_000_000);
-        let mut draft = initial_draft(Some(3_000_000));
+        let mut draft = initial_draft(Some(3_000_000), &[]);
         fill_form_defaults(&mut draft, &form);
         draft.coordinator = "@owner:test".into();
         draft.managers = "@manager:test".into();
         assert!(primary_available(
             &Phase::Choose,
-            Some(&form),
+            Some(&root_bounds(&form)),
             &draft,
             false,
             true,
-            OCTOBER
+            false, OCTOBER
         ));
         for server in ["active", "revoked", "expired"] {
             let phase = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
@@ -1225,11 +1597,11 @@ mod tests {
                 for can_choose_new_limits in [false, true] {
                     assert!(!primary_available(
                         &phase,
-                        Some(&form),
+                        Some(&root_bounds(&form)),
                         &draft,
                         has_original,
                         can_choose_new_limits,
-                        OCTOBER
+                        false, OCTOBER
                     ));
                 }
             }
@@ -1240,7 +1612,7 @@ mod tests {
         const ENDED_NOTE: &str =
             "The proposed limit is filled in when you choose this month's limits.";
         let form = pool_form(10_000_000);
-        let draft = initial_draft(Some(3_000_000));
+        let draft = initial_draft(Some(3_000_000), &[]);
         // Once its UTC month has ended, a published grant (the server reports
         // it expired) or an unpublished recorded one no longer blocks: the
         // pool has no limit and the panel offers this month's limits instead.
@@ -1256,28 +1628,28 @@ mod tests {
             assert!(!published_grant(&phase, NOVEMBER));
             assert_eq!(live_grant_tokens(&phase, NOVEMBER), None);
             assert_eq!(
-                proposal_notice(&phase, Some(3_000_000), "", NOVEMBER).unwrap(),
+                proposal_notice(&phase, Some(3_000_000), "", false, NOVEMBER).unwrap(),
                 format!("Per-request limit: None active → 3 M\n{ENDED_NOTE}")
             );
             assert!(primary_available(
                 &phase,
-                Some(&form),
+                Some(&root_bounds(&form)),
                 &draft,
                 true,
                 true,
-                NOVEMBER
+                false, NOVEMBER
             ));
             assert!(!primary_available(
                 &phase,
-                Some(&form),
+                Some(&root_bounds(&form)),
                 &draft,
                 true,
                 false,
-                NOVEMBER
+                false, NOVEMBER
             ));
             // Closing keeps the public progress, never pool_grant_already_published.
             let reply: serde_json::Value = serde_json::from_str(
-                &close_reply(&phase, Some(3_000_000), false, Some("original"), NOVEMBER).unwrap(),
+                &close_reply(&phase, Some(3_000_000), false, Some("original"), false, NOVEMBER).unwrap(),
             )
             .unwrap();
             assert_eq!(reply["summary"]["periodKey"], "2026-10");
@@ -1297,7 +1669,7 @@ mod tests {
             &draft,
             true,
             true,
-            NOVEMBER
+            false, NOVEMBER
         ));
     }
     #[test]
@@ -1311,26 +1683,26 @@ mod tests {
         ] {
             assert_eq!(live_grant_tokens(&phase, OCTOBER), None);
             assert_eq!(
-                proposal_notice(&phase, Some(3_000_000), "", OCTOBER).unwrap(),
+                proposal_notice(&phase, Some(3_000_000), "", false, OCTOBER).unwrap(),
                 EXISTING
             );
         }
         // An unattempted original reserved nothing; cancelling it reopens the form.
         for state in [OwnerGrantState::ReviewRequired, OwnerGrantState::ReviewExpired] {
             assert_eq!(
-                proposal_notice(&progress(state, false), Some(3_000_000), "", OCTOBER).unwrap(),
+                proposal_notice(&progress(state, false), Some(3_000_000), "", false, OCTOBER).unwrap(),
                 format!("Per-request limit: None active → 3 M\n{PENDING_NOTE}")
             );
         }
         // A proposal adds or removes no action on an existing original.
-        let draft = initial_draft(Some(3_000_000));
+        let draft = initial_draft(Some(3_000_000), &[]);
         assert!(primary_available(
             &progress(OwnerGrantState::Recorded, false),
             None,
             &draft,
             true,
             true,
-            OCTOBER
+            false, OCTOBER
         ));
         assert!(!primary_available(
             &progress(OwnerGrantState::OutcomeUnknown, false),
@@ -1338,27 +1710,203 @@ mod tests {
             &draft,
             true,
             true,
-            OCTOBER
+            false, OCTOBER
         ));
+    }
+    /// The real UTC month (start, end): `GrantChoices::parse` reads the real clock.
+    fn this_month() -> (u64, u64) {
+        use chrono::Datelike;
+        let first = chrono::Utc::now().date_naive().with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc();
+        (first.timestamp_millis() as u64, publication_period_end().timestamp_millis() as u64)
+    }
+    fn month_after(start: u64) -> u64 {
+        use chrono::Datelike;
+        let at = chrono::DateTime::from_timestamp_millis(start as i64).unwrap().date_naive();
+        (at + chrono::Duration::days(32)).with_day(1).unwrap().and_hms_opt(0, 0, 0).unwrap().and_utc().timestamp_millis() as u64
+    }
+    fn successor_form(kind: OwnerGrantSuccessionKind) -> OwnerGrantSuccessionForm {
+        let (start, end) = this_month();
+        let mut predecessor = summary(2_000_000);
+        predecessor.period_start_ms = start;
+        predecessor.period_end_ms = end;
+        predecessor.delegation_expires_at_ms = end;
+        let (key, period_start, period_end) = if kind == OwnerGrantSuccessionKind::Renewal {
+            let at = chrono::DateTime::from_timestamp_millis(end as i64).unwrap();
+            (at.format("%Y-%m").to_string(), end, month_after(end))
+        } else {
+            let at = chrono::DateTime::from_timestamp_millis(start as i64).unwrap();
+            (at.format("%Y-%m").to_string(), start, end)
+        };
+        OwnerGrantSuccessionForm {
+            kind,
+            contribution_id: "pool_1".into(),
+            resource_id: "resource".into(),
+            label: "Pool".into(),
+            context: pool_form(5_000_000).context,
+            predecessor,
+            floor: ::hagency::native_owner::OwnerGrantFloor { children: 2, retained_tokens: 600_000 },
+            period_key: key,
+            period_start_ms: period_start,
+            period_end_ms: period_end,
+            window_opens_at_ms: end.saturating_sub(7 * 86_400_000),
+            window_closes_at_ms: end,
+        }
+    }
+    #[test]
+    fn an_amendment_keeps_running_agents_and_only_adds_applicants() {
+        let form = successor_form(OwnerGrantSuccessionKind::Amendment);
+        let bounds = successor_bounds(&form);
+        assert_eq!(bounds.minimum, 600_000);
+        assert_eq!(bounds.keep_managers, ["@manager:test"]);
+        // The proposal fills the tokens field; applicants are added to the
+        // current ones; the current delegation is kept.
+        let mut draft = initial_draft(Some(800_000), &["@new:test".to_owned()]);
+        assert_eq!(draft.managers, "@new:test");
+        fill_successor_defaults(&mut draft, &form, now_ms());
+        assert_eq!(draft.tokens, "800000");
+        assert_eq!(draft.managers, "@manager:test @new:test");
+        assert_eq!(draft.expires_utc, rfc3339(form.predecessor.delegation_expires_at_ms));
+        draft.coordinator = "@owner:test".into();
+        assert!(choices_valid(&bounds, &draft));
+        // Lowering is allowed down to what running Agents hold, never below.
+        for (tokens, valid) in [("600000", true), ("599999", false), ("5000000", true), ("5000001", false)] {
+            let mut d = draft.clone();
+            d.tokens = tokens.into();
+            assert_eq!(choices_valid(&bounds, &d), valid, "{tokens}");
+        }
+        // Removing a current applicant is never committed from this form.
+        let mut removed = draft.clone();
+        removed.managers = "@new:test".into();
+        assert!(!choices_valid(&bounds, &removed));
+        // The delegation cannot leave the month being amended.
+        let mut late = draft.clone();
+        late.expires_utc = rfc3339(form.period_end_ms + 1000);
+        assert!(!choices_valid(&bounds, &late));
+        // Without a proposal the field starts at the current limit.
+        let mut plain = initial_draft(None, &[]);
+        fill_successor_defaults(&mut plain, &form, now_ms());
+        assert_eq!(plain.tokens, "2000000");
+        assert_eq!(plain.managers, "@manager:test");
+        // The notice names the change, the carried floor and pending requests.
+        let notice = successor_notice(&form, "800000");
+        let lines: Vec<&str> = notice.lines().collect();
+        assert_eq!(lines.len(), 3, "{notice}");
+        assert_eq!(lines[0], format!("Per-request limit: 2 M → {} (applies now, until {})", amount(Some(800_000)), utc(form.period_end_ms)));
+        assert_eq!(lines[1], format!("Agents that keep running: 2. The limit cannot go below {}, which Agents already hold this month.", amount(Some(600_000))));
+        assert_eq!(lines[2], format!("Pending requests above {} cannot be approved.", amount(Some(800_000))));
+        // Unknown capacity keeps the form unconfirmable.
+        let mut unknown = form.clone();
+        unknown.context.remaining_tokens = None;
+        assert!(!choices_valid(&successor_bounds(&unknown), &draft));
+    }
+    #[test]
+    fn a_renewal_starts_next_month_and_its_delegation_reaches_into_it() {
+        let form = successor_form(OwnerGrantSuccessionKind::Renewal);
+        let bounds = successor_bounds(&form);
+        let mut draft = initial_draft(None, &[]);
+        fill_successor_defaults(&mut draft, &form, now_ms());
+        // Q12: a renewal's delegation defaults to the end of the new month.
+        assert_eq!(draft.expires_utc, rfc3339(form.period_end_ms));
+        assert_eq!(draft.tokens, "2000000");
+        draft.coordinator = "@owner:test".into();
+        assert!(choices_valid(&bounds, &draft));
+        for (expiry, valid) in [
+            (form.period_start_ms, false),
+            (form.period_start_ms + 1000, true),
+            (form.period_end_ms, true),
+            (form.period_end_ms + 1000, false),
+        ] {
+            let mut d = draft.clone();
+            d.expires_utc = rfc3339(expiry);
+            assert_eq!(choices_valid(&bounds, &d), valid, "{expiry}");
+        }
+        // Presets only offer expiries inside the new month.
+        assert_eq!(successor_preset(&form, None, now_ms()), Some(rfc3339(form.period_end_ms)));
+        for days in [Some(1), Some(7)] {
+            if let Some(value) = successor_preset(&form, days, now_ms()) {
+                let mut d = draft.clone();
+                d.expires_utc = value;
+                assert!(choices_valid(&bounds, &d));
+            }
+        }
+        let notice = successor_notice(&form, "3000000");
+        assert!(notice.starts_with(&format!("Renew for {}: per-request limit 2 M → 3 M\n", form.period_key)), "{notice}");
+        assert!(notice.ends_with(&format!("Takes effect {}.", utc(form.period_start_ms))), "{notice}");
+    }
+    #[test]
+    fn a_proposal_beside_an_active_grant_opens_the_amendment_when_the_server_supports_it() {
+        let live = publication(OwnerGrantPublicationState::ServerObserved, Some("active"));
+        assert_eq!(
+            proposal_notice(&live, Some(3_000_000), "", true, OCTOBER).unwrap(),
+            format!("Per-request limit: 2 M → 3 M\n{AMENDABLE_NOTE}")
+        );
+        let draft = initial_draft(Some(3_000_000), &[]);
+        assert!(primary_available(&live, None, &draft, true, true, true, OCTOBER));
+        // Only the native amendment form can commit; without support or a
+        // pool selector nothing is offered.
+        assert!(!primary_available(&live, None, &draft, true, true, false, OCTOBER));
+        assert!(!primary_available(&live, None, &draft, true, false, true, OCTOBER));
+        // The reply is the public progress, not a refusal.
+        let reply: serde_json::Value = serde_json::from_str(
+            &close_reply(&live, Some(3_000_000), false, Some("original"), true, OCTOBER).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(reply["serverState"], "active");
+        assert_eq!(reply["summary"]["grantId"], "grant_original");
+        // A revoked, superseded or expired grant cannot be amended.
+        for server in ["revoked", "superseded", "expired"] {
+            let used = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
+            assert_eq!(
+                proposal_notice(&used, Some(3_000_000), "", true, OCTOBER).unwrap(),
+                format!("Per-request limit: None active → 3 M\n{NOT_AMENDABLE_NOTE}")
+            );
+            assert!(!primary_available(&used, None, &draft, true, true, true, OCTOBER));
+        }
+    }
+    #[test]
+    fn a_scheduled_renewal_is_shown_but_never_amended_from_here() {
+        let mut p = OwnerGrantPublicationProgress {
+            summary: summary(2_000_000),
+            state: OwnerGrantPublicationState::ServerObserved,
+            server_state: Some("active".into()),
+            server_revision: Some(1),
+            observed_at_ms: Some(1),
+        };
+        p.summary.period_key = "2026-11".into();
+        p.summary.period_start_ms = NOVEMBER;
+        p.summary.period_end_ms = 1_796_083_200_000;
+        let scheduled = Phase::PublicationProgress(p);
+        assert!(published_grant(&scheduled, OCTOBER) && scheduled_grant(&scheduled, OCTOBER));
+        assert_eq!(live_grant_tokens(&scheduled, OCTOBER), None);
+        assert_eq!(
+            proposal_notice(&scheduled, Some(3_000_000), "", true, OCTOBER).unwrap(),
+            format!("Per-request limit: None active → 3 M\n{SCHEDULED_NOTE}")
+        );
+        let draft = initial_draft(Some(3_000_000), &[]);
+        assert!(!primary_available(&scheduled, None, &draft, true, true, true, OCTOBER));
+        // In its own month it is the active grant and can be amended.
+        assert!(!scheduled_grant(&scheduled, NOVEMBER));
+        assert_eq!(live_grant_tokens(&scheduled, NOVEMBER), Some(2_000_000));
+        assert!(primary_available(&scheduled, None, &draft, true, true, true, NOVEMBER));
     }
     #[test]
     fn closing_beside_a_published_grant_names_why_the_proposal_was_not_applied() {
         for server in ["active", "revoked", "expired"] {
             let phase = publication(OwnerGrantPublicationState::ServerObserved, Some(server));
             assert_eq!(
-                close_reply(&phase, Some(3_000_000), false, Some("original"), OCTOBER),
+                close_reply(&phase, Some(3_000_000), false, Some("original"), false, OCTOBER),
                 Err("pool_grant_already_published".into())
             );
             // Without a proposal the reply stays the public publication status.
             let reply: serde_json::Value =
-                serde_json::from_str(&close_reply(&phase, None, false, Some("original"), OCTOBER).unwrap()).unwrap();
+                serde_json::from_str(&close_reply(&phase, None, false, Some("original"), false, OCTOBER).unwrap()).unwrap();
             assert_eq!(reply["state"], "server_observed");
             assert_eq!(reply["serverState"], server);
             assert_eq!(reply["summary"]["allocatedTokens"], 2_000_000);
         }
         // Other outcomes keep their public progress so the app can recover them.
         let reserved: serde_json::Value = serde_json::from_str(
-            &close_reply(&progress(OwnerGrantState::Recorded, false), Some(3_000_000), false, Some("original"), OCTOBER).unwrap(),
+            &close_reply(&progress(OwnerGrantState::Recorded, false), Some(3_000_000), false, Some("original"), false, OCTOBER).unwrap(),
         ).unwrap();
         assert_eq!(reserved["state"], "recorded");
         assert_eq!(reserved["summary"]["allocatedTokens"], 2_000_000);
@@ -1367,6 +1915,7 @@ mod tests {
             Some(3_000_000),
             false,
             Some("original"),
+            false,
             OCTOBER,
         );
         assert!(unknown.unwrap().contains("\"state\":\"outcome_unknown\""));
@@ -1378,7 +1927,7 @@ mod tests {
                 Some(3_000_000),
                 false,
                 None,
-                OCTOBER
+                false, OCTOBER
             )),
             json!({"state":"review_closed","intentId":null})
         );
@@ -1388,7 +1937,7 @@ mod tests {
                 Some(3_000_000),
                 true,
                 None,
-                OCTOBER
+                false, OCTOBER
             )),
             json!({"state":"outcome_unknown","intentId":null})
         );
@@ -1617,6 +2166,19 @@ mod diagnostic_tests {
             "invalid_grant_budget",
             "invalid_grant_expiry",
             "invalid_grant_manager",
+            "management_grant_succession_required",
+            "pool_grant_succession_unavailable",
+            "owner_grant_predecessor_required",
+            "owner_grant_succession_pending",
+            "owner_grant_successor_exists",
+            "owner_grant_renewal_window_closed",
+            "owner_grant_below_floor",
+            "owner_grant_manager_removed",
+            "grant_predecessor_not_effective",
+            "grant_successor_exists",
+            "grant_successor_below_reserved",
+            "grant_succession_window_closed",
+            "invalid_grant_succession",
         ] {
             assert_eq!(super::grant_failure_code(code), code);
         }

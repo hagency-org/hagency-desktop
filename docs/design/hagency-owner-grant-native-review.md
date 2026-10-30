@@ -8,6 +8,15 @@ Opening a published pool observes its existing original grant. Recovery and reop
 
 The shared token editor supports a slider plus a compact exact M input. Publication uses a real capacity bound; configuration editors have an expanding slider scale and do not misrepresent it as an account authorization limit. Typed values retain integer precision and are validated before publication.
 
+## Amendment, renewal and proposed applicants — 2026-10-29
+
+`hagency.grants.review` also accepts, only beside `contributionId`:
+
+- `succession: "amendment" | "renewal"` opens the native form for a successor of the pool's published grant: this month's new per-request limit (amendment), or next month's grant scheduled during the last 7 days of this month (renewal). The form shows the current limit → the new one, how many Agents keep running, the tokens Agents already hold (the lowest the new limit may take), and, for an amendment, that pending requests above the new limit cannot be approved. Applicants can be added but never removed. A renewal's delegation defaults to the end of the new month; an amendment keeps the current delegation. An unfinished successor (unattempted review, unknown outcome, saved but unpublished change) is shown instead of a new form until it is published, recovered or cancelled.
+- `applicants: ["@user:server", …]` (1–64 complete Matrix IDs of the owner's homeserver) only pre-selects the native applicants field, for a new grant or a successor; for a successor they are added to the current applicants.
+
+A successor requires the server to advertise `pool-grant-succession-v1`; otherwise the panel explains that the server must be updated. With that support, a `proposedTokens` beside this month's active grant no longer closes with `pool_grant_already_published`: the panel offers **Change per-request limit**, which opens the same native amendment form. The script still cannot commit anything: prepare, confirm and publication are native, exactly as for a new grant, and the close reply is the same public progress (its summary now also carries `grantId` and, for a successor, `succession`, with `successionState`).
+
 The notes below document earlier implementation checkpoints; their separate-confirmation UI is superseded by this flow.
 
 # Historical native owner grant review checkpoint
