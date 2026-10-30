@@ -14,7 +14,6 @@
 use makepad_widgets::*;
 
 use crate::home::rooms_list::RoomsListWidgetExt;
-use crate::home::rooms_list_header::RoomsListHeaderAction;
 use crate::home::joined_spaces::JoinedSpacesWidgetExt;
 use crate::home::navigation_tab_bar::{NavigationBarAction, SelectedTab};
 use crate::shared::navigation_bar_button::NavigationBarButtonWidgetExt;
@@ -215,14 +214,6 @@ impl Widget for RoomsSideBar {
                 // A legacy desktop Space shortcut still opens its filtered list.
                 if let Some(NavigationBarAction::TabSelected(SelectedTab::Space {..})) = action.downcast_ref() {
                     cx.global::<ChatsViewState>().spaces = false;
-                }
-                // Both layouts own their search field in this sidebar.
-                if let Some(RoomsListHeaderAction::OpenRoomFilterModal) = action.downcast_ref() {
-                    if crate::home::home_screen::effective_is_desktop(cx) {
-                        self.view.text_input(cx, ids!(room_filter_input_bar.input)).take_key_focus(cx);
-                    } else {
-                        self.open_mobile_search(cx);
-                    }
                 }
             }
         }
