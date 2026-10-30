@@ -4511,7 +4511,7 @@ A.pool_pump=fn(epoch){
         if epoch!=H.pool_epoch {return}
         H.pool_job_running=false
         A.pool_pump(epoch)
-        if H.page=="resources" || H.page=="resource_detail" {A.redraw()}
+        if H.page=="resources" || H.page=="resource_detail" || A.dev_page() {A.redraw()}
     }) return}
     host.request(job.service,job.args,fn(r){
         if epoch!=H.pool_epoch {return}
@@ -4519,7 +4519,7 @@ A.pool_pump=fn(epoch){
         if !r.is_ok && (r.error=="native_resume_missing" || r.error=="native_resume_revoked") {H.needs_signin=true}
         job.apply(r)
         A.pool_pump(epoch)
-        if H.page=="resources" || H.page=="resource_detail" {A.redraw()}
+        if H.page=="resources" || H.page=="resource_detail" || A.dev_page() {A.redraw()}
     })
 }
 // Reads every page of a list; done(nil) on any error or a repeated cursor.
@@ -5245,9 +5245,9 @@ A.pool_renew_title=fn(v){
 A.pool_renew_text=fn(v){
     if v.renewal!=nil {
         let tokens=A.recipient_optional(v.renewal,"publishedTokens")
-        return A.t("Per-request limit "+A.tokens(tokens)+", monthly maximum "+A.pool_carried(v)+" (same as this month), from "+A.pool_next_month(v.now)+". Running Agents carry on.","每次申请上限 "+A.tokens(tokens)+"，每月上限 "+A.pool_carried(v)+"（沿用本月），"+A.pool_next_month(v.now)+"起生效；使用中的 Agent 会接着用。")
+        return A.t("Per-request limit "+A.tokens(tokens)+", monthly maximum "+A.pool_carried(v)+" (same as this month), from "+A.pool_next_month(v.now)+". Running Agents carry on.","每次申请上限 "+A.tokens(tokens)+"，每月上限 "+A.pool_carried(v)+"（沿用本月），"+A.pool_next_month(v.now)+"起生效；使用中的 Agent 会接着用")
     }
-    return A.t("Per-request limit "+A.tokens(v.publishedTokens)+", monthly maximum "+A.pool_carried(v)+" (same as this month) and the same list, from "+A.pool_next_month(v.now)+". Running Agents don’t ask again. Open in the last 7 days of a month.","每次申请上限 "+A.tokens(v.publishedTokens)+"，每月上限 "+A.pool_carried(v)+"（沿用本月），名单不变，"+A.pool_next_month(v.now)+"起生效；使用中的 Agent 不用重新申请。每月最后 7 天可用。")
+    return A.t("Per-request limit "+A.tokens(v.publishedTokens)+", monthly maximum "+A.pool_carried(v)+" (same as this month) and the same list, from "+A.pool_next_month(v.now)+". Running Agents don’t ask again.","每次申请上限 "+A.tokens(v.publishedTokens)+"，每月上限 "+A.pool_carried(v)+"（沿用本月），名单不变，"+A.pool_next_month(v.now)+"起生效；使用中的 Agent 不用重新申请")
 }
 A.pool_carried=fn(v){return if v.b.ceiling==nil {A.t("none","未设置")} else {A.tokens(v.b.ceiling)}}
 A.pool_renew=fn(){
@@ -7872,7 +7872,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                     mod.widgets.HagencyListText{
                         mod.widgets.HagencyWrapTitle{text:A.t("New requests can’t be approved for now","暂时不能批准新的 Agent 申请")}
-                        reqs_stop_why := mod.widgets.HagencyWrapSubtitle{text:A.t("This pool is over its monthly maximum. Stopping an Agent returns what it was given but hasn’t used to the pool; the alert clears by itself once use is back under the maximum.","这个资源池超出了每月上限。停止一个 Agent 后，分给它但没用掉的额度会回到资源池；用量回到上限以内时，告警自动解除。")}
+                        reqs_stop_why := mod.widgets.HagencyWrapSubtitle{text:A.t("This pool is over its monthly maximum. Stopping an Agent returns what it was given but hasn’t used to the pool; the alert clears by itself once use is back under the maximum.","这个资源池超出了每月上限。停止一个 Agent 后，分给它但没用掉的额度会回到资源池；用量回到上限以内后告警自动解除。")}
                     }
                 }}}
                 if r.result!=nil {View{width:Fill height:Fit padding:Inset{top:2}
@@ -12320,7 +12320,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             }
                             if v.renewal==nil {View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:16 right:14 top:0 bottom:12} align:Align{y:0.0}
                                 mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}
-                                pool_renew_lock := mod.widgets.HagencyWrapSubtitle{text:A.t("Once published ahead, this month’s per-request limit can’t change, and it can’t be withdrawn here.","提前发布后：本月的每次申请上限不能再改；这里不能撤回。") draw_text.color:mod.widgets.RINX_WARNING_FG}
+                                pool_renew_lock := mod.widgets.HagencyWrapSubtitle{text:A.t("Once published ahead, this month’s per-request limit can’t change, and it can’t be withdrawn here.","提前发布后，本月的每次申请上限不能再改，也不能在这里撤回") draw_text.color:mod.widgets.RINX_WARNING_FG}
                             }}
                             if H.pool_result!=nil && A.pool_result_at(v)=="renew" {View{width:Fill height:Fit padding:Inset{left:16 right:16 bottom:12}
                                 pool_result_box := mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.pool_result.tone)
@@ -15557,7 +15557,7 @@ alert_layer := View{width:Fill height:Fill flow:Down align:Align{y:1.0} new_batc
             let name=r.definition.name
             let owner=H.entry_role=="owner"
             mod.widgets.HagencyAlertTitle{text:if kind=="pool_approve" {A.t("Approve “"+name+"”?","批准「"+name+"」的申请？")} else if kind=="pool_reject" {A.t("Decline “"+name+"”?","拒绝「"+name+"」的申请？")} else if owner {A.t("Stop “"+name+"” using this pool?","让「"+name+"」停止使用这个资源池？")} else {A.t("Remove “"+name+"”?","要移除「"+name+"」吗？")}}
-            mod.widgets.HagencyAlertMessage{text:if kind=="pool_approve" {A.t("This gives it "+A.tokens(r.requestedTokens)+" from "+r.poolLabel+".","将从 "+r.poolLabel+" 分给它 "+A.tokens(r.requestedTokens)+"。")+A.reqs_after(r)} else if kind=="pool_reject" {A.t("The request will be closed. This can’t be undone.","申请将被关闭，且无法撤销。")} else if owner {A.t("It stops taking new work from your pool. Of the "+A.tokens(r.requestedTokens)+" it was given, what it hasn’t used goes back to the pool.","它不再从你的资源池接新任务。分给它的 "+A.tokens(r.requestedTokens)+" 里没用掉的部分，会回到资源池。")+(if A.reqs_stop_view() && A.reqs_pool_over() {A.t(" The alert clears by itself once use is back under the maximum."," 用量回到每月上限以内时，告警自动解除。")} else {""})} else {A.t("It stops taking new work.","此 Agent 将不再接收新任务。")}}
+            mod.widgets.HagencyAlertMessage{text:if kind=="pool_approve" {A.t("This gives it "+A.tokens(r.requestedTokens)+" from "+r.poolLabel+".","将从 "+r.poolLabel+" 分给它 "+A.tokens(r.requestedTokens)+"。")+A.reqs_after(r)} else if kind=="pool_reject" {A.t("The request will be closed. This can’t be undone.","申请将被关闭，且无法撤销。")} else if owner {A.t("It stops taking new work from your pool. Of the "+A.tokens(r.requestedTokens)+" it was given, what it hasn’t used goes back to the pool.","它不再从你的资源池接新任务。分给它的 "+A.tokens(r.requestedTokens)+" 里没用掉的部分，会回到资源池。")+(if A.reqs_stop_view() && A.reqs_pool_over() {A.t(" The alert clears by itself once use is back under the maximum."," 用量回到每月上限以内后告警自动解除。")} else {""})} else {A.t("It stops taking new work.","此 Agent 将不再接收新任务。")}}
             mod.widgets.HagencyDivider{}
             View{width:Fill height:44 flow:Right
                 if kind=="pool_approve" {owner_decision_cancel := mod.widgets.HagencyAlertButton{text:A.t("Cancel","取消") enabled:!H.busy on_click: || {H.pool_confirm="" H.reqs.confirm=nil A.redraw()}}}
