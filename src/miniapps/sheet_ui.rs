@@ -311,7 +311,8 @@ impl MiniAppsPanel {
         show(self, cx, &[id!(scroll), id!(more), id!(details)], v.more_open && !v.technical.is_empty());
         self.view.label(cx, &at(&[id!(scroll), id!(more), id!(details), id!(copy)])).set_text(cx, &v.technical);
         // A short sheet keeps its buttons right under its last card; a long one keeps them at the foot.
-        let short = !v.choosing && !v.people_visible && !v.more_open && !v.sharing_visible && v.facts.len() <= 3;
+        // With large text even a short sheet can outgrow the window: it scrolls, so its buttons stay reachable.
+        let short = !large && !v.choosing && !v.people_visible && !v.more_open && !v.sharing_visible && v.facts.len() <= 3;
         let scroll = self.view.view(cx, &at(&[id!(scroll)]));
         let height = if short { Size::fit() } else { Size::fill() };
         if let Some(mut walk) = scroll.borrow().map(|view| view.walk.clone()).filter(|walk| walk.height != height) {
