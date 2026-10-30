@@ -77,8 +77,6 @@ impl Selector {
                 value.contribution_id.is_none() || tokens == 0 || tokens > MAX_GRANT_TOKENS
             })
             || (value.succession.is_some() && value.contribution_id.is_none())
-            // A renewal is offered with next month's renewal support.
-            || value.succession == Some(Succession::Renewal)
         {
             return Err("invalid_management_arguments".into());
         }
@@ -280,10 +278,6 @@ impl GrantFlow {
     /// The script's proposed amount for the native tokens field, if any.
     pub fn proposed_tokens(&self) -> Option<u64> {
         self.selector.proposed_tokens
-    }
-    /// The change the script asked the panel to prepare, if any.
-    pub fn succession(&self) -> Option<Succession> {
-        self.selector.succession
     }
     /// Last known server support for amending or renewing a published grant.
     pub fn succession_supported(&self) -> Option<bool> {
@@ -825,8 +819,7 @@ mod tests {
         let s = parsed(json!({"contributionId":"pool_1","proposedTokens":800000,"succession":"amendment"})).unwrap();
         assert_eq!(s.succession, Some(Succession::Amendment));
         assert_eq!(s.proposed_tokens, Some(800000));
-        // Scripts cannot request a renewal yet.
-        assert!(parsed(json!({"contributionId":"pool_1","succession":"renewal"})).is_err());
+        assert_eq!(parsed(json!({"contributionId":"pool_1","succession":"renewal"})).unwrap().succession, Some(Succession::Renewal));
         for bad in [
             json!({"intentId":"original_1","succession":"amendment"}),
             json!({"contributionId":"pool_1","succession":"revoke"}),
