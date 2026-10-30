@@ -121,26 +121,34 @@ impl ResourceCreateConsent {
                     CeilingChange::Clear {} => None,
                     CeilingChange::Monthly { tokens } => Some(u64::from(*tokens)),
                 };
+                // The pool by its own name, or its model; IDs stay out of the summary.
+                let name = old
+                    .local_name
+                    .as_ref()
+                    .map(|local| local.name.trim())
+                    .filter(|name| !name.is_empty())
+                    .unwrap_or(old.model.as_str())
+                    .to_owned();
                 format!(
                     "{}\n\n{}\n{} · {}\n{}: {}\n{}: {}\n\n{}\n{} · {}\n{}: {}\n{}: {}\n\n{}: {}\n{}",
-                    old.id,
+                    name,
                     tr("Source configuration"),
                     old.model,
                     reasoning_text(old.reasoning.as_deref()),
-                    tr("Monthly resource token limit"),
+                    tr("Monthly maximum"),
                     ceiling(previous),
-                    tr("Default permissions for new agents"),
+                    tr("Default permissions for new Agents"),
                     super::resource_edit::policy_text(detail.execution_policy.yolo),
                     tr("New configuration"),
                     model,
                     reasoning_text(reasoning.as_deref()),
-                    tr("Monthly resource token limit"),
+                    tr("Monthly maximum"),
                     ceiling(next),
-                    tr("Default permissions for new agents"),
+                    tr("Default permissions for new Agents"),
                     super::resource_edit::policy_text(self.input.execution_policy.unwrap_or(detail.execution_policy).yolo),
                     tr("Shared account monthly limit · unchanged"),
                     ceiling(old.budget.seat.quota.map(u64::from)),
-                    tr("Existing agents keep their current permissions.")
+                    tr("Existing Agents keep their current permissions.")
                 )
             }
             None => tr("Reading current resource configuration…").into(),

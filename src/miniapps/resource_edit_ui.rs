@@ -3,31 +3,59 @@ use super::*;
 use crate::host::hagency::resource_edit::ResourceEditConsent;
 
 /// Native panel words for a monthly-maximum amendment: title, purpose,
-/// consequence and confirmation. Only the maximum changes.
+/// consequence and confirmation. The change itself is one sentence in the
+/// details card (`amendment_details`), so purpose and consequence stay empty.
 pub(super) const AMENDMENT_WORDS: (&str, &str, &str, &str) = (
     "Change the monthly maximum",
-    "Hagency will recheck this pool's current maximum and this month's commitments before saving. Nothing is sent to the server.",
-    "This records a new monthly maximum on this device. The pool's definition, its server admission and its running Agents stay as they are. The per-request limit is changed separately.",
+    "",
+    "",
     "Save monthly maximum",
 );
 
 /// The English catalog key shown when the review could not be loaded.
-fn failure_text(code: Option<&str>) -> &'static str {
+fn failure_text(code: Option<&str>, amendment: bool) -> &'static str {
     match code {
+        None if amendment => "Reading this pool…",
         None => "Reading current resource configuration…",
-        Some("management_resource_edit_changed") => "The resource changed. Close this review and refresh its details. Saved requests remain available for recovery.",
-        Some("management_resource_edit_not_available") => "This resource cannot be edited locally. Close this review and refresh to see the current reason.",
-        Some("management_ceiling_amendment_not_available") => "This resource's monthly maximum cannot be changed here. Close this review and refresh to see the current reason.",
-        Some("management_ceiling_clear_refused") => "The monthly maximum of an offered pool cannot be cleared. Choose a whole number of tokens instead.",
+        Some("management_resource_edit_changed") => "This pool just changed, so nothing was saved. Close this window and refresh, then try again.",
+        Some("management_resource_edit_not_available") => "This pool can’t be changed here right now. Close this window and refresh to see why.",
+        Some("management_ceiling_amendment_not_available") => "This pool’s monthly maximum can’t change right now. Close this window and refresh to see why.",
+        Some("management_ceiling_clear_refused") => "A pool already offered to a server can’t drop its monthly maximum. You can lower it instead.",
         Some("management_ceiling_unchanged") => "The monthly maximum already has this value. Nothing was changed.",
-        Some("management_ceiling_below_commitments") => "The monthly maximum cannot be lower than this month's published capacity and Agent holds. Close this review and choose a higher value.",
-        Some("management_ceiling_usage_unsettled") => "Some Agent usage is still being reported, so the monthly maximum cannot be lowered yet. You can still raise it. Keep this device online, then try again.",
-        Some(_) => "The current configuration could not be verified. Close this review, refresh, or recover your original saved request.",
+        Some("management_ceiling_below_commitments") => "The monthly maximum can’t be lower than what this month has committed: what was used plus what Agents hold. Close this window and choose a larger amount.",
+        Some("management_ceiling_usage_unsettled") => "Some Agent use is still being reported, so the monthly maximum can only go up for now. Keep this computer online, then try again.",
+        Some(_) => "The current settings couldn’t be confirmed. Close this window and refresh, then try again.",
     }
+}
+
+/// Offline review only: the words, details and readiness of the monthly
+/// maximum window for a fixture, through the same text as the real window.
+#[cfg(any(test, feature = "onboarding-test-support"))]
+pub(super) fn preview(fixture: &Value) -> Result<((&'static str, &'static str, &'static str, &'static str), String, bool), String> {
+    if let Some(code) = fixture["error"].as_str() {
+        return Ok((AMENDMENT_WORDS, crate::i18n::tr(failure_text(Some(code), true)).into(), false));
+    }
+    let tokens = |key: &str| fixture[key].as_u64().ok_or_else(|| format!("preview field {key} missing"));
+    let review = ::hagency::native_owner::CeilingAmendmentReview {
+        resource_id: fixture["resource"].as_str().unwrap_or("resource_original").into(),
+        name: fixture["label"].as_str().map(str::to_owned),
+        revision: "0".repeat(64),
+        sequence: 1,
+        previous_tokens: tokens("current")?,
+        tokens: tokens("proposed")?,
+        per_request_tokens: fixture["perRequest"].as_u64(),
+    };
+    Ok((
+        AMENDMENT_WORDS,
+        crate::host::hagency::resource_edit::amendment_details(crate::i18n::language(), &review),
+        true,
+    ))
 }
 
 pub(super) struct ResourceEditPrompt {
     account: String,
+    /// The request asked for a monthly-maximum amendment.
+    amendment: bool,
     expires: Instant,
     receiver: Option<Receiver<Result<ResourceEditConsent, String>>>,
     consent: Option<ResourceEditConsent>,
@@ -36,6 +64,7 @@ pub(super) struct ResourceEditPrompt {
 impl ResourceEditPrompt {
     pub(super) fn begin(consent: ResourceEditConsent) -> Self {
         let account = consent.account().to_owned();
+        let amendment = consent.amendment_requested();
         let (tx, receiver) = mpsc::sync_channel(1);
         crate::sliding_sync::spawn_async_task(async move {
             let result = consent.load().await;
@@ -44,6 +73,7 @@ impl ResourceEditPrompt {
         });
         Self {
             account,
+            amendment,
             expires: Instant::now() + Duration::from_secs(300),
             receiver: Some(receiver),
             consent: None,
@@ -89,11 +119,16 @@ impl ResourceEditPrompt {
             .as_ref()
             .is_some_and(ResourceEditConsent::amending)
     }
+    /// A monthly-maximum request keeps its own window, even when its review
+    /// could not be loaded and the window only says why.
+    pub(super) fn amendment_requested(&self) -> bool {
+        self.amendment
+    }
     pub(super) fn details(&self) -> String {
         if let Some(consent) = &self.consent {
             return consent.details();
         }
-        crate::i18n::tr(failure_text(self.failure.as_deref())).into()
+        crate::i18n::tr(failure_text(self.failure.as_deref(), self.amendment)).into()
     }
     pub(super) async fn accept(self) -> Result<Value, String> {
         if self.expired() {
@@ -114,13 +149,14 @@ mod tests {
     #[test]
     fn ceiling_amendment_panel_and_refusals_are_localized_and_distinct() {
         let (title, purpose, consequence, confirm) = AMENDMENT_WORDS;
-        for english in [title, purpose, consequence, confirm] {
+        for english in [title, confirm] {
             assert_ne!(text_for(Language::Chinese, english), english, "{english}");
         }
-        assert_eq!(text_for(Language::Chinese, title), "修改每月总上限");
-        assert!(consequence.contains("running Agents stay as they are"));
-        assert!(consequence.contains("per-request limit is changed separately"));
-        let generic = failure_text(Some("management_unavailable"));
+        // The change and what stays the same are one sentence each in the details card.
+        assert!(purpose.is_empty() && consequence.is_empty());
+        assert_eq!(text_for(Language::Chinese, title), "修改每月上限");
+        assert_eq!(text_for(Language::Chinese, confirm), "保存每月上限");
+        let generic = failure_text(Some("management_unavailable"), true);
         for code in [
             "management_ceiling_amendment_not_available",
             "management_ceiling_clear_refused",
@@ -128,14 +164,15 @@ mod tests {
             "management_ceiling_below_commitments",
             "management_ceiling_usage_unsettled",
         ] {
-            let english = failure_text(Some(code));
+            let english = failure_text(Some(code), true);
             assert_ne!(english, generic, "{code} has its own reason");
             assert_ne!(text_for(Language::Chinese, english), english, "{code} is translated");
         }
-        assert!(failure_text(Some("management_ceiling_below_commitments")).contains("this month's published capacity"));
+        assert!(failure_text(Some("management_ceiling_below_commitments"), true).contains("what was used plus what Agents hold"));
         assert_eq!(
-            text_for(Language::Chinese, failure_text(Some("management_ceiling_usage_unsettled"))),
-            "部分 Agent 用量仍在上报中，暂时不能调低每月总上限，但仍可调高。请保持本设备在线，然后重试。"
+            text_for(Language::Chinese, failure_text(Some("management_ceiling_usage_unsettled"), true)),
+            "部分 Agent 的用量还在上报，所以暂时只能调高、不能调低每月上限。请保持这台电脑在线，稍后再试。"
         );
+        assert_eq!(text_for(Language::Chinese, failure_text(None, true)), "正在读取这个资源池…");
     }
 }

@@ -85,6 +85,19 @@ pub enum MiniAppsAction {
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
+    // One person on a native grant list: a check, the name, and a "new" tag.
+    let GrantPerson = View {visible: false width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5} padding: Inset{top: 7 bottom: 7}
+        Icon {width: 16 height: 16 draw_icon +: {svg: mod.widgets.ICON_CHECKMARK color: mod.widgets.RINX_SUCCESS_FG}}
+        name := RinxLabel {width: Fit}
+        tag := RinxHint {visible: false width: Fit draw_text +: {color: RINX_ACCENT}}
+    }
+    // A section toggle in native confirmations: a 44 pt text button in the accent.
+    let GrantDisclosure = RinxButton {height: 44 margin: 0 padding: Inset{left: 7 right: 7 top: 8 bottom: 8} grab_key_focus: false
+        draw_bg +: {color: #0000 color_focus: #0000 color_hover: RINX_HOVER color_down: RINX_PRESSED
+            border_color: #0000 border_color_hover: #0000 border_color_down: #0000 border_color_focus: RINX_ACCENT
+            border_color_2: #0000 border_color_2_hover: #0000 border_color_2_down: #0000 border_color_2_focus: RINX_ACCENT}
+        draw_text +: {color: RINX_ACCENT color_hover: RINX_ACCENT color_down: RINX_ACCENT color_focus: RINX_ACCENT}
+    }
     mod.widgets.MiniAppsPanel = #(MiniAppsPanel::register_widget(vm)) {
         width: Fill height: Fill flow: Down padding: 20 spacing: 16
         show_bg: true
@@ -275,39 +288,69 @@ script_mod! {
             }
         }
         grant_confirmation := View {visible: false width: Fill height: Fill flow: Down spacing: 16
-            scroll := ScrollYView {width: Fill height: Fill flow: Down spacing: 16
+            scroll := ScrollYView {width: Fill height: Fill flow: Down spacing: 14 padding: Inset{right: 14}
                 heading := View {width: Fill height: Fit flow: Right spacing: 12 align: Align{y: 0.5}
                     Icon {width: 24 height: 24 draw_icon +: {svg: ICON_SHIELD color: RINX_ACCENT}}
-                    RinxPageTitle {width: Fill text: #(crate::i18n::tr("Resource pool publication")) i18n_text: "Resource pool publication"}
+                    title := RinxPageTitle {width: Fill flow: Flow.Right{wrap: true} text: #(crate::i18n::tr("Publish This Pool")) i18n_text: "Publish This Pool"}
                 }
-                owner := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
+                pool := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                // One sentence in the mini app's words, then at most one line of consequence.
+                lead := RinxLabel {width: Fill flow: Flow.Right{wrap: true} draw_text.text_style: theme.font_bold{font_size: (13 * mod.widgets.RINX_TEXT_SCALE)}}
                 status := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
                 change := RinxLabel {visible: false width: Fill flow: Flow.Right{wrap: true}}
-                choices := View {width: Fill height: Fit flow: Down spacing: 12
-                    capacity := RinxLabel {width:Fill flow:Flow.Right{wrap:true}}
-                    RinxLabel {text: #(crate::i18n::tr("Agent applicants")) i18n_text: "Agent applicants"}
-                    managers := RinxInput {width: Fill empty_text: "@manager:server"}
-                    RinxLabel {text: #(crate::i18n::tr("Tokens to publish (M)")) i18n_text: "Tokens to publish (M)"}
-                    tokens := RinxNumberInput {width: Fill millions: true slider_mode:true maximum:0 minimum: 1 empty_text: "1"}
-                    RinxLabel {text: #(crate::i18n::tr("Expires (UTC)")) i18n_text: "Expires (UTC)"}
-                    expiry_presets := View {width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
-                        day := RinxKeyButton{text:#(crate::i18n::tr("1 day")) i18n_text:"1 day"}
-                        week := RinxKeyButton{text:#(crate::i18n::tr("7 days")) i18n_text:"7 days"}
-                        month := RinxKeyButton{text:#(crate::i18n::tr("End of month")) i18n_text:"End of month"}
+                people := View {visible: false width: Fill height: Fit flow: Down spacing: 8
+                    people_label := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
+                    list := RoundedView {width: Fill height: Fit flow: Down padding: Inset{left: 14 right: 14 top: 6 bottom: 6}
+                        draw_bg +: {color: RINX_SURFACE border_color: RINX_BORDER border_size: 1 border_radius: theme.corner_radius}
+                        p0 := GrantPerson {}
+                        p1 := GrantPerson {}
+                        p2 := GrantPerson {}
+                        p3 := GrantPerson {}
+                        p4 := GrantPerson {}
+                        p5 := GrantPerson {}
+                        p6 := GrantPerson {}
+                        p7 := GrantPerson {}
+                        more := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{top: 6 bottom: 6}}
                     }
-                    expires := RinxInput {width: Fill empty_text: "YYYY-MM-DDTHH:MM:SSZ"}
-                    RinxHint {width:Fill flow:Flow.Right{wrap:true} text:#(crate::i18n::tr("Expiry cannot exceed the current monthly budget period. You can also enter an exact UTC time.")) i18n_text:"Expiry cannot exceed the current monthly budget period. You can also enter an exact UTC time."}
+                    note := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                    edit := GrantDisclosure {text: #(crate::i18n::tr("Edit List")) i18n_text: "Edit List"}
+                    editor := View {visible: false width: Fill height: Fit flow: Down spacing: 6
+                        managers := RinxInput {width: Fill empty_text: "@name:server"}
+                        editor_hint := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                    }
                 }
-                details := RoundedView {width: Fill height: Fit flow: Down padding: 16
+                choices := View {width: Fill height: Fit flow: Down spacing: 12
+                    quota := View {width: Fill height: Fit flow: Down spacing: 8
+                        quota_label := RinxLabel {width: Fill flow: Flow.Right{wrap: true} text: #(crate::i18n::tr("Per-request limit (M)")) i18n_text: "Per-request limit (M)"}
+                        tokens := RinxNumberInput {width: Fill millions: true slider_mode:true maximum:0 minimum: 1 empty_text: "1"}
+                        quota_hint := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                    }
+                }
+                // The two collapsed sections open side by side, like a settings footer.
+                disclosures := View {width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 8
+                    advanced_toggle := GrantDisclosure {text: #(crate::i18n::tr("Advanced Options")) i18n_text: "Advanced Options"}
+                    technical_toggle := GrantDisclosure {text: #(crate::i18n::tr("Technical Details")) i18n_text: "Technical Details"}
+                }
+                advanced := View {visible: false width: Fill height: Fit flow: Down spacing: 8
+                    expiry := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
+                    expiry_presets := View {width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
+                        day := RinxKeyButton{height: 44 margin: 0 text:#(crate::i18n::tr("1 day")) i18n_text:"1 day"}
+                        week := RinxKeyButton{height: 44 margin: 0 text:#(crate::i18n::tr("7 days")) i18n_text:"7 days"}
+                        month := RinxKeyButton{height: 44 margin: 0 text:#(crate::i18n::tr("To the end of the month")) i18n_text:"To the end of the month"}
+                    }
+                    expires := RinxInput {width: Fill empty_text: ""}
+                    RinxHint {width:Fill flow:Flow.Right{wrap:true} text:#(crate::i18n::tr("Sharing can’t go past the end of the month. You can also enter an exact UTC time here.")) i18n_text:"Sharing can’t go past the end of the month. You can also enter an exact UTC time here."}
+                }
+                details := RoundedView {visible: false width: Fill height: Fit flow: Down padding: 16
                     draw_bg +: {color: RINX_SURFACE border_color: RINX_BORDER border_size: 1 border_radius: theme.corner_radius}
-                    copy := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
+                    copy := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
                 }
             }
             buttons := View {width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 12
-                cancel := RinxButton {text: #(crate::i18n::tr("Close")) i18n_text: "Close"}
-                primary := RinxPrimaryButton {text: #(crate::i18n::tr("Publish resource pool")) i18n_text: "Publish resource pool"}
-                recover := RinxButton {text: #(crate::i18n::tr("Recover original")) i18n_text: "Recover original"}
-                cancel_intent := RinxButton {text: #(crate::i18n::tr("Review cancellation")) i18n_text: "Review cancellation"}
+                cancel := RinxButton {text: #(crate::i18n::tr("Cancel")) i18n_text: "Cancel"}
+                primary := RinxPrimaryButton {text: #(crate::i18n::tr("Publish")) i18n_text: "Publish"}
+                recover := RinxButton {text: #(crate::i18n::tr("Refresh")) i18n_text: "Refresh"}
+                cancel_intent := RinxButton {text: #(crate::i18n::tr("Discard This Publish…")) i18n_text: "Discard This Publish…"}
             }
         }
         project_room_picker := View {visible: false width: Fill height: Fill flow: Down spacing: 12
@@ -667,18 +710,62 @@ impl MiniAppsPanel {
         let visible = self.provider_confirmation.is_some();
         self.view.view(cx, ids!(provider_confirmation)).set_visible(cx, visible);
         if let Some(pending) = &self.provider_confirmation {
-            self.view.label(cx, ids!(provider_confirmation.scroll.identity.runtime)).set_text(cx, &pending.consent.details());
-            self.view.label(cx, ids!(provider_confirmation.scroll.identity.account)).set_text(cx, pending.consent.account());
-            let (title,body,warning,action)=pending.consent.words();
-            self.view.label(cx,ids!(provider_confirmation.scroll.heading.title)).set_text(cx,crate::i18n::tr(title));
-            self.view.label(cx,ids!(provider_confirmation.scroll.explanation)).set_text(cx,crate::i18n::tr(body));
-            self.view.label(cx,ids!(provider_confirmation.scroll.warning)).set_text(cx,crate::i18n::tr(warning));
-            self.view.button(cx,ids!(provider_confirmation.buttons.connect)).set_text(cx,crate::i18n::tr(action));
-            self.view.button(cx,ids!(provider_confirmation.buttons.connect)).set_enabled(cx,pending.consent.ready());
+            let details = pending.consent.details();
+            let account = pending.consent.account().to_owned();
+            let words = pending.consent.words();
+            let ready = pending.consent.ready();
+            self.apply_provider_view(cx, words, &details, &account, ready);
             self.view.view(cx, ids!(app_content)).set_visible(cx, false);
             self.view.view(cx, ids!(approval)).set_visible(cx, false);
         }
         self.present_personal_controls(cx);
+    }
+    /// Write one native consent's words into its window. Empty purpose or
+    /// consequence lines are hidden rather than left as blank gaps.
+    fn apply_provider_view(&mut self, cx: &mut Cx, (title, body, warning, action): (&str, &str, &str, &str), details: &str, account: &str, ready: bool) {
+        self.view.label(cx, ids!(provider_confirmation.scroll.identity.runtime)).set_text(cx, details);
+        self.view.label(cx, ids!(provider_confirmation.scroll.identity.account)).set_text(cx, account);
+        self.view.label(cx,ids!(provider_confirmation.scroll.heading.title)).set_text(cx,crate::i18n::tr(title));
+        for (path, english) in [(ids!(provider_confirmation.scroll.explanation), body), (ids!(provider_confirmation.scroll.warning), warning)] {
+            self.view.label(cx, path).set_text(cx, crate::i18n::tr(english));
+            self.view.widget(cx, path).set_visible(cx, !english.is_empty());
+        }
+        self.view.button(cx,ids!(provider_confirmation.buttons.connect)).set_text(cx,crate::i18n::tr(action));
+        self.view.button(cx,ids!(provider_confirmation.buttons.connect)).set_enabled(cx,ready);
+        // Also look unavailable while loading or refused, not merely ignore taps.
+        self.view.button(cx,ids!(provider_confirmation.buttons.connect)).set_disabled(cx,!ready);
+    }
+    /// Offline review only: show one native confirmation built from fixture
+    /// JSON through the production text and layout. No flow, lease or reply
+    /// exists, so nothing shown here can be confirmed or sent anywhere.
+    #[cfg(any(test, feature = "onboarding-test-support"))]
+    pub fn preview_confirmation(&mut self, cx: &mut Cx, fixture: &Value) -> Result<(), String> {
+        // Open, so the window scrolls like the real one. Without a lease or
+        // package nothing else runs, and no prompt exists to confirm.
+        self.open = true;
+        for path in [
+            ids!(header), ids!(library), ids!(catalog), ids!(import_form), ids!(hagency_review), ids!(notice),
+            ids!(approval), ids!(account_confirmation), ids!(account_login_panel), ids!(provider_confirmation),
+            ids!(adoption_confirmation), ids!(execution_confirmation), ids!(grant_confirmation),
+            ids!(project_room_picker), ids!(app_content),
+        ] {
+            self.view.widget(cx, path).set_visible(cx, false);
+        }
+        match fixture["panel"].as_str() {
+            Some("grant") => self.preview_grant(cx, fixture)?,
+            Some("maximum") => {
+                let (words, details, ready) = resource_edit_ui::preview(fixture)?;
+                let account = fixture["account"].as_str().unwrap_or_default().to_owned();
+                self.apply_provider_view(cx, words, &details, &account, ready);
+                for path in [ids!(provider_confirmation.scroll.personal)] {
+                    self.view.widget(cx, path).set_visible(cx, false);
+                }
+                self.view.view(cx, ids!(provider_confirmation)).set_visible(cx, true);
+            }
+            _ => return Err("unknown preview panel".into()),
+        }
+        self.view.redraw(cx);
+        Ok(())
     }
     fn begin_provider_confirmation(&mut self, cx: &mut Cx, service: &str, args: Value, reply: (usize, u64)) -> Result<(), String> {
         if self.account_login.is_some() || self.execution_confirmation.is_some() || self.reauthentication.is_some() || self.provider_confirmation.is_some() || self.grant_confirmation.is_some() || self.adoption_confirmation.is_some() || self.project_room_reply.is_some() || self.pending.len() >= 16 {
@@ -1460,9 +1547,12 @@ impl Widget for MiniAppsPanel {
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.primary)).clicked(actions) {self.grant_primary(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.recover)).clicked(actions) {self.grant_recover(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.cancel_intent)).clicked(actions) {self.grant_cancel_intent(cx);}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.choices.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.choices.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.choices.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.advanced.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.advanced.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.advanced.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.people.edit)).clicked(actions) {self.grant_disclose(cx,grant_ui::GrantSection::People);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.disclosures.advanced_toggle)).clicked(actions) {self.grant_disclose(cx,grant_ui::GrantSection::Advanced);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.disclosures.technical_toggle)).clicked(actions) {self.grant_disclose(cx,grant_ui::GrantSection::Technical);}
                 return;
             }
             self.handle_account_login_actions(cx,actions);

@@ -314,6 +314,11 @@ impl GrantFlow {
     pub fn applicants(&self) -> &[String] {
         self.selector.applicants.as_deref().unwrap_or_default()
     }
+    /// The change the script asked the panel to open, if any. It only names
+    /// the window while its native form loads; the form decides what commits.
+    pub fn requested_succession(&self) -> Option<Succession> {
+        self.selector.succession
+    }
     /// Last known server support for amending or renewing a published grant.
     pub fn succession_supported(&self) -> Option<bool> {
         match self.succession_support.load(Ordering::Acquire) {
