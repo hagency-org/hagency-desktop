@@ -103,6 +103,13 @@ script_mod! {
             border_color_2: #0000 border_color_2_hover: #0000 border_color_2_down: #0000 border_color_2_focus: RINX_ACCENT}
         draw_text +: {color: RINX_ACCENT color_hover: RINX_ACCENT color_down: RINX_ACCENT color_focus: RINX_ACCENT}
     }
+    // A chosen preset: the selected tint and accent text, like the pool page's chosen amount.
+    let SheetPresetOn = RinxKeyButton {visible: false width: Fill height: 44 margin: 0 grab_key_focus: false
+        draw_bg +: {color: RINX_SELECTED color_hover: RINX_SELECTED color_down: RINX_SELECTED color_focus: RINX_SELECTED
+            border_color: RINX_ACCENT border_color_hover: RINX_ACCENT border_color_down: RINX_ACCENT border_color_focus: RINX_ACCENT
+            border_color_2: RINX_ACCENT border_color_2_hover: RINX_ACCENT border_color_2_down: RINX_ACCENT border_color_2_focus: RINX_ACCENT}
+        draw_text +: {color: RINX_ACCENT color_hover: RINX_ACCENT color_down: RINX_ACCENT color_focus: RINX_ACCENT}
+    }
     // A whole grouped row that is one tap target, like an iOS settings row.
     let SheetRowButton = SheetTextButton {width: Fill height: 48 align: Align{x: 0.0 y: 0.5} padding: Inset{left: 16 right: 16 top: 8 bottom: 8}
         draw_bg +: {border_radius: 12.0}}
@@ -256,10 +263,14 @@ script_mod! {
                 advanced := View {visible: false width: Fill height: Fit flow: Down spacing: 8 padding: Inset{left: 16 right: 16 top: 0 bottom: 12}
                     SheetLine {margin: 0}
                     expiry := RinxLabel {width: Fill flow: Flow.Right{wrap: true} padding: Inset{top: 6}}
+                    // The chosen period shows selected, in the tint of a selected segment.
                     expiry_presets := View {width: Fill height: Fit flow: Right spacing: 8
                         day := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
+                        day_on := SheetPresetOn {text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
                         week := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
+                        week_on := SheetPresetOn {text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
                         month := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
+                        month_on := SheetPresetOn {text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
                     }
                     expiry_note := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
                 }

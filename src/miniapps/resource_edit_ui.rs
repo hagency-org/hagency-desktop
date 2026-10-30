@@ -14,7 +14,7 @@ pub(super) const AMENDMENT_WORDS: (&str, &str, &str, &str) = (
     "Change the monthly maximum",
     "",
     "",
-    "Save monthly maximum",
+    "Change the monthly maximum",
 );
 
 /// The English catalog key shown when the review could not be loaded.
@@ -139,7 +139,10 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
         more_label: tr("Technical Details").into(),
         more_open: s.more,
         cancel: tr("Cancel").into(),
-        primary: tr("Save Monthly Maximum").into(),
+        primary: match value {
+            Some(n) if n > 0 => fmt("Change to {amount}", &[("amount", amount(Some(n)))]),
+            _ => tr("Change the Monthly Maximum").into(),
+        },
         quota_label: tr("Monthly maximum").into(),
         ..SheetView::default()
     };
@@ -196,7 +199,7 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
             v.before = before.map(|n| Figure::new(amount(Some(n)), tr("Before")));
             v.after = Some(Figure::new(amount(after), tr("Now")));
             v.lead = fmt("Agents can now use up to {amount} in total this month.", &[("amount", amount(after))]);
-            v.facts_label = tr("What stays the same").into();
+            v.facts_label = tr("This pool").into();
             v.facts = vec![per_request_fact(true), Fact::new(tr("Running Agents"), tr("Not affected"))];
             v.primary = tr("Done").into();
             v.primary_visible = true;
@@ -245,7 +248,7 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
             v.tone = SheetTone::Working;
             v.before = previous.map(|n| Figure::new(amount(Some(n)), tr("Now")));
             v.after = Some(Figure::new(amount(value), tr("Being saved")));
-            v.status = sentences(&[tr("Saving…").into(), tr("Closing this window doesn’t cancel it.").into()]);
+            v.status = sentences(&[tr("Saving your change…").into(), tr("Closing this window doesn’t cancel it.").into()]);
             v.cancel = tr("Close").into();
         }
         (None, false, None) => match (s.recorded, s.choosing()) {
@@ -278,9 +281,17 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
                 );
                 let (floor, top) = (s.floor(), s.top());
                 let limit = facts.account_limit.filter(|limit| *limit > 0);
-                v.quota_hint = match limit {
+                let range = match limit {
                     Some(limit) => fmt("Choose {min} – {max}.", &[("min", amount(Some(floor))), ("max", amount(Some(limit)))]),
                     None => fmt("At least {min}.", &[("min", amount(Some(floor)))]),
+                };
+                // Opened from the pool's page with its value: say so, so this slider reads as a check.
+                v.quota_hint = match (s.proposed, s.chosen) {
+                    (Some(page), None) if page > 0 && !s.retrying => sentences(&[
+                        fmt("You chose {amount} on the pool’s page; you can still adjust it here.", &[("amount", amount(Some(page)))]),
+                        range,
+                    ]),
+                    _ => range,
                 };
                 v.problem = match value {
                     _ if s.invalid => tr("Enter an amount, for example 1.5.").into(),
@@ -299,6 +310,11 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
                     ),
                     Some(_) => String::new(),
                 };
+                // A value that can't be saved isn't described as if it would apply.
+                if !v.problem.is_empty() {
+                    v.lead.clear();
+                    v.after = Some(Figure::new(amount(value), tr("You chose")));
+                }
                 if s.reviewing {
                     v.status = tr("Checking this amount…").into();
                 }
@@ -795,7 +811,9 @@ mod tests {
         }
         assert!(purpose.is_empty() && consequence.is_empty());
         assert_eq!(text_for(Language::Chinese, title), "修改每月上限");
-        assert_eq!(text_for(Language::Chinese, confirm), "保存每月上限");
+        // One verb with the per-request window and the page: the button commits 改成 X.
+        assert_eq!(text_for(Language::Chinese, confirm), "修改每月上限");
+        assert_eq!(text_for(Language::Chinese, "Change to {amount}"), "改成 {amount}");
         let generic = failure_text(Some("management_unavailable"), true);
         for code in [
             "management_ceiling_amendment_not_available",
@@ -845,7 +863,8 @@ mod tests {
         assert_eq!(view.facts[1].note, "The monthly maximum can’t go below it.");
         // The slider adjusts it here, between the floor and the account limit.
         assert!(view.choosing && view.quota_visible && view.problem.is_empty());
-        assert_eq!((view.quota_label.as_str(), view.quota_hint.as_str()), ("Monthly maximum", "Choose 0.25 M – 5 M."));
+        // Opened with the page's value: said as such, so this slider reads as a check.
+        assert_eq!((view.quota_label.as_str(), view.quota_hint.as_str()), ("Monthly maximum", "You chose 2 M on the pool’s page; you can still adjust it here. Choose 0.25 M – 5 M."));
         let preview = CeilingPreview::from_fixture(&fixture(json!({}))).unwrap();
         assert_eq!(ceiling_inputs(&preview.state()), Some((250_000, 5_000_000, 2_000_000)));
         // The account is labelled and behind the disclosure, never a bare ID.
@@ -853,7 +872,7 @@ mod tests {
             assert!(!shown.contains("@owner") && !shown.contains("resource_original"), "{shown}");
         }
         assert!(view.technical.starts_with("Your account\n@owner:test"));
-        assert_eq!((view.primary.as_str(), view.cancel.as_str()), ("Save Monthly Maximum", "Cancel"));
+        assert_eq!((view.primary.as_str(), view.cancel.as_str()), ("Change to 2 M", "Cancel"));
         assert!(view.primary_enabled && !view.primary_closes);
     }
 
@@ -864,6 +883,8 @@ mod tests {
         assert_eq!(saved.title, "Monthly Maximum Saved");
         assert_eq!((saved.before.clone().unwrap().value, saved.after.clone().unwrap().value), ("1 M".into(), "2 M".into()));
         assert!(saved.primary_closes && saved.cancel.is_empty() && saved.primary == "Done");
+        // The same section name as every other state and the per-request window.
+        assert_eq!(saved.facts_label, "This pool");
         let refused = preview(&fixture(json!({"error": "management_ceiling_below_commitments", "proposed": 200_000u64}))).unwrap();
         assert_eq!(refused.tone, SheetTone::Failed);
         assert_eq!(refused.title, "Monthly Maximum Not Saved");
@@ -881,6 +902,8 @@ mod tests {
         assert_eq!(saving.tone, SheetTone::Working);
         assert!(!saving.primary_visible && saving.cancel == "Close");
         assert!(saving.status.contains("doesn’t cancel"), "{}", saving.status);
+        // One saving line in both windows.
+        assert!(saving.status.starts_with("Saving your change…"), "{}", saving.status);
     }
 
     #[test]
@@ -898,6 +921,9 @@ mod tests {
             let view = preview(&fixture(json!({"chosen": chosen}))).unwrap();
             assert_eq!(view.problem, problem, "{chosen}");
             assert!(!view.primary_enabled, "{chosen}");
+            // A value that can't be saved isn't described as if it would apply.
+            assert!(view.lead.is_empty(), "{chosen}: {}", view.lead);
+            assert_eq!(view.after.clone().map(|f| f.tag), Some("You chose".to_owned()), "{chosen}");
         }
         // Lowering says what it means for new requests.
         let lower = preview(&fixture(json!({"chosen": 500_000u64}))).unwrap();
@@ -907,7 +933,7 @@ mod tests {
             "retrying": true, "chosen": 250_000u64}))).unwrap();
         assert_eq!(fixed.tone, SheetTone::Proposal);
         assert_eq!((fixed.before.clone().unwrap().value, fixed.after.clone().unwrap().value), ("1 M".into(), "0.25 M".into()));
-        assert!(fixed.choosing && fixed.primary_enabled && fixed.primary == "Save Monthly Maximum");
+        assert!(fixed.choosing && fixed.primary_enabled && fixed.primary == "Change to 0.25 M");
         // While that value is checked, Save waits.
         let checking = preview(&fixture(json!({"chosen": 1_500_000u64, "reviewing": true, "retrying": true,
             "error": "management_ceiling_below_commitments"}))).unwrap();

@@ -124,6 +124,8 @@ pub(super) struct SheetView {
     /// The primary button closes the sheet: Done after a finished change.
     pub primary_closes: bool,
     pub cancel: String,
+    /// The amount a refusal's primary button ("Change to 0.6 M") puts back in the form.
+    pub fix_tokens: Option<u64>,
 }
 impl SheetView {
     /// Whether the hero card has anything to show.
@@ -282,6 +284,14 @@ impl MiniAppsPanel {
         text(self, cx, &[id!(scroll), id!(more), id!(advanced), id!(expiry_note)], &v.expiry_note);
         show(self, cx, &[id!(scroll), id!(more), id!(details)], v.more_open && !v.technical.is_empty());
         self.view.label(cx, &at(&[id!(scroll), id!(more), id!(details), id!(copy)])).set_text(cx, &v.technical);
+        // A short sheet keeps its buttons right under its last card; a long one keeps them at the foot.
+        let short = !v.choosing && !v.people_visible && !v.more_open && v.facts.len() <= 3;
+        let scroll = self.view.view(cx, &at(&[id!(scroll)]));
+        let height = if short { Size::fit() } else { Size::fill() };
+        if let Some(mut walk) = scroll.borrow().map(|view| view.walk.clone()).filter(|walk| walk.height != height) {
+            walk.height = height;
+            scroll.set_walk(cx, walk);
+        }
         // The footer: one secondary and one primary button.
         self.view.button(cx, &at(&[id!(buttons), id!(cancel)])).set_text(cx, &v.cancel);
         self.view.widget(cx, &at(&[id!(buttons), id!(cancel)])).set_visible(cx, !v.cancel.is_empty());

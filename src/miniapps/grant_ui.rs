@@ -98,6 +98,24 @@ fn local_time(ms: u64) -> String {
         date.format("%B %-d, %-I:%M %p").to_string()
     }
 }
+/// The same moment as the pool's page names it, "11 月 1 日 0 点（UTC）", said
+/// beside a local month boundary only where the two differ, so the page's
+/// date and the window's time never seem to disagree.
+fn utc_note(ms: u64) -> String {
+    use chrono::{Datelike, Timelike};
+    let Some(date) = i64::try_from(ms).ok().and_then(chrono::DateTime::from_timestamp_millis) else {
+        return String::new();
+    };
+    if date.with_timezone(&chrono::Local).offset().local_minus_utc() == 0 || date.hour() != 0 || date.minute() != 0 {
+        return String::new();
+    }
+    let day = if crate::i18n::language() == crate::i18n::Language::Chinese {
+        format!("{} 月 {} 日", date.month(), date.day())
+    } else {
+        format!("{} {}", month_name(date.month()), date.day())
+    };
+    crate::i18n::format("That’s {date} 0:00 UTC, the date on the pool’s page.", &[("date", day)])
+}
 /// When sharing ends, said the same way in every window and state, in the
 /// owner's own time zone: "11 月 1 日 08:00 前" for a UTC month end in UTC+8.
 fn ends_at(ms: u64) -> String {
@@ -686,7 +704,7 @@ fn draft_problem(bounds: &Bounds, draft: &GrantChoices, renewing: Option<&str>, 
         .filter(|at| at.offset().local_minus_utc() == 0)
         .and_then(|at| u64::try_from(at.timestamp_millis()).ok());
     match expiry {
-        None => Some(tr("Choose when sharing ends under Advanced Options.").into()),
+        None => Some(tr("Choose when sharing ends under Sharing Period.").into()),
         Some(at) if at <= now.max(bounds.expiry_after_ms) || at > bounds.expiry_until_ms => Some(match renewing {
             Some(month) => fmt("Sharing must end within {month}.", &[("month", month.to_owned())]),
             None => tr("Sharing must end within this month.").into(),
@@ -987,7 +1005,7 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         glyph: kind_glyph(kind),
         pool: pool_line(s),
         choosing,
-        more_label: tr(if choosing { "Advanced Options and Technical Details" } else { "Technical Details" }).into(),
+        more_label: tr(if choosing { "Sharing Period and Technical Details" } else { "Technical Details" }).into(),
         more_open: s.disclosure.more,
         advanced_open: s.disclosure.more,
         cancel: tr(if choosing || matches!(s.phase, Phase::Review(_) | Phase::PublicationReview(_) | Phase::CancellationReview(_)) || (matches!(s.phase, Phase::Loading) && !s.submitting) {
@@ -1174,7 +1192,9 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
             // The unchanged limit never shows in a window that only adds people.
             v.quota_visible = kind != GrantKind::AddPeople;
             if let Some(b) = &bounds {
-                // One short line under the slider; the facts above say why.
+                // One short line under the slider; the facts above say why. A value
+                // the pool's page chose is said as such, so this reads as a check.
+                let from_page = s.proposal.filter(|page| Some(*page) == tokens && kind != GrantKind::AddPeople);
                 v.quota_hint = match b.remaining {
                     Some(remaining) if b.minimum > 1 => fmt(
                         "Choose {min} – {max}.",
@@ -1183,11 +1203,17 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                     Some(remaining) => fmt("At most {max}.", &[("max", amount(Some(remaining)))]),
                     None => String::new(),
                 };
+                if let Some(page) = from_page {
+                    v.quota_hint = sentences(&[
+                        fmt("You chose {amount} on the pool’s page; you can still adjust it here.", &[("amount", amount(Some(page)))]),
+                        v.quota_hint.clone(),
+                    ]);
+                }
                 v.expiry = fmt("Shared until: {when}", &[("when", shared_until(b, &s.draft.expires_utc))]);
-                let mut notes = vec![fmt(
-                    "Sharing ends before {when} at the latest.",
-                    &[("when", local_time(b.expiry_until_ms))],
-                )];
+                let mut notes = vec![
+                    fmt("Sharing ends before {when} at the latest.", &[("when", local_time(b.expiry_until_ms))]),
+                    utc_note(b.expiry_until_ms),
+                ];
                 let left = b.expiry_until_ms.saturating_sub(now.max(b.expiry_after_ms));
                 if left < 7 * 86_400_000 {
                     notes.push(tr("Fewer than 7 days are left in it, so 7 days isn’t offered.").into());
@@ -1301,10 +1327,8 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                         v.status = tr("This month’s per-request limit and list can’t change any more.").into();
                     }
                     v.facts_label = tr("This pool").into();
-                    v.facts = vec![Fact::new(
-                        tr("Shared until"),
-                        ends_at(p.summary.delegation_expires_at_ms.min(p.summary.period_end_ms)),
-                    )];
+                    let until = p.summary.delegation_expires_at_ms.min(p.summary.period_end_ms);
+                    v.facts = vec![Fact::new(tr("Shared until"), ends_at(until)).note(utc_note(until))];
                     if let Some(succession) = p.summary.succession.as_ref().filter(|_| kind != GrantKind::AddPeople) {
                         v.facts.push(Fact::new(
                             tr("Held by running Agents"),
@@ -1440,7 +1464,10 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
             // An expired or changed confirmation: read the record again.
             v.primary = tr("Check Again").into();
         } else if (fixable || unknown_failure(code)) && v.recover_visible {
-            v.primary = tr(if fixable { "Choose Again" } else { "Check Again" }).into();
+            v.primary = match v.fix_tokens.filter(|_| fixable) {
+                Some(tokens) => fmt("Change to {amount}", &[("amount", amount(Some(tokens)))]),
+                None => tr(if fixable { "Choose Again" } else { "Check Again" }).into(),
+            };
             v.primary_recovers = true;
             v.primary_enabled = true;
         } else {
@@ -1500,6 +1527,7 @@ fn failure_hero(v: &mut GrantView, code: &str, s: &GrantState, bounds: Option<&B
             let held = bounds.map_or(0, |b| b.minimum);
             v.caption = tr("The per-request limit must be at least").into();
             v.after = Some(Figure::new(amount(Some(held)), tr("Held by running Agents")));
+            v.fix_tokens = Some(held);
             v.lead = match chosen {
                 Some(chosen) => fmt(
                     "You chose {chosen}, which is less than the {held} held by running Agents. Choose {held} or more.",
@@ -1742,7 +1770,7 @@ fn failure_message(code: &str) -> &'static str {
         "management_scope_changed" | "management_access_required" => {
             "The account or session changed. Sign in again, then open this again."
         }
-        "invalid_grant_expiry" => "Choose when sharing ends under Advanced.",
+        "invalid_grant_expiry" => "Choose when sharing ends under Sharing Period.",
         "owner_grant_new_admission_required" => {
             "The server administrator must approve this pool again before it can be published."
         }
@@ -1785,6 +1813,8 @@ pub(super) struct GrantInputs {
     minimum: u64,
     maximum: Option<u64>,
     presets: [bool; 3],
+    /// The preset that matches the sharing period chosen now (1 day, 7 days, to month end).
+    selected: [bool; 3],
 }
 impl GrantInputs {
     fn of(s: &GrantState, now: u64) -> Self {
@@ -1793,11 +1823,22 @@ impl GrantInputs {
             Some(form) => successor_preset(form, days, now).is_some(),
             None => publication_preset_available(days),
         });
+        // The draft's end against each preset's: to month end exactly, else 1 or 7 days from now.
+        let end = bounds.as_ref().map(|b| draft_end(b, &s.draft.expires_utc));
+        let period_end = bounds.as_ref().map(|b| b.expiry_until_ms);
+        let near = |at: Option<u64>, target: u64, slack: u64| at.is_some_and(|at| at.abs_diff(target) <= slack);
+        let month = end.is_some() && end == period_end;
+        let selected = [
+            !month && near(end, now + 86_400_000, 3_600_000),
+            !month && near(end, now + 7 * 86_400_000, 3_600_000),
+            month,
+        ];
         Self {
             tokens: s.draft.tokens.clone(),
             minimum: bounds.as_ref().map_or(1, |b| b.minimum),
             maximum: bounds.as_ref().map(|b| b.remaining.unwrap_or(0)),
             presets,
+            selected,
         }
     }
 }
@@ -1953,12 +1994,18 @@ impl MiniAppsPanel {
         self.apply_sheet(cx, id!(grant_confirmation), view);
         self.apply_sheet_disclosure(cx, id!(grant_confirmation), view.more_open);
         if let Some(inputs) = inputs.filter(|_| view.choosing) {
-            for (id, available) in [
-                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day), inputs.presets[0]),
-                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week), inputs.presets[1]),
-                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month), inputs.presets[2]),
-            ] {
-                self.view.button(cx, id).set_disabled(cx, !available);
+            for (index, (id, on)) in [
+                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day), ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day_on)),
+                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week), ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week_on)),
+                (ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month), ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month_on)),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                // The chosen period shows selected, like the page's chosen preset.
+                self.view.button(cx, id).set_disabled(cx, !inputs.presets[index]);
+                self.view.widget(cx, id).set_visible(cx, !inputs.selected[index]);
+                self.view.widget(cx, on).set_visible(cx, inputs.selected[index]);
             }
             let widget = self.view.widget(cx, ids!(grant_confirmation.scroll.quota.tokens));
             if let Some(mut editor) = widget.borrow_mut::<crate::miniapps::design::MiniAppNumberInput>() {
@@ -2219,6 +2266,10 @@ impl MiniAppsPanel {
             return;
         }
         if view.primary_recovers {
+            // "Change to 0.6 M": back to the form with that amount in it.
+            if let Some(tokens) = view.fix_tokens {
+                prompt.draft.tokens = tokens.to_string();
+            }
             self.grant_recover(cx);
             return;
         }
@@ -3464,6 +3515,7 @@ mod tests {
         assert_eq!(view.expiry, format!("Shared until: Before {end}"));
         assert!(!view.people_collapsible, "a publish chooses its list here");
         for primary in [&view.title, &view.pool, &view.lead, &view.status, &view.quota_hint, &view.expiry, &view.expiry_note] {
+            let primary = without_page_date(primary);
             assert!(!primary.contains("UTC") && !primary.contains("matrix.test") && !primary.contains("pool_1"), "{primary}");
         }
         assert!(view.technical.contains("https://matrix.test") && view.technical.contains("pool_1"));
@@ -3528,8 +3580,21 @@ mod tests {
         assert!(finished.technical.contains("Shared until (your time)") && finished.technical.contains("Shared until (UTC)"));
         for view in [&proposal, &finished] {
             for text in [&view.lead, &view.status, &view.expiry, &view.expiry_note] {
+                let text = without_page_date(text);
                 assert!(!text.contains("End of") && !text.contains("UTC"), "{text}");
             }
+        }
+        // Beside the local time, the window names the same moment as the pool's page does
+        // (its UTC month boundary), wherever the two differ.
+        assert_eq!(finished.facts[0].note, utc_note(end));
+        assert!(proposal.expiry_note.contains(&utc_note(end)), "{}", proposal.expiry_note);
+    }
+    /// The one UTC mention a window makes outside its details: the pool page's own date.
+    fn without_page_date(text: &str) -> String {
+        let tail = "the date on the pool’s page.";
+        match (text.find("That’s "), text.find(tail)) {
+            (Some(start), Some(end)) if end > start => format!("{}{}", &text[..start], &text[end + tail.len()..]),
+            _ => text.to_owned(),
         }
     }
     #[test]
@@ -3590,7 +3655,9 @@ mod tests {
         assert_eq!(failed.status, "Nothing was changed.");
         // The way forward is the primary button: back to the form.
         assert!(failed.primary_recovers && failed.primary_enabled);
-        assert_eq!((failed.primary.as_str(), failed.cancel.as_str()), ("Choose Again", "Close"));
+        // The fix is a known amount, so the button offers it in the verb that commits it.
+        assert_eq!((failed.primary.as_str(), failed.cancel.as_str()), ("Change to 0.6 M", "Close"));
+        assert_eq!(failed.fix_tokens, Some(600_000));
         // An unknown outcome is amber and asks to check before anything else.
         let unsure = preview_view(&Phase::Failed("management_outcome_unknown".into()), &draft, Some(&form), None, &[], Disclosure::default());
         assert_eq!(unsure.tone, SheetTone::Unsure);
@@ -3675,7 +3742,7 @@ mod tests {
     #[test]
     fn native_pool_windows_use_the_mini_apps_words_in_chinese() {
         use crate::i18n::{Language, text_for};
-        const BANNED: [&str; 26] = [
+        const BANNED: [&str; 32] = [
             "每月总上限", "本设备", "智能体", "令牌", "授权意向", "准入", "协调者", "发布额度",
             "M tokens", "申请者", "已贡献", "结算周期", "资源池发布",
             // Retired words for what Agents hold and the committed total.
@@ -3683,6 +3750,9 @@ mod tests {
             "已承诺", "承诺", "所占的部分", "已分给正在运行的",
             // Month ends are one local time ("11 月 1 日 08:00 前"), never "10 月底".
             "{month}底",
+            // Round 8: one verb, one section name and one saving line in both windows, the
+            // page's name for the list, and an option named rather than hidden as "advanced".
+            "不变的部分", "正在保存…", "可以申请的人 ·", "加入本月名单", "高级选项", "每次申请上限的下限",
         ];
         let cut = |source: &'static str, from: &str, to: &str| -> &'static str {
             let start = source.find(from).unwrap_or(0);
@@ -3700,6 +3770,8 @@ mod tests {
         let mut checked = 0;
         for source in sources {
             for english in literals(source) {
+                // One verb commits a new value in both windows: "Change to {amount}".
+                assert!(!english.eq_ignore_ascii_case("Save Monthly Maximum"), "a window still says {english:?}");
                 let chinese = text_for(Language::Chinese, &english);
                 if chinese == english {
                     continue;
@@ -3727,8 +3799,26 @@ mod tests {
             ("Before {when}", "{when} 前"),
             ("Monthly Maximum Saved", "已保存每月上限"),
             ("Per-Request Limit Not Saved", "没有保存每次申请上限"),
+            // One verb commits a new value in both windows and on the page; one saving line; one
+            // section name; the page's own name for the list of people.
+            ("Change to {amount}", "改成 {amount}"),
+            ("Saving your change…", "正在保存更改…"),
+            ("This pool", "这个资源池"),
+            ("People who can request", "谁可以申请"),
+            ("Add to This Month’s List", "添加到本月名单"),
         ] {
             assert_eq!(text_for(Language::Chinese, english), chinese);
+        }
+        // Every term and verb the windows share with the pool's page is the page's own text.
+        let page = include_str!("../../apps/hagency/bundle/main.splash");
+        for english in [
+            "Monthly maximum", "Per-request limit", "Held by running Agents", "Used and given out this month",
+            "This month’s list only grows: people already on it can’t be removed.", "People who can request",
+            "Add People Who Can Request", "Add to This Month’s List", "This pool", "Choose Again", "Publish Ahead",
+            "Account limit", "Change to {amount}",
+        ] {
+            let chinese = text_for(Language::Chinese, english).replace("{amount}", "");
+            assert!(page.contains(&chinese), "the windows say {chinese:?} for {english:?}; the pool's page doesn't");
         }
     }
 }
@@ -3829,7 +3919,7 @@ mod layout_tests {
                 for choosing in [true, false] {
                     for root in [id!(grant_confirmation), id!(ceiling_confirmation)] {
                         let view = long_view(cn, choosing);
-                        let inputs = GrantInputs { tokens: "250000".into(), minimum: 100_000, maximum: Some(800_000), presets: [true, false, true] };
+                        let inputs = GrantInputs { tokens: "250000".into(), minimum: 100_000, maximum: Some(800_000), presets: [true, false, true], selected: [false, false, true] };
                         let (cx, panel) = draw_sheet(width, height, &view, Some(&inputs), root);
                         let at = |rest: &[LiveId]| super::super::sheet_ui::sheet_path(root, rest);
                         let cancel = panel.view.widget(&cx, &at(&[id!(buttons), id!(cancel)])).area().rect(&cx);
@@ -3848,7 +3938,7 @@ mod layout_tests {
                     if choosing {
                         // The value box sits beside the slider, as on the new-pool sheet.
                         let short = GrantView { facts: Vec::new(), caution: String::new(), lead: String::new(), people: Vec::new(), ..long_view(cn, true) };
-                        let inputs = GrantInputs { tokens: "250000".into(), minimum: 100_000, maximum: Some(800_000), presets: [true, false, true] };
+                        let inputs = GrantInputs { tokens: "250000".into(), minimum: 100_000, maximum: Some(800_000), presets: [true, false, true], selected: [false, false, true] };
                         let (cx, panel) = draw_sheet(width, height, &short, Some(&inputs), id!(grant_confirmation));
                         let slider = panel.view.widget(&cx, ids!(grant_confirmation.scroll.quota.tokens.slider_wrap.amount_slider)).area().rect(&cx);
                         let input = panel.view.widget(&cx, ids!(grant_confirmation.scroll.quota.tokens.input)).area().rect(&cx);

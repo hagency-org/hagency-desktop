@@ -424,9 +424,29 @@ fn bundle_uses_the_owner_vocabulary() {
         // the catalogue and approval-room jargon, and the second Add on Who Can Request.
         "已承诺", "尚未用", "已分给正在运行的", "所占的部分", "对外展示", "审批聊天", "在目录中列出",
         "点「添加」会把对方", "审批对话（高级）",
+        // Retired in round 8: a second verb for committing a maximum, a list that seemed to
+        // expire, the per-request floor as a fragment or a "lower limit", raw server text on a
+        // primary row, admin jargon, and a lock that sounded permanent.
+        "保存每月上限", "本月底到期", "每次申请上限的下限", "最低约 ", "服务器原文（英文）：", "\"Connection Check\",\"连接诊断\"",
+        "（电脑要开着）", "显示后，模型和每月上限不能修改", "点下方「保存更改」", "加入本月名单",
     ] {
         assert!(!source.contains(banned), "the bundle says {banned}");
     }
+    // The page and the native confirmation windows say one thing one way: every shared term and
+    // verb is the windows' own translation, word for word ("改成 X" commits a new value in both).
+    let catalog: std::collections::BTreeMap<String, String> =
+        serde_json::from_str(include_str!("../../resources/i18n/zh-CN.json")).unwrap();
+    for english in [
+        "Monthly maximum", "Per-request limit", "Held by running Agents", "Used and given out this month",
+        "This month’s list only grows: people already on it can’t be removed.", "People who can request",
+        "Add People Who Can Request", "Add to This Month’s List", "This pool", "Choose Again", "Publish Ahead",
+        "Account limit", "Change to {amount}",
+    ] {
+        let chinese = catalog.get(english).unwrap_or_else(|| panic!("no translation for {english}")).replace("{amount}", "");
+        assert!(source.contains(&chinese), "the windows say {chinese:?} for {english:?}, the bundle doesn't");
+    }
+    // The page's dates are UTC month boundaries and say so; the windows give the same moment locally.
+    assert!(source.contains("月 1 日（UTC）"), "the pool page doesn't name the zone of its dates");
     // Manager-side project-reservation pages may still say 预留; the owner's pool, request,
     // approval, alert and device helpers may not.
     let owner = ["pool_", "reqs_", "dev_", "alert_", "who_", "health_", "stopped_", "onboarding_", "local_pool"];
@@ -457,7 +477,8 @@ fn bundle_uses_the_owner_vocabulary() {
     // The legend, floors and refusals quote the same words.
     for pattern in [
         "\"已保存：每月上限 \"", "\"已保存：每次申请上限 \"", "A.t(\"Not saved: \",\"没有保存：\")",
-        "不能低于正在运行的 Agent 已拿到的 ", "不能低于本月已用和已分出的 ", "（已用和已分出）", "\"已分出 \"", "\"已用 \"",
+        "不能低于正在运行的 Agent 已拿到的 ", "不能低于正在运行的 Agent 已拿到的，约 ", "（确认窗口里有准确数字）",
+        "不能低于本月已用和已分出的 ", "（已用和已分出）", "\"已分出 \"", "\"已用 \"",
     ] {
         assert!(source.contains(pattern), "the bundle doesn't say {pattern}");
     }
