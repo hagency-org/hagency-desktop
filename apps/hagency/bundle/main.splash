@@ -28,7 +28,7 @@ H.pool_adv_state=pool_adv_state
 let {entry_role="",entry_choosing=false}=H
 H.entry_role=entry_role H.entry_choosing=entry_choosing
 let {dev=nil}=H
-if dev==nil {dev={tasks:[] taskState:"idle" taskError:"" taskEpoch:0 pools:[] failed:[] more:false exec:nil execState:"idle" execError:"" result:nil}}
+if dev==nil {dev={tasks:[] taskState:"idle" taskError:"" taskEpoch:0 pools:[] failed:[] more:false exec:nil execState:"idle" execError:"" result:nil resultScroll:false other:""}}
 H.dev=dev
 let {pool_rows=[],pool_after=nil,pool_agents=[],pool_agent_after=nil,pool_selected=nil,pool_detail=nil,pool_draft=nil,pool_confirm=""}=H
 H.pool_rows=pool_rows H.pool_after=pool_after H.pool_agents=pool_agents H.pool_agent_after=pool_agent_after H.pool_selected=pool_selected H.pool_detail=pool_detail H.pool_draft=pool_draft H.pool_confirm=pool_confirm
@@ -4486,8 +4486,9 @@ A.pool_enqueue=fn(epoch,service,args,apply){
 }
 A.pool_pump=fn(epoch){
     if epoch!=H.pool_epoch || H.pool_job_running || H.pool_job_at>=H.pool_jobs.len() {return}
-    // Reads belong to the page that asked; opening that page again starts over.
-    if H.page!="resources" && H.page!="resource_detail" {return}
+    // Reads belong to the page that asked; opening that page again starts over. This
+    // computer's pages count pools from the same reads.
+    if H.page!="resources" && H.page!="resource_detail" && !A.dev_page() {return}
     let job=H.pool_jobs[H.pool_job_at]
     H.pool_job_at+=1 H.pool_job_running=true
     if job.run!=nil {job.run(fn(){
@@ -5708,7 +5709,22 @@ A.dev_open=fn(page,from){
     if page=="pool_device" {H.dev.result=nil}
     H.page=page H.notice="" H.bar_past=false
     if page=="pool_device_tasks" {A.dev_tasks_load() A.redraw() return}
+    A.dev_pools_ensure()
     A.pool_device_load()
+}
+// Opened from Coding Tools, the pool list may not be read yet: read it (and what is published)
+// before counting pools, so the page never says there are none while they load.
+A.dev_pools_ensure=fn(){
+    if H.session==nil {return}
+    if H.owner.poolsReady {if H.pool_meta==nil {A.pool_meta_load()} return}
+    host.request("hagency.resources.list",{after:"" limit:16},fn(r){
+        if !r.is_ok || H.owner.poolsReady || !A.dev_page() {return}
+        let {resources=nil,nextAfter=nil}=r.data
+        if resources==nil {return}
+        H.resources=resources H.resource_after=nextAfter H.owner.poolsReady=true
+        A.pool_meta_load()
+        A.redraw()
+    })
 }
 // Runs the native setup review directly, for "Continue Setting Up" wherever it is offered.
 // origin: "list", "pool" or "hub"; the result is said on that page.
@@ -5752,7 +5768,7 @@ A.dev_steps=fn(){
     let d=H.pool_device
     let device=A.pool_device_state(d.board,d.state)
     let m=H.pool_meta
-    let s={device:device pools:H.resources.len() pending:-1 admitted:-1 unpublished:-1 published:-1 left:0}
+    let s={device:device pools:H.resources.len() pending:-1 admitted:-1 unpublished:-1 published:-1 left:0 loading:!H.owner.poolsReady || m==nil || ((m.conns==nil || m.grants==nil) && !m.connsError && !m.grantsError)}
     if m!=nil && m.conns!=nil {
         s.pending=0 s.admitted=0
         for c in m.conns {if A.pool_mine(c) {if c.state=="pending_admission" {s.pending+=1} if c.state=="admitted" {s.admitted+=1}}}
@@ -5771,8 +5787,9 @@ A.dev_step_pill=fn(done,text){return {text:text tone:if done {"running"} else {"
 // The getting-started row: the computer's own state first, then pools still to finish.
 A.dev_setup_summary=fn(){
     let s=A.dev_steps()
-    if s.device.key=="loading" || s.device.key=="error" {return {text:s.device.text tone:s.device.tone line:A.t("Coding tool, joining a server, publishing","接入编码工具、加入服务器、发布")}}
+    if s.device.key=="loading" || s.device.key=="error" {return {text:s.device.text tone:s.device.tone line:A.t("Coding tool, joining a server, publishing","接入编码工具、连接服务器、发布")}}
     if s.device.key!="ready" {return {text:s.device.text tone:"waiting" line:if s.device.fix {A.t("This computer isn’t set up yet","这台电脑还没设置好")} else {A.t("This computer can’t publish pools now","这台电脑现在不能发布资源池")}}}
+    if s.loading {return {text:A.t("Reading…","正在读取…") tone:"" line:A.t("This computer is set up · reading your pools…","这台电脑已设置好 · 正在读取资源池…")}}
     let pools=max(0,s.pending)+max(0,s.unpublished)
     if s.pools==0 {return {text:A.t("Create a pool","新建资源池") tone:"waiting" line:A.t("This computer is set up · no pool yet","这台电脑已设置好 · 还没有资源池")}}
     if pools==0 {return {text:A.t("Done","已完成") tone:"running" line:A.t("This computer is set up · every pool is published","这台电脑已设置好 · 资源池都已发布")}}
@@ -5817,6 +5834,8 @@ A.dev_exec_load=fn(epoch){
         let {supported=false,items=[]}=r.data
         d.exec=r.data d.execState=if supported==true {"ready"} else {"unsupported"}
         A.redraw()
+        // After a restart, the updated row and its result are brought into view together.
+        if A.recipient_optional(d,"resultScroll")==true {d.resultScroll=false start_timeout(0.3,||{if H.page=="pool_device_tasks" && H.dev.result!=nil {ui.content.scroll_to("pool_device_runs_label")}})}
     })
 }
 A.dev_ready_count=fn(){let n={c:0} for t in H.dev.tasks {let {inspectionAvailable=false,sharedResourceAuthority=false}=t.row if inspectionAvailable==true && sharedResourceAuthority==true {n.c=n.c+1}} return n.c}
@@ -5833,30 +5852,35 @@ A.dev_exec_action=fn(id,resume){
     for row in A.dev_exec_rows() {if row.assignmentId==id {found.row=row}}
     let row=found.row
     if row==nil || (resume && !row.savedStart) {return}
+    let name=row.agentName
     A.pool_call(if resume {"hagency.execution.resume"} else {"hagency.execution.review"},{assignmentId:id},fn(r){
-        H.dev.result=if r.is_ok {A.dev_exec_result(r.data)} else {{tone:"attention" text:A.execution_reason(r.error)}}
+        H.dev.result=if r.is_ok {A.dev_exec_result(r.data,name)} else {{tone:"attention" text:A.t(name+" wasn’t restarted: ",A.sub_join(name,"没有重新启动："))+A.execution_reason(r.error)}}
+        H.dev.resultScroll=true
         A.dev_tasks_load()
     })
 }
-A.dev_exec_result=fn(data){
+A.dev_exec_result=fn(data,name){
     let {state=nil,result=nil,progress=nil}=data
-    if state=="review_closed" {return {tone:"waiting" text:A.t("The confirmation window was closed; nothing was started.","已关闭确认窗口，没有启动任何东西。")}}
-    if state=="outcome_unknown" {return {tone:"waiting" text:A.t("It isn’t known yet whether it started. Use Finish the Last Start; it won’t start twice.","暂时不知道是否已经启动。请点「完成上次的启动」，不会重复启动。")}}
+    if state=="review_closed" {return {tone:"waiting" text:A.t("The confirmation window was closed; "+name+" wasn’t started.","已关闭确认窗口，"+name+" 没有启动。")}}
+    if state=="outcome_unknown" {return {tone:"waiting" text:A.t("It isn’t known yet whether "+name+" started. Refresh in a moment; if it still isn’t running, use Other Ways › Continue the last start (it won’t start twice).","暂时不知道 "+name+" 有没有启动。稍后刷新；如果还没运行，用「其他办法 › 接着上次的启动」，不会多启动一个。")}}
     let p={v:progress}
     if result!=nil {
         let rs=A.recipient_optional(result,"state")
-        if rs=="no_saved_intent" {return {tone:"waiting" text:A.t("There was no earlier start to finish; nothing was started.","没有需要完成的上次启动，没有启动任何东西。")}}
+        if rs=="no_saved_intent" {return {tone:"waiting" text:A.t("There was no earlier start to continue; "+name+" wasn’t started.","没有可以接着的上次启动，"+name+" 没有启动。")}}
         if rs=="resumed" {p.v=A.recipient_optional(result,"progress")}
     }
     if p.v!=nil {
         let ps=A.recipient_optional(p.v,"state")
-        if ps=="running" {return {tone:"running" text:A.t("It’s running again.","它已经重新运行。")}}
-        if ps=="stopping" {return {tone:"waiting" text:A.t("The earlier run is still stopping. Check again in a moment.","上次的运行还在停止，请稍后再看。")}}
-        if ps=="recorded" {return {tone:"running" text:A.t("Started. Its work shows in the Agent’s history.","已启动，结果会记在 Agent 的任务记录里。")}}
+        if ps=="running" {return {tone:"running" text:A.t(name+" is running again.",A.sub_join(name,"已重新运行。"))}}
+        if ps=="stopping" {return {tone:"waiting" text:A.t(name+"’s earlier run is still stopping. Check again in a moment.",A.sub_join(name,"上次的运行还在停止，请稍后再看。"))}}
+        if ps=="recorded" {return {tone:"running" text:A.t(name+" started. Its work shows in its task history.",A.sub_join(name,"已启动，结果会记在它的任务记录里。"))}}
     }
-    return {tone:"waiting" text:A.t("Nothing is running yet. You can try again.","现在还没有运行，可以再试一次。")}
+    return {tone:"waiting" text:A.t(name+" isn’t running yet. You can try again.",A.sub_join(name,"还没有运行，可以再试一次。"))}
 }
+// Agents whose last run stopped, which the page offers to restart (a running one needs nothing).
+A.dev_restart_count=fn(){let n={c:0} for row in A.dev_exec_rows() {if row.processState!="running" {n.c=n.c+1}} return n.c}
 A.dev_process_text=fn(state){
+    if state=="running" {return A.t("Running","正在运行")}
     if state=="stopped" {return A.t("Stopped","已停止")}
     if state=="qualified" {return A.t("Ready to run","可以运行")}
     return A.t("Not known","状态未知")
@@ -5909,30 +5933,44 @@ A.dev_account=fn(){
     return parts[0]
 }
 A.dev_move_new=fn(){return [
-    {title:A.t("Install Hagency and sign in","安装 Hagency 并登录") text:A.t("Use the same account: ","用同一个账号：")+A.dev_account()},
-    {title:A.t("Set up the new computer","设置新电脑") text:A.t("The first time it opens, follow This Computer › Getting Started.","第一次打开时，按「这台电脑 › 上手步骤」完成设置。")},
-    {title:A.t("Connect your coding tool","接入编码工具") text:A.t("Connect your Codex account on Coding Tools.","在「编码工具」里接入 Codex 账号。")},
-    {title:A.t("Create pools and join a server","新建资源池并加入服务器") text:A.t("On Resource Pools, tap ⊕, connect to a server and wait for approval.","在「资源池」里点 ⊕，连接服务器，等服务器管理员批准。")},
-    {title:A.t("Publish this month’s capacity","发布本月额度") text:A.t("Then Agents can request the new computer’s pools.","发布后，Agent 就能申请新电脑上的资源池。")}
+    {title:A.t("Install Hagency and sign in","安装 Hagency 并登录") text:A.t("Use the same account: ","用同一个账号：")+A.dev_account() go:""},
+    {title:A.t("Set up the new computer","设置新电脑") text:A.t("The first time it opens, follow This Computer › Getting Started.","第一次打开时，按「这台电脑 › 上手步骤」完成设置。") go:"setup"},
+    {title:A.t("Connect your coding tool","接入编码工具") text:A.t("Connect your Codex account on Coding Tools.","在「编码工具」里接入 Codex 账号。") go:"tools"},
+    {title:A.t("Create pools and connect them","新建资源池并连接服务器") text:A.t("On Resource Pools, tap ⊕ New Pool, connect to a server and wait for approval.","在「资源池」里点「⊕ 新建」，连接服务器，等服务器管理员批准。") go:"create"},
+    {title:A.t("Publish this month’s capacity","发布本月额度") text:A.t("Then Agents can request the new computer’s pools.","发布后，Agent 就能申请新电脑上的资源池。") go:""}
 ]}
 A.dev_move_old=fn(){return [
-    {title:A.t("Keep it on and online for now","先保持开机联网") text:A.t("Agents’ tasks run here. Until the new pools are published, these pools keep working.","Agent 的任务在这里运行。新电脑的资源池发布前，这里的资源池照常工作。")},
-    {title:A.t("Don’t publish next month here","下个月不在这里发布") text:A.t("Each month’s capacity ends with the month. Without a new publication, these pools give Agents nothing new.","每个月的额度到月底结束。不再发布，这里的资源池就不会再给 Agent 新额度。")},
-    {title:A.t("To stop now, close the connection","想马上停用，就关闭连接") text:A.t("Open the pool, then close its connection on Server & Publishing.","打开资源池，在「服务器与发布」里关闭连接。")}
+    {title:A.t("Keep it on and online for now","先保持开机联网") text:A.t("Agents’ tasks run here. Until the new pools are published, these pools keep working.","Agent 的任务在这里运行。新电脑的资源池发布前，这里的资源池照常工作。") go:""},
+    {title:A.t("Don’t publish next month here","下个月不在这里发布") text:A.t("Each month’s capacity ends with the month. Without a new publication, these pools give Agents nothing new.","每个月的额度到月底结束。不再发布，这里的资源池就不会再给 Agent 新额度。") go:""},
+    {title:A.t("To stop now, close the connection","想马上停用，就关闭连接") text:A.t("Open the pool below, then close its connection on Server & Publishing.","打开下面的资源池，在「服务器与发布」里关闭连接。") go:""}
 ]}
+// A migration step that is a place in this app opens it (the same place on the new computer).
+A.dev_move_go=fn(go){
+    if H.busy {return}
+    if go=="setup" {A.dev_open("pool_device_setup",nil) return}
+    if go=="tools" {A.open_accounts(nil) return}
+    if go=="create" {A.pool_create_open() return}
+}
 A.dev_tasks_title=fn(ready,loading,partial){
+    let runs=A.dev_restart_count()
     if loading {return A.t("Checking each pool…","正在查看每个资源池…")}
+    if ready>0 && runs>0 {return A.t(""+ready+(if ready==1 {" task"} else {" tasks"})+" and "+runs+(if runs==1 {" Agent"} else {" Agents"})+" need you","有 "+ready+" 个任务和 "+runs+" 个 Agent 等你处理")}
     if ready>0 {return A.t(""+ready+(if ready==1 {" task needs"} else {" tasks need"})+" you","有 "+ready+" 个任务等你处理")}
+    if runs>0 {return A.t(""+runs+(if runs==1 {" Agent needs"} else {" Agents need"})+" restarting","有 "+runs+" 个 Agent 需要重新启动")}
     if partial {return A.t("Some pools couldn’t be read","部分信息暂时无法读取")}
     if H.dev.tasks.len()>0 {return A.t("None can be handled yet","中断的任务暂时都不能处理")}
-    return A.t("No tasks to pick up","没有需要接回的任务")
+    if H.dev.execState=="loading" {return A.t("Checking Agents…","正在查看 Agent…")}
+    return A.t("Nothing to pick up","没有需要接回的")
 }
 A.dev_tasks_subtitle=fn(ready,loading,partial){
+    let runs=A.dev_restart_count()
     if loading {return A.t("Interrupted tasks in every pool on this computer","这台电脑上所有资源池里中断的任务")}
+    if ready>0 && runs>0 {return A.t("Decide what happens to each task, and restart the Agents below.","决定每个任务怎么处理，再重新启动下面的 Agent。")}
     if ready>0 {return A.t("They’re listed below, with the pool each one belongs to.","下面列出了每个任务和它所在的资源池。")}
+    if runs>0 {return A.t("No task stopped midway, but an Agent’s last run stopped. Restart it below.","没有任务中途停下，但有 Agent 上次运行停止了，可以在下方重新启动。")}
     if partial {return A.t("Try again below. Nothing was changed.","请在下方重试，没有改动任何东西。")}
-    if H.dev.tasks.len()>0 {return A.t("Their records aren’t ready yet. Check again in a moment.","它们的记录还没准备好，请稍后再看。")}
-    return A.t("Nothing stopped in the middle of its work.","没有任务在执行中途停下来。")
+    if H.dev.tasks.len()>0 {return A.t("Their records aren’t ready yet. Tap Refresh on the task in a moment.","它们的记录还没准备好，过一会儿点任务右边的「刷新」。")}
+    return A.t("No task stopped midway, and no Agent needs restarting.","没有任务中途停下，也没有 Agent 需要重新启动。")
 }
 A.dev_tasks_failed=fn(){
     let d=H.dev
@@ -12512,14 +12550,18 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
             }}
             mod.widgets.HagencyListLabel{text:A.t("ON THE NEW COMPUTER","在新电脑上")}
             mod.widgets.HagencyList{
-                for index step in A.dev_move_new() {View{width:Fill height:Fit flow:Down
+                for index step in A.dev_move_new() {let go=step.go View{width:Fill height:Fit flow:Down
                     if index>0 {mod.widgets.HagencyListDivider{}}
-                    mod.widgets.HagencySwitchRow{
-                        mod.widgets.HagencyRowIcon{mod.widgets.HagencyListValue{text:""+(index+1) draw_text.color:mod.widgets.RINX_ACCENT}}
-                        mod.widgets.HagencyListText{
-                            mod.widgets.HagencyWrapTitle{text:step.title}
-                            mod.widgets.HagencyWrapSubtitle{text:step.text}
+                    mod.widgets.HagencyFitRow{
+                        mod.widgets.HagencyRowBody{
+                            mod.widgets.HagencyRowIcon{mod.widgets.HagencyListValue{text:""+(index+1) draw_text.color:mod.widgets.RINX_ACCENT}}
+                            mod.widgets.HagencyListText{
+                                mod.widgets.HagencyWrapTitle{text:step.title}
+                                mod.widgets.HagencyWrapSubtitle{text:step.text}
+                            }
+                            if go!="" {mod.widgets.HagencyChevron{}}
                         }
+                        if go!="" {pool_device_move_go := mod.widgets.HagencyRowCover{enabled:!H.busy on_click:||A.dev_move_go(go)}}
                     }
                 }}
             }
@@ -12563,9 +12605,11 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
             mod.widgets.HagencyListNote{padding:Inset{left:2 right:7 top:0 bottom:6} text:A.t("After a restart or a dropped connection, tasks that were running stop. Decide here what happens to each one.","重启或断线后，正在执行的任务会停下来。在这里决定每个任务怎么处理。")}
             mod.widgets.HagencyList{View{width:Fill height:Fit flow:Right spacing:14 padding:Inset{left:16 right:16 top:14 bottom:14} align:Align{y:0.5}
                 if loading {View{width:38 height:38 align:Align{x:0.5 y:0.5} mod.widgets.HagencySpinner{width:22 height:22}}}
+                let restarts=A.dev_restart_count()
                 if !loading && ready>0 {mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.tasks draw_icon.color:mod.widgets.RINX_WARNING_FG}}}
-                if !loading && ready==0 && partial {mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_MUTED}}}
-                if !loading && ready==0 && !partial {mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}}
+                if !loading && ready==0 && restarts>0 {mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.robot draw_icon.color:mod.widgets.RINX_WARNING_FG}}}
+                if !loading && ready==0 && restarts==0 && partial {mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_MUTED}}}
+                if !loading && ready==0 && restarts==0 && !partial {mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}}
                 View{width:Fill height:Fit flow:Down spacing:3
                     pool_device_tasks_summary := mod.widgets.HagencyWrapTitle{draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE} text:A.dev_tasks_title(ready,loading,partial)}
                     mod.widgets.HagencyWrapSubtitle{text:A.dev_tasks_subtitle(ready,loading,partial)}
@@ -12593,6 +12637,9 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             if can {mod.widgets.HagencyChevron{}}
                         }
                         pool_device_task_open := mod.widgets.HagencyListFitTap{enabled:!H.busy && can on_click: || {if row.sharedResourceAuthority && row.inspectionAvailable {A.open_stopped(row.resourceId,row.engagementId,row.dispatchId,0)}}}
+                        if !row.inspectionAvailable && row.sharedResourceAuthority {View{width:Fill height:Fill align:Align{x:1.0 y:0.5} padding:Inset{right:10}
+                            pool_device_task_refresh := mod.widgets.HagencyBarText{text:A.t("Refresh","刷新") enabled:!H.busy on_click: || {A.dev_tasks_load() A.redraw()}}
+                        }}
                     }
                 }}
                 if !loading && partial {View{width:Fill height:Fit flow:Down
@@ -12612,7 +12659,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 }}
             }
             mod.widgets.HagencyListNote{text:if d.more {A.t("Some pools have more; see each pool’s Health & Recovery.","有些资源池还有更多任务，请在资源池的「健康与恢复」里查看。")} else {A.t("See where a task stopped, then let it finish, accept it as done, or pause it.","看看任务停在哪里，再决定继续、确认完成或先暂停。")}}
-            mod.widgets.HagencyListLabel{text:A.t("AGENTS TO RESTART","需要重新启动的 Agent")}
+            pool_device_runs_label := mod.widgets.HagencyListLabel{text:if A.dev_restart_count()>0 || runs.len()==0 {A.t("AGENTS TO RESTART","需要重新启动的 Agent")} else {A.t("AGENTS’ RUNS","Agent 运行情况")}}
             mod.widgets.HagencyList{
                 if d.execState=="loading" {mod.widgets.HagencySwitchRow{mod.widgets.HagencySkeleton{width:29 height:29} mod.widgets.HagencySkeleton{width:160 height:14}}}
                 if d.execState=="ready" && runs.len()==0 {mod.widgets.HagencySwitchRow{
@@ -12641,37 +12688,43 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                     }
                 }}
                 for index item in runs {let run=item View{width:Fill height:Fit flow:Down
+                    let running=run.processState=="running"
+                    let other=A.recipient_optional(H.dev,"other")==run.assignmentId
                     if index>0 {mod.widgets.HagencyListDivider{}}
                     View{width:Fill height:Fit flow:Down spacing:10 padding:Inset{left:14 right:14 top:12 bottom:12}
                         View{width:Fill height:Fit flow:Right spacing:12 align:Align{y:0.5}
-                            mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_INFO_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.robot draw_icon.color:mod.widgets.RINX_INFO_FG}}
+                            mod.widgets.HagencyRowIcon{draw_bg.color:if running {mod.widgets.RINX_SUCCESS_BG} else {mod.widgets.RINX_INFO_BG} mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.robot draw_icon.color:if running {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_INFO_FG}}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{text:run.agentName}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("Last run: ","上次运行：")+A.dev_process_text(run.processState)}
+                                pool_device_run_state := mod.widgets.HagencyWrapSubtitle{text:if running {A.t("Running · nothing to do","正在运行 · 不用处理")} else {A.t("Last run: ","上次运行：")+A.dev_process_text(run.processState)}}
                             }
                         }
-                        View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:41} align:Align{y:0.5}
+                        if !running {View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:41} align:Align{y:0.5}
                             mod.widgets.HagencyListText{
-                                mod.widgets.HagencyWrapTitle{text:A.t("Start it again","从头重新启动")}
+                                mod.widgets.HagencyWrapTitle{text:A.t("Suggested: restart it","建议：重新启动")}
                                 mod.widgets.HagencyWrapSubtitle{text:A.t("A new run; a confirmation window opens first","新运行一次，会先弹出确认窗口")}
                             }
                             pool_device_run_start := mod.widgets.HagencyPillTinted{width:Fit padding:Inset{left:18 right:18} text:A.t("Restart","重新启动") enabled:!H.busy && H.command==nil on_click:||A.dev_exec_action(run.assignmentId,false)}
-                        }
-                        if run.savedStart {View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:41} align:Align{y:0.5}
-                            mod.widgets.HagencyListText{
-                                mod.widgets.HagencyWrapTitle{text:A.t("Finish the last start","完成上次的启动")}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("Started before, but the result never came back; finishes that start, never twice","上次点了启动但没等到结果；完成那一次，不会启动两次")}
-                            }
-                            pool_device_run_resume := mod.widgets.HagencyPillTinted{width:Fit padding:Inset{left:18 right:18} text:A.t("Finish","完成启动") enabled:!H.busy && H.command==nil on_click:||A.dev_exec_action(run.assignmentId,true)}
+                        }}
+                        if !running && run.savedStart {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:41}
+                            pool_device_run_other := mod.widgets.HagencyBarText{padding:Inset{left:0 right:8} text:if other {A.t("Other Ways ▴","其他办法 ▴")} else {A.t("Other Ways ▾","其他办法 ▾")} enabled:!H.busy on_click: || {H.dev.other=if A.recipient_optional(H.dev,"other")==run.assignmentId {""} else {run.assignmentId} A.redraw()}}
+                            if other {View{width:Fill height:Fit flow:Right spacing:12 align:Align{y:0.5}
+                                mod.widgets.HagencyListText{
+                                    mod.widgets.HagencyWrapTitle{text:A.t("Tapped Start before but saw no result?","上次点了启动，但没有结果？")}
+                                    mod.widgets.HagencyWrapSubtitle{text:A.t("Continue that start instead; it won’t start a second one.","可以接着上次那一次启动，不会多启动一个。")}
+                                }
+                                pool_device_run_resume := mod.widgets.HagencyPillTinted{width:Fit padding:Inset{left:18 right:18} text:A.t("Continue","接着启动") enabled:!H.busy && H.command==nil on_click:||A.dev_exec_action(run.assignmentId,true)}
+                            }}
                         }}
                     }
                 }}
             }
-            if H.dev.result!=nil {View{width:Fill height:Fit padding:Inset{top:4} mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.dev.result.tone)
+            if H.dev.result!=nil {View{width:Fill height:Fit padding:Inset{top:4} pool_device_tasks_result_box := mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(H.dev.result.tone)
+                mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.dev.result.tone=="running" {mod.rinx_icons.check} else {mod.rinx_icons.info} draw_icon.color:A.local_tone_fg(H.dev.result.tone)}
                 pool_device_tasks_result := mod.widgets.HagencyCopy{text:H.dev.result.text draw_text.color:A.local_tone_fg(H.dev.result.tone)}
                 pool_device_tasks_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || {H.dev.result=nil A.redraw()}}
             }}}
-            mod.widgets.HagencyListNote{text:A.t("Either way it uses the capacity the Agent already has; nothing is charged twice.","两种都用 Agent 已有的额度，不会重复扣。")}
+            if A.dev_restart_count()>0 {mod.widgets.HagencyListNote{text:A.t("Restarting uses what this Agent was already given; nothing is charged twice.","重新启动用的是已分给这个 Agent 的额度，不会重复扣。")}}
         }}}
         if H.page=="pool_who" {View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{top:18 bottom:28} mod.widgets.HagencyColumn{
             let detail=if H.resource_detail!=nil && H.resource_detail.resource.id==H.pool_sub_rid {H.resource_detail} else {nil}
