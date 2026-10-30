@@ -376,13 +376,16 @@ fn recovery_ux_continue_form_reduces_height_without_losing_multiline_inputs() {
         for version in [&original, &localized] {
             let (mut cx, card) = fixture_with_open(version, &stopped_decision_fixture(false, false));
             draw_card(&mut cx, &card);
-            for id in [id!(stopped_note), id!(stopped_instruction)] {
+            // The instruction stays a multiline field; the note is an optional single line
+            // beside one-tap answers, so the form no longer requires typing a check.
+            for (id, min_height) in [(id!(stopped_instruction), 60.), (id!(stopped_note), 30.)] {
                 let fields = targets(&card, id);
                 assert_eq!(fields.len(), 1);
                 let rect = fields[0].area().rect(&cx);
-                assert!(rect.size.x > 100. && rect.size.y >= 60., "{id:?} {rect:?}");
+                assert!(rect.size.x > 100. && rect.size.y >= min_height, "{id:?} {rect:?}");
                 assert!(!fields[0].as_text_input().is_read_only());
             }
+            assert!(!targets(&card, id!(stopped_check_pick)).is_empty(), "one-tap answers render");
             let actions = targets(&card, id!(stopped_confirm_review));
             assert_eq!(actions.len(), 1);
             let rect = actions[0].area().rect(&cx);
@@ -390,6 +393,17 @@ fn recovery_ux_continue_form_reduces_height_without_losing_multiline_inputs() {
             bottoms.push(rect.pos.y + rect.size.y);
             card.set_text(&mut cx, "");
         }
-        assert!(bottoms[1] <= bottoms[0] - 31., "Expected 32px less form height: {bottoms:?}");
+        assert!(bottoms[1] <= bottoms[0] - 15., "Expected 16px less form height: {bottoms:?}");
+    }
+}
+
+/// The mini app and the native confirmation windows share one owner vocabulary
+/// (每月上限, 每次申请上限, 这台电脑, Agent, token). Older technical words must not
+/// come back into the bundle's Chinese text.
+#[test]
+fn bundle_uses_the_owner_vocabulary() {
+    let source = include_str!("../../apps/hagency/bundle/main.splash");
+    for banned in ["每月总上限", "本设备", "这台设备", "智能体", "令牌", "授权意向", "加密权限详情", "接着原来的启动", "发布时选择"] {
+        assert!(!source.contains(banned), "the bundle says {banned}");
     }
 }
