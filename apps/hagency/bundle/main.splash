@@ -1215,7 +1215,7 @@ A.nav_entry=fn(){
     let p=H.page
     let e={key:"" kind:p title:A.nav_title() a:"" b:"" c:""}
     if p=="resources" || p=="inbox" {e.key=p return e}
-    if p=="pool_requests" {e.key="requests/"+H.reqs.pool e.a=H.reqs.pool e.b=H.reqs.label return e}
+    if p=="pool_requests" {e.key=(if A.reqs_stop_view() {"stop/"} else {"requests/"})+H.reqs.pool e.a=H.reqs.pool e.b=H.reqs.label e.c=H.reqs.hint return e}
     if p=="pool_agent" {e.key="request/"+H.reqs.agent e.a=H.reqs.agent return e}
     if p=="resource_detail" {e.key="pool/"+H.resource_id e.a=H.resource_id return e}
     if p=="resource_edit" || p=="resource_create" {e.key=p+"/"+H.resource_id e.a=H.resource_id return e}
@@ -1248,7 +1248,7 @@ A.nav_title=fn(){
     let p=H.page
     if p=="resources" {return A.t("Pools","资源池")}
     if p=="inbox" {return A.t("Agent Requests","Agent 申请")}
-    if p=="pool_requests" {return A.t("Requests","申请")}
+    if p=="pool_requests" {return if A.reqs_stop_view() {A.t("Stop Some Agents","停止部分 Agent")} else {A.t("Requests","申请")}}
     if p=="pool_agent" {return if H.pool_detail!=nil {H.pool_detail.definition.name} else {A.t("Request","申请")}}
     if p=="resource_detail" {let name=A.sub_pool_name(H.resource_id) return if name!="" {name} else {A.t("Pool","资源池")}}
     if p=="resource_edit" {return A.t("Model","模型")}
@@ -1257,7 +1257,7 @@ A.nav_title=fn(){
     if p=="tool_request" {return if H.tool_selected!=nil {A.tool_agent(H.tool_selected.subject)} else {A.t("Tool Request","工具请求")}}
     if p=="execution_policy" {return if H.policy_detail!=nil {H.policy_detail.agent} else {A.t("Agent Permissions","Agent 权限")}}
     if p=="tool_grants" || p=="tool_grant_review" || p=="tool_grant_result" {return A.t("Saved Tool Permissions","已保存的工具权限")}
-    if p=="approval_binding_review" || p=="approval_binding_result" {return A.t("Approval Room","审批房间")}
+    if p=="approval_binding_review" || p=="approval_binding_result" {return A.t("Approval Room","审批聊天")}
     if p=="health_hub" {return A.t("Health & Recovery","健康与恢复")}
     if p=="resource_alert" {return A.t("Alert","告警")}
     if p=="stopped_task" {return A.t("Interrupted Task","中断的任务")}
@@ -1267,6 +1267,7 @@ A.nav_title=fn(){
     if p=="template_edit" {return A.t("Edit Template","编辑模板")}
     if p=="template_command" {return A.t("Review","确认更改")}
     if p=="web_catalog" {return A.t("Public Listing","对外展示")}
+    if p=="web_catalog_command" && A.web_retire_review() {return A.t("Delete Pool","删除资源池")}
     if p=="web_catalog_command" {return A.t("Review","确认更改")}
     if p=="default_policy" {return A.t("New Agent Permissions","新 Agent 默认权限")}
     if p=="action" {return A.t("Server & Publishing","服务器与发布")}
@@ -1315,12 +1316,18 @@ A.nav_back=fn(){
     return true
 }
 // Pages with a server change go back through their own finish step.
+// The review of deleting a pool, before it is confirmed.
+A.web_retire_review=fn(){
+    let w=H.web
+    if H.page!="web_catalog_command" || w.pending==nil || w.phase!="saved" {return false}
+    return A.recipient_optional(w.pending.change,"operation")=="retire"
+}
 A.nav_back_own=fn(){return (H.page=="template_command" && H.templates.pending!=nil) || (H.page=="web_catalog_command" && H.web.pending!=nil)}
 A.nav_back_sub=fn(){if A.nav_back_own() {return false} return A.nav_back()}
 A.nav_reopen=fn(e){
     let k=e.kind
     if k=="resources" || k=="inbox" {A.return_list(k) return}
-    if k=="pool_requests" {A.reqs_reopen(e.a,e.b) return}
+    if k=="pool_requests" {A.reqs_reopen(e.a,e.b,e.c) return}
     if k=="pool_agent" {A.open_pool_agent(e.a) return}
     if k=="resource_detail" {A.open_resource(e.a) return}
     if k=="resource_edit" {if H.resource_edit_draft!=nil && H.resource_detail!=nil {H.page="resource_edit" H.notice="" A.redraw()} else {A.open_resource(e.a)} return}
@@ -1390,6 +1397,7 @@ A.sub_title=fn(){
     if p=="template_edit" {return if H.templates.draft!=nil && H.templates.draft.operation=="create" {A.t("New Template","新建模板")} else {A.t("Edit Template","编辑模板")}}
     if p=="template_command" {return A.t("Review Change","确认更改")}
     if p=="web_catalog_command" && H.web.section=="trust" {return A.t("Trusted Projects","信任的项目")}
+    if p=="web_catalog_command" && A.web_retire_review() {return A.t("Delete Pool","删除资源池")}
     if p=="web_catalog_command" {return A.t("Review Change","确认更改")}
     if !H.bar_past {return ""}
     if A.pool_sub_page() {return A.pool_sub_title()}
@@ -1397,7 +1405,7 @@ A.sub_title=fn(){
     if p=="tool_request" {return if H.tool_selected!=nil {A.tool_agent(H.tool_selected.subject)} else {A.t("Tool Request","工具请求")}}
     if p=="execution_policy" {return if H.policy_detail!=nil {H.policy_detail.agent} else {A.t("Agent Permissions","Agent 权限")}}
     if p=="tool_grants" || p=="tool_grant_review" || p=="tool_grant_result" {return A.t("Saved Tool Permissions","已保存的工具权限")}
-    if p=="approval_binding_review" || p=="approval_binding_result" {return A.t("Approval Room","审批房间")}
+    if p=="approval_binding_review" || p=="approval_binding_result" {return A.t("Approval Room","审批聊天")}
     if p=="health_hub" {return A.t("Health & Recovery","健康与恢复")}
     if p=="resource_alert" {return A.t("Alert","告警")}
     if p=="stopped_task" {return A.t("Interrupted Task","中断的任务")}
@@ -1406,19 +1414,22 @@ A.sub_title=fn(){
     if p=="template" {return if H.templates.detail!=nil {H.templates.detail.definition.name} else {A.t("Template","模板")}}
     if p=="web_catalog" {return A.t("Public Listing","对外展示")}
     if p=="connections" {return A.t("Server Connections","服务器连接")}
-    if p=="pool_requests" {return A.t("Requests","申请")}
+    if p=="pool_requests" {return if A.reqs_stop_view() {A.t("Stop Some Agents","停止部分 Agent")} else {A.t("Requests","申请")}}
     if p=="default_policy" {return A.t("New Agent Permissions","新 Agent 默认权限")}
     if p=="action" {return A.t("Server & Publishing","服务器与发布")}
+    if A.pool_sub_page() {return A.pool_sub_title()}
     return ""
 }
 A.sub_back_label=fn(){
+    // Deleting a pool starts from Advanced Settings and goes back there.
+    if A.web_retire_review() {return A.t("Advanced Settings","高级设置")}
     let nav=if A.nav_back_own() {""} else {A.nav_back_title()} if nav!="" {return nav}
     let p=H.page
     if A.pool_sub_page() {return A.pool_sub_back_label()}
     if p=="web_catalog_command" && H.web.section=="trust" {return A.t("Who Can Request","谁可以申请")}
     if A.tools_hub_page() || p=="health_hub" || p=="templates" || p=="web_catalog" || p=="connections" {return A.t("Pool","资源池")}
     if p=="tool_request" || p=="execution_policy" || p=="approval_binding_review" || p=="approval_binding_result" {return A.t("Tools","工具与权限")}
-    if p=="tool_grants" || p=="tool_grant_review" {return if H.tool_origin=="execution_policy" {A.t("Agent","Agent 权限")} else if H.tool_origin=="approval_binding_review" || H.tool_origin=="approval_bindings" {A.t("Rooms","审批房间")} else {A.t("Tools","工具与权限")}}
+    if p=="tool_grants" || p=="tool_grant_review" {return if H.tool_origin=="execution_policy" {A.t("Agent","Agent 权限")} else if H.tool_origin=="approval_binding_review" || H.tool_origin=="approval_bindings" {A.t("Rooms","审批聊天")} else {A.t("Tools","工具与权限")}}
     if p=="tool_grant_result" {return A.t("Saved","已保存的工具权限")}
     if p=="resource_alert" || p=="stopped_task" || p=="workspace" {return A.t("Health","健康与恢复")}
     if p=="template" || p=="template_command" {return A.t("Templates","Agent 模板")}
@@ -1726,7 +1737,9 @@ A.open_pool_requests=fn(conn){
     r.filter="pending" r.hint=""
     A.reqs_show("pool_requests")
 }
-A.reqs_reopen=fn(pool,label){if H.busy {return} H.reqs.pool=pool H.reqs.label=label A.reqs_show("pool_requests")}
+A.reqs_reopen=fn(pool,label,hint){if H.busy {return} H.reqs.pool=pool H.reqs.label=label H.reqs.hint=if hint=="stop" {"stop"} else {""} if hint=="stop" {H.reqs.filter="all"} A.reqs_show("pool_requests")}
+// "Stop Some Agents": the pool's requests page showing only the Agents using it, opened from an alert.
+A.reqs_stop_view=fn(){return H.page=="pool_requests" && A.recipient_optional(H.reqs,"hint")=="stop"}
 A.reqs_show=fn(page){
     let r=H.reqs
     r.confirm=nil r.result=nil r.items=nil r.next=nil
@@ -1750,6 +1763,13 @@ A.reqs_load=fn(after){
         let rows=if r.items==nil {[]} else {r.items}
         for q in items {let {resourceOwnerMxid=nil,poolId=nil}=q if resourceOwnerMxid==H.session.account && (pool=="" || poolId==pool) {rows.push(q)}}
         r.items=rows r.next=nextAfter r.state="ready"
+        // A complete list of everything waiting is what the tab badge counts too.
+        if pool=="" && args.needsMyAction==true && after==nil && nextAfter==nil {
+            let n={c:0} for q in rows {if A.reqs_decidable(q) {n.c=n.c+1}}
+            H.tab_requests=n.c
+            if H.pool_meta!=nil {H.pool_meta.requests=items}
+            ui.navigation.render()
+        }
     },fn(code){if r.epoch!=epoch {return} r.state="error" r.error=code})
     if !started {r.state="error" r.error="management_busy"}
 }
@@ -1782,6 +1802,33 @@ A.reqs_ask=fn(q,kind){
 // An approved Agent of your pool that you can stop from the list.
 A.reqs_stoppable=fn(q){let {canStopSupply=false,resourceOwnerMxid=nil}=q return canStopSupply==true && H.entry_role=="owner" && H.session!=nil && resourceOwnerMxid==H.session.account}
 A.reqs_using=fn(rows){let out=[] for q in rows {if A.reqs_stoppable(q) {out.push(q)}} return out}
+A.reqs_stopped_rows=fn(rows){let out=[] for q in rows {let {state=nil,resourceOwnerMxid=nil}=q if state=="revoked" && H.session!=nil && resourceOwnerMxid==H.session.account {out.push(q)}} return out}
+A.reqs_given_line=fn(q){return A.t("Given "+A.tokens(q.requestedTokens)+" · from "+A.sub_person(q.managerMxid),"已分给它 "+A.tokens(q.requestedTokens)+" · 来自 "+A.sub_person(q.managerMxid))}
+// Whether the pool the stop view is about is over its monthly maximum now (from its live figures).
+A.reqs_pool_over=fn(){
+    let rid=A.recipient_optional(H.reqs,"rid")
+    if rid==nil || rid=="" {return false}
+    let b=A.alert_live_left(rid)
+    return b!=nil && b.ceiling!=nil && b.remaining!=nil && b.remaining<=0
+}
+// Approving can't work while the pool has less left than the request: say so instead of offering it.
+A.reqs_blocked=fn(q){
+    let {poolId=nil,requestedTokens=nil}=q
+    if poolId==nil || requestedTokens==nil {return ""}
+    let rid=A.reqs_pool_rid(poolId)
+    if rid=="" {return ""}
+    let b=A.alert_live_left(rid)
+    if b==nil || b.remaining==nil || b.ceiling==nil {return ""}
+    if b.remaining<=0 {return A.t("Can’t approve for now: the pool is over its monthly maximum. Raise the maximum or stop some Agents first.","暂时不能批准：资源池超出了每月上限。先调高每月上限，或停止部分 Agent。")}
+    if b.remaining<requestedTokens {return A.t("Can’t approve for now: the pool has "+A.tokens(b.remaining)+" left this month, less than the "+A.tokens(requestedTokens)+" asked for.","暂时不能批准：资源池本月只剩 "+A.tokens(b.remaining)+"，不够它申请的 "+A.tokens(requestedTokens)+"。")}
+    return ""
+}
+A.reqs_pool_rid=fn(poolId){
+    let found={rid:""}
+    if H.pool_meta!=nil && H.pool_meta.conns!=nil {for c in H.pool_meta.conns {if c.id==poolId {found.rid=c.resourceId}}}
+    if found.rid=="" && H.pool_info!=nil && H.pool_info.conn!=nil && H.pool_info.conn.id==poolId {found.rid=H.pool_info.rid}
+    return found.rid
+}
 A.reqs_ask_stop=fn(q){
     if H.busy || H.command!=nil || !A.reqs_stoppable(q) {return}
     H.reqs.confirm={row:q kind:"stop"} H.reqs.result=nil A.redraw()
@@ -1800,6 +1847,21 @@ A.reqs_decide=fn(){
     A.submit("hagency.pools.agents.decide",{requestId:c.row.id expectedRevision:c.row.revision approve:c.kind=="approve"})
 }
 // What a decision did, said once on the list or on the request page.
+// After a decision or a stop, the counts that badge it are read again at once: the tab,
+// the list's rows and "Needs you" all read the same pending requests.
+A.reqs_counts_reload=fn(){
+    if H.entry_role!="owner" || H.session==nil || !A.pool_enabled() {return}
+    host.request("hagency.pools.agents.list",{after:nil needsMyAction:true},fn(r){
+        if !r.is_ok {return}
+        let {items=nil,nextAfter=nil}=r.data
+        if items==nil {return}
+        let n={c:0}
+        for q in items {let {canDecide=false,resourceOwnerMxid=nil}=q if canDecide==true && resourceOwnerMxid==H.session.account {n.c=n.c+1}}
+        H.tab_requests=n.c
+        if nextAfter==nil && H.pool_meta!=nil {H.pool_meta.requests=items}
+        A.redraw()
+    })
+}
 A.reqs_decided=fn(args,request){
     let {definition=nil,requestedTokens=nil,poolLabel=""}=request
     let {approve=false}=args
@@ -2022,7 +2084,7 @@ A.alert_open_agents=fn(rid){
     if found.c==nil && H.pool_meta!=nil && H.pool_meta.conns!=nil {for c in H.pool_meta.conns {if found.c==nil && c.resourceId==rid && A.pool_mine(c) {found.c=c}}}
     if found.c==nil {A.open_resource(rid) return}
     let r=H.reqs
-    r.pool=found.c.id r.label=found.c.label r.filter="all" r.hint="stop"
+    r.pool=found.c.id r.label=found.c.label r.filter="all" r.hint="stop" r.rid=rid
     A.reqs_show("pool_requests")
 }
 A.alert_seen_line=fn(row){
@@ -4617,8 +4679,8 @@ A.pool_row=fn(row){
         s.known=s.conn==nil || s.conn.state!="admitted" || s.grant!=nil
         if s.conn!=nil && m.requests!=nil {for q in m.requests {let {poolId=nil,canDecide=false}=q if poolId==s.conn.id && canDecide==true {s.requests+=1}}}
     }
-    // A permission request asked in chat isn't tied to one pool; "Needs you" lists it once.
-    if m!=nil {for c in m.counts {if c.rid==row.id {let own=A.recipient_optional(c,"own") s.alerts=c.alerts s.tools=if own!=nil {own} else {c.tools} s.stopped=c.stopped s.workspaces=c.workspaces}}}
+    // The card counts what the pool page's tiles count; "Needs you" lists a chat permission request once.
+    if m!=nil {for c in m.counts {if c.rid==row.id {s.alerts=c.alerts s.tools=c.tools s.stopped=c.stopped s.workspaces=c.workspaces}}}
     s.badge=A.pool_badge_sum5(s.requests,s.alerts,s.tools,s.stopped,s.workspaces)
     s.unknown=s.requests==-2 || s.alerts==-2 || s.tools==-2 || s.stopped==-2 || s.workspaces==-2
     s.status=A.pool_status(s.conn,s.grant,b.low,s.known)
@@ -6515,10 +6577,11 @@ A.tab_badge=fn(tab){
     let m=H.pool_meta
     if tab=="inbox" {return if m!=nil && m.requests!=nil {A.pool_pending_total()} else {H.tab_requests}}
     if m==nil {return 0}
-    // The same items as the list's "Needs you" section, each counted once.
+    // The same items as the list's "Needs you" section, each counted once; Agent requests
+    // are the Agent 申请 tab's, so they badge that tab only.
     let items=A.pool_todo()
     let n={c:0}
-    for item in items {if item.kind!="draft" {n.c=n.c+max(0,item.count)}}
+    for item in items {if item.kind!="draft" && item.kind!="requests" {n.c=n.c+max(0,item.count)}}
     return n.c
 }
 A.tab_counts_load=fn(){
@@ -6771,6 +6834,7 @@ A.retry_command = fn(){
             if command.service=="hagency.resources.edit" && H.page=="default_policy" {A.dpol_saved(command.args)}
             if command.service == "hagency.resources.rename" || (command.service=="hagency.resources.edit" && H.page!="default_policy") || command.service=="hagency.resources.create" {A.open_resource(r.data.resourceId)}
             if (command.service=="hagency.pools.agents.decide" || command.service=="hagency.pools.agents.stop") && A.reqs_page() {A.reqs_load(nil)}
+            if command.service=="hagency.pools.agents.decide" || command.service=="hagency.pools.agents.stop" {A.reqs_counts_reload()}
             if command.service == "hagency.personal_agents.policy.save" || command.service == "hagency.personal_agents.observe" {A.open_personal_agent(r.data.agentId)}
             if A.cleanup_enabled() && (command.service == "hagency.agents.cancel" || command.service == "hagency.agents.revoke") {A.open_removal(r.data.agentRequest.id)}
             if command.service == "hagency.allocations.decide" || command.service == "hagency.allocations.release" {A.open_allocation(r.data.allocation.id)}
@@ -7282,7 +7346,7 @@ A.local_pool_state=fn(r){
     if r.state=="pending_approval" {return A.t("Awaiting approval","等待审批")}
     if r.state=="rejected" {return A.t("Declined","已拒绝")}
     if r.state=="cancelled" {return A.t("Removed","已移除")}
-    if r.state=="revoked" {return A.t("Stopped using the pool","已停止使用资源池")}
+    if r.state=="revoked" {return A.t("Stopped","已停止")}
     if r.state=="expired" {return A.t("Expired","已过期")}
     if r.reservationState=="refused" {return A.t("Not enough capacity","容量不足")}
     if r.runtimeState=="qualified" {return A.t("Ready to start","可以启动")}
@@ -7718,7 +7782,8 @@ A.render_page = fn(){
         let rows=if r.items==nil {[]} else {r.items}
         let parts=A.reqs_split(rows)
         let can=!H.busy && H.command==nil && A.alert_kind()==""
-        mod.widgets.HagencyLargeTitle{text:if tab {A.t("Agent Requests","Agent 申请")} else {A.t("Requests","申请")}}
+        let stop_view=A.reqs_stop_view()
+        mod.widgets.HagencyLargeTitle{text:if stop_view {A.t("Stop Some Agents","停止部分 Agent")} else if tab {A.t("Agent Requests","Agent 申请")} else {A.t("Requests","申请")}}
         mod.widgets.HagencyListNote{padding:Inset{left:2 right:7 top:0 bottom:2} text:if pool_scope!="" {scope_label} else if tab {A.t("Agents asking to use your resource pools","申请使用你资源池的 Agent")} else {A.t("All resource pools","全部资源池")}}
         if !A.pool_enabled() {mod.widgets.HagencyList{mod.widgets.HagencySwitchRow{
             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info}}
@@ -7733,16 +7798,35 @@ A.render_page = fn(){
                     mod.widgets.HagencyAccentText{width:Fit text:A.t("Show All","显示全部")}
                 }
             }}}}
-            View{width:Fill height:Fit padding:Inset{top:6 bottom:6}
+            if !stop_view {View{width:Fill height:Fit padding:Inset{top:6 bottom:6}
                 mod.widgets.HagencySegments{
                     if r.filter=="pending" {owner_pending := mod.widgets.HagencyTabOn{text:A.t("To Review","待审批") enabled:can on_click: || A.reqs_filter("pending")}}
                     if r.filter!="pending" {owner_pending := mod.widgets.HagencyTab{text:A.t("To Review","待审批") enabled:can on_click: || A.reqs_filter("pending")}}
                     if r.filter=="all" {owner_history := mod.widgets.HagencyTabOn{text:A.t("All Requests","全部申请") enabled:can on_click: || A.reqs_filter("all")}}
                     if r.filter!="all" {owner_history := mod.widgets.HagencyTab{text:A.t("All Requests","全部申请") enabled:can on_click: || A.reqs_filter("all")}}
                 }
-            }
-            if A.recipient_optional(r,"hint")=="stop" && r.items!=nil {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{bottom:6}
+            }}
+            if stop_view && r.items!=nil {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:6 bottom:6}
                 let using=A.reqs_using(rows)
+                let stopped=A.reqs_stopped_rows(rows)
+                if A.reqs_pool_over() {mod.widgets.HagencyList{mod.widgets.HagencySwitchRow{
+                    mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}}
+                    mod.widgets.HagencyListText{
+                        mod.widgets.HagencyWrapTitle{text:A.t("New requests can’t be approved for now","暂时不能批准新的 Agent 申请")}
+                        reqs_stop_why := mod.widgets.HagencyWrapSubtitle{text:A.t("This pool is over its monthly maximum. Stopping an Agent returns what it was given but hasn’t used to the pool; the alert clears by itself once use is back under the maximum.","这个资源池超出了每月上限。停止一个 Agent 后，分给它但没用掉的额度会回到资源池；用量回到上限以内时，告警自动解除。")}
+                    }
+                }}}
+                if r.result!=nil {View{width:Fill height:Fit padding:Inset{top:2}
+                    let note=A.reqs_note(r.result)
+                    mod.widgets.HagencyList{View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:14 top:12 bottom:12} align:Align{y:0.5}
+                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}
+                        View{width:Fill height:Fit flow:Down spacing:3
+                            mod.widgets.HagencyWrapTitle{draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE} text:note.title}
+                            mod.widgets.HagencyWrapSubtitle{text:note.text}
+                        }
+                        request_result_open := mod.widgets.HagencyGetButton{text:A.t("View","查看") enabled:can on_click: || A.open_pool_agent(r.result.id)}
+                    }}
+                }}
                 mod.widgets.HagencyListLabel{text:A.t("AGENTS USING THIS POOL","使用中的 Agent")}
                 if using.len()==0 {mod.widgets.HagencyList{mod.widgets.HagencySwitchRow{
                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}
@@ -7754,14 +7838,31 @@ A.render_page = fn(){
                         mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}
                         View{width:Fill height:Fit flow:Down spacing:3
                             mod.widgets.HagencyListTitle{max_lines:1 text_overflow:TextOverflow.Ellipsis text:q.definition.name}
-                            mod.widgets.HagencyWrapSubtitle{text:A.t("Holds ","已分到 ")+A.tokens(q.requestedTokens)+A.t(" · from "," · 来自 ")+A.sub_person(q.managerMxid)}
+                            mod.widgets.HagencyWrapSubtitle{text:A.reqs_given_line(q)}
                         }
                         request_stop := mod.widgets.HagencyPillDanger{width:Fit padding:Inset{left:16 right:16} text:A.t("Stop","停止") enabled:can on_click: || A.reqs_ask_stop(q)}
                     }
                 }}}}
-                mod.widgets.HagencyListNote{text:A.t("A stopped Agent takes no new work from this pool. Work it already finished stays.","停止后，它不再从这个资源池接新任务；已经完成的工作不受影响。")}
+                if using.len()>0 {mod.widgets.HagencyListNote{text:A.t("A stopped Agent takes no new work from this pool. Work it already finished stays.","停止后，它不再从这个资源池接新任务；已经完成的工作不受影响。")}}
+                if stopped.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
+                    mod.widgets.HagencyListLabel{text:A.t("STOPPED","已停止")}
+                    mod.widgets.HagencyList{for index item in stopped {let q=item View{width:Fill height:Fit flow:Down
+                        if index>0 {mod.widgets.HagencyListDivider{margin:Inset{left:64}}}
+                        mod.widgets.HagencyListFit{
+                            View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:14 top:11 bottom:11} align:Align{y:0.5}
+                                mod.widgets.HagencyAvatarSmall{mod.widgets.HagencyAvatarSmallGlyph{draw_icon.color:mod.widgets.RINX_MUTED}}
+                                View{width:Fill height:Fit flow:Down spacing:3
+                                    mod.widgets.HagencyListTitle{max_lines:1 text_overflow:TextOverflow.Ellipsis text:q.definition.name}
+                                    request_stopped_state := mod.widgets.HagencyWrapSubtitle{text:A.t("Stopped · what it hasn’t used goes back to the pool","已停止 · 没用掉的额度会回到资源池")}
+                                }
+                                mod.widgets.HagencyChevron{}
+                            }
+                            owner_request_open := mod.widgets.HagencyListFitTap{enabled:can on_click: || A.open_pool_agent(q.id)}
+                        }
+                    }}}
+                }}
             }}
-            if r.result!=nil {View{width:Fill height:Fit padding:Inset{bottom:6}
+            if r.result!=nil && !stop_view {View{width:Fill height:Fit padding:Inset{bottom:6}
                 let note=A.reqs_note(r.result)
                 let yes=r.result.approve
                 mod.widgets.HagencyList{View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:14 top:12 bottom:12} align:Align{y:0.5}
@@ -7794,13 +7895,13 @@ A.render_page = fn(){
                     mod.widgets.HagencyListBody{mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.refresh}} mod.widgets.HagencyAccentText{text:A.t("Try Again","重试")}}
                 }
             }}
-            if r.items!=nil && rows.len()==0 {mod.widgets.HagencyList{View{width:Fill height:Fit flow:Down spacing:6 align:Align{x:0.5} padding:Inset{left:16 right:16 top:22 bottom:22}
+            if r.items!=nil && rows.len()==0 && !stop_view {mod.widgets.HagencyList{View{width:Fill height:Fit flow:Down spacing:6 align:Align{x:0.5} padding:Inset{left:16 right:16 top:22 bottom:22}
                 mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}
                 mod.widgets.HagencyListTitle{width:Fit text:if r.filter=="pending" {A.t("Nothing to review","没有等你审批的申请")} else {A.t("No requests yet","还没有申请")}}
                 mod.widgets.HagencyListSubtitle{width:Fill align:Align{x:0.5} flow:Flow.Right{wrap:true} text:A.t("When an Agent asks to use your pool, it shows up here.","Agent 申请使用你的资源池时，会出现在这里。")}
             }}}
-            if parts.decide.len()>0 {mod.widgets.HagencyListLabel{text:A.t("NEEDS YOUR DECISION","需要你决定")}}
-            for item in parts.decide {let q=item View{width:Fill height:Fit flow:Down padding:Inset{bottom:6}
+            if parts.decide.len()>0 && !stop_view {mod.widgets.HagencyListLabel{text:A.t("NEEDS YOUR DECISION","需要你决定")}}
+            if !stop_view {for item in parts.decide {let q=item let blocked=A.reqs_blocked(q) View{width:Fill height:Fit flow:Down padding:Inset{bottom:6}
                 mod.widgets.HagencyList{
                     mod.widgets.HagencyListFit{
                         View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:14 top:12 bottom:8} align:Align{y:0.5}
@@ -7814,13 +7915,17 @@ A.render_page = fn(){
                         }
                         owner_request_open := mod.widgets.HagencyListFitTap{enabled:can on_click: || A.open_pool_agent(q.id)}
                     }
+                    if blocked!="" {View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:64 right:14 top:0 bottom:4} align:Align{y:0.0}
+                        mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}
+                        request_blocked := mod.widgets.HagencyWrapSubtitle{text:blocked draw_text.color:mod.widgets.RINX_WARNING_FG}
+                    }}
                     View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:64 right:14 top:2 bottom:12}
                         request_reject := mod.widgets.HagencyPillDanger{text:A.t("Decline","拒绝") enabled:can on_click: || A.reqs_ask(q,"reject")}
-                        request_approve := mod.widgets.HagencyPillPrimary{text:A.t("Approve","批准") enabled:can on_click: || A.reqs_ask(q,"approve")}
+                        request_approve := mod.widgets.HagencyPillPrimary{text:A.t("Approve","批准") enabled:can && blocked=="" on_click: || A.reqs_ask(q,"approve")}
                     }
                 }
-            }}
-            if parts.other.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
+            }}}
+            if parts.other.len()>0 && !stop_view {View{width:Fill height:Fit flow:Down spacing:6
                 mod.widgets.HagencyListLabel{text:if r.filter=="pending" {A.t("WAITING ON OTHERS","等待其他人处理")} else {A.t("HANDLED","已处理的申请")}}
                 mod.widgets.HagencyList{for index item in parts.other {let q=item View{width:Fill height:Fit flow:Down
                     let tone=A.pool_tone(q)
@@ -7843,7 +7948,7 @@ A.render_page = fn(){
                 requests_more := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.reqs_load(r.next)}
                 mod.widgets.HagencyListBody{mod.widgets.HagencyAccentText{text:A.t("Show More","显示更多")}}
             }}}
-            mod.widgets.HagencyListNote{padding:Inset{left:7 right:7 top:6 bottom:2} text:A.t("Approving holds the requested amount from the pool for that Agent. Declining closes the request.","批准后，会从资源池为这个 Agent 预留它申请的额度；拒绝后申请会关闭。")}
+            if !stop_view {mod.widgets.HagencyListNote{padding:Inset{left:7 right:7 top:6 bottom:2} text:A.t("Approving gives that Agent the amount it asked for from the pool. Declining closes the request.","批准后，从资源池分给这个 Agent 它申请的额度；拒绝后申请会关闭。")}}
         }}
     }}}
 
@@ -15348,7 +15453,7 @@ alert_layer := View{width:Fill height:Fill flow:Down align:Align{y:1.0} new_batc
             let name=r.definition.name
             let owner=H.entry_role=="owner"
             mod.widgets.HagencyAlertTitle{text:if kind=="pool_approve" {A.t("Approve “"+name+"”?","批准「"+name+"」的申请？")} else if kind=="pool_reject" {A.t("Decline “"+name+"”?","拒绝「"+name+"」的申请？")} else if owner {A.t("Stop “"+name+"” using this pool?","让「"+name+"」停止使用这个资源池？")} else {A.t("Remove “"+name+"”?","要移除「"+name+"」吗？")}}
-            mod.widgets.HagencyAlertMessage{text:if kind=="pool_approve" {A.t("This holds "+A.tokens(r.requestedTokens)+" for it from "+r.poolLabel+".","将从 "+r.poolLabel+" 为它预留 "+A.tokens(r.requestedTokens)+"。")+A.reqs_after(r)} else if kind=="pool_reject" {A.t("The request will be closed. This can’t be undone.","申请将被关闭，且无法撤销。")} else if owner {A.t("It stops taking new work from your pool.","此 Agent 将不再从你的资源池接收新任务。")} else {A.t("It stops taking new work.","此 Agent 将不再接收新任务。")}}
+            mod.widgets.HagencyAlertMessage{text:if kind=="pool_approve" {A.t("This gives it "+A.tokens(r.requestedTokens)+" from "+r.poolLabel+".","将从 "+r.poolLabel+" 分给它 "+A.tokens(r.requestedTokens)+"。")+A.reqs_after(r)} else if kind=="pool_reject" {A.t("The request will be closed. This can’t be undone.","申请将被关闭，且无法撤销。")} else if owner {A.t("It stops taking new work from your pool. Of the "+A.tokens(r.requestedTokens)+" it was given, what it hasn’t used goes back to the pool.","它不再从你的资源池接新任务。分给它的 "+A.tokens(r.requestedTokens)+" 里没用掉的部分，会回到资源池。")+(if A.reqs_stop_view() && A.reqs_pool_over() {A.t(" The alert clears by itself once use is back under the maximum."," 用量回到每月上限以内时，告警自动解除。")} else {""})} else {A.t("It stops taking new work.","此 Agent 将不再接收新任务。")}}
             mod.widgets.HagencyDivider{}
             View{width:Fill height:44 flow:Right
                 if kind=="pool_approve" {owner_decision_cancel := mod.widgets.HagencyAlertButton{text:A.t("Cancel","取消") enabled:!H.busy on_click: || {H.pool_confirm="" H.reqs.confirm=nil A.redraw()}}}
