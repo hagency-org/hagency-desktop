@@ -145,16 +145,18 @@ fn successor_preset(form: &OwnerGrantSuccessionForm, days: Option<i64>, now: u64
     };
     (value > bounds.expiry_after_ms.max(now)).then(|| rfc3339(value))
 }
-/// A script proposal only seeds the native tokens field; the owner can edit it
-/// and the committed value is always read back from that widget.
-fn initial_draft(proposal: Option<u64>) -> GrantChoices {
+/// A script proposal only seeds the native tokens field, and its applicants
+/// only the applicants field; the owner can edit both and the committed values
+/// are always read back from those widgets.
+fn initial_draft(proposal: Option<u64>, applicants: &[String]) -> GrantChoices {
     GrantChoices {
         tokens: proposal.map(|tokens| tokens.to_string()).unwrap_or_default(),
+        managers: applicants.join(" "),
         ..GrantChoices::default()
     }
 }
 /// Defaults for an amendment or renewal: the current limit unless a proposal
-/// filled the field, the current applicants plus any typed ones
+/// filled the field, the current applicants plus any typed or proposed ones
 /// (applicants are never removed), and the current delegation for an
 /// amendment or the end of the new month for a renewal.
 fn fill_successor_defaults(draft: &mut GrantChoices, form: &OwnerGrantSuccessionForm, now: u64) {
@@ -733,7 +735,7 @@ impl MiniAppsPanel {
             phase: Phase::Loading,
             original: None,
             receiver: None,
-            draft: initial_draft(proposal),
+            draft: initial_draft(proposal, flow.applicants()),
             publishing: false,
             cancelling: false,
             form: None,
@@ -1511,18 +1513,18 @@ mod tests {
     #[test]
     fn proposal_prefills_only_the_native_tokens_field_and_is_never_lowered() {
         let form = pool_form(10_000_000);
-        let mut draft = initial_draft(Some(3_000_000));
+        let mut draft = initial_draft(Some(3_000_000), &[]);
         assert_eq!(draft.tokens, "3000000");
         fill_form_defaults(&mut draft, &form);
         assert_eq!(draft.tokens, "3000000");
         // Applicants are still typed natively; expiry keeps today's default.
         assert!(draft.managers.is_empty());
         assert_eq!(draft.expires_utc, publication_expiry(None));
-        let mut default = initial_draft(None);
+        let mut default = initial_draft(None, &[]);
         fill_form_defaults(&mut default, &form);
         assert_eq!(default.tokens, "1000000");
         // Above the available capacity the proposal stays visible and unconfirmable.
-        let mut above = initial_draft(Some(12_000_000));
+        let mut above = initial_draft(Some(12_000_000), &[]);
         fill_form_defaults(&mut above, &form);
         above.coordinator = "@owner:test".into();
         above.managers = "@manager:test".into();
@@ -1531,7 +1533,7 @@ mod tests {
         above.tokens = "3000000".into();
         assert!(form_choices_valid(&form, &above));
         // A reopened form keeps what the owner typed over the proposal.
-        let mut edited = initial_draft(Some(3_000_000));
+        let mut edited = initial_draft(Some(3_000_000), &[]);
         edited.tokens = "2500000".into();
         fill_form_defaults(&mut edited, &form);
         assert_eq!(edited.tokens, "2500000");
@@ -1577,7 +1579,7 @@ mod tests {
         // No proposal, applicant or selector flag offers a commit beside a
         // published grant: nothing is revoked, reserved or published from here.
         let form = pool_form(10_000_000);
-        let mut draft = initial_draft(Some(3_000_000));
+        let mut draft = initial_draft(Some(3_000_000), &[]);
         fill_form_defaults(&mut draft, &form);
         draft.coordinator = "@owner:test".into();
         draft.managers = "@manager:test".into();
@@ -1610,7 +1612,7 @@ mod tests {
         const ENDED_NOTE: &str =
             "The proposed limit is filled in when you choose this month's limits.";
         let form = pool_form(10_000_000);
-        let draft = initial_draft(Some(3_000_000));
+        let draft = initial_draft(Some(3_000_000), &[]);
         // Once its UTC month has ended, a published grant (the server reports
         // it expired) or an unpublished recorded one no longer blocks: the
         // pool has no limit and the panel offers this month's limits instead.
@@ -1693,7 +1695,7 @@ mod tests {
             );
         }
         // A proposal adds or removes no action on an existing original.
-        let draft = initial_draft(Some(3_000_000));
+        let draft = initial_draft(Some(3_000_000), &[]);
         assert!(primary_available(
             &progress(OwnerGrantState::Recorded, false),
             None,
@@ -1758,8 +1760,8 @@ mod tests {
         assert_eq!(bounds.keep_managers, ["@manager:test"]);
         // The proposal fills the tokens field; applicants are added to the
         // current ones; the current delegation is kept.
-        let mut draft = initial_draft(Some(800_000));
-        draft.managers = "@new:test".into();
+        let mut draft = initial_draft(Some(800_000), &["@new:test".to_owned()]);
+        assert_eq!(draft.managers, "@new:test");
         fill_successor_defaults(&mut draft, &form, now_ms());
         assert_eq!(draft.tokens, "800000");
         assert_eq!(draft.managers, "@manager:test @new:test");
@@ -1781,7 +1783,7 @@ mod tests {
         late.expires_utc = rfc3339(form.period_end_ms + 1000);
         assert!(!choices_valid(&bounds, &late));
         // Without a proposal the field starts at the current limit.
-        let mut plain = initial_draft(None);
+        let mut plain = initial_draft(None, &[]);
         fill_successor_defaults(&mut plain, &form, now_ms());
         assert_eq!(plain.tokens, "2000000");
         assert_eq!(plain.managers, "@manager:test");
@@ -1801,7 +1803,7 @@ mod tests {
     fn a_renewal_starts_next_month_and_its_delegation_reaches_into_it() {
         let form = successor_form(OwnerGrantSuccessionKind::Renewal);
         let bounds = successor_bounds(&form);
-        let mut draft = initial_draft(None);
+        let mut draft = initial_draft(None, &[]);
         fill_successor_defaults(&mut draft, &form, now_ms());
         // Q12: a renewal's delegation defaults to the end of the new month.
         assert_eq!(draft.expires_utc, rfc3339(form.period_end_ms));
@@ -1838,7 +1840,7 @@ mod tests {
             proposal_notice(&live, Some(3_000_000), "", true, OCTOBER).unwrap(),
             format!("Per-request limit: 2 M → 3 M\n{AMENDABLE_NOTE}")
         );
-        let draft = initial_draft(Some(3_000_000));
+        let draft = initial_draft(Some(3_000_000), &[]);
         assert!(primary_available(&live, None, &draft, true, true, true, OCTOBER));
         // Only the native amendment form can commit; without support or a
         // pool selector nothing is offered.
@@ -1880,7 +1882,7 @@ mod tests {
             proposal_notice(&scheduled, Some(3_000_000), "", true, OCTOBER).unwrap(),
             format!("Per-request limit: None active → 3 M\n{SCHEDULED_NOTE}")
         );
-        let draft = initial_draft(Some(3_000_000));
+        let draft = initial_draft(Some(3_000_000), &[]);
         assert!(!primary_available(&scheduled, None, &draft, true, true, true, OCTOBER));
         // In its own month it is the active grant and can be amended.
         assert!(!scheduled_grant(&scheduled, NOVEMBER));

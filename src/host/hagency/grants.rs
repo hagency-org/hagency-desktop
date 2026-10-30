@@ -49,6 +49,9 @@ struct Selector {
     /// Open the native form for an amendment or a renewal of the pool's
     /// published grant instead of a new grant.
     succession: Option<Succession>,
+    /// Agent applicants a script proposes. They only pre-select the native
+    /// applicants field; the owner still confirms them natively.
+    applicants: Option<Vec<String>>,
 }
 /// A complete Matrix user ID (`@name:server`), as the native form accepts.
 pub(crate) fn matrix_user(id: &str) -> bool {
@@ -58,9 +61,12 @@ pub(crate) fn matrix_user(id: &str) -> bool {
             name.starts_with('@') && name.len() > 1 && !server.is_empty()
         })
 }
+fn server_of(id: &str) -> Option<&str> {
+    id.split_once(':').map(|(_, server)| server)
+}
 impl Selector {
     fn parse(value: Value) -> Result<Self, String> {
-        let value: Self = parse(value)?;
+        let mut value: Self = parse(value)?;
         let keys: Vec<_> = [&value.contribution_id, &value.intent_id]
             .into_iter()
             .flatten()
@@ -80,7 +86,32 @@ impl Selector {
         {
             return Err("invalid_management_arguments".into());
         }
+        if let Some(applicants) = &mut value.applicants {
+            applicants.sort();
+            applicants.dedup();
+            if value.contribution_id.is_none()
+                || applicants.is_empty()
+                || applicants.len() > 64
+                || !applicants.iter().all(|id| matrix_user(id))
+            {
+                return Err("invalid_management_arguments".into());
+            }
+        }
         Ok(value)
+    }
+    /// Applicants must be selectable by the native form: users of the
+    /// owner's own homeserver, the only ones a grant may name.
+    fn check_applicants(&self, owner: &str) -> Result<(), String> {
+        let server = server_of(owner).ok_or("invalid_management_arguments")?;
+        if self
+            .applicants
+            .iter()
+            .flatten()
+            .any(|id| server_of(id) != Some(server))
+        {
+            return Err("invalid_management_arguments".into());
+        }
+        Ok(())
     }
 }
 
@@ -278,6 +309,10 @@ impl GrantFlow {
     /// The script's proposed amount for the native tokens field, if any.
     pub fn proposed_tokens(&self) -> Option<u64> {
         self.selector.proposed_tokens
+    }
+    /// Applicants the script proposed for the native applicants field.
+    pub fn applicants(&self) -> &[String] {
+        self.selector.applicants.as_deref().unwrap_or_default()
     }
     /// Last known server support for amending or renewing a published grant.
     pub fn succession_supported(&self) -> Option<bool> {
@@ -501,6 +536,7 @@ impl Host {
         let selector = Selector::parse(args)?;
         let account = self.check(&lease)?;
         lease.authorize(&account, REVIEW_GRANT, None)?;
+        selector.check_applicants(&account)?;
         // Only the native adoption handoff or authenticated descriptor reload
         // can supply this qualified registry/session. This script selector
         // cannot choose a path or initialize a new resource authority.
@@ -814,18 +850,31 @@ mod tests {
         assert!(matches!(ended.state, OwnerGrantState::Recorded));
     }
     #[test]
-    fn succession_is_a_bounded_pool_argument() {
+    fn succession_and_applicants_are_bounded_pool_arguments() {
         let parsed = |value: Value| Selector::parse(value);
         let s = parsed(json!({"contributionId":"pool_1","proposedTokens":800000,"succession":"amendment"})).unwrap();
         assert_eq!(s.succession, Some(Succession::Amendment));
         assert_eq!(s.proposed_tokens, Some(800000));
         assert_eq!(parsed(json!({"contributionId":"pool_1","succession":"renewal"})).unwrap().succession, Some(Succession::Renewal));
+        let s = parsed(json!({"contributionId":"pool_1","applicants":["@b:test","@a:test","@b:test"]})).unwrap();
+        assert_eq!(s.applicants.as_deref(), Some(&["@a:test".to_owned(), "@b:test".to_owned()][..]));
+        assert!(s.check_applicants("@owner:test").is_ok());
+        assert_eq!(s.check_applicants("@owner:other.test"), Err("invalid_management_arguments".into()));
+        let many: Vec<String> = (0..65).map(|n| format!("@m{n}:test")).collect();
         for bad in [
             json!({"intentId":"original_1","succession":"amendment"}),
             json!({"contributionId":"pool_1","succession":"revoke"}),
             json!({"contributionId":"pool_1","succession":"Amendment"}),
             json!({"contributionId":"pool_1","succession":true}),
-            json!({"contributionId":"pool_1","succession":"amendment","eligibleManagers":["@a:test"]}),
+            json!({"intentId":"original_1","applicants":["@a:test"]}),
+            json!({"contributionId":"pool_1","applicants":[]}),
+            json!({"contributionId":"pool_1","applicants":["a:test"]}),
+            json!({"contributionId":"pool_1","applicants":["@:test"]}),
+            json!({"contributionId":"pool_1","applicants":["@a:"]}),
+            json!({"contributionId":"pool_1","applicants":["@a b:test"]}),
+            json!({"contributionId":"pool_1","applicants":"@a:test"}),
+            json!({"contributionId":"pool_1","applicants":many}),
+            json!({"contributionId":"pool_1","applicants":["@a:test"],"eligibleManagers":["@a:test"]}),
         ] {
             assert!(parsed(bad.clone()).is_err(), "{bad}");
         }
