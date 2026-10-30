@@ -447,7 +447,7 @@ A.submit_resource_name = fn(){
 }
 A.resource_edit_reason = fn(reason){
     if reason=="previously_offered" {return A.t("This resource has already been offered. Its server agreement must be amended before configuration changes.","此资源已贡献过。修改配置前须先变更服务器上的协议。")}
-    if reason=="published" {return A.t("This resource is published locally. It cannot be changed in place here.","此资源已在本机目录登记，此处不能直接修改配置。")}
+    if reason=="published" {return A.t("This resource is published locally. It cannot be changed in place here.","这个资源池正在公开介绍，这里不能直接修改配置。")}
     if reason=="retained_commitments" {return A.t("This resource has retained allocations or usage commitments.","这个资源池还有已用或已分出的额度。")}
     if reason=="managed_namespace_required" {return A.t("Editing currently requires a resource enrolled from a private Codex account space.","编辑目前要求资源来自独立的 Codex 账号空间。")}
     if reason=="account_unavailable" {return A.t("The original account space is unavailable or sign-in is in progress. Check Accounts, then refresh.","原账号空间不可用或正在登录。请检查账号后刷新。")}
@@ -1318,7 +1318,7 @@ A.nav_title=fn(){
     if p=="template" {return if H.templates.detail!=nil {H.templates.detail.definition.name} else {A.t("Template","模板")}}
     if p=="template_edit" {return A.t("Edit Template","编辑模板")}
     if p=="template_command" {return A.t("Review","确认更改")}
-    if p=="web_catalog" {return if H.web.section=="offers" {A.t("Roles in the Catalogue","目录里的角色")} else {A.t("Daily Use, as Stated","每天用量说明")}}
+    if p=="web_catalog" {return if H.web.section=="offers" {A.t("Roles in the Catalogue","介绍里的角色")} else {A.t("Daily Use, as Stated","每天用量说明")}}
     if p=="web_catalog_command" && A.web_retire_review() {return A.t("Delete Pool","删除资源池")}
     if p=="web_catalog_command" {return A.t("Review","确认更改")}
     if p=="default_policy" {return A.t("New Agent Permissions","新 Agent 默认权限")}
@@ -1487,7 +1487,7 @@ A.sub_title=fn(){
     if p=="workspace" {return A.t("Workspace","工作区")}
     if p=="templates" {return A.t("Agent Templates","Agent 模板")}
     if p=="template" {return if H.templates.detail!=nil {H.templates.detail.definition.name} else {A.t("Template","模板")}}
-    if p=="web_catalog" {return if H.web.section=="offers" {A.t("Roles in the Catalogue","目录里的角色")} else {A.t("Daily Use, as Stated","每天用量说明")}}
+    if p=="web_catalog" {return if H.web.section=="offers" {A.t("Roles in the Catalogue","介绍里的角色")} else {A.t("Daily Use, as Stated","每天用量说明")}}
     if p=="connections" {return A.t("Server Connections","服务器连接")}
     if p=="pool_requests" {return if A.reqs_using_view() {A.t("Agents Using This Pool","使用中的 Agent")} else if A.reqs_stop_view() {A.t("Stop Some Agents","停止部分 Agent")} else {A.t("Requests","申请")}}
     if p=="default_policy" {return A.t("New Agent Permissions","新 Agent 默认权限")}
@@ -1508,7 +1508,7 @@ A.sub_back_label=fn(){
     if p=="tool_grant_result" {return A.t("Saved","已保存的工具权限")}
     if p=="resource_alert" || p=="stopped_task" || p=="workspace" {return A.t("Health","健康与恢复")}
     if p=="template" || p=="template_command" {return A.t("Templates","Agent 模板")}
-    if p=="web_catalog_command" {return if H.web.section=="settings" {A.t("Advanced Settings","高级设置")} else {A.t("Roles","目录里的角色")}}
+    if p=="web_catalog_command" {return if H.web.section=="settings" {A.t("Advanced Settings","高级设置")} else {A.t("Roles","介绍里的角色")}}
     return A.t("Back","返回")
 }
 A.sub_back=fn(){
@@ -3486,7 +3486,7 @@ A.web_int=fn(text,blank){let s=text.trim() if s==""{return blank} let n=s.to_f64
 A.web_can_edit=fn(){let w=H.web if H.busy || H.command!=nil || w.pending!=nil || w.phase=="saving" || w.phase=="unknown" || w.phase=="submitting"{return false} for row in H.saved_commands{let {hasReply=false}=row if row.operation=="web_catalog" && !hasReply{return false}} return true}
 A.open_web_catalog=fn(resource,section,after){if H.busy{return} if section=="trust" {A.pool_sub_open("pool_who",resource) return} let w=H.web w.resourceId=resource w.section=section w.after=after w.catalog=nil w.draft=nil H.page="web_catalog"
     let service=if section=="offers"{"hagency.web_catalog.offers"}else if section=="trust"{"hagency.web_catalog.trust"}else{"hagency.web_catalog.get"}
-    A.web_read(service,{resourceId:resource after:after},fn(v){if v.resourceId!=resource || !v.revision.is_string(){H.notice=A.web_error("management_outcome_unknown") return} w.catalog=v if section=="settings"{w.rate=if v.rateCapPerDay==nil{""}else{""+v.rateCapPerDay}} if H.nav.anchor!=""{start_timeout(0.3,||{if H.page=="web_catalog"{A.nav_scroll()}})}})
+    A.web_read(service,{resourceId:resource after:after},fn(v){if v.resourceId!=resource || !v.revision.is_string(){H.notice=A.web_error("management_outcome_unknown") return} w.catalog=v if section=="settings"{w.rate=A.web_rate_text(v.rateCapPerDay)} if H.nav.anchor!=""{start_timeout(0.3,||{if H.page=="web_catalog"{A.nav_scroll()}})}})
 }
 // "old → " for a listing row whose current value is known and differs; "" otherwise.
 A.web_offer_before=fn(role,field,word){
@@ -3510,7 +3510,7 @@ A.web_change_label=fn(c){
     if c.operation=="assign_preset"{return A.t("Use the pool’s defaults","改用资源池的默认设置")+" · "+A.web_agent_name(c.engagementId)}
     if c.operation=="trust_add"{return A.t("Trust project","信任项目")+" · "+A.recipient_optional(c,"displayName")}
     if c.operation=="trust_remove"{return A.t("Stop trusting project","不再信任项目")}
-    return A.capability_label(c.role)+" · "+if c.published{A.t("Shown in the catalogue","在目录里显示")}else{A.t("Hidden","不再显示")}
+    return A.capability_label(c.role)+" · "+if c.published{A.t("Shown in the catalogue","公开中")}else{A.t("Hidden","不公开")}
 }
 A.web_same_change=fn(a,b){
     if a.operation!=b.operation{return false}
@@ -3546,7 +3546,22 @@ A.web_finish=fn(){let w=H.web if H.busy || w.pending==nil || (w.phase!="recorded
         if p.result!=nil && p.result.retired{A.navigate("resources")}else if w.section=="settings"{A.pool_sub_open("pool_advanced",p.resourceId)}else{A.open_web_catalog(p.resourceId,w.section,nil)}
     })
 }
-A.web_rate=fn(){let n=A.web_int(H.web.rate,nil) if n!=nil && n<1{H.notice=A.web_error("invalid_management_arguments") A.redraw() return} A.web_prepare({operation:"rate_cap" rateCapPerDay:n})}
+// The daily amount as typed, in M ("0.5"): exact tokens, nil when empty, -1 when it isn't an amount.
+A.web_rate_tokens=fn(text){
+    let parts=text.trim().split(".")
+    if text.trim()=="" {return nil}
+    if parts.len()>2 {return -1}
+    let whole=parts[0] let frac=if parts.len()==2 {parts[1]} else {""}
+    if (whole=="" && frac=="") || frac.len()>6 || whole.len()>9 {return -1}
+    let digits="0123456789".to_chars()
+    let all=(whole+frac).to_chars()
+    for ch in all {let found={y:false} for d in digits {if ch==d {found.y=true}} if !found.y {return -1}}
+    let padded=frac.to_chars() let zero="0".to_chars()[0]
+    for i in 6-frac.len() {padded.push(zero)}
+    return ((if whole=="" {"0"} else {whole})+padded.to_string()).to_f64()
+}
+A.web_rate_text=fn(tokens){return if tokens==nil {""} else {A.tokens(tokens).split(" M")[0]}}
+A.web_rate=fn(){let n=A.web_rate_tokens(H.web.rate) if n!=nil && n<1{H.notice=A.web_error("invalid_management_arguments") A.redraw() return} A.web_prepare({operation:"rate_cap" rateCapPerDay:n})}
 A.web_offer_edit=fn(row){if !A.web_can_edit(){return} H.web.draft={role:row.role count:if row.count==nil{""}else{""+row.count} budget:if row.budgetCapPerEngagement==nil{""}else{""+row.budgetCapPerEngagement} rate:if row.rateCap==nil{""}else{""+row.rateCap} published:row.published || row.catalogPublished qualified:row.qualified} A.redraw()}
 A.web_offer_save=fn(){let d=H.web.draft if d==nil{return} let count=A.web_int(d.count,nil) let budget=A.web_int(d.budget,nil) let rate=A.web_int(d.rate,nil)
     if (count!=nil && count<1) || (budget!=nil && budget<1) || (rate!=nil && rate<1){H.notice=A.web_error("invalid_management_arguments") A.redraw() return}
@@ -3576,10 +3591,10 @@ A.web_refresh_plan=fn(){let w=H.web let c=H.webConnection
         return {service:"hagency.web_connections.get" args:{id:c.id} done:fn(v){if v.id==c.id{c.detail=v c.tokens=if v.allocatedTokens==nil{""}else{""+v.allocatedTokens}}}}
     }
     if H.page=="web_catalog" && w.catalog!=nil && w.draft==nil{
-        if w.section=="settings" && w.rate!=(if w.catalog.rateCapPerDay==nil{""}else{""+w.catalog.rateCapPerDay}){return nil}
+        if w.section=="settings" && w.rate!=A.web_rate_text(w.catalog.rateCapPerDay){return nil}
         if w.section=="trust" && (w.trustRoom!="" || w.trustName!=""){return nil}
         let service=if w.section=="offers"{"hagency.web_catalog.offers"}else if w.section=="trust"{"hagency.web_catalog.trust"}else{"hagency.web_catalog.get"}
-        return {service:service args:{resourceId:w.resourceId after:w.after} done:fn(v){if v.resourceId==w.resourceId{w.catalog=v if w.section=="settings"{w.rate=if v.rateCapPerDay==nil{""}else{""+v.rateCapPerDay}}}}}
+        return {service:service args:{resourceId:w.resourceId after:w.after} done:fn(v){if v.resourceId==w.resourceId{w.catalog=v if w.section=="settings"{w.rate=A.web_rate_text(v.rateCapPerDay)}}}}
     }
     if H.page=="overview"{return nil}
     if H.page=="pool_agent" && H.pool_detail!=nil && H.pool_confirm==""{return {service:"hagency.pools.agents.get" args:{id:H.pool_detail.id} done:fn(v){if H.pool_detail!=nil && v.request.id==H.pool_detail.id{H.pool_detail=v.request}}}}
@@ -5440,7 +5455,7 @@ A.pool_whole=fn(text){
 A.pool_max_reason=fn(reason,amend){
     if reason=="read_only" {return A.t("You can only view this pool here.","这里只能查看，不能修改。")}
     if reason=="account_unavailable" {return A.t("Sign in to the coding tool again to change it.","请先在「编码工具」里重新登录。")}
-    if reason=="published" {return A.t("It can’t change while the pool is shown in the catalogue.","在目录里显示期间，每月上限不能修改。")}
+    if reason=="published" {return A.t("It can’t change while the pool is shown in the catalogue.","公开介绍期间，每月上限不能修改。")}
     if reason=="retained_commitments" {return A.t("Some of it is given out to Agents, so it can’t change yet.","还有额度已分出，暂时不能修改。")}
     if amend==nil {return A.pool_lock_rule()}
     let why=A.recipient_optional(amend,"reason")
@@ -6587,7 +6602,7 @@ A.pool_adv_load=fn(rid){
         if !r.is_ok {H.pool_adv_state="error" A.redraw() return}
         let {resourceId="",revision=nil,rateCapPerDay=nil}=r.data
         if resourceId!=rid || revision==nil || !revision.is_string() {H.pool_adv_state="error" A.redraw() return}
-        w.catalog=r.data w.rate=if rateCapPerDay==nil {""} else {""+rateCapPerDay} H.pool_adv_state="ready"
+        w.catalog=r.data w.rate=A.web_rate_text(rateCapPerDay) H.pool_adv_state="ready"
         A.redraw()
     })
 }
@@ -6686,7 +6701,7 @@ A.pool_pill_text=fn(v){
     return A.t("Server and Publishing","服务器与发布")
 }
 A.pool_model_lock=fn(v){
-    if v.editReason=="published" {return A.t("locked while shown in the catalogue","在目录里显示期间锁定")}
+    if v.editReason=="published" {return A.t("locked while shown in the catalogue","公开介绍期间锁定")}
     if v.editReason=="previously_offered" {return A.t("locked once connected","连接服务器后锁定")}
     return A.t("locked","已锁定")
 }
@@ -6849,10 +6864,15 @@ A.pool_glossary=fn(){
         {key:"left" term:A.t("Left","剩余") gist:A.t("What this month can still give out","本月还能分出的") text:A.t("The monthly maximum minus used and given out. It resets "+A.pool_reset_rule()+".","每月上限减去已用和已分出。"+A.pool_reset_rule()+"重置。")},
         {key:"held" term:A.t("Held by running Agents","正在运行的 Agent 已拿到") gist:A.t("The lowest the per-request limit can go","每次申请上限最低只能调到这里") text:A.t("What running Agents were given, including what they already used. The per-request limit can’t go below it. The pool’s page shows an estimate; the confirmation window has the exact figure.","正在运行的 Agent 拿到的额度，包括已经用掉的部分。每次申请上限不能低于它；资源池页面上是估计值，确认窗口里有准确数字。")},
         {key:"publish" term:A.t("Publish","发布") gist:A.t("Lets people on the list request","让名单上的人能申请") text:A.t("Hands this month’s capacity to the server so people on the list can request it, once a month. In the last 7 days you can publish next month ahead.","把本月额度交给服务器，名单上的人才能申请，每月一次。每月最后 7 天还能提前发布下个月。")},
+        {key:"workspace" term:A.t("Workspace","工作区") gist:A.t("The folder an Agent works in","Agent 干活用的文件夹") text:A.t("The folder on this computer where an Agent reads and writes its project’s files. When a task stops unexpectedly, it’s marked so you check it before it’s used again.","Agent 在这台电脑上读写项目文件的文件夹。任务意外停止后它会被标记，你看过后才能再用。")},
+        {key:"room" term:A.t("Approval chat","审批对话") gist:A.t("Where an Agent asks before using a tool","Agent 用工具前来问你的聊天") text:A.t("A chat with only you and one Agent. When it wants to use a tool that needs your OK, it asks you there. It’s set up for you and rarely needs changing.","只有你和一个 Agent 的聊天。它要用需要你同意的工具时，会在这里问你。它是自动建好的，一般不用管。")},
+        {key:"intro" term:A.t("Public introduction","公开介绍") gist:A.t("What applicants can read about a pool","申请者能看到的资源池介绍") text:A.t("An optional description of the pool for people looking for one: its roles and how much it is used a day. It doesn’t limit anything; people on your list can request either way.","可选的资源池说明，给正在找资源池的人看：它能做什么、每天大约用多少。它不限制任何东西；名单上的人不管公开不公开都能申请。")},
         {key:"m" term:"1 M" gist:A.t("One million tokens","100 万 token") text:A.t("Tokens are how model use is counted. Amounts are Hagency’s records, not the provider’s balance. Pools on one account share its account limit.","token 是模型用量的计算单位。额度来自 Hagency 的记录，不是服务商余额。同一账号下的资源池共用账号上限。")}
     ]
 }
 A.glossary_toggle=fn(key){H.glossary_open=if H.glossary_open==key {""} else {key} A.redraw()}
+// "What is …?" on a secondary page: the glossary, opened at that word.
+A.glossary_term_open=fn(key,rid){if H.busy || rid==nil || rid=="" {return} H.glossary_open=key A.pool_sub_open("pool_glossary",rid)}
 // Create a pool in a sheet on this tab: tool, model, reasoning and monthly maximum.
 A.pool_create_open=fn(){
     if H.busy || H.command!=nil {return}
@@ -7336,7 +7356,7 @@ A.recover_native = fn(row){
     })
 }
 A.saved_label = fn(operation){
-    if operation=="web_catalog"{return A.t("Catalogue entry and defaults","目录介绍与默认设置")}
+    if operation=="web_catalog"{return A.t("Catalogue entry and defaults","公开介绍与默认设置")}
     if A.personal_config_operation(operation){return A.t("Local-agent model, workspace or tool rules","本地 Agent 模型、工作区或工具规则")}
     if A.is_template_operation(operation){return A.t("Saved agent template change","已保存的 Agent 模板更改")}
     if A.is_graph_operation(operation){return A.t("Saved graph change","已保存的任务图更改")}
@@ -7390,7 +7410,7 @@ A.retry_command = fn(){
         if A.personal_config_service(command.service){A.personal_config_reply(command,r) return}
         H.busy = false
         if command.service=="hagency.resources.publish" && !r.is_ok && r.error=="management_resource_in_use" {
-            H.command=nil H.notice=A.t("This configuration has active allocations or another owner. Its saved definition must stay unchanged. Use the listing to control new requests.","此配置正被使用或属于其他所有者，已保存的设置不能改。可以在「高级设置」的目录介绍里控制新的申请。")
+            H.command=nil H.notice=A.t("This configuration has active allocations or another owner. Its saved definition must stay unchanged. Use the listing to control new requests.","此配置正被使用或属于其他所有者，已保存的设置不能改。可以在「高级设置」的公开介绍里控制新的申请。")
             if A.save(){A.acknowledge(command.args.commandId)} A.redraw() return
         }
         if command.service=="hagency.tool_grants.revoke" {A.tool_grant_reply(command,r) return}
@@ -10533,8 +10553,10 @@ A.render_page = fn(){
                         if open {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:55 right:14 bottom:6}
                             if info.exact!="" {mod.widgets.HagencyCode{mod.widgets.HagencyCodeText{text:info.exact}}}
                             if info.reason!="" {mod.widgets.HagencyWrapSubtitle{text:A.t("Reason: ","理由：")+info.reason}}
-                            mod.widgets.HagencyListSubtitle{text:A.t("Request ID, if your administrator asks · select to copy","请求编号（管理员问起时用）· 可选中复制")}
-                            approval_request_id := mod.widgets.HagencyCopyText{text:a.id}
+                            mod.widgets.HagencyIdRow{
+                                mod.widgets.HagencyWrapSubtitle{text:A.t("Request ID, if your administrator asks","请求编号（管理员问起时用）")}
+                                approval_request_id := mod.widgets.HagencyIdText{text:a.id}
+                            }
                         }}
                         View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:6 bottom:12}
                             View{width:Fill height:Fit flow:Right spacing:8
@@ -10713,7 +10735,10 @@ A.render_page = fn(){
             }}
 
             if tab=="rooms" {View{width:Fill height:Fit flow:Down spacing:6
-                mod.widgets.HagencyListNote{padding:Inset{left:2 right:7 top:0 bottom:4} text:A.t("Advanced. Each Agent sends its tool approvals to a private room. You rarely need to change these.","高级设置。每个 Agent 的工具审批会发到一个只有你和它的聊天里，通常不用改。")}
+                View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}
+                    mod.widgets.HagencyListNote{padding:Inset{left:2 right:7 top:0 bottom:4} text:A.t("An approval chat is where an Agent asks you before using a tool: only you and it. It’s set up for you; you rarely need to change it.","审批对话：Agent 用工具前来问你的聊天，只有你和它。它是自动建好的，一般不用管。")}
+                    bindings_term := mod.widgets.HagencyBarText{text:A.t("Learn More","了解更多") enabled:!H.busy on_click:||A.glossary_term_open("room",H.binding_resource)}
+                }
                 if H.binding_after!="" || H.binding_filters.agent!="" || H.binding_filters.project!="" || (H.binding_page!=nil && H.binding_page.nextAfter!=nil) {mod.widgets.HagencyList{
                     mod.widgets.HagencyListRow{
                         bindings_filter_toggle := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || {H.bindings_filter_open=!H.bindings_filter_open A.redraw()}}
@@ -10892,8 +10917,8 @@ A.render_page = fn(){
                         }
                     }
                     if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                        View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Request · select to copy","请求编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:row.id}}
-                        if subject!=nil {View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project","项目编号")} mod.widgets.HagencyCopyText{text:subject.projectId}}}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Request","请求编号")} mod.widgets.HagencyIdText{text:row.id}}
+                        if subject!=nil {mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Project","项目编号")} mod.widgets.HagencyIdText{text:subject.projectId}}}
                     }}
                 }}
             }}
@@ -10990,8 +11015,8 @@ A.render_page = fn(){
                     }
                     if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
                         mod.widgets.HagencyWrapSubtitle{text:A.t("Runtime ","运行环境 ")+row.framework}
-                        View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project · select to copy","项目编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:row.projectId}}
-                        View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Agent link","Agent 关联")} mod.widgets.HagencyCopyText{text:row.engagementId}}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Project","项目编号")} mod.widgets.HagencyIdText{text:row.projectId}}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Agent link","Agent 关联")} mod.widgets.HagencyIdText{text:row.engagementId}}
                     }}
                 }}
             }}
@@ -11122,8 +11147,8 @@ A.render_page = fn(){
                     }
                 }
                 if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project · select to copy","项目编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:d.projectId}}
-                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Agent link","Agent 关联")} mod.widgets.HagencyCopyText{text:d.engagementId}}
+                    mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Project","项目编号")} mod.widgets.HagencyIdText{text:d.projectId}}
+                    mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Agent link","Agent 关联")} mod.widgets.HagencyIdText{text:d.engagementId}}
                 }}
             }}
         }}}
@@ -11617,9 +11642,8 @@ A.render_page = fn(){
                         }}
                         mod.widgets.HagencyListDivider{margin:Inset{left:16}}
                         View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:10 bottom:12}
-                            mod.widgets.HagencyListSubtitle{text:A.t("Alert ID · select to copy","告警编号 · 可选中复制")}
-                            alert_id_copy := mod.widgets.HagencyCopyText{text:row.id}
-                            if assignee!=nil {View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Handled by","处理人")} mod.widgets.HagencyCopyText{text:assignee}}}
+                            mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Alert ID","告警编号")} alert_id_copy := mod.widgets.HagencyIdText{text:row.id}}
+                            if assignee!=nil {mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Handled by","处理人")} mod.widgets.HagencyIdText{text:assignee}}}
                             if ceiling {View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Server text","服务器原文")} mod.widgets.HagencyCopyText{text:""+row.summary}}}
                         }
                     }}
@@ -11818,8 +11842,8 @@ A.render_page = fn(){
                         }
                     }
                     if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                        View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project · select to copy","项目编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:d.attempt.projectId}}
-                        View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Run","执行编号")} mod.widgets.HagencyCopyText{text:d.attempt.dispatchId}}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Project","项目编号")} mod.widgets.HagencyIdText{text:d.attempt.projectId}}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Run","执行编号")} mod.widgets.HagencyIdText{text:d.attempt.dispatchId}}
                     }}
                 }}}
             }}
@@ -11867,6 +11891,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyAvatar{draw_bg.color:A.local_tone_bg(tone) mod.widgets.HagencyAvatarGlyph{draw_icon.svg:mod.rinx_icons.folder draw_icon.color:A.local_tone_fg(tone)}}
                     mod.widgets.HagencyHeroName{width:Fill align:Align{x:0.5} flow:Flow.Right{wrap:true} text:if H.workspace_mode=="result" {A.t("Ready to Use Again","工作区可以再次使用")} else {A.workspace_state(row)}}
                     mod.widgets.HagencyHint{width:Fit text:A.workspace_label(row)}
+                    workspace_term := mod.widgets.HagencyBarText{text:A.t("What’s a workspace?","什么是工作区？") enabled:!H.busy on_click:||A.glossary_term_open("workspace",H.workspace_resource)}
                 }
                 if row.quarantined {mod.widgets.HagencyList{
                     mod.widgets.HagencySwitchRow{
@@ -11978,7 +12003,7 @@ A.render_page = fn(){
                         }
                     }
                     if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                        View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Workspace · select to copy","工作区编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:row.workspaceId}}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Workspace (folder) ID","工作区（文件夹）编号")} mod.widgets.HagencyIdText{text:row.workspaceId}}
                     }}
                 }}
             }}
@@ -12230,7 +12255,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
             let pool=if c!=nil && w.section=="settings" {c.resourceName} else {A.sub_pool_name(w.resourceId)}
             if w.draft==nil {View{width:Fill height:Fit flow:Down spacing:6
                 // Part of Advanced Settings: the catalogue's roles, or its daily-use note on its own.
-                mod.widgets.HagencyLargeTitle{text:if w.section=="offers" {A.t("Roles in the Catalogue","目录里的角色")} else {A.t("Daily Use, as Stated","每天用量说明")}}
+                mod.widgets.HagencyLargeTitle{text:if w.section=="offers" {A.t("Roles in the Catalogue","介绍里的角色")} else {A.t("Daily Use, as Stated","每天用量说明")}}
                 if pool!="" {mod.widgets.HagencyListNote{padding:Inset{left:2 right:7 top:0 bottom:6} text:pool}}
             }}
             if w.pending!=nil {View{width:Fill height:Fit padding:Inset{bottom:6} mod.widgets.HagencyList{mod.widgets.HagencyListTall{
@@ -12255,7 +12280,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 mod.widgets.HagencySwitchRow{
                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_DANGER_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_DANGER_FG}}
                     mod.widgets.HagencyListText{
-                        mod.widgets.HagencyWrapTitle{text:A.t("Couldn’t load the catalogue entry","暂时无法读取目录里的介绍")}
+                        mod.widgets.HagencyWrapTitle{text:A.t("Couldn’t load the catalogue entry","暂时无法读取公开介绍")}
                         mod.widgets.HagencyWrapSubtitle{text:A.read_error(H.ux.errorCode)}
                     }
                 }
@@ -12279,7 +12304,8 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }
                     if H.details_open=="daily_rate" {View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12} align:Align{y:0.5}
-                        web_daily_rate := mod.widgets.HagencyInput{width:Fill empty_text:A.t("Tokens per day","每天 token 数") text:w.rate on_change:|s|{if A.web_can_edit(){w.rate=s}}}
+                        web_daily_rate := mod.widgets.HagencyInput{width:Fill empty_text:A.t("About how much a day, e.g. 0.5","每天大约用多少，例如 0.5") text:w.rate on_change:|s|{if A.web_can_edit(){w.rate=s}}}
+                        mod.widgets.HagencyListValue{text:"M"}
                         web_daily_review := mod.widgets.HagencyGetButton{text:A.t("Next","下一步") enabled:A.web_can_edit() on_click: || A.web_rate()}
                     }}
                 }
@@ -12318,7 +12344,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         mod.widgets.HagencyRowBody{
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.globe draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}
                             mod.widgets.HagencyListText{
-                                mod.widgets.HagencyListTitle{text:A.t("Show to applicants","在目录里显示")}
+                                mod.widgets.HagencyListTitle{text:A.t("Show to applicants","对申请者公开")}
                                 mod.widgets.HagencyListSubtitle{text:if !d.qualified {A.t("This model doesn’t qualify","此模型不满足要求")} else if d.published {A.t("Applicants can see it","申请者可以看到")} else {A.t("Applicants can’t see it","申请者看不到")}}
                             }
                             mod.widgets.HagencySwitch{draw_bg.selected:if d.published {1.0} else {0.0} enabled:!H.busy && d.qualified}
@@ -12397,7 +12423,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         mod.widgets.HagencySwitchRow{
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_INFO_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.robot draw_icon.color:mod.widgets.RINX_INFO_FG}}
                             mod.widgets.HagencyListTitle{text:A.capability_label(change.role)}
-                            mod.widgets.HagencyListValue{text:A.web_offer_before(change.role,"published",fn(v){return if v==true {A.t("Shown","已展示")} else {A.t("Not shown","未展示")}})+(if change.published {A.t("Show to applicants","在目录里显示")} else {A.t("Stop showing","不再展示")})}
+                            mod.widgets.HagencyListValue{text:A.web_offer_before(change.role,"published",fn(v){return if v==true {A.t("Shown","已展示")} else {A.t("Not shown","未展示")}})+(if change.published {A.t("Show to applicants","对申请者公开")} else {A.t("Stop showing","不再展示")})}
                         }
                         mod.widgets.HagencyListDivider{}
                         mod.widgets.HagencySwitchRow{
@@ -12635,7 +12661,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }
                     if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                        View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Template · select to copy","模板编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:row.id}}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Template","模板编号")} mod.widgets.HagencyIdText{text:row.id}}
                         mod.widgets.HagencyWrapSubtitle{text:A.template_status(row.status)}
                     }}
                 }}
@@ -13154,7 +13180,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.adjust}}
                                 mod.widgets.HagencyListText{
                                     mod.widgets.HagencyWrapTitle{text:A.t("Advanced Settings","高级设置")}
-                                    mod.widgets.HagencyWrapSubtitle{text:A.t("Server, catalogue, templates, delete","服务器、目录介绍、模板、删除")}
+                                    mod.widgets.HagencyWrapSubtitle{text:A.t("Server, catalogue, templates, delete","服务器、公开介绍、模板、删除")}
                                 }
                                 mod.widgets.HagencyChevron{}
                             }
@@ -13746,14 +13772,14 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 // The catalogue entry, all on this page: whether it shows, its roles, and the daily-use note.
                 let w=H.web
                 let cat=if H.pool_adv_state=="ready" && w.catalog!=nil && w.resourceId==row.id {w.catalog} else {nil}
-                mod.widgets.HagencyListLabel{text:A.t("INTRODUCE THIS POOL IN THE CATALOGUE (OPTIONAL)","在目录里介绍这个资源池（可选）")}
+                mod.widgets.HagencyListLabel{text:A.t("INTRODUCE THIS POOL TO APPLICANTS (OPTIONAL)","向申请者公开介绍（可选）")}
                 mod.widgets.HagencyList{
                     mod.widgets.HagencyFitRow{
                         mod.widgets.HagencyRowBody{
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.globe}}
                             mod.widgets.HagencyListText{
-                                mod.widgets.HagencyWrapTitle{text:A.t("Show in the catalogue","在目录里显示")}
-                                mod.widgets.HagencyWrapSubtitle{text:if row.published {A.t("Shown · the model and monthly maximum are locked","显示中 · 模型和每月上限已锁定")} else {A.t("While shown, the model and monthly maximum are locked","显示期间，模型和每月上限会锁定")}}
+                                mod.widgets.HagencyWrapTitle{text:A.t("Show to applicants","公开介绍")}
+                                mod.widgets.HagencyWrapSubtitle{text:if row.published {A.t("Shown · the model and monthly maximum are locked","公开中 · 模型和每月上限已锁定")} else {A.t("While shown, the model and monthly maximum are locked","公开期间，模型和每月上限会锁定")}}
                             }
                             resource_publish_switch := mod.widgets.HagencySwitch{draw_bg.selected:if row.published {1.0} else {0.0} enabled:!H.busy && H.command==nil && !locked}
                         }
@@ -13764,8 +13790,8 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         mod.widgets.HagencyRowBody{
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.robot}}
                             mod.widgets.HagencyListText{
-                                mod.widgets.HagencyWrapTitle{text:A.t("Roles in the catalogue","目录里的角色")}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("What applicants see this pool offer","申请者在目录里看到它能做什么")}
+                                mod.widgets.HagencyWrapTitle{text:A.t("Roles in the catalogue","介绍里的角色")}
+                                mod.widgets.HagencyWrapSubtitle{text:A.t("What applicants see this pool offer","申请者在介绍里看到它能做什么")}
                             }
                             mod.widgets.HagencyChevron{}
                         }
@@ -13782,7 +13808,8 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }
                     if H.details_open=="daily_rate" && cat!=nil {View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12} align:Align{y:0.5}
-                        web_daily_rate := mod.widgets.HagencyInput{width:Fill empty_text:A.t("Tokens per day","每天 token 数") text:w.rate on_change:|s|{if A.web_can_edit(){w.rate=s}}}
+                        web_daily_rate := mod.widgets.HagencyInput{width:Fill empty_text:A.t("About how much a day, e.g. 0.5","每天大约用多少，例如 0.5") text:w.rate on_change:|s|{if A.web_can_edit(){w.rate=s}}}
+                        mod.widgets.HagencyListValue{text:"M"}
                         web_daily_review := mod.widgets.HagencyGetButton{text:A.t("Next","下一步") enabled:A.web_can_edit() on_click: || A.web_rate()}
                     }}
                 }
@@ -13839,8 +13866,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }
                     if H.details_open=="pool_ids/"+row.id {View{width:Fill height:Fit flow:Down spacing:2 padding:Inset{left:14 right:14 top:2 bottom:12}
-                        mod.widgets.HagencyListSubtitle{text:A.t("Pool ID · select to copy","资源池编号 · 可选中复制")}
-                        resource_id_text := mod.widgets.HagencyCopyText{text:row.id}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Pool ID","资源池编号")} resource_id_text := mod.widgets.HagencyIdText{text:row.id}}
                     }}
                 }}
             }}
@@ -15824,8 +15850,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }
                     if H.details_open=="server_ids/"+c.id {View{width:Fill height:Fit flow:Down spacing:2 padding:Inset{left:57 right:14 top:2 bottom:12}
-                        mod.widgets.HagencyListSubtitle{text:A.t("Connection ID · select to copy","连接编号 · 可选中复制")}
-                        server_connection_id := mod.widgets.HagencyCopyText{text:c.id}
+                        mod.widgets.HagencyIdRow{mod.widgets.HagencyWrapSubtitle{text:A.t("Connection ID","连接编号")} server_connection_id := mod.widgets.HagencyIdText{text:c.id}}
                         if checked {mod.widgets.HagencyListSubtitle{padding:Inset{top:6} text:A.t("A connection check stays valid for five minutes.","连接检查的结果 5 分钟内有效。")}}
                     }}
                 }
@@ -16116,9 +16141,11 @@ mod.widgets.HagencyPreset = mod.widgets.RinxKeyButton{width:Fit height:max(44,mo
 mod.widgets.HagencyPresetOn = mod.widgets.HagencyPreset{draw_bg +: {color:mod.widgets.RINX_SELECTED color_focus:mod.widgets.RINX_SELECTED color_disabled:mod.widgets.RINX_SELECTED color_2_disabled:mod.widgets.RINX_SELECTED} draw_text +: {color:mod.widgets.RINX_ACCENT color_hover:mod.widgets.RINX_ACCENT color_down:mod.widgets.RINX_ACCENT color_focus:mod.widgets.RINX_ACCENT}}
 mod.widgets.HagencyPresetCard = mod.widgets.HagencyPreset{draw_bg +: {color:mod.widgets.RINX_SURFACE color_focus:mod.widgets.RINX_SURFACE color_disabled:mod.widgets.RINX_SURFACE color_2_disabled:mod.widgets.RINX_SURFACE}}
 // Selectable, read-only text for IDs a person may need to copy.
+mod.widgets.HagencyIdRow = View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}}
 mod.widgets.HagencyCopyText = mod.widgets.RinxInput{width:Fill height:(30+14*mod.widgets.RINX_TEXT_SCALE) padding:0 is_read_only:true
     draw_bg +: {border_size:0.0 color:#0000 color_hover:#0000 color_focus:#0000 color_empty:#0000 color_down:#0000 border_color:#0000 border_color_hover:#0000 border_color_focus:#0000 border_color_empty:#0000 border_color_down:#0000 border_color_2:#0000}
     draw_text +: {color:mod.widgets.RINX_MUTED color_hover:mod.widgets.RINX_MUTED color_focus:mod.widgets.RINX_MUTED text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE}}}
+mod.widgets.HagencyIdText = mod.widgets.HagencyCopyText{width:Fit draw_text +: {text_style:theme.font_code{font_size:mod.widgets.RINX_META_SIZE}}}
 mod.widgets.HagencyTallSegment = mod.widgets.HagencySegment{height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) margin:0}
 mod.widgets.HagencyTallSegmentOn = mod.widgets.HagencySegmentOn{height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) margin:0}
 mod.widgets.HagencyTile = RoundedView{width:Fill height:(46+18*mod.widgets.RINX_TEXT_SCALE) flow:Overlay show_bg:true draw_bg +: {color:mod.widgets.RINX_SURFACE border_radius:12.0 border_size:0.0}}
@@ -16398,8 +16425,8 @@ alert_layer := View{width:Fill height:Fill flow:Down align:Align{y:1.0} new_batc
         }}
         if kind=="resource_publish" {View{width:Fill height:Fit flow:Down
             let listed=H.resource_detail.resource.published
-            mod.widgets.HagencyAlertTitle{text:if listed {A.t("Stop Showing in the Catalogue?","不再在目录里显示？")} else {A.t("Show in the Catalogue?","在目录里显示？")}}
-            mod.widgets.HagencyAlertMessage{text:if listed {A.t("The catalogue won’t show this pool any more. Agents already running keep it.","目录里不再显示这个资源池，正在运行的 Agent 不受影响。")} else {A.t("While it’s shown, this pool’s model and monthly maximum are locked. Hide it again to change them.","显示期间，这个资源池的模型和每月上限会锁定；不再显示后就能修改。")}}
+            mod.widgets.HagencyAlertTitle{text:if listed {A.t("Stop Showing to Applicants?","不再公开介绍？")} else {A.t("Show to Applicants?","公开介绍？")}}
+            mod.widgets.HagencyAlertMessage{text:if listed {A.t("The catalogue won’t show this pool any more. Agents already running keep it.","申请者不再看到这个资源池的介绍，正在运行的 Agent 不受影响。")} else {A.t("While it’s shown, this pool’s model and monthly maximum are locked. Hide it again to change them.","公开期间，这个资源池的模型和每月上限会锁定；不再公开后就能修改。")}}
             mod.widgets.HagencyDivider{}
             View{width:Fill height:44 flow:Right
                 if !listed {resource_publish_cancel := mod.widgets.HagencyAlertButton{text:A.t("Cancel","取消") enabled:!H.busy on_click:||{H.web.publicationReview=false A.redraw()}}}

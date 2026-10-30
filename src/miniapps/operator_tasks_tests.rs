@@ -429,8 +429,11 @@ fn bundle_uses_the_owner_vocabulary() {
         // primary row, admin jargon, and a lock that sounded permanent.
         "保存每月上限", "本月底到期", "每次申请上限的下限", "最低约 ", "服务器原文（英文）：", "\"Connection Check\",\"连接诊断\"",
         "（电脑要开着）", "显示后，模型和每月上限不能修改", "点下方「保存更改」", "加入本月名单",
-        // Retired in round 10: stopping Agents "under Requests", and a suggestion pill that didn't say why.
-        "在「申请」里停止", "A.t(\"Suggested \",\"建议 \")",
+        // Retired in round 10: the catalogue as 目录 on the pool's pages (it's the pool's public
+        // introduction), the daily amount in raw tokens, stopping Agents "under Requests", and a
+        // suggestion pill that didn't say why.
+        "在目录里显示", "目录里的角色", "目录介绍", "在目录里介绍", "每天 token 数", "在「申请」里停止",
+        "A.t(\"Suggested \",\"建议 \")",
     ] {
         assert!(!source.contains(banned), "the bundle says {banned}");
     }
@@ -470,12 +473,15 @@ fn bundle_uses_the_owner_vocabulary() {
             assert!(!line.contains("预留"), "A.{name} says 预留 on line {}: {line}", index + 1);
         }
     }
-    // The glossary is the source of these words.
+    // The glossary is the source of these words, the secondary pages' too (one tap from those pages).
     for term in [
         r#"term:A.t("Used","已用")"#,
         r#"term:A.t("Given out","已分出")"#,
         r#"term:A.t("Left","剩余")"#,
         r#"term:A.t("Held by running Agents","正在运行的 Agent 已拿到")"#,
+        r#"term:A.t("Workspace","工作区")"#,
+        r#"term:A.t("Approval chat","审批对话")"#,
+        r#"term:A.t("Public introduction","公开介绍")"#,
         "不能低于已用和已分出",
     ] {
         assert!(source.contains(term), "the glossary doesn't define {term}");
