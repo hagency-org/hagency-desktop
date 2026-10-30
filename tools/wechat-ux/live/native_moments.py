@@ -115,7 +115,7 @@ def main():
         author.capture('moments-album-detail');back(author);passed('ordered_album_native_preview_and_navigation')
         author.click_id('moments_audience');idle(author);author.capture('moments-audience')
         assert fixture['users']['emma']['user_id'] in ' '.join(texts(author));back(author)
-        back(author);author.click_id('chats_tab');author.click_id('file_transfer_entry');idle(author)
+        back(author);author.click_id('discover_tab');author.click_id('discover_file_transfer');idle(author)
         author.wait_text('File Transfer',pixels=True,timeout=60);author.capture('file-transfer-native')
         # Check membership and separation through authenticated fixture APIs.
         members=checked(fixture['url'],'GET','rooms/'+seed['file_transfer']+'/joined_members',token=fixture['users']['alex']['access_token'])['joined']
@@ -138,7 +138,7 @@ def main():
         author=start(root,size=(1050,800))
         author.click_id('moments_button');idle(author);author.wait_text('Moments',pixels=True);author.capture('moments-desktop');back(author)
         passed('desktop_moments_navigation_and_feed')
-        author.click_id('file_transfer_entry');idle(author);author.wait_text('File Transfer',pixels=True,timeout=60)
+        author.click_id('file_transfer_button');idle(author);author.wait_text('File Transfer',pixels=True,timeout=60)
         author.capture('file-transfer-desktop');passed('desktop_file_transfer_and_session_restore')
         report['passed']=True
     finally:

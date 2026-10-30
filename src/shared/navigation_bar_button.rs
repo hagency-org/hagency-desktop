@@ -294,6 +294,11 @@ impl NavigationBarButton {
         self.tooltip_text = text.into();
     }
 
+    /// The text of the built-in tooltip; empty when the parent provides its own.
+    pub fn tooltip_text(&self) -> &str {
+        &self.tooltip_text
+    }
+
     /// Sets whether this button is visually marked as selected.
     ///
     /// The "selected" state is drawn with a darker background
