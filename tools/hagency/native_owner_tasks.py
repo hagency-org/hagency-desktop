@@ -34,7 +34,7 @@ def fixtures():
 
 class Owner(Accounts):
  def visible(self,name):
-  if name in {'entry_switch','refresh','accounts','resources','inbox','pool_agent_back'}:
+  if name in {'entry_switch','refresh','accounts','resources','inbox','pool_agent_back','sub_back'}:
    r=self.row(name);assert r['r'][2]>0 and r['r'][3]>=43;return r
   return super().visible(name)
  def set_fixtures(self,data):
@@ -86,12 +86,15 @@ class Owner(Accounts):
   self.click('resource_detail');self.wait(lambda:self.row('resource_alerts_open')['r'][2]>0)
   # The model and limit editor is reached from the pool page's Model row.
   self.visible('owner_pool_config');self.shot('07-pool-management')
+  # Catalogue listing lives in Advanced Settings.
+  self.click('resource_advanced');self.wait(lambda:self.row('resource_publish_review')['r'][2]>0)
   self.click('resource_publish_review');self.wait(lambda:self.row('resource_publish_confirm')['r'][2]>0);self.shot('07b-catalogue-alert')
   self.click('resource_publish_cancel')
-  # One status-aware Server and publishing row replaces the Servers tile.
+  self.click('sub_back');self.wait(lambda:self.row('resource_alerts_open')['r'][2]>0)
+  # The status pill opens Server and publishing; there is no Servers tile.
   assert not any(r.get('i')=='resource_all_connections' for r in self.snap())
   self.visible('resource_alerts_open');self.shot('07c-pool-manage-tiles')
-  self.visible('resource_publish_review');self.shot('07d-pool-on-device')
+  self.visible('resource_advanced');self.shot('07d-pool-on-device')
   self.req('/m',k='scroll',x=200,y=400,dy=-10000,wait=1)
   self.click('resource_connections');self.wait(lambda:self.row('owner_connection_requests')['r'][2]>0)
   self.visible('owner_connection_capacity');self.shot('08-server-connection')

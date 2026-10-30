@@ -70,7 +70,7 @@ class Family(Workspaces):
         self.shot('01-initial')
         if case in {'enrollment','resource','wizard'}:
             name={'enrollment':'enrollment_tokens','resource':'resource_config_tokens','wizard':'budget'}[case]
-            self.number(name)
+            if case!='resource':self.number(name)
             if case=='enrollment':
                 self.field('input','0');self.click('enrollment_review')
                 self.wait(lambda:any('greater than zero' in r.get('t','') or '大于零的整数' in r.get('t','') for r in self.snap()))
@@ -78,8 +78,8 @@ class Family(Workspaces):
                 self.wait(lambda:self.row(name).get('t')=='345678')
             if case=='resource':
                 self.click('resource_config_unrestricted');self.click('resource_config_standard')
-                self.click('resource_config_clear');self.wait(lambda:all(r.get('i')!='input' or r['r'][3]==0 for r in self.snap()))
-                self.click('resource_config_monthly');self.wait(lambda:self.row(name).get('t')=='223456')
+                # The monthly maximum is edited on the pool page; this editor keeps the model and permissions.
+                assert not any(r.get('i')==name for r in self.snap())
         elif case=='budget':
             self.click('budget_request');self.number('budget_tokens')
             self.click('budget_review');self.wait(lambda:self.row('budget_submit')['enabled'])
