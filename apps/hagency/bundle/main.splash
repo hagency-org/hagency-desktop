@@ -4895,6 +4895,14 @@ A.pool_publish_label=fn(now){
     return A.t("Publish "+A.pool_month_name(c.m)+" Capacity","发布 "+c.m+" 月额度")
 }
 // Held for Agents but not used yet this month; used + this + left = the maximum.
+// Under the bar when little is left: over, used up, or almost used up, and what the owner can do.
+A.pool_low_line=fn(v){
+    let b=v.b
+    let can=v.maxMode!="locked"
+    if b.ceiling!=nil && b.committed>b.ceiling {return if can {A.t("Over the monthly maximum. You can raise it below.","已超出每月上限，可在下方调高。")} else {A.t("Over the monthly maximum. New Agent requests are refused until it resets.","已超出每月上限，重置前新的申请会被拒绝。")}}
+    if b.remaining!=nil && b.remaining<=0 {return if can {A.t("Used up for this month. You can raise the monthly maximum below.","本月额度已用完，可在下方调高每月上限。")} else {A.t("Used up for this month. New Agent requests are refused until it resets.","本月额度已用完，重置前新的申请会被拒绝。")}}
+    return if can {A.t("Almost used up. You can raise the monthly maximum below.","快用完了，可在下方调高每月上限。")} else {A.t("Almost used up. New Agent requests may be refused until it resets.","额度快用完了，重置前新的申请可能被拒绝。")}
+}
 A.pool_held_unused=fn(b){
     let used=if b.spent==nil {0} else {b.spent}
     return max(0,b.committed-used)
@@ -5143,12 +5151,38 @@ A.pool_floor=fn(v){
 // The per-request floor in one sentence everywhere: no less than what running Agents hold. The page
 // estimates it; once the confirmation window refused an amount, the floor is known to be above it.
 A.pool_floor_proved=fn(rid){let p=H.pool_floor_proof return if p!=nil && p.rid==rid {p.above} else {nil}}
-A.pool_floor_text=fn(v){
-    let given=A.pool_floor(v)
-    let above=A.pool_floor_proved(v.row.id)
-    if above!=nil && (given==nil || above>=given) {return A.t("No less than what running Agents hold: more than "+A.tokens(above)+" (the confirmation window has the exact figure)","不能低于正在运行的 Agent 已拿到的，要高于 "+A.tokens(above)+"（确认窗口里有准确数字）")}
-    if given!=nil {return A.t("No less than what running Agents hold, about "+A.tokens(given)+" (the confirmation window has the exact figure)","不能低于正在运行的 Agent 已拿到的，约 "+A.tokens(given)+"（确认窗口里有准确数字）")}
-    return A.t("No less than what running Agents hold (the confirmation window has the exact figure)","不能低于正在运行的 Agent 已拿到的（确认窗口里有准确数字）")
+A.pool_floor_of=fn(given,above){
+    let f={t:0}
+    if given!=nil && given>0 {f.t=A.pool_div(given+9999,10000)*10000}
+    if above!=nil && above>=0 {let next=A.pool_div(above,10000)*10000+10000 if next>f.t {f.t=next}}
+    return if f.t>0 {f.t} else {nil}
+}
+// The floor of a published month's per-request limit as the page knows it, or nil.
+A.pool_quota_floor=fn(v){
+    if v.quotaMode!="amend" {return nil}
+    return A.pool_floor_of(A.pool_floor(v),A.pool_floor_proved(v.row.id))
+}
+// The one sentence for that floor, always "about": only the confirmation window knows it exactly.
+A.pool_floor_words=fn(f){
+    if f!=nil {return A.t("No less than what running Agents hold, about "+A.tokens(f)+" (the confirmation window has the exact figure)","不能低于正在运行的 Agent 已拿到的约 "+A.tokens(f)+"（确认窗口里有准确数字）")}
+    return A.t("No less than what running Agents hold (the confirmation window has the exact figure)","不能低于正在运行的 Agent 已拿到的额度（确认窗口里有准确数字）")
+}
+A.pool_floor_text=fn(v){return A.pool_floor_words(A.pool_quota_floor(v))}
+// The window's refusal, after "Not saved: ", in that same sentence.
+A.pool_floor_refusal=fn(f){
+    if f!=nil {return A.t("the per-request limit can’t go below what running Agents hold, about "+A.tokens(f)+" (the confirmation window has the exact figure).","每次申请上限不能低于正在运行的 Agent 已拿到的约 "+A.tokens(f)+"（确认窗口里有准确数字）。")}
+    return A.t("the per-request limit can’t go below what running Agents hold (the confirmation window has the exact figure).","每次申请上限不能低于正在运行的 Agent 已拿到的额度（确认窗口里有准确数字）。")
+}
+// The per-request suggestion: a quarter of the maximum, never below that floor.
+A.pool_quota_min=fn(v){
+    let f=A.pool_quota_floor(v)
+    if f==nil {return 1}
+    return if v.publishedTokens!=nil && v.publishedTokens<f {v.publishedTokens} else {f}
+}
+A.pool_quota_suggestion=fn(v){
+    let d=A.pool_quota_default(v.b.ceiling)
+    let f=A.pool_quota_floor(v)
+    return if f!=nil && f>d && (v.b.ceiling==nil || f<=v.b.ceiling) {f} else {d}
 }
 A.pool_info_retry=fn(){if H.busy || H.resource_detail==nil {return} H.pool_result=nil A.pool_info_load(H.resource_id) A.redraw()}
 // A month key "2026-10" or a UTC time; the pool resets on the 1st of the next month.
@@ -5394,6 +5428,8 @@ A.pool_view=fn(detail){
     v.maxMode=if v.editable {"edit"} else if A.pool_amend_allowed(ceilingAmendment) {"amend"} else {"locked"}
     v.raiseOnly=v.maxMode=="amend" && A.pool_amend_min(ceilingAmendment)==nil
     v.maxMin=if v.maxMode=="amend" {if v.raiseOnly {if b.ceiling==nil {1} else {b.ceiling}} else {A.pool_amend_min(ceilingAmendment)}} else {b.committed}
+    // One floor on the card: the server's, but never below the used and given out shown above it.
+    if v.maxMode=="amend" && !v.raiseOnly && b.committed>v.maxMin {v.maxMin=b.committed}
     v.maxMax=if b.quota!=nil && b.quota>0 {max(b.quota,if b.ceiling==nil {0} else {b.ceiling})} else {-1}
     v.maxReason=if v.maxMode=="locked" {A.pool_max_reason(reason,ceilingAmendment)} else {""}
     v.another=v.maxMode=="locked" && detail.choices.len()>0 && reason!="read_only"
@@ -5433,7 +5469,7 @@ A.pool_view=fn(detail){
     return v
 }
 A.pool_save_state=fn(){
-    let s={dirty:false maxDirty:false quotaDirty:false quotaEditable:false quotaMode:"" maxMode:"" enabled:false visible:false maxError:"" quotaError:"" label:"" note:"" draft:""}
+    let s={dirty:false maxDirty:false quotaDirty:false quotaEditable:false quotaMode:"" maxMode:"" enabled:false visible:false maxError:"" quotaError:"" quotaFloor:false label:"" note:"" draft:""}
     let detail=H.resource_detail let e=H.pool_edit
     if detail==nil || e==nil || e.rid!=detail.resource.id {return s}
     let v=A.pool_view(detail)
@@ -5452,10 +5488,8 @@ A.pool_save_state=fn(){
     let top=if max>=0 {max} else {v.quotaMax}
     if quota<1 {s.quotaError=A.t("Enter an amount above zero.","请输入大于零的额度。")}
     else if top>=0 && quota>top {s.quotaError=A.t("No more than the monthly maximum of ","不能超过每月上限 ")+A.tokens(top)+A.t(".","。")}
-    let given=if v.quotaMode=="amend" {A.pool_floor(v)} else {nil}
-    let above=if v.quotaMode=="amend" {A.pool_floor_proved(v.row.id)} else {nil}
-    if s.quotaError=="" && above!=nil && quota>=1 && quota<=above && quota!=v.publishedTokens {s.quotaError=A.t("No less than what running Agents hold: more than "+A.tokens(above)+".","不能低于正在运行的 Agent 已拿到的，要高于 "+A.tokens(above)+"。")}
-    if s.quotaError=="" && given!=nil && quota>=1 && quota<given && quota!=v.publishedTokens {s.quotaError=A.t("No less than the "+A.tokens(given)+" held by running Agents.","不能低于正在运行的 Agent 已拿到的 "+A.tokens(given)+"。")}
+    let floor=A.pool_quota_floor(v)
+    if s.quotaError=="" && floor!=nil && quota>=1 && quota<floor && quota!=v.publishedTokens {s.quotaError=A.pool_floor_words(floor) s.quotaFloor=true}
     // A published month: the slider proposes a change now (amend), or keeps a draft for next month.
     s.quotaDirty=(v.quotaMode=="amend" || v.quotaMode=="draft") && quota>=1 && v.publishedTokens!=nil && quota!=v.publishedTokens
     if v.quotaMode=="draft" && s.quotaDirty && s.quotaError=="" {s.draft=A.t("Saved for "+A.pool_next_month_name(v.now)+": each request up to ","已记下："+A.pool_next_month_name(v.now)+"发布时每次最多 ")+A.tokens(quota)+A.t(".","。")}
@@ -5464,6 +5498,9 @@ A.pool_save_state=fn(){
     s.label=if s.maxDirty && e.unlimited {A.t("Pause Sharing","暂停共享")} else if s.maxDirty && max>=0 {A.t("Change to ","改成 ")+A.tokens(max)} else if v.quotaMode=="amend" && s.quotaDirty && quota>=1 {A.t("Change to ","改成 ")+A.tokens(quota)} else if v.quotaEditable {A.pool_publish_label(v.now)} else {A.t("Save Changes","保存更改")}
     s.note=if s.maxDirty && v.maxMode=="amend" && v.quotaMode=="amend" && s.quotaDirty {A.t("Confirm the monthly maximum first, then the per-request limit, each in its confirmation window.","先在确认窗口里确认每月上限，再确认每次申请上限。")} else if s.maxDirty && v.maxMode=="amend" {A.t("Confirm it in the confirmation window. Running Agents aren’t affected.","在确认窗口里确认；正在运行的 Agent 不受影响。")} else if s.maxDirty {A.t("Confirm it in the confirmation window.","在确认窗口里确认。")} else if v.quotaMode=="amend" {A.t("Confirm it in the confirmation window; it applies this month right away.","在确认窗口里确认，本月立即生效。")} else if v.quotaEditable {A.t("Choose people and publish in the confirmation window.","在确认窗口里选人并发布。")} else {""}
     s.enabled=!H.busy && H.command==nil && s.maxError=="" && (s.maxDirty || (v.quotaEditable && s.quotaError=="") || (v.quotaMode=="amend" && s.quotaDirty && s.quotaError==""))
+    // A change that can't be confirmed says why above its own button, in the words beside its control.
+    if s.maxDirty && s.maxError!="" {s.note=s.maxError}
+    if !s.maxDirty && s.quotaDirty && v.quotaMode=="amend" && s.quotaError!="" {s.note=s.quotaError}
     return s
 }
 A.pool_next_month_name=fn(now){
@@ -5483,7 +5520,8 @@ A.pool_max_floor_text=fn(v){
     let least=if v.maxMode=="amend" {v.maxMin} else {b.committed}
     if v.maxMode=="amend" && v.raiseOnly {return A.t("For now it can only go up","现在只能调高")+top}
     if v.maxMode=="amend" && least<=1 {return A.t("It can go up or down","可以调高，也可以调低")+top}
-    if least>0 {return A.t("At least "+A.tokens(least)+" (used and given out)","最低 "+A.tokens(least)+"（已用和已分出）")+top}
+    if least>0 && least==b.committed {return A.t("At least "+A.tokens(least)+" (used and given out)","最低 "+A.tokens(least)+"（已用和已分出）")+top}
+    if least>0 {return A.t("At least ","最低 ")+A.tokens(least)+top}
     return A.t("Lowest 0 (not shared)","最低 0（不共享）")+top
 }
 // "Committed" in one sentence: what's used plus what Agents hold, the floor of the maximum.
@@ -5767,7 +5805,7 @@ A.pool_succeed_reply=fn(rid,cid,kind,r,applicants,ctx){
         if r.error=="management_grant_succession_required" || r.error=="invalid_management_arguments" {H.pool_no_succession=true}
         let below=r.error=="owner_grant_below_floor" || r.error=="grant_successor_below_reserved"
         if below && kind=="amendment" && ctx.proposed!=nil {let old=A.pool_floor_proved(rid) H.pool_floor_proof={rid:rid above:if old!=nil && old>ctx.proposed {old} else {ctx.proposed}}}
-        let why=if below && ctx.floor!=nil && ctx.proposed!=nil && ctx.proposed<ctx.floor {A.t("the per-request limit can’t go below what running Agents hold, about "+A.tokens(ctx.floor)+".","每次申请上限不能低于正在运行的 Agent 已拿到的，约 "+A.tokens(ctx.floor)+"。")} else if below && ctx.proposed!=nil {A.t("the per-request limit must be more than "+A.tokens(ctx.proposed)+": running Agents hold more than that. Tap Choose Again to see the exact figure.","每次申请上限要高于 "+A.tokens(ctx.proposed)+"：正在运行的 Agent 已拿到的比这多。点「重新选择」看准确数字。")} else {A.pool_succession_error(r.error)}
+        let why=if below {A.pool_floor_refusal(A.pool_floor_of(ctx.floor,A.pool_floor_proved(rid)))} else {A.pool_succession_error(r.error)}
         note.v={at:at tone:"attention" text:(if kind=="renewal" {A.t("Not published ahead: ","没有提前发布：")} else {A.t("Not saved: ","没有保存：")})+why retry:if below && kind=="amendment" && ctx.proposed!=nil {ctx.proposed} else {nil}}
     } else {
         // A renewal's summary is next month's; this month's list stays as it is.
@@ -6399,7 +6437,7 @@ A.pool_quota_pick=fn(amount){
 // When the per-request value takes effect, in the owner's terms.
 A.pool_quota_when=fn(v){
     // A published month: the floor, in the words of the Agents it protects (the page counts what it can see).
-    if v.quotaMode=="amend" {return if A.pool_floor(v)!=nil || A.pool_floor_proved(v.row.id)!=nil || v.agents>0 {A.pool_floor_text(v)} else {A.t("Applies this month once you confirm","确认后本月立即生效")}}
+    if v.quotaMode=="amend" {return if A.pool_quota_floor(v)!=nil || v.agents>0 {A.pool_floor_text(v)} else {A.t("Applies this month once you confirm","确认后本月立即生效")}}
     if v.quotaMode=="scheduled" {return A.t(A.pool_next_month_name(v.now)+" is published ahead, so this month’s per-request limit and list can’t change. "+A.pool_change_again(),A.pool_next_month_name(v.now)+"已提前发布，本月的每次申请上限和名单都不能再改。"+A.pool_change_again())}
     if v.published {return A.t("Applies when you next publish, from "+A.pool_next_month(v.now),"下次发布时生效，"+A.pool_next_month(v.now)+"起")}
     if v.quotaEditable {return A.t("Applies when you tap ","点「")+A.pool_publish_label(v.now)+A.t("","」时生效")}
@@ -12702,7 +12740,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 let locked=alert || H.resource_name_mode!=""
                 let local_name=A.local_name(row)
                 let banner=A.pool_banner(v)
-                let suggest=b.ceiling!=nil && b.ceiling>0 && v.quotaMode!="scheduled" && (e==nil || A.pool_whole(e.quota)!=A.pool_quota_default(b.ceiling))
+                let suggest=b.ceiling!=nil && b.ceiling>0 && v.quotaMode!="scheduled" && (e==nil || A.pool_whole(e.quota)!=A.pool_quota_suggestion(v))
                 View{width:Fill height:Fit flow:Down spacing:4 align:Align{x:0.5} padding:Inset{top:0 bottom:0}
                     if mod.widgets.RINX_TEXT_SCALE<=1.2 {mod.widgets.HagencyAvatar{width:56 height:56 draw_bg +: {color:mod.widgets.RINX_INFO_BG border_radius:28.0} mod.widgets.HagencyAvatarGlyph{width:28 height:28 icon_walk:Walk{width:28 height:28} draw_icon.svg:mod.rinx_icons.resources draw_icon.color:mod.widgets.RINX_INFO_FG}}}
                     if H.resource_name_mode=="" {for line in A.pool_hero_lines(A.resource_title(row)) {mod.widgets.HagencyHeroWrap{text:line}}}
@@ -12838,10 +12876,10 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 }
                                 View{width:Fit height:Fit flow:Right spacing:6 align:Align{y:0.5}
                                     mod.widgets.HagencyPillDot{draw_bg.color:mod.widgets.RINX_BORDER}
-                                    pool_legend_left := mod.widgets.HagencyListValue{text:if unpublished {A.t("Usable once published ","发布后可用 ")+A.tokens(b.remaining)+A.t(" of ","，共 ")+A.tokens(b.ceiling)} else {A.t("Left ","剩余 ")+A.tokens(b.remaining)+A.t(" of ","，共 ")+A.tokens(b.ceiling)}}
+                                    pool_legend_left := mod.widgets.HagencyListValue{text:if unpublished {A.t("Usable once published ","发布后可用 ")+A.tokens(b.remaining)+A.t(" of ","，共 ")+A.tokens(b.ceiling)} else if b.committed>b.ceiling {A.t("Over by ","超出 ")+A.tokens(b.committed-b.ceiling)+A.t(" of ","，共 ")+A.tokens(b.ceiling)} else {A.t("Left ","剩余 ")+A.tokens(b.remaining)+A.t(" of ","，共 ")+A.tokens(b.ceiling)}}
                                 }
                             }}
-                            if b.low {mod.widgets.HagencyWrapSubtitle{text:if v.maxMode!="locked" {A.t("Almost used up. You can raise the monthly maximum below.","快用完了，可在下方调高每月上限。")} else {A.t("Almost used up. New Agent requests may be refused until it resets.","额度快用完了，重置前新的申请可能被拒绝。")} draw_text.color:mod.widgets.RINX_DANGER_FG}}
+                            if b.low {pool_low_line := mod.widgets.HagencyWrapSubtitle{text:A.pool_low_line(v) draw_text.color:mod.widgets.RINX_DANGER_FG}}
                             // Every term and floor in one place; each control below keeps one line.
                             if H.pool_tip=="capacity" {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:12 right:12 top:10 bottom:10} show_bg:true draw_bg +: {color:mod.widgets.RINX_FIELD}
                                 let has_sum=b.ceiling!=nil && b.committed>0 && !unpublished
@@ -12938,20 +12976,20 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 pool_quota_value := mod.widgets.HagencyListValue{visible:unsaved.quota=="" text:if v.publishedTokens!=nil {A.t("Now ","现在 ")+A.tokens(v.publishedTokens)} else {""}}
                                 pool_quota_unsaved := mod.widgets.HagencyListValue{visible:unsaved.quota!="" text:unsaved.quota draw_text +: {color:mod.widgets.RINX_WARNING_FG text_style:theme.font_bold{font_size:mod.widgets.RINX_META_SIZE}}}
                             }
-                            View{width:Fill height:Fit pool_quota_tokens := mod.widgets.HagencyPoolSlider{minimum:1 maximum:v.quotaMax text:if e!=nil {e.quota} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked || v.quotaMode=="scheduled" unit +: {margin:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {7} else {0})}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked && v.quotaMode!="scheduled"}} on_change:|text| A.pool_quota_changed(text)}}
-                            pool_quota_error := mod.widgets.HagencyWrapSubtitle{visible:save.quotaError!="" text:save.quotaError draw_text.color:mod.widgets.RINX_DANGER_FG}
+                            View{width:Fill height:Fit pool_quota_tokens := mod.widgets.HagencyPoolSlider{minimum:A.pool_quota_min(v) maximum:v.quotaMax text:if e!=nil {e.quota} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked || v.quotaMode=="scheduled" unit +: {margin:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {7} else {0})}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked && v.quotaMode!="scheduled"}} on_change:|text| A.pool_quota_changed(text)}}
+                            pool_quota_error := mod.widgets.HagencyWrapSubtitle{visible:save.quotaError!="" && !save.quotaFloor text:save.quotaError draw_text.color:mod.widgets.RINX_DANGER_FG}
                             // One line under the control: its floor, or when the value applies, then the suggestion.
                             if mod.widgets.RINX_TEXT_SCALE<=1.2 {View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}
-                                if v.when!="" {mod.widgets.HagencyPillDot{draw_bg.color:if v.quotaEditable || v.quotaMode=="amend" {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_WARNING_FG}}}
-                                View{width:Fill height:Fit padding:Inset{top:6 bottom:6 right:4} pool_quota_when := mod.widgets.HagencyWrapSubtitle{text:v.when}}
-                                if suggest {View{width:Fit height:Fit pool_quota_suggest := mod.widgets.HagencyPreset{text:A.t("Suggested ","建议 ")+A.tokens(A.pool_quota_default(b.ceiling)) enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_quota_pick(A.pool_quota_default(b.ceiling))}}}
+                                if v.when!="" {mod.widgets.HagencyPillDot{draw_bg.color:if save.quotaFloor {mod.widgets.RINX_DANGER_FG} else if v.quotaEditable || v.quotaMode=="amend" {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_WARNING_FG}}}
+                                View{width:Fill height:Fit padding:Inset{top:6 bottom:6 right:4} pool_quota_when := mod.widgets.HagencyWrapSubtitle{text:v.when draw_text.color:if save.quotaFloor {mod.widgets.RINX_DANGER_FG} else {mod.widgets.RINX_MUTED}}}
+                                if suggest {View{width:Fit height:Fit pool_quota_suggest := mod.widgets.HagencyPreset{text:A.t("Suggested ","建议 ")+A.tokens(A.pool_quota_suggestion(v)) enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_quota_pick(A.pool_quota_suggestion(v))}}}
                             }}
                             if mod.widgets.RINX_TEXT_SCALE>1.2 {View{width:Fill height:Fit flow:Down spacing:8
                                 View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.0}
-                                    if v.when!="" {mod.widgets.HagencyPillDot{margin:Inset{top:9} draw_bg.color:if v.quotaEditable || v.quotaMode=="amend" {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_WARNING_FG}}}
-                                    pool_quota_when := mod.widgets.HagencyWrapSubtitle{text:v.when}
+                                    if v.when!="" {mod.widgets.HagencyPillDot{margin:Inset{top:9} draw_bg.color:if save.quotaFloor {mod.widgets.RINX_DANGER_FG} else if v.quotaEditable || v.quotaMode=="amend" {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_WARNING_FG}}}
+                                    pool_quota_when := mod.widgets.HagencyWrapSubtitle{text:v.when draw_text.color:if save.quotaFloor {mod.widgets.RINX_DANGER_FG} else {mod.widgets.RINX_MUTED}}
                                 }
-                                if suggest {View{width:Fit height:Fit pool_quota_suggest := mod.widgets.HagencyPreset{text:A.t("Suggested ","建议 ")+A.tokens(A.pool_quota_default(b.ceiling)) enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_quota_pick(A.pool_quota_default(b.ceiling))}}}
+                                if suggest {View{width:Fit height:Fit pool_quota_suggest := mod.widgets.HagencyPreset{text:A.t("Suggested ","建议 ")+A.tokens(A.pool_quota_suggestion(v)) enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_quota_pick(A.pool_quota_suggestion(v))}}}
                             }}
                             pool_quota_draft_row := View{visible:save.draft!="" width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:10 right:4 top:2 bottom:2} align:Align{y:0.5} show_bg:true draw_bg +: {color:mod.widgets.RINX_SUCCESS_BG}
                                 mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}

@@ -481,7 +481,8 @@ fn bundle_uses_the_owner_vocabulary() {
     // The legend, floors and refusals quote the same words.
     for pattern in [
         "\"已保存：每月上限 \"", "\"已保存：每次申请上限 \"", "A.t(\"Not saved: \",\"没有保存：\")",
-        "不能低于正在运行的 Agent 已拿到的 ", "不能低于正在运行的 Agent 已拿到的，约 ", "（确认窗口里有准确数字）",
+        // One sentence for the per-request floor, its estimate always 约.
+        "不能低于正在运行的 Agent 已拿到的约 ", "（确认窗口里有准确数字）",
         "不能低于本月已用和已分出的 ", "（已用和已分出）", "\"已分出 \"", "\"已用 \"",
     ] {
         assert!(source.contains(pattern), "the bundle doesn't say {pattern}");
