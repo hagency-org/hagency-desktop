@@ -30,6 +30,10 @@ impl ProviderReview {
             Self::Edit(_) => ("Change model settings","Hagency checks this account, model and pool again before saving.","This changes the pool on this computer for every profile that uses it. It doesn’t raise the account limit or hand out capacity. Clearing its maximum makes the available capacity unknown.","Save settings"),
         }
     }
+    /// A monthly-maximum request: shown in its own sheet of the confirmation
+    /// family, which stays open while the change saves.
+    pub(super) fn ceiling(&self)->Option<&resource_edit_ui::ResourceEditPrompt>{match self {Self::Edit(v) if v.amendment_requested()=>Some(v),_=>None}}
+    pub(super) fn ceiling_mut(&mut self)->Option<&mut resource_edit_ui::ResourceEditPrompt>{match self {Self::Edit(v) if v.amendment_requested()=>Some(v),_=>None}}
     pub(super) async fn accept(self)->Result<Value,String>{match self {Self::Connect(v)=>v.accept().await,Self::Retire(v)=>v.accept().await,Self::Enroll(v)=>v.accept().await,Self::Create(v)=>v.accept().await,Self::Edit(v)=>v.accept().await,Self::Personal(v)=>v.accept().await,Self::Connection(v)=>v.accept().await}}
 }
 #[cfg(test)]

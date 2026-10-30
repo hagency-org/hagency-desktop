@@ -22,6 +22,8 @@ use std::{
 
 #[path = "execution_ui.rs"]
 mod execution_ui;
+#[path = "sheet_ui.rs"]
+mod sheet_ui;
 #[path = "grant_ui.rs"]
 mod grant_ui;
 #[path = "adoption_ui.rs"]
@@ -85,18 +87,180 @@ pub enum MiniAppsAction {
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
-    // One person on a native grant list: a check, the name, and a "new" tag.
-    let GrantPerson = View {visible: false width: Fill height: Fit flow: Right spacing: 10 align: Align{y: 0.5} padding: Inset{top: 7 bottom: 7}
-        Icon {width: 16 height: 16 draw_icon +: {svg: mod.widgets.ICON_CHECKMARK color: mod.widgets.RINX_SUCCESS_FG}}
-        name := RinxLabel {width: Fit}
-        tag := RinxHint {visible: false width: Fit draw_text +: {color: RINX_ACCENT}}
-    }
-    // A section toggle in native confirmations: a 44 pt text button in the accent.
-    let GrantDisclosure = RinxButton {height: 44 margin: 0 padding: Inset{left: 7 right: 7 top: 8 bottom: 8} grab_key_focus: false
+    // Native confirmation sheets are one family: publishing a month, changing
+    // it, adding people, publishing ahead and the monthly maximum all show a
+    // status icon and title, a before → after hero, grouped facts, the people
+    // affected, one disclosure, and two full-width buttons at the bottom.
+    let SheetGroup = RoundedView {width: Fill height: Fit flow: Down show_bg: true
+        draw_bg +: {color: RINX_SURFACE border_radius: 12.0 border_size: 0.0}}
+    let SheetLine = SolidView {width: Fill height: 1 margin: Inset{left: 16} draw_bg.color: RINX_BORDER}
+    // Label and hint padding renders about twice as wide, so 8 lines text up with 16 pt rows.
+    let SheetCaption = RinxHint {width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8}}
+    // A text button with no box: 44 pt tall, in the accent unless restyled.
+    let SheetTextButton = RinxButton {width: Fit height: 44 margin: 0 padding: Inset{left: 10 right: 10 top: 8 bottom: 8} grab_key_focus: false
         draw_bg +: {color: #0000 color_focus: #0000 color_hover: RINX_HOVER color_down: RINX_PRESSED
             border_color: #0000 border_color_hover: #0000 border_color_down: #0000 border_color_focus: RINX_ACCENT
             border_color_2: #0000 border_color_2_hover: #0000 border_color_2_down: #0000 border_color_2_focus: RINX_ACCENT}
         draw_text +: {color: RINX_ACCENT color_hover: RINX_ACCENT color_down: RINX_ACCENT color_focus: RINX_ACCENT}
+    }
+    // A whole grouped row that is one tap target, like an iOS settings row.
+    let SheetRowButton = SheetTextButton {width: Fill height: 48 align: Align{x: 0.0 y: 0.5} padding: Inset{left: 16 right: 16 top: 8 bottom: 8}
+        draw_bg +: {border_radius: 12.0}}
+    // One fact: its name, its value on the right, and an optional note below.
+    let SheetRow = View {visible: false width: Fill height: Fit flow: Down
+        line := SheetLine {}
+        // With large text the value goes under its name instead of squeezing it.
+        body := View {width: Fill height: Fit flow: (if mod.widgets.RINX_TEXT_SCALE > 1.2 {Flow.Down} else {Flow.Right}) spacing: (if mod.widgets.RINX_TEXT_SCALE > 1.2 {2} else {12}) padding: Inset{left: 16 right: 16 top: 12 bottom: 12} align: Align{y: 0.5}
+            label := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
+            value := RinxLabel {width: Fit flow: Flow.Right{wrap: true} draw_text +: {color: RINX_MUTED}}
+        }
+        note := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5}}
+    }
+    // One person who can request: already listed people are locked, people
+    // added in this window carry a tag and can be removed before confirming.
+    let SheetPerson = View {visible: false width: Fill height: Fit flow: Down
+        line := SheetLine {}
+        body := View {width: Fill height: Fit flow: Right spacing: 10 padding: Inset{left: 16 right: 6 top: 2 bottom: 2} align: Align{y: 0.5}
+            RoundedView {width: 30 height: 30 align: Align{x: 0.5 y: 0.5} show_bg: true draw_bg +: {color: RINX_SELECTED border_radius: 15.0}
+                Icon {width: 16 height: 16 icon_walk: Walk{width: 16 height: 16} draw_icon +: {svg: mod.rinx_icons.person color: RINX_ACCENT}}
+            }
+            name := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
+            tag := RoundedView {visible: false width: Fit height: Fit padding: Inset{left: 8 right: 8 top: 3 bottom: 3} show_bg: true draw_bg +: {color: RINX_SELECTED border_radius: 9.0}
+                tag_text := RinxHint {width: Fit draw_text +: {color: RINX_ACCENT}}
+            }
+            locked := View {visible: false width: 44 height: 44 align: Align{x: 0.5 y: 0.5}
+                Icon {width: 15 height: 15 icon_walk: Walk{width: 15 height: 15} draw_icon +: {svg: mod.rinx_icons.lock color: RINX_MUTED}}
+            }
+            remove := SheetTextButton {visible: false text: #(crate::i18n::tr("Remove")) i18n_text: "Remove"
+                draw_text +: {color: RINX_DANGER_FG color_hover: RINX_DANGER_FG color_down: RINX_DANGER_FG color_focus: RINX_DANGER_FG}}
+        }
+    }
+    // The sheet's status: a tinted circle with what the window does, then a
+    // green check once it worked, a red warning when it was refused, an amber
+    // mark when the outcome isn't known yet, or a spinner while it works.
+    let SheetBadge = RoundedView {visible: false width: 60 height: 60 align: Align{x: 0.5 y: 0.5} show_bg: true
+        draw_bg +: {color: RINX_SELECTED border_radius: 30.0}}
+    let SheetGlyph = Icon {width: 28 height: 28 icon_walk: Walk{width: 28 height: 28} draw_icon +: {color: RINX_ACCENT}}
+    let SheetFigure = View {width: Fit height: Fit flow: Down spacing: 2
+        // Big numbers grow less than body text with large text, so before → after still fits a phone.
+        value := RinxLabel {width: Fit draw_text +: {text_style: theme.font_bold{font_size: (25 * (0.6 + 0.4 * mod.widgets.RINX_TEXT_SCALE))}}}
+        tag := RinxHint {width: Fit}
+    }
+    let NativeSheet = View {visible: false width: Fill height: Fill flow: Down spacing: 12 align: Align{x: 0.5}
+        scroll := ScrollYView {width: Fill height: Fill flow: Down spacing: 18 align: Align{x: 0.5} padding: Inset{left: 4 right: 14 top: 6 bottom: 10}
+            heading := View {width: Fill{max: 640} height: Fit flow: Down spacing: 8 align: Align{x: 0.5}
+                icons := View {width: Fill height: Fit align: Align{x: 0.5}
+                    glyph_publish := SheetBadge {SheetGlyph {draw_icon +: {svg: mod.widgets.ICON_SHARE}}}
+                    glyph_change := SheetBadge {SheetGlyph {draw_icon +: {svg: mod.rinx_icons.adjust}}}
+                    glyph_people := SheetBadge {SheetGlyph {draw_icon +: {svg: mod.widgets.ICON_ADD_USER}}}
+                    glyph_renew := SheetBadge {SheetGlyph {draw_icon +: {svg: mod.rinx_icons.sync}}}
+                    glyph_maximum := SheetBadge {SheetGlyph {draw_icon +: {svg: mod.rinx_icons.gauge}}}
+                    glyph_working := SheetBadge {LoadingSpinner {width: 30 height: 30 draw_bg +: {color: RINX_ACCENT stroke_width: 3.0}}}
+                    glyph_done := SheetBadge {draw_bg +: {color: RINX_SUCCESS_BG} SheetGlyph {draw_icon +: {svg: mod.rinx_icons.check color: RINX_SUCCESS_FG}}}
+                    glyph_failed := SheetBadge {draw_bg +: {color: RINX_DANGER_BG} SheetGlyph {draw_icon +: {svg: mod.rinx_icons.alert color: RINX_DANGER_FG}}}
+                    glyph_unsure := SheetBadge {draw_bg +: {color: RINX_WARNING_BG} SheetGlyph {draw_icon +: {svg: mod.rinx_icons.info color: RINX_WARNING_FG}}}
+                }
+                title := RinxPageTitle {width: Fill align: Align{x: 0.5} flow: Flow.Right{wrap: true}}
+                pool := RinxHint {width: Fill align: Align{x: 0.5} flow: Flow.Right{wrap: true}}
+            }
+            // What changes, in big numbers: before → after, then one sentence.
+            hero := SheetGroup {visible: false width: Fill{max: 640} padding: Inset{left: 18 right: 18 top: 14 bottom: 16} spacing: 8
+                caption := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                // Top-aligned columns; the smaller "before" value and the arrow
+                // are nudged down to sit on the big value's line.
+                figures := View {width: Fill height: Fit flow: Right spacing: 14 align: Align{y: 0.0}
+                    before := SheetFigure {visible: false padding: Inset{top: (6 * (0.6 + 0.4 * mod.widgets.RINX_TEXT_SCALE))} value +: {draw_text +: {color: RINX_MUTED text_style: theme.font_bold{font_size: (19 * (0.6 + 0.4 * mod.widgets.RINX_TEXT_SCALE))}}}}
+                    arrow := View {visible: false width: Fit height: Fit padding: Inset{top: (19 * (0.6 + 0.4 * mod.widgets.RINX_TEXT_SCALE))}
+                        Icon {width: 18 height: 18 icon_walk: Walk{width: 18 height: 18} draw_icon +: {svg: mod.rinx_icons.chevron color: RINX_MUTED}}
+                    }
+                    after := SheetFigure {}
+                }
+                lead := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
+            }
+            status := RinxHint {visible: false width: Fill{max: 640} flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8}}
+            problem := RinxLabel {visible: false width: Fill{max: 640} flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8} draw_text +: {color: RINX_DANGER_FG}}
+            // A consequence the owner must know before confirming.
+            caution := RoundedView {visible: false width: Fill{max: 640} height: Fit flow: Right spacing: 10 padding: Inset{left: 14 right: 14 top: 12 bottom: 12} show_bg: true
+                draw_bg +: {color: RINX_WARNING_BG border_radius: 12.0}
+                Icon {width: 18 height: 18 icon_walk: Walk{width: 18 height: 18} draw_icon +: {svg: mod.rinx_icons.alert color: RINX_WARNING_FG}}
+                caution_text := RinxLabel {width: Fill flow: Flow.Right{wrap: true} draw_text +: {color: RINX_WARNING_FG}}
+            }
+            change := RinxHint {visible: false width: Fill{max: 640} flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8}}
+            facts := View {visible: false width: Fill{max: 640} height: Fit flow: Down spacing: 6
+                facts_label := SheetCaption {}
+                SheetGroup {
+                    r0 := SheetRow {} r1 := SheetRow {} r2 := SheetRow {} r3 := SheetRow {} r4 := SheetRow {} r5 := SheetRow {}
+                }
+            }
+            quota := View {visible: false width: Fill{max: 640} height: Fit flow: Down spacing: 6
+                quota_label := SheetCaption {text: #(crate::i18n::tr("Per-request limit")) i18n_text: "Per-request limit"}
+                SheetGroup {padding: Inset{left: 12 right: 12 top: 6 bottom: 12} spacing: 4
+                    // The value box sits beside the slider; with large text it moves under it so the slider keeps its length.
+                    tokens := RinxNumberInput {width: Fill flow: (if mod.widgets.RINX_TEXT_SCALE > 1.2 {Flow.Right{wrap: true}} else {Flow.Right}) millions: true slider_mode: true maximum: 0 minimum: 1 empty_text: "1" input +: {width: 80}}
+                    quota_hint := RinxHint {width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 4 right: 4}}
+                }
+            }
+            people := View {visible: false width: Fill{max: 640} height: Fit flow: Down spacing: 6
+                people_label := SheetCaption {}
+                list := SheetGroup {
+                    p0 := SheetPerson {} p1 := SheetPerson {} p2 := SheetPerson {} p3 := SheetPerson {}
+                    p4 := SheetPerson {} p5 := SheetPerson {} p6 := SheetPerson {} p7 := SheetPerson {}
+                    more_people := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 top: 5 bottom: 5}}
+                    add := View {visible: false width: Fill height: Fit flow: Down
+                        add_line := SheetLine {}
+                        View {width: Fill height: Fit flow: Right spacing: 8 padding: Inset{left: 12 right: 6 top: 6 bottom: 6} align: Align{y: 0.5}
+                            add_name := RinxInput {width: Fill height: 44 empty_text: ""}
+                            add_button := SheetTextButton {text: #(crate::i18n::tr("Add")) i18n_text: "Add"}
+                        }
+                        add_error := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5} draw_text +: {color: RINX_DANGER_FG}}
+                        add_hint := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5}}
+                    }
+                }
+                people_note := SheetCaption {}
+            }
+            // Recovery steps for a saved record, as plain grouped rows.
+            actions := SheetGroup {visible: false width: Fill{max: 640}
+                recover := SheetRowButton {text: #(crate::i18n::tr("Check Again")) i18n_text: "Check Again"}
+                actions_line := SheetLine {}
+                cancel_intent := SheetRowButton {text: #(crate::i18n::tr("Discard This Publish…")) i18n_text: "Discard This Publish…"
+                    draw_text +: {color: RINX_DANGER_FG color_hover: RINX_DANGER_FG color_down: RINX_DANGER_FG color_focus: RINX_DANGER_FG}}
+            }
+            // Advanced choices and technical details live behind one row.
+            more := SheetGroup {visible: false width: Fill{max: 640}
+                more_row := View {width: Fill height: 48 flow: Overlay
+                    more_toggle := SheetRowButton {text: ""}
+                    more_body := View {width: Fill height: Fill flow: Right spacing: 8 padding: Inset{left: 16 right: 16} align: Align{y: 0.5}
+                        more_label := RinxLabel {width: Fill draw_text +: {color: RINX_ACCENT}}
+                        more_closed := View {width: Fit height: Fit
+                            Icon {width: 14 height: 14 icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: mod.rinx_icons.expand color: RINX_MUTED}}
+                        }
+                        more_opened := View {visible: false width: Fit height: Fit
+                            Icon {width: 14 height: 14 icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: mod.rinx_icons.collapse color: RINX_MUTED}}
+                        }
+                    }
+                }
+                advanced := View {visible: false width: Fill height: Fit flow: Down spacing: 8 padding: Inset{left: 16 right: 16 top: 0 bottom: 12}
+                    SheetLine {margin: 0}
+                    expiry := RinxLabel {width: Fill flow: Flow.Right{wrap: true} padding: Inset{top: 6}}
+                    expiry_presets := View {width: Fill height: Fit flow: Right spacing: 8
+                        day := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
+                        week := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
+                        month := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
+                    }
+                    expiry_note := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                }
+                details := View {visible: false width: Fill height: Fit flow: Down spacing: 6 padding: Inset{left: 16 right: 16 top: 0 bottom: 14}
+                    SheetLine {margin: 0}
+                    details_label := RinxHint {width: Fill padding: Inset{top: 6} text: #(crate::i18n::tr("For your server administrator")) i18n_text: "For your server administrator"}
+                    copy := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
+                }
+            }
+        }
+        // One secondary and one primary action side by side, full width.
+        buttons := View {width: Fill{max: 640} height: Fit flow: Right spacing: 12 padding: Inset{right: 14}
+            cancel := RinxButton {width: Fill height: 50 margin: 0 grab_key_focus: false text: #(crate::i18n::tr("Cancel")) i18n_text: "Cancel" draw_bg +: {border_radius: 12.0}}
+            primary := RinxPrimaryButton {width: Fill height: 50 margin: 0 grab_key_focus: false text: #(crate::i18n::tr("Publish")) i18n_text: "Publish" draw_bg +: {border_radius: 12.0}}
+        }
     }
     mod.widgets.MiniAppsPanel = #(MiniAppsPanel::register_widget(vm)) {
         width: Fill height: Fill flow: Down padding: 20 spacing: 16
@@ -287,72 +451,9 @@ script_mod! {
                 recover := RinxButton {text: #(crate::i18n::tr("Resume saved start")) i18n_text: "Resume saved start"}
             }
         }
-        grant_confirmation := View {visible: false width: Fill height: Fill flow: Down spacing: 16
-            scroll := ScrollYView {width: Fill height: Fill flow: Down spacing: 14 padding: Inset{right: 14}
-                heading := View {width: Fill height: Fit flow: Right spacing: 12 align: Align{y: 0.5}
-                    Icon {width: 24 height: 24 draw_icon +: {svg: ICON_SHIELD color: RINX_ACCENT}}
-                    title := RinxPageTitle {width: Fill flow: Flow.Right{wrap: true} text: #(crate::i18n::tr("Publish This Pool")) i18n_text: "Publish This Pool"}
-                }
-                pool := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
-                // One sentence in the mini app's words, then at most one line of consequence.
-                lead := RinxLabel {width: Fill flow: Flow.Right{wrap: true} draw_text.text_style: theme.font_bold{font_size: (13 * mod.widgets.RINX_TEXT_SCALE)}}
-                status := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
-                change := RinxLabel {visible: false width: Fill flow: Flow.Right{wrap: true}}
-                people := View {visible: false width: Fill height: Fit flow: Down spacing: 8
-                    people_label := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
-                    list := RoundedView {width: Fill height: Fit flow: Down padding: Inset{left: 14 right: 14 top: 6 bottom: 6}
-                        draw_bg +: {color: RINX_SURFACE border_color: RINX_BORDER border_size: 1 border_radius: theme.corner_radius}
-                        p0 := GrantPerson {}
-                        p1 := GrantPerson {}
-                        p2 := GrantPerson {}
-                        p3 := GrantPerson {}
-                        p4 := GrantPerson {}
-                        p5 := GrantPerson {}
-                        p6 := GrantPerson {}
-                        p7 := GrantPerson {}
-                        more := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{top: 6 bottom: 6}}
-                    }
-                    note := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
-                    edit := GrantDisclosure {text: #(crate::i18n::tr("Edit List")) i18n_text: "Edit List"}
-                    editor := View {visible: false width: Fill height: Fit flow: Down spacing: 6
-                        managers := RinxInput {width: Fill empty_text: "@name:server"}
-                        editor_hint := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
-                    }
-                }
-                choices := View {width: Fill height: Fit flow: Down spacing: 12
-                    quota := View {width: Fill height: Fit flow: Down spacing: 8
-                        quota_label := RinxLabel {width: Fill flow: Flow.Right{wrap: true} text: #(crate::i18n::tr("Per-request limit (M)")) i18n_text: "Per-request limit (M)"}
-                        tokens := RinxNumberInput {width: Fill millions: true slider_mode:true maximum:0 minimum: 1 empty_text: "1"}
-                        quota_hint := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
-                    }
-                }
-                // The two collapsed sections open side by side, like a settings footer.
-                disclosures := View {width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 8
-                    advanced_toggle := GrantDisclosure {text: #(crate::i18n::tr("Advanced Options")) i18n_text: "Advanced Options"}
-                    technical_toggle := GrantDisclosure {text: #(crate::i18n::tr("Technical Details")) i18n_text: "Technical Details"}
-                }
-                advanced := View {visible: false width: Fill height: Fit flow: Down spacing: 8
-                    expiry := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
-                    expiry_presets := View {width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
-                        day := RinxKeyButton{height: 44 margin: 0 text:#(crate::i18n::tr("1 day")) i18n_text:"1 day"}
-                        week := RinxKeyButton{height: 44 margin: 0 text:#(crate::i18n::tr("7 days")) i18n_text:"7 days"}
-                        month := RinxKeyButton{height: 44 margin: 0 text:#(crate::i18n::tr("To the end of the month")) i18n_text:"To the end of the month"}
-                    }
-                    expires := RinxInput {width: Fill empty_text: ""}
-                    RinxHint {width:Fill flow:Flow.Right{wrap:true} text:#(crate::i18n::tr("Sharing can’t go past the end of the month. You can also enter an exact UTC time here.")) i18n_text:"Sharing can’t go past the end of the month. You can also enter an exact UTC time here."}
-                }
-                details := RoundedView {visible: false width: Fill height: Fit flow: Down padding: 16
-                    draw_bg +: {color: RINX_SURFACE border_color: RINX_BORDER border_size: 1 border_radius: theme.corner_radius}
-                    copy := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
-                }
-            }
-            buttons := View {width: Fill height: Fit flow: Flow.Right{wrap: true} spacing: 12
-                cancel := RinxButton {text: #(crate::i18n::tr("Cancel")) i18n_text: "Cancel"}
-                primary := RinxPrimaryButton {text: #(crate::i18n::tr("Publish")) i18n_text: "Publish"}
-                recover := RinxButton {text: #(crate::i18n::tr("Refresh")) i18n_text: "Refresh"}
-                cancel_intent := RinxButton {text: #(crate::i18n::tr("Discard This Publish…")) i18n_text: "Discard This Publish…"}
-            }
-        }
+        grant_confirmation := NativeSheet {}
+        // The monthly-maximum amendment uses the same sheet; its fields stay hidden.
+        ceiling_confirmation := NativeSheet {}
         project_room_picker := View {visible: false width: Fill height: Fill flow: Down spacing: 12
             RinxPageTitle {text: "Choose a project room"}
             RinxHint {width: Fill flow: Flow.Right{wrap: true} text: "Choose a private, unencrypted room you created. Submitting the project will invite its Hagency representative. Rinx shares only your selected room with Palpo."}
@@ -664,6 +765,7 @@ impl MiniAppsPanel {
         self.view.view(cx, ids!(grant_confirmation)).set_visible(cx, false);
         self.provider_confirmation = None;
         self.view.view(cx, ids!(provider_confirmation)).set_visible(cx, false);
+        self.view.view(cx, ids!(ceiling_confirmation)).set_visible(cx, false);
         self.project_room_reply = None;
         self.project_rooms.clear();
         self.view.view(cx, ids!(project_room_picker)).set_visible(cx, false);
@@ -708,8 +810,16 @@ impl MiniAppsPanel {
     }
     fn present_provider_confirmation(&mut self, cx: &mut Cx) {
         let visible = self.provider_confirmation.is_some();
-        self.view.view(cx, ids!(provider_confirmation)).set_visible(cx, visible);
-        if let Some(pending) = &self.provider_confirmation {
+        // A monthly-maximum request has its own sheet in the confirmation family.
+        let ceiling = self.provider_confirmation.as_ref().and_then(|pending| pending.consent.ceiling()).map(|prompt| prompt.sheet());
+        self.view.view(cx, ids!(provider_confirmation)).set_visible(cx, visible && ceiling.is_none());
+        self.view.view(cx, ids!(ceiling_confirmation)).set_visible(cx, ceiling.is_some());
+        if let Some(sheet) = &ceiling {
+            self.apply_sheet(cx, id!(ceiling_confirmation), sheet);
+            self.apply_sheet_disclosure(cx, id!(ceiling_confirmation), sheet.more_open);
+            self.view.view(cx, ids!(app_content)).set_visible(cx, false);
+            self.view.view(cx, ids!(approval)).set_visible(cx, false);
+        } else if let Some(pending) = &self.provider_confirmation {
             let details = pending.consent.details();
             let account = pending.consent.account().to_owned();
             let words = pending.consent.words();
@@ -747,20 +857,17 @@ impl MiniAppsPanel {
             ids!(header), ids!(library), ids!(catalog), ids!(import_form), ids!(hagency_review), ids!(notice),
             ids!(approval), ids!(account_confirmation), ids!(account_login_panel), ids!(provider_confirmation),
             ids!(adoption_confirmation), ids!(execution_confirmation), ids!(grant_confirmation),
-            ids!(project_room_picker), ids!(app_content),
+            ids!(ceiling_confirmation), ids!(project_room_picker), ids!(app_content),
         ] {
             self.view.widget(cx, path).set_visible(cx, false);
         }
         match fixture["panel"].as_str() {
             Some("grant") => self.preview_grant(cx, fixture)?,
             Some("maximum") => {
-                let (words, details, ready) = resource_edit_ui::preview(fixture)?;
-                let account = fixture["account"].as_str().unwrap_or_default().to_owned();
-                self.apply_provider_view(cx, words, &details, &account, ready);
-                for path in [ids!(provider_confirmation.scroll.personal)] {
-                    self.view.widget(cx, path).set_visible(cx, false);
-                }
-                self.view.view(cx, ids!(provider_confirmation)).set_visible(cx, true);
+                let sheet = resource_edit_ui::preview(fixture)?;
+                self.apply_sheet(cx, id!(ceiling_confirmation), &sheet);
+                self.apply_sheet_disclosure(cx, id!(ceiling_confirmation), sheet.more_open);
+                self.view.view(cx, ids!(ceiling_confirmation)).set_visible(cx, true);
             }
             _ => return Err("unknown preview panel".into()),
         }
@@ -793,7 +900,88 @@ impl MiniAppsPanel {
         self.request_confirmation_redraw(cx);
         Ok(())
     }
+    /// The monthly-maximum sheet: Save keeps it open while the change saves,
+    /// then it shows the result; closing answers the mini app exactly once.
+    /// Returns false when the ordinary consent path should handle the tap.
+    fn finish_ceiling(&mut self, cx: &mut Cx, approved: bool) -> bool {
+        let Some(prompt) = self.provider_confirmation.as_mut().and_then(|pending| pending.consent.ceiling_mut()) else { return false; };
+        let settled = prompt.saving() || prompt.sheet().primary_closes;
+        if approved && !settled {
+            if !prompt.save() { return false; }
+            self.present_provider_confirmation(cx);
+            self.request_confirmation_redraw(cx);
+            return true;
+        }
+        if !settled { return false; }
+        let close = prompt.close();
+        let Some(pending) = self.provider_confirmation.take() else { return true; };
+        match close {
+            resource_edit_ui::CeilingClose::Replied => {}
+            resource_edit_ui::CeilingClose::Saving(receiver) => {
+                self.pending.push(Pending {reply: Some(pending.reply), target: None, receiver, started: Instant::now(), turn: false, navigation: None});
+            }
+            resource_edit_ui::CeilingClose::Reply(result) => {
+                let text = result.map(|value| value.to_string());
+                splash_host_respond(cx, pending.reply.0, pending.reply.1, text.as_deref().map_err(String::as_str));
+                self.reply_redraw = cx.new_next_frame();
+            }
+            resource_edit_ui::CeilingClose::Cancelled => {
+                splash_host_respond(cx, pending.reply.0, pending.reply.1, Err(pending.consent.cancelled()));
+                self.reply_redraw = cx.new_next_frame();
+            }
+        }
+        self.present_provider_confirmation(cx);
+        self.show_approval(cx);
+        self.view.view(cx, ids!(app_content)).set_visible(cx, true);
+        self.view.redraw(cx);
+        true
+    }
+    /// Keyboard for the monthly-maximum sheet: Escape closes, Tab moves
+    /// between the disclosure and the footer, Return or Space activates.
+    fn ceiling_key(&mut self, cx: &mut Cx, event: &Event) -> bool {
+        let Some(sheet) = self.provider_confirmation.as_ref().and_then(|pending| pending.consent.ceiling()).map(|prompt| prompt.sheet()) else { return false; };
+        let Event::KeyDown(key) = event else { return false; };
+        if key.key_code == KeyCode::Escape {
+            self.finish_provider_confirmation(cx, false);
+            return true;
+        }
+        let more = self.view.button(cx, ids!(ceiling_confirmation.scroll.more.more_row.more_toggle)).area();
+        let cancel = self.view.button(cx, ids!(ceiling_confirmation.buttons.cancel)).area();
+        let primary = self.view.button(cx, ids!(ceiling_confirmation.buttons.primary)).area();
+        let mut targets = Vec::new();
+        if sheet.more_visible() {targets.push(more);}
+        if !sheet.cancel.is_empty() {targets.push(cancel);}
+        if sheet.primary_visible && sheet.primary_enabled {targets.push(primary);}
+        if targets.is_empty() {return false;}
+        if key.key_code == KeyCode::Tab {
+            let next = grant_ui::focus_next(targets.iter().position(|area| cx.has_key_focus(*area)), targets.len(), key.modifiers.shift);
+            cx.set_key_focus(targets[next]);
+            return true;
+        }
+        if matches!(key.key_code, KeyCode::ReturnKey | KeyCode::Space) {
+            if sheet.more_visible() && cx.has_key_focus(more) {
+                if let Some(prompt) = self.provider_confirmation.as_mut().and_then(|pending| pending.consent.ceiling_mut()) {prompt.toggle_more();}
+                self.present_provider_confirmation(cx);
+                cx.set_key_focus(more);
+                return true;
+            }
+            if !sheet.cancel.is_empty() && cx.has_key_focus(cancel) {self.finish_provider_confirmation(cx, false); return true;}
+            if sheet.primary_visible && sheet.primary_enabled && cx.has_key_focus(primary) {self.finish_provider_confirmation(cx, true); return true;}
+        }
+        false
+    }
+    /// Once a confirmed maximum is saved or refused, the mini app hears it
+    /// at once, while the sheet stays to show the result.
+    fn reply_ceiling(&mut self, cx: &mut Cx) {
+        let Some(pending) = &mut self.provider_confirmation else { return; };
+        let reply = pending.reply;
+        let Some(result) = pending.consent.ceiling_mut().and_then(|prompt| prompt.take_reply()) else { return; };
+        let text = result.map(|value| value.to_string());
+        splash_host_respond(cx, reply.0, reply.1, text.as_deref().map_err(String::as_str));
+        self.reply_redraw = cx.new_next_frame();
+    }
     fn finish_provider_confirmation(&mut self, cx: &mut Cx, approved: bool) {
+        if self.finish_ceiling(cx, approved) { return; }
         if approved && self.provider_confirmation.as_ref().is_some_and(|pending|!pending.consent.ready()) { return; }
         let Some(pending) = self.provider_confirmation.take() else { return; };
         self.present_provider_confirmation(cx);
@@ -1294,6 +1482,7 @@ impl MiniAppsPanel {
         }
         let heap = self.view.splash(cx, ids!(card)).isolate_heap_key(cx);
         if self.provider_confirmation.as_mut().is_some_and(|pending|pending.consent.poll()) {
+            self.reply_ceiling(cx);
             self.present_provider_confirmation(cx);
             self.request_confirmation_redraw(cx);
         }
@@ -1507,7 +1696,7 @@ impl Widget for MiniAppsPanel {
         self.poll_execution_confirmation(cx);
         self.poll_grant_confirmation(cx);
         self.poll_adoption_confirmation(cx);
-        if self.account_login_key(cx,event) || self.execution_key(cx,event) || self.reauthentication_key(cx,event) || self.adoption_key(cx,event) || self.grant_key(cx,event) {return;}
+        if self.account_login_key(cx,event) || self.execution_key(cx,event) || self.reauthentication_key(cx,event) || self.adoption_key(cx,event) || self.grant_key(cx,event) || self.ceiling_key(cx,event) {return;}
         self.view.handle_event(cx, event, scope);
         if self.confirmation_redraw.is_event(event).is_some() {
             self.confirmation_redraw = NextFrame::default();
@@ -1543,22 +1732,37 @@ impl Widget for MiniAppsPanel {
             }
             if self.grant_confirmation.is_some() {
                 self.capture_grant_choices(cx);
+                let add_field = self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name));
                 if self.view.button(cx,ids!(grant_confirmation.buttons.cancel)).clicked(actions) {self.close_grant_confirmation(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.primary)).clicked(actions) {self.grant_primary(cx);}
-                else if self.view.button(cx,ids!(grant_confirmation.buttons.recover)).clicked(actions) {self.grant_recover(cx);}
-                else if self.view.button(cx,ids!(grant_confirmation.buttons.cancel_intent)).clicked(actions) {self.grant_cancel_intent(cx);}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.advanced.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.advanced.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.advanced.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.people.edit)).clicked(actions) {self.grant_disclose(cx,grant_ui::GrantSection::People);}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.disclosures.advanced_toggle)).clicked(actions) {self.grant_disclose(cx,grant_ui::GrantSection::Advanced);}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.disclosures.technical_toggle)).clicked(actions) {self.grant_disclose(cx,grant_ui::GrantSection::Technical);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.actions.recover)).clicked(actions) {self.grant_recover(cx);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.actions.cancel_intent)).clicked(actions) {self.grant_cancel_intent(cx);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.more.advanced.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.more.more_row.more_toggle)).clicked(actions) {self.grant_disclose(cx);}
+                else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.add.add_button)).clicked(actions) || add_field.returned(actions).is_some() {self.grant_add_person(cx);}
+                else if add_field.changed(actions).is_some() {self.grant_add_typing(cx);}
+                else {
+                    for (index, row) in sheet_ui::PEOPLE.iter().enumerate() {
+                        let path = sheet_ui::sheet_path(id!(grant_confirmation), &[id!(scroll), id!(people), id!(list), *row, id!(body), id!(remove)]);
+                        if self.view.button(cx, &path).clicked(actions) {self.grant_remove_person(cx, index); break;}
+                    }
+                }
                 return;
             }
             self.handle_account_login_actions(cx,actions);
             if self.provider_confirmation.is_some() {
                 self.handle_personal_controls(cx,actions);
-                if self.view.button(cx, ids!(provider_confirmation.buttons.connect)).clicked(actions) {
+                if self.view.button(cx, ids!(ceiling_confirmation.buttons.primary)).clicked(actions) {
+                    self.finish_provider_confirmation(cx, true);
+                } else if self.view.button(cx, ids!(ceiling_confirmation.buttons.cancel)).clicked(actions) {
+                    self.finish_provider_confirmation(cx, false);
+                } else if self.view.button(cx, ids!(ceiling_confirmation.scroll.more.more_row.more_toggle)).clicked(actions) {
+                    if let Some(prompt) = self.provider_confirmation.as_mut().and_then(|pending| pending.consent.ceiling_mut()) {prompt.toggle_more();}
+                    self.present_provider_confirmation(cx);
+                    self.request_confirmation_redraw(cx);
+                } else if self.view.button(cx, ids!(provider_confirmation.buttons.connect)).clicked(actions) {
                     self.finish_provider_confirmation(cx, true);
                 } else if self.view.button(cx, ids!(provider_confirmation.buttons.cancel)).clicked(actions) {
                     self.finish_provider_confirmation(cx, false);

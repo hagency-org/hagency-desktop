@@ -82,6 +82,7 @@ mod tests {
                 ids!(notice),
                 ids!(approval),
                 ids!(grant_confirmation),
+                ids!(ceiling_confirmation),
                 ids!(adoption_confirmation),
                 ids!(execution_confirmation),
             ] {
@@ -93,8 +94,17 @@ mod tests {
             for root in [
                 id!(adoption_confirmation),
                 id!(grant_confirmation),
+                id!(ceiling_confirmation),
                 id!(execution_confirmation),
             ] {
+                // The native sheets keep details behind their one disclosure
+                // and a recovery step in a grouped row above it.
+                let sheet = root == id!(grant_confirmation) || root == id!(ceiling_confirmation);
+                let recover: Vec<LiveId> = if sheet {
+                    vec![root, id!(scroll), id!(actions), id!(recover)]
+                } else {
+                    vec![root, id!(buttons), id!(recover)]
+                };
                 panel.view.widget(&cx, &[root]).set_visible(&mut cx, true);
                 // Initial Choose, then the async Loading state removes the
                 // previously visible details and primary control.
@@ -130,9 +140,19 @@ mod tests {
                         .view
                         .widget(&cx, &[root, id!(buttons), id!(primary)])
                         .set_visible(&mut cx, primary);
+                    if sheet {
+                        panel
+                            .view
+                            .widget(&cx, &[root, id!(scroll), id!(more)])
+                            .set_visible(&mut cx, !details.is_empty());
+                        panel
+                            .view
+                            .widget(&cx, &[root, id!(scroll), id!(actions)])
+                            .set_visible(&mut cx, phase == "failed" || phase == "progress");
+                    }
                     panel
                         .view
-                        .widget(&cx, &[root, id!(buttons), id!(recover)])
+                        .widget(&cx, &recover)
                         .set_visible(&mut cx, phase == "failed" || phase == "progress");
                     panel.request_confirmation_redraw(&mut cx);
                     frame(&mut cx, &mut panel, &pass, &mut list, width, height);
@@ -150,16 +170,16 @@ mod tests {
                         assert!(details_widget.area().rect(&cx).size.y > 0.0);
                     }
                     for control in [
-                        id!(cancel),
+                        vec![root, id!(buttons), id!(cancel)],
                         if primary {
-                            id!(primary)
+                            vec![root, id!(buttons), id!(primary)]
                         } else if phase == "failed" || phase == "progress" {
-                            id!(recover)
+                            recover.clone()
                         } else {
-                            id!(cancel)
+                            vec![root, id!(buttons), id!(cancel)]
                         },
                     ] {
-                        let widget = panel.view.widget(&cx, &[root, id!(buttons), control]);
+                        let widget = panel.view.widget(&cx, &control);
                         let rect = widget.area().rect(&cx);
                         assert!(widget.visible() && widget.area().is_valid(&cx));
                         assert!(

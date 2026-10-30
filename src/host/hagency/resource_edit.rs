@@ -70,12 +70,43 @@ pub(crate) fn amendment_details(language: Language, review: &CeilingAmendmentRev
     format!("{lead}\n{unchanged}")
 }
 
+/// What the monthly-maximum sheet shows beside the change, read natively
+/// from the pool's own record, never from the mini app's request.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub(crate) struct CeilingFacts {
+    /// The owner's name for the pool, when one is set.
+    pub name: Option<String>,
+    /// The monthly maximum in force now.
+    pub current: Option<u64>,
+    /// What this request would set it to.
+    pub proposed: Option<u64>,
+    /// This month's committed total (used plus given to Agents): the lowest
+    /// the maximum can be now. None while usage is still being reported.
+    pub committed: Option<u64>,
+    /// The live per-request limit, which this change never touches.
+    pub per_request: Option<u64>,
+}
+
+/// A review that could not be shown, with the facts read beside it so the
+/// sheet can say which amount would work.
+#[derive(Debug)]
+pub(crate) struct EditRefusal {
+    pub code: String,
+    pub facts: Option<CeilingFacts>,
+}
+impl EditRefusal {
+    fn plain(code: String) -> Self {
+        Self { code, facts: None }
+    }
+}
+
 pub(crate) struct ResourceEditConsent {
     host: Host,
     lease: Lease,
     input: EditLocalResource,
     expires: Instant,
     review: Option<LocalResourceEditReview>,
+    facts: Option<CeilingFacts>,
 }
 
 pub(super) fn parse_edit(args: Value) -> Result<EditLocalResource, String> {
@@ -101,6 +132,7 @@ impl Host {
             input,
             expires: Instant::now() + Duration::from_secs(300),
             review: None,
+            facts: None,
         })
     }
 }
@@ -131,17 +163,73 @@ impl ResourceEditConsent {
         let account = self.host.check(&self.lease)?;
         self.lease.authorize(&account, EDIT, None)
     }
-    pub async fn load(mut self) -> Result<Self, String> {
-        self.authorize()?;
-        let manager = self.host.manager(&self.lease).await?;
-        self.authorize()?;
-        let review = manager
-            .review_local_resource_edit(&self.input)
+    pub async fn load(mut self) -> Result<Self, EditRefusal> {
+        self.authorize().map_err(EditRefusal::plain)?;
+        let manager = self.host.manager(&self.lease).await.map_err(EditRefusal::plain)?;
+        self.authorize().map_err(EditRefusal::plain)?;
+        let review = manager.review_local_resource_edit(&self.input).await;
+        // A monthly-maximum request also reads the pool's committed total, so
+        // the sheet can name the floor before and after a refusal.
+        let facts = if self.amendment_requested() {
+            self.ceiling_facts(&manager).await
+        } else {
+            None
+        };
+        self.authorize().map_err(EditRefusal::plain)?;
+        match review {
+            Ok(review) => {
+                self.review = Some(review);
+                self.facts = facts;
+                Ok(self)
+            }
+            Err(error) => Err(EditRefusal { code: error.code, facts }),
+        }
+    }
+    /// The pool's maximum, committed total and per-request limit, read from
+    /// its own record. A failed read only leaves the sheet without them.
+    async fn ceiling_facts(&self, manager: &::hagency::native_owner::NativeManagement) -> Option<CeilingFacts> {
+        let detail = manager
+            .resource_detail(::hagency::native_owner::ResourceDetailQuery { id: self.input.resource_id.clone() })
             .await
-            .map_err(|e| e.code)?;
-        self.authorize()?;
-        self.review = Some(review);
-        Ok(self)
+            .ok()?;
+        Some(CeilingFacts {
+            name: detail
+                .resource
+                .local_name
+                .as_ref()
+                .map(|local| local.name.trim().to_owned())
+                .filter(|name| !name.is_empty()),
+            current: detail.ceiling.as_ref().and_then(|c| c.tokens).map(u64::from),
+            proposed: match &self.input.ceiling {
+                CeilingChange::Monthly { tokens } => Some(u64::from(*tokens)),
+                _ => None,
+            },
+            committed: detail.ceiling_amendment.minimum_tokens,
+            per_request: detail.ceiling_amendment.per_request_tokens,
+        })
+    }
+    /// The amendment shown for confirmation, when this is one.
+    pub fn ceiling_review(&self) -> Option<&CeilingAmendmentReview> {
+        match &self.review {
+            Some(LocalResourceEditReview::CeilingAmendment(review)) => Some(review),
+            _ => None,
+        }
+    }
+    /// An amendment this request already saved: (previous, saved) maximum.
+    pub fn recorded_amendment(&self) -> Option<(u64, u64)> {
+        match &self.review {
+            Some(LocalResourceEditReview::Recorded(result)) => result
+                .ceiling_amendment
+                .as_ref()
+                .map(|amendment| (amendment.previous_tokens, amendment.tokens)),
+            _ => None,
+        }
+    }
+    pub fn facts(&self) -> Option<&CeilingFacts> {
+        self.facts.as_ref()
+    }
+    pub fn resource_id(&self) -> &str {
+        &self.input.resource_id
     }
     pub fn details(&self) -> String {
         let tr = crate::i18n::tr;
