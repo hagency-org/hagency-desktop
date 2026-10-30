@@ -43,6 +43,11 @@ let {shared_done=[],workspace_files=nil}=H
 H.shared_done=shared_done H.workspace_files=workspace_files
 let {pool_renew_ask=false,pool_raise=nil,pool_created=nil,glossary_open=""}=H
 H.pool_renew_ask=pool_renew_ask H.pool_raise=pool_raise H.pool_created=pool_created H.glossary_open=glossary_open
+// Round 8: a fix started from a request or an alert comes back there; the per-request floor a
+// refusal proved; reads that back, the tabs and refresh may leave behind.
+let {detour=nil,detour_note=nil,nav_forward=false,pool_floor_proof=nil,reading=false,read_epoch=0,pool_name_after=nil,pool_name_note=nil}=H
+H.detour=detour H.detour_note=detour_note H.nav_forward=nav_forward H.pool_floor_proof=pool_floor_proof H.reading=reading H.read_epoch=read_epoch
+H.pool_name_after=pool_name_after H.pool_name_note=pool_name_note
 let {who=nil}=H
 if who==nil {who={rid:"" picks:[] name:"" nameError:"" trustOpen:false roomError:""}}
 H.who=who
@@ -1408,12 +1413,27 @@ A.read_error=fn(code){
     if code=="management_invalid_result" || code=="management_outcome_unknown" || code=="" {return A.t("The reply didn’t match this page. Try again.","收到的数据与此页面不符，请重试。")}
     return A.t("Couldn’t connect. Check your connection and try again.","暂时连不上，请检查网络后重试。")
 }
+// Services that change something or open a confirmation window; every other request only reads.
+A.read_service=fn(service){
+    for write in ["hagency.intent.new","hagency.intent.retry","hagency.grants.review","hagency.onboarding.review","hagency.providers.connect","hagency.account.reauthenticate","hagency.navigation.open","hagency.tool_approvals.open","hagency.pools.agents.room","hagency.session","hagency.shared_approvals.decide"] {if service==write {return false}}
+    return true
+}
+// Back, the tabs and refresh stay usable while a page reads; using one drops the read.
+A.nav_free=fn(){return !H.busy || (H.reading && H.command==nil)}
+A.read_cancel=fn(){
+    if !H.busy || !H.reading || H.command!=nil {return}
+    H.read_epoch=H.read_epoch+1 H.templates.epoch=H.templates.epoch+1 H.web.epoch=H.web.epoch+1
+    H.busy=false H.reading=false H.notice=""
+}
 // Reads that keep their own error state instead of the shared notice line.
 A.sub_read=fn(service,args,done,fail){
     if H.busy {return false}
-    H.busy=true A.redraw()
+    H.read_epoch=H.read_epoch+1
+    let epoch=H.read_epoch
+    H.busy=true H.reading=A.read_service(service) A.redraw()
     host.request(service,args,fn(r){
-        H.busy=false
+        if epoch!=H.read_epoch {return}
+        H.busy=false H.reading=false
         H.ux.errorCode=if r.is_ok {""} else {r.error}
         if !r.is_ok && (r.error=="native_resume_missing" || r.error=="native_resume_revoked") {H.needs_signin=true}
         if r.is_ok {done(r.data)} else {fail(r.error)}
@@ -2858,9 +2878,12 @@ A.reauthenticate = fn(){
 }
 A.request = fn(service, args, done){
     if H.busy { return }
-    H.busy = true H.notice = A.t("Updating…", "正在更新…") A.redraw()
+    H.read_epoch=H.read_epoch+1
+    let epoch=H.read_epoch
+    H.busy = true H.reading=A.read_service(service) H.notice = A.t("Updating…", "正在更新…") A.redraw()
     host.request(service, args, fn(r){
-        H.busy = false
+        if epoch!=H.read_epoch {return}
+        H.busy = false H.reading=false
         H.ux.errorCode=if r.is_ok{""}else{r.error}
         if !r.is_ok && H.page=="overview" {H.ux.dashboardError=true}
         if !r.is_ok && H.page=="inbox" {H.ux.inboxError=true H.ux.inboxReady=false}
@@ -3170,8 +3193,8 @@ A.template_reason=fn(code){
     if code=="management_change_cancelled"{return A.t("This change was discarded; nothing was saved.","这项更改已经放弃，没有保存。")}
     return A.error_text(code)
 }
-A.template_read=fn(service,args,done){if H.busy{return} let t=H.templates t.epoch=t.epoch+1 let epoch=t.epoch let page=H.page H.busy=true H.notice="" A.redraw()
-    host.request(service,args,fn(reply){if t.epoch!=epoch{return} H.busy=false H.ux.errorCode=if reply.is_ok{""}else{reply.error} if H.page!=page{A.redraw() return} if reply.is_ok{done(reply.data)}else{t.error=A.template_reason(reply.error) if page=="template_command"{t.phase="unknown"} if reply.error=="native_resume_missing" || reply.error=="native_resume_revoked"{H.needs_signin=true}} A.redraw()})
+A.template_read=fn(service,args,done){if H.busy{return} let t=H.templates t.epoch=t.epoch+1 let epoch=t.epoch let page=H.page H.busy=true H.reading=true H.notice="" A.redraw()
+    host.request(service,args,fn(reply){if t.epoch!=epoch{return} H.busy=false H.reading=false H.ux.errorCode=if reply.is_ok{""}else{reply.error} if H.page!=page{A.redraw() return} if reply.is_ok{done(reply.data)}else{t.error=A.template_reason(reply.error) if page=="template_command"{t.phase="unknown"} if reply.error=="native_resume_missing" || reply.error=="native_resume_revoked"{H.needs_signin=true}} A.redraw()})
 }
 A.template_bad=fn(){H.templates.error=A.t("The template response did not match this view. Refresh the current record.","模板响应与此页面不符，请刷新当前记录。")}
 // "Change discarded" shows once, on the page the discard returned to.
@@ -3282,8 +3305,8 @@ A.web_error=fn(code){
     if code=="management_model_unqualified"{return A.t("This model does not qualify for the selected role.","此模型不满足所选角色的要求。")}
     return A.error_text(code)
 }
-A.web_read=fn(service,args,done){if H.busy{return} let w=H.web w.epoch=w.epoch+1 let epoch=w.epoch let page=H.page H.busy=true H.notice="" A.redraw()
-    host.request(service,args,fn(r){if w.epoch!=epoch{return} H.busy=false H.ux.errorCode=if r.is_ok{""}else{r.error} if H.page!=page{A.redraw() return} if r.is_ok{done(r.data)}else{H.notice=A.web_error(r.error) if r.error=="native_resume_missing" || r.error=="native_resume_revoked"{H.needs_signin=true}} A.redraw()})
+A.web_read=fn(service,args,done){if H.busy{return} let w=H.web w.epoch=w.epoch+1 let epoch=w.epoch let page=H.page H.busy=true H.reading=true H.notice="" A.redraw()
+    host.request(service,args,fn(r){if w.epoch!=epoch{return} H.busy=false H.reading=false H.ux.errorCode=if r.is_ok{""}else{r.error} if H.page!=page{A.redraw() return} if r.is_ok{done(r.data)}else{H.notice=A.web_error(r.error) if r.error=="native_resume_missing" || r.error=="native_resume_revoked"{H.needs_signin=true}} A.redraw()})
 }
 A.open_web=fn(kind,after){if H.busy{return} let w=H.web if H.page!="web_overview" || w.kind!=kind || w.after!=after{w.data=nil} w.kind=kind w.after=after H.page="web_overview"
     let q={after:after}
@@ -15585,7 +15608,7 @@ shell := View{width:Fill height:Fill flow:Down spacing:12
             mod.widgets.HagencyBadge{width:32 height:32 mod.widgets.HagencyGlyph{width:18 height:18 icon_walk:Walk{width:18 height:18} draw_icon.svg:mod.rinx_icons.hagency}}
             mod.widgets.HagencySectionTitle{width:Fill flow:Right max_lines:1 text_overflow:TextOverflow.Ellipsis text:if H.entry_role!="" && !H.entry_choosing{A.entry_label(H.entry_role)}else{"Hagency"}}
             entry_switch := mod.widgets.HagencyButton{visible:H.ready && H.entry_role!="" && !H.entry_choosing enabled:!H.busy text:A.t("Switch Role","切换角色") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.person on_click:||A.entry_switch()}
-            refresh := mod.widgets.HagencyIconButton{enabled:!H.busy && !A.must_reopen() draw_icon.svg:mod.rinx_icons.refresh on_click:||A.refresh()}
+            refresh := mod.widgets.HagencyIconButton{enabled:A.nav_free() && !A.must_reopen() draw_icon.svg:mod.rinx_icons.refresh on_click:||{A.read_cancel() A.refresh()}}
         }
     }}
     navigation := View{width:Fill height:Fit flow:Right spacing:4 on_render:||{
@@ -15593,96 +15616,96 @@ shell := View{width:Fill height:Fill flow:Down spacing:12
             let parent=A.entry_parent()
             nav_overview := View{visible:H.entry_role!="owner" width:Fill height:Fit
                 let active=parent=="overview"
-                overview := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                overview := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:A.t("Home","首页")
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.home color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.navigate("overview")
+                    on_click:||{A.read_cancel() A.navigate("overview")}
                 }
             }
             nav_agents := View{visible:H.entry_role=="manager" width:Fill height:Fit
                 let active=parent=="agents"
-                agents := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                agents := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:A.t("Agents","Agent")
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.person color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.navigate("agent_home")
+                    on_click:||{A.read_cancel() A.navigate("agent_home")}
                 }
             }
             nav_projects := View{visible:H.entry_role=="manager" width:Fill height:Fit
                 let active=parent=="projects"
-                projects := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                projects := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:A.t("Pools","资源池")
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.projects color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.navigate("pools")
+                    on_click:||{A.read_cancel() A.navigate("pools")}
                 }
             }
             nav_accounts := View{visible:H.entry_role=="owner" width:Fill height:Fit
                 let active=parent=="accounts"
-                accounts := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                accounts := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:A.t("Coding tools","编码工具")
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.connection color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.open_accounts(nil)
+                    on_click:||{A.read_cancel() A.open_accounts(nil)}
                 }
             }
             nav_resources := View{visible:H.entry_role=="owner" width:Fill height:Fit flow:Overlay
                 let active=parent=="resources"
                 let badge=A.tab_badge("resources")
-                resources := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:(if badge>0 {(20+12*mod.widgets.RINX_TEXT_SCALE)} else {6}) top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                resources := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:(if badge>0 {(20+12*mod.widgets.RINX_TEXT_SCALE)} else {6}) top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:if badge>0 {A.t("Pools","资源池")} else {A.t("Resource pools","资源池")}
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.resources color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.navigate("resources")
+                    on_click:||{A.read_cancel() A.navigate("resources")}
                 }
                 if badge>0 {View{width:Fill height:Fill align:Align{x:1.0 y:(if mod.widgets.RINX_TEXT_SCALE>1.2 {0.2} else {0.5})} padding:Inset{right:(4+2*mod.widgets.RINX_TEXT_SCALE)} mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:if badge>99 {"99+"} else {""+badge}}}}}
             }
             nav_inbox := View{visible:H.entry_role!="manager" width:Fill height:Fit flow:Overlay
                 let active=parent=="inbox"
                 let badge=A.tab_badge("inbox")
-                inbox := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:(if badge>0 {(20+12*mod.widgets.RINX_TEXT_SCALE)} else {6}) top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                inbox := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:(if badge>0 {(20+12*mod.widgets.RINX_TEXT_SCALE)} else {6}) top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:if H.entry_role=="admin"{A.t("Admission","加入服务器")}else if badge>0 {A.t("Requests","Agent 申请")} else {A.t("Agent requests","Agent 申请")}
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.inbox color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.navigate("inbox")
+                    on_click:||{A.read_cancel() A.navigate("inbox")}
                 }
                 if badge>0 {View{width:Fill height:Fill align:Align{x:1.0 y:(if mod.widgets.RINX_TEXT_SCALE>1.2 {0.2} else {0.5})} padding:Inset{right:(4+2*mod.widgets.RINX_TEXT_SCALE)} mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:if badge>99 {"99+"} else {""+badge}}}}}
             }
             nav_devices := View{visible:false width:Fill height:Fit
                 let active=parent=="devices"
-                devices := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                devices := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:A.t("Devices","执行")
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.device color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.open_execution(nil)
+                    on_click:||{A.read_cancel() A.open_execution(nil)}
                 }
             }
             nav_servers := View{visible:H.entry_role=="admin" width:Fill height:Fit
                 let active=parent=="servers"
-                servers := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                servers := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:A.t("Servers","连接")
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.connection color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.navigate("connections")
+                    on_click:||{A.read_cancel() A.navigate("connections")}
                 }
             }
             nav_work := View{visible:H.entry_role!="owner" width:Fill height:Fit
                 let active=parent=="work"
-                work := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:!H.busy
+                work := mod.widgets.HagencyButton{width:Fill height:(if mod.widgets.RINX_TEXT_SCALE>1.2 {56} else {44}) flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {2} else {6}) padding:Inset{left:6 right:6 top:0 bottom:0} align:Align{x:0.5 y:0.5} enabled:A.nav_free()
                     text:if H.entry_role=="admin"{A.t("Console","管理")}else{A.t("Work","工作")}
                     draw_bg +: {color:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE} color_hover:mod.widgets.RINX_HOVER color_focus:if active{mod.widgets.RINX_SELECTED}else{mod.widgets.RINX_PAGE}}
                     draw_text +: {text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE} color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK} color_hover:mod.widgets.RINX_INK color_focus:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_INK}}
                     icon_walk:Walk{width:16 height:16} draw_icon +: {svg:mod.rinx_icons.tasks color:if active{mod.widgets.RINX_ACCENT}else{mod.widgets.RINX_MUTED}}
-                    on_click:||A.navigate("tools")
+                    on_click:||{A.read_cancel() A.navigate("tools")}
                 }
             }
         }
@@ -15694,22 +15717,22 @@ shell := View{width:Fill height:Fill flow:Down spacing:12
             View{width:Fill{max:720} height:(30+14*mod.widgets.RINX_TEXT_SCALE) flow:Overlay
                 View{width:Fill height:Fill align:Align{x:0.5 y:0.5} padding:Inset{left:A.page_bar_side(mode) right:A.page_bar_side(mode)} mod.widgets.HagencyBarTitle{width:Fill align:Align{x:0.5} max_lines:1 text_overflow:TextOverflow.Ellipsis text:A.page_bar_title()}}
                 View{width:Fill height:Fill flow:Right align:Align{y:0.5}
-                    if mode=="resource" {View{width:Fit height:Fit resource_back := mod.widgets.HagencyBackLink{text:A.nav_label(A.t("Pools","资源池")) enabled:!H.busy && A.alert_kind()=="" on_click: || A.pool_back()}}}
+                    if mode=="resource" {View{width:Fit height:Fit resource_back := mod.widgets.HagencyBackLink{text:A.nav_label(A.t("Pools","资源池")) enabled:A.nav_free() && A.alert_kind()=="" on_click: || {A.read_cancel() A.pool_back()}}}}
                     if mode=="resource_name" {View{width:Fit height:Fit resource_name_cancel := mod.widgets.HagencyBarText{text:A.t("Cancel","取消") enabled:!H.busy on_click: || {H.resource_name_mode="" H.resource_name_draft=nil A.redraw()}}}}
                     if mode=="pool_create" {View{width:Fit height:Fit pool_create_cancel := mod.widgets.HagencyBarText{text:A.t("Cancel","取消") enabled:!H.busy on_click: || A.pool_create_close()}}}
                     if mode=="resource_edit" {View{width:Fit height:Fit resource_config_back := mod.widgets.HagencyBarText{text:A.t("Cancel","取消") enabled:!H.busy on_click: || {let id=H.resource_edit_draft.resourceId H.resource_edit_draft=nil A.open_resource(id)}}}}
                     if mode=="resource_create" {View{width:Fit height:Fit resource_create_back := mod.widgets.HagencyBarText{text:A.t("Cancel","取消") enabled:!H.busy on_click: || {let id=H.resource_create_draft.sourceResourceId H.resource_create_draft=nil A.open_resource(id)}}}}
-                    if mode=="pool" {View{width:Fit height:Fit pool_agent_back := mod.widgets.HagencyBackLink{text:if H.entry_role=="owner" {A.nav_label(A.t("Requests","申请"))} else {A.t("My Agents","我的 Agent")} enabled:!H.busy on_click: || {if H.entry_role!="owner" || !A.nav_back() {A.navigate(if H.entry_role=="owner" {"inbox"} else {"agent_home"})}}}}}
+                    if mode=="pool" {View{width:Fit height:Fit pool_agent_back := mod.widgets.HagencyBackLink{text:if H.entry_role=="owner" {A.nav_label(A.t("Requests","申请"))} else {A.t("My Agents","我的 Agent")} enabled:A.nav_free() on_click: || {A.read_cancel() if H.entry_role!="owner" || !A.nav_back() {A.navigate(if H.entry_role=="owner" {"inbox"} else {"agent_home"})}}}}}
                     if mode=="detail" {View{width:Fit height:Fit personal_back := mod.widgets.HagencyBackLink{text:A.t("My Agents","我的 Agent") enabled:!H.busy && H.local_discard=="" && H.local_confirm=="" on_click: || A.navigate("agent_home")}}}
                     if mode=="edit" {View{width:Fit height:Fit personal_edit_cancel := mod.widgets.HagencyBarText{text:A.t("Cancel","取消") enabled:!H.busy && H.local_discard=="" && H.local_confirm=="" on_click: || A.local_cancel_edit()}}}
                     if mode=="review" {View{width:Fit height:Fit personal_review_back := mod.widgets.HagencyBackLink{text:A.t("Edit","修改") enabled:!H.busy && H.local_discard=="" && H.local_confirm=="" on_click: || {H.personal_mode="edit" A.redraw()}}}}
                     if mode=="observe" {View{width:Fit height:Fit personal_observe_cancel := mod.widgets.HagencyBarText{text:A.t("Cancel","取消") enabled:!H.busy on_click: || {H.personal_mode="detail" H.personal_draft=nil A.redraw()}}}}
                     if mode=="model" {View{width:Fit height:Fit personal_model_back := mod.widgets.HagencyBarText{text:A.t("Cancel","取消") enabled:!H.busy && H.local_discard=="" && H.local_confirm=="" on_click: || A.local_cancel_model()}}}
-                    if mode=="sub" {View{width:Fit height:Fit sub_back := mod.widgets.HagencyBackLink{text:A.sub_back_label() enabled:!H.busy && A.sub_back_enabled() on_click: || A.sub_back()}}}
+                    if mode=="sub" {View{width:Fit height:Fit sub_back := mod.widgets.HagencyBackLink{text:A.sub_back_label() enabled:A.nav_free() && A.sub_back_enabled() on_click: || {A.read_cancel() A.sub_back()}}}}
                     if mode=="offer_edit" {View{width:Fit height:Fit web_offer_cancel := mod.widgets.HagencyBarText{padding:Inset{left:10 right:10} text:A.t("Cancel","取消") enabled:!H.busy on_click: || {H.web.draft=nil A.redraw()}}}}
                     if mode=="template_edit" && H.templates.draft!=nil {View{width:Fit height:Fit template_edit_back := mod.widgets.HagencyBarText{padding:Inset{left:10 right:10} text:A.t("Cancel","取消") enabled:!H.busy on_click: || A.template_cancel_edit()}}}
                     View{width:Fill height:1}
-                    if (mode=="sub" || mode=="template_edit" || mode=="offer_edit") && H.busy {View{width:Fit height:Fit padding:Inset{right:10} mod.widgets.HagencySpinner{}}}
+                    if ((mode=="sub" || mode=="template_edit" || mode=="offer_edit") && H.busy) || ((mode=="resource" || mode=="pool") && H.reading) {View{width:Fit height:Fit padding:Inset{right:10} mod.widgets.HagencySpinner{}}}
                     if mode=="offer_edit" {View{width:Fit height:Fit web_offer_review := mod.widgets.HagencyBarDone{padding:Inset{left:10 right:10} text:A.t("Next","下一步") enabled:A.web_can_edit() on_click: || A.web_offer_save()}}}
                     if mode=="template_edit" && H.templates.draft!=nil {View{width:Fit height:Fit template_prepare := mod.widgets.HagencyBarDone{padding:Inset{left:10 right:10} text:A.t("Next","下一步") enabled:!H.busy on_click: || A.template_save_draft()}}}
                     if mode=="edit" {View{width:Fit height:Fit personal_review := mod.widgets.HagencyBarDone{text:A.t("Next","下一步") enabled:!H.busy && H.local_discard=="" && H.local_confirm=="" && H.command == nil && A.local_policy_changed() && A.personal_valid() on_click: || A.review_personal_policy()}}}
