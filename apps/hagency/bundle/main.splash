@@ -10376,28 +10376,22 @@ A.render_page = fn(){
                 // One section for everything to decide: this pool's tool requests (decided in the Agent's
                 // approval chat) and permission questions from chat, which all pools share.
                 if live.len()+decide.len()>0 {tools_decide_label := mod.widgets.HagencyListLabel{text:A.t("NEEDS YOUR DECISION · ","需要你决定 · ")+(live.len()+decide.len())}}
+                // One card per request, one template: what it wants, one line of context, then its actions in a
+                // row. Requests decided in the Agent's approval chat open there; the IDs live on the detail page.
                 for item in live {let row=item View{width:Fill height:Fit flow:Down padding:Inset{bottom:6}
                     let subject=A.tool_subject(H.tool_page,row.engagementId)
                     let project=A.tool_project_name(subject)
                     mod.widgets.HagencyList{
-                        View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:14 top:13 bottom:8} align:Align{y:0.0}
+                        View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:6 top:13 bottom:8} align:Align{y:0.0}
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.shield draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                             View{width:Fill height:Fit flow:Down spacing:4 padding:Inset{top:3}
                                 mod.widgets.HagencyWrapTitle{text:A.t(A.tool_agent(subject)+" is waiting for a tool approval",A.sub_join(A.tool_agent(subject),"在等待工具审批")) draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}}
-                                mod.widgets.HagencyWrapSubtitle{text:(if project!="" {project+" · "} else {""})+A.tool_left(row,observed)}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("Decide it in the Agent’s approval chat, after seeing the exact parameters.","要在 Agent 的审批对话里看过具体参数再决定。")}
+                                mod.widgets.HagencyWrapSubtitle{text:(if project!="" {project+" · "} else {""})+A.tool_left(row,observed)+A.t(" · decide it in the Agent’s approval chat"," · 在 Agent 的审批对话里决定")}
                             }
+                            tool_request_open := mod.widgets.HagencyBarText{text:A.t("Details","详情") enabled:!H.busy on_click: || A.open_tool_request(row.id)}
                         }
                         View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:14 right:14 top:6 bottom:12}
                             tool_request_room := mod.widgets.HagencyPillPrimary{text:A.t("Approve in Chat","去聊天中审批") draw_icon.svg:mod.rinx_icons.chat icon_walk:Walk{width:16 height:16} enabled:!H.busy on_click: || A.tool_open_room(row)}
-                        }
-                        mod.widgets.HagencyListDivider{margin:Inset{left:14}}
-                        mod.widgets.HagencyListRow{
-                            tool_request_open := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.open_tool_request(row.id)}
-                            mod.widgets.HagencyListBody{
-                                mod.widgets.HagencyListSubtitle{text:A.t("Open This Request","查看这项请求")}
-                                mod.widgets.HagencyChevron{}
-                            }
                         }
                     }
                 }}
@@ -10418,16 +10412,23 @@ A.render_page = fn(){
                     let info=A.perm_info(row)
                     let session_ok=A.shared_session(row)
                     let sending=H.shared_sending==a.id
+                    let open=H.details_open=="shared:"+a.id
                     mod.widgets.HagencyList{
-                        View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:14 top:13 bottom:8} align:Align{y:0.0}
+                        View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:6 top:13 bottom:8} align:Align{y:0.0}
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:info.icon draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                             View{width:Fill height:Fit flow:Down spacing:4 padding:Inset{top:3}
                                 mod.widgets.HagencyWrapTitle{text:info.title draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}}
                                 mod.widgets.HagencyWrapSubtitle{text:A.t("Asked in a chat with ","来自 ")+A.sub_person(a.requesterMxid)+A.t(" · shared by all pools"," 的对话 · 所有资源池共用")}
                             }
+                            // What exactly it asks and why, and the IDs, fold under the card's own Details.
+                            approval_details := mod.widgets.HagencyBarText{text:A.t("Details","详情") enabled:!H.busy on_click: || A.sub_toggle("shared:"+a.id)}
                         }
-                        if info.exact!="" {View{width:Fill height:Fit padding:Inset{left:55 right:14 bottom:6} mod.widgets.HagencyCode{mod.widgets.HagencyCodeText{text:info.exact}}}}
-                        if info.reason!="" {View{width:Fill height:Fit padding:Inset{left:55 right:14 bottom:6} mod.widgets.HagencyWrapSubtitle{text:A.t("Reason: ","理由：")+info.reason}}}
+                        if open {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:55 right:14 bottom:6}
+                            if info.exact!="" {mod.widgets.HagencyCode{mod.widgets.HagencyCodeText{text:info.exact}}}
+                            if info.reason!="" {mod.widgets.HagencyWrapSubtitle{text:A.t("Reason: ","理由：")+info.reason}}
+                            mod.widgets.HagencyListSubtitle{text:A.t("Request ID, if your administrator asks · select to copy","请求编号（管理员问起时用）· 可选中复制")}
+                            approval_request_id := mod.widgets.HagencyCopyText{text:a.id}
+                        }}
                         View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:6 bottom:12}
                             View{width:Fill height:Fit flow:Right spacing:8
                                 approval_deny := mod.widgets.HagencyPillDanger{text:A.t("Deny","拒绝") enabled:!H.busy && !sending on_click: || A.decide_shared_approval(row,"deny")}
@@ -10440,30 +10441,20 @@ A.render_page = fn(){
                         if H.shared_failed==a.id && H.shared_failure!="" {View{width:Fill height:Fit padding:Inset{left:14 right:14 bottom:10} mod.widgets.HagencyWrapSubtitle{text:H.shared_failure draw_text.color:mod.widgets.RINX_DANGER_FG}}}
                     }
                 }}
-                // One place for the IDs an administrator may ask about.
-                if decide.len()>0 {View{width:Fill height:Fit flow:Down padding:Inset{bottom:6}
-                    mod.widgets.HagencyList{
-                        mod.widgets.HagencyListRow{
-                            approval_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("shared_ids")}
-                            mod.widgets.HagencyListBody{
-                                mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_MUTED}}
-                                mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
-                                mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open=="shared_ids" {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
-                            }
+                // Requests that can't be decided here yet: muted rows right under the ones that can.
+                if waiting.len()>0 {mod.widgets.HagencyList{for index row in waiting {View{width:Fill height:Fit flow:Down
+                    let info=A.perm_info(row)
+                    if index>0 {mod.widgets.HagencyListDivider{}}
+                    mod.widgets.HagencySwitchRow{
+                        mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:info.icon draw_icon.color:mod.widgets.RINX_MUTED}}
+                        mod.widgets.HagencyListText{
+                            tools_waiting_row := mod.widgets.HagencyWrapTitle{text:info.title draw_text.color:mod.widgets.RINX_MUTED}
+                            mod.widgets.HagencyWrapSubtitle{text:if A.recipient_optional(row,"encryptedPending")==true {A.t("It arrives securely in a few seconds; then you can decide.","几秒后就能看到并处理。")} else {A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}}
                         }
-                        if H.details_open=="shared_ids" {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                            for row in decide {View{width:Fill height:Fit flow:Down spacing:4
-                                let a=row.approval
-                                View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Request","请求编号")} mod.widgets.HagencyCopyText{text:a.id}}
-                                View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Requested by · select to copy","申请人 · 可选中复制")} mod.widgets.HagencyCopyText{text:a.requesterMxid}}
-                                View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Room","房间")} mod.widgets.HagencyCopyText{text:a.roomId}}
-                                View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Message","来源消息")} mod.widgets.HagencyCopyText{text:a.eventId}}
-                            }}
-                        }}
                     }
-                }}
-
-                if A.shared_any_session(decide) {mod.widgets.HagencyListNote{text:A.t("“This Session” keeps allowing the same kind of request until the Agent’s current run ends.","「本次会话允许」：在这个 Agent 本次运行结束前，同类请求都会自动允许。")}}
+                }}}}
+                // The group's footer: what the two chat-only words mean.
+                if decide.len()>0 || waiting.len()>0 {mod.widgets.HagencyListNote{text:(if A.shared_any_session(decide) {A.t("“This Session” keeps allowing the same kind of request until the Agent’s current run ends. ","「本次会话允许」：在这个 Agent 本次运行结束前，同类请求都会自动允许。")} else {""})+A.t("Requests from chat belong to no single pool, so every pool shows them.","聊天里的请求不属于某一个资源池，所以每个资源池里都看得到。")}}
                 if decide.len()==0 && live.len()==0 && H.shared_state!="loading" {mod.widgets.HagencyList{View{width:Fill height:Fit flow:Down spacing:6 align:Align{x:0.5} padding:Inset{left:16 right:16 top:22 bottom:22}
                     mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}
                     mod.widgets.HagencyListTitle{width:Fit text:A.t("Nothing waiting for you","没有等你处理的请求")}
@@ -10483,20 +10474,6 @@ A.render_page = fn(){
                         tools_shared_retry := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.tools_shared_load()}
                         mod.widgets.HagencyListBody{mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.refresh}} mod.widgets.HagencyAccentText{text:A.t("Try Again","重试")}}
                     }
-                }}
-
-                if waiting.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyList{for index row in waiting {View{width:Fill height:Fit flow:Down
-                        let info=A.perm_info(row)
-                        if index>0 {mod.widgets.HagencyListDivider{}}
-                        mod.widgets.HagencySwitchRow{
-                            mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:info.icon draw_icon.color:mod.widgets.RINX_MUTED}}
-                            mod.widgets.HagencyListText{
-                                mod.widgets.HagencyWrapTitle{text:info.title}
-                                mod.widgets.HagencyWrapSubtitle{text:if A.recipient_optional(row,"encryptedPending")==true {A.t("It arrives securely in a few seconds; then you can decide.","几秒后就能看到并处理。")} else {A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}}
-                            }
-                        }
-                    }}}
                 }}
 
                 if recent.len()>0 || decided.len()>0 || H.tool_after!="" {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:6}
@@ -10803,14 +10780,13 @@ A.render_page = fn(){
                     mod.widgets.HagencyListRow{
                         tool_request_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
                         mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
+                            mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
                             mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open==key {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
                         }
                     }
                     if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
                         View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Request · select to copy","请求编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:row.id}}
                         if subject!=nil {View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project","项目编号")} mod.widgets.HagencyCopyText{text:subject.projectId}}}
-                        if row.projectRoomId!=nil {View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project room","项目房间")} mod.widgets.HagencyCopyText{text:row.projectRoomId}}}
                     }}
                 }}
             }}
@@ -10901,7 +10877,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyListRow{
                         policy_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
                         mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
+                            mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
                             mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open==key {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
                         }
                     }
@@ -11023,21 +10999,6 @@ A.render_page = fn(){
                 }
             }
             mod.widgets.HagencyListNote{text:if active {A.t("Tool approvals for "+d.agent+" are sent to this private room.",A.sub_join(d.agent,"的工具审批会发到这个聊天（只有你和它）。"))} else {A.t("This room isn’t confirmed right now, so "+d.agent+"’s tool requests may not reach you. Remove it below; the Agent sets up a new room the next time it asks.","这个审批对话目前没有确认可用，"+A.sub_join(d.agent,"的工具审批可能发不到你这里。可以在下面移除它；Agent 下次请求时会建立新的审批对话。"))}}
-            View{width:Fill height:Fit padding:Inset{top:6} mod.widgets.HagencyList{
-                mod.widgets.HagencyListRow{
-                    binding_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
-                    mod.widgets.HagencyListBody{
-                        mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
-                        mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open==key {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
-                    }
-                }
-                if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Room · select to copy","房间 · 可选中复制")} mod.widgets.HagencyCopyText{text:d.roomId}}
-                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Approver","审批人")} mod.widgets.HagencyCopyText{text:d.ownerMxid}}
-                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project","项目编号")} mod.widgets.HagencyCopyText{text:d.projectId}}
-                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Agent link","Agent 关联")} mod.widgets.HagencyCopyText{text:d.engagementId}}
-                }}
-            }}
             View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:12}
                 mod.widgets.HagencyList{mod.widgets.HagencyListRow{
                     binding_remove_ask := mod.widgets.HagencyListTap{enabled:!H.busy && H.command==nil on_click: || {H.binding_confirm=true A.redraw()}}
@@ -11045,6 +11006,19 @@ A.render_page = fn(){
                 }}
                 mod.widgets.HagencyListNote{text:A.t("Removing it takes back the tool permissions saved in it, and its pending approvals stop working.","移除后，这个审批对话里保存的工具权限会被撤销，待处理的审批也会失效。")}
             }
+            View{width:Fill height:Fit padding:Inset{top:12} mod.widgets.HagencyList{
+                mod.widgets.HagencyListRow{
+                    binding_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
+                    mod.widgets.HagencyListBody{
+                        mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
+                        mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open==key {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
+                    }
+                }
+                if H.details_open==key {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
+                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project · select to copy","项目编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:d.projectId}}
+                    View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Agent link","Agent 关联")} mod.widgets.HagencyCopyText{text:d.engagementId}}
+                }}
+            }}
         }}}
         if H.page=="approval_binding_result" && H.binding_result!=nil {View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{top:18 bottom:28} mod.widgets.HagencyColumn{
             let result=H.binding_result
@@ -11728,11 +11702,11 @@ A.render_page = fn(){
                         stopped_commit := mod.widgets.HagencyWideButton{enabled:A.stopped_can_decide() text:A.t("Confirm","确认") on_click: || A.submit_stopped()}
                     }
                 }}
-                View{width:Fill height:Fit padding:Inset{top:12} mod.widgets.HagencyList{
+                if H.stopped_mode=="inspect" {View{width:Fill height:Fit padding:Inset{top:12} mod.widgets.HagencyList{
                     mod.widgets.HagencyListRow{
                         stopped_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
                         mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
+                            mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
                             mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open==key {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
                         }
                     }
@@ -11740,7 +11714,7 @@ A.render_page = fn(){
                         View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Project · select to copy","项目编号 · 可选中复制")} mod.widgets.HagencyCopyText{text:d.attempt.projectId}}
                         View{width:Fill height:Fit flow:Down mod.widgets.HagencyListSubtitle{text:A.t("Run","执行编号")} mod.widgets.HagencyCopyText{text:d.attempt.dispatchId}}
                     }}
-                }}
+                }}}
             }}
             if H.stopped_mode=="result" && H.stopped_result!=nil {View{width:Fill height:Fit flow:Down spacing:6
                 let result=H.stopped_result
@@ -11757,19 +11731,6 @@ A.render_page = fn(){
                 View{width:Fill height:Fit padding:Inset{top:10}
                     stopped_result_done := mod.widgets.HagencyWideButton{text:A.t("Done","完成") enabled:!H.busy on_click: || A.open_stopped_tasks(H.stopped_resource,H.stopped_workspace,"")}
                 }
-                View{width:Fill height:Fit padding:Inset{top:12} mod.widgets.HagencyList{
-                    mod.widgets.HagencyListRow{
-                        stopped_result_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("stopped_result")}
-                        mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
-                            mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open=="stopped_result" {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
-                        }
-                    }
-                    if H.details_open=="stopped_result" {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:2 bottom:12}
-                        mod.widgets.HagencyWrapSubtitle{text:A.t("Task ","任务编号 ")+result.taskId}
-                        mod.widgets.HagencyWrapSubtitle{text:A.t("Run ","执行编号 ")+result.dispatchId}
-                    }}
-                }}
             }}
         }}}
         if H.page=="workspace" {View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{top:18 bottom:28} mod.widgets.HagencyColumn{
@@ -11905,7 +11866,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyListRow{
                         workspace_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
                         mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
+                            mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
                             mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open==key {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
                         }
                     }
@@ -12562,7 +12523,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                     mod.widgets.HagencyListRow{
                         template_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle(key)}
                         mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
+                            mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
                             mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open==key {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
                         }
                     }
@@ -13754,25 +13715,26 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             mod.widgets.HagencyChevron{}
                         }
                     }
-                    mod.widgets.HagencyListDivider{}
-                    mod.widgets.HagencyListRow{
-                        resource_id_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("pool_ids/"+row.id)}
-                        mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info}}
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
-                            mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open=="pool_ids/"+row.id {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
-                        }
-                    }
-                    if H.details_open=="pool_ids/"+row.id {View{width:Fill height:Fit flow:Down spacing:2 padding:Inset{left:57 right:14 top:2 bottom:12}
-                        mod.widgets.HagencyListSubtitle{text:A.t("Resource ID · select to copy","资源标识 · 可选中复制")}
-                        resource_id_text := mod.widgets.HagencyCopyText{text:row.id}
-                    }}
                 }
                 View{width:Fill height:Fit padding:Inset{top:12} mod.widgets.HagencyList{mod.widgets.HagencyListRow{
                     pool_advanced_delete := mod.widgets.HagencyListTap{enabled:!H.busy && H.command==nil && !locked && A.pool_adv_can_delete() on_click:||A.pool_adv_delete()}
                     View{width:Fill height:Fill align:Align{x:0.5 y:0.5} mod.widgets.HagencyDangerText{text:A.t("Delete This Pool…","删除这个资源池…") draw_text.color:if A.pool_adv_can_delete() {mod.widgets.RINX_DANGER_FG} else {mod.widgets.RINX_MUTED}}}
                 }}}
                 pool_advanced_delete_note := mod.widgets.HagencyListNote{text:A.pool_adv_delete_note()}
+                // The pool's ID, for an administrator: the page's last row, folded.
+                View{width:Fill height:Fit padding:Inset{top:12} mod.widgets.HagencyList{
+                    mod.widgets.HagencyListRow{
+                        resource_id_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("pool_ids/"+row.id)}
+                        mod.widgets.HagencyListBody{
+                            mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
+                            mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open=="pool_ids/"+row.id {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
+                        }
+                    }
+                    if H.details_open=="pool_ids/"+row.id {View{width:Fill height:Fit flow:Down spacing:2 padding:Inset{left:14 right:14 top:2 bottom:12}
+                        mod.widgets.HagencyListSubtitle{text:A.t("Pool ID · select to copy","资源池编号 · 可选中复制")}
+                        resource_id_text := mod.widgets.HagencyCopyText{text:row.id}
+                    }}
+                }}
             }}
         }}}
         if H.page=="pool_glossary" {View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{top:18 bottom:28} mod.widgets.HagencyColumn{
@@ -15749,15 +15711,13 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         server_ids_details := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("server_ids/"+c.id)}
                         mod.widgets.HagencyListBody{
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info}}
-                            mod.widgets.HagencyListSubtitle{text:A.t("IDs for your administrator","给管理员看的编号")}
+                            mod.widgets.HagencyListSubtitle{text:A.t("Technical details","技术详情")}
                             mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open=="server_ids/"+c.id {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
                         }
                     }
                     if H.details_open=="server_ids/"+c.id {View{width:Fill height:Fit flow:Down spacing:2 padding:Inset{left:57 right:14 top:2 bottom:12}
                         mod.widgets.HagencyListSubtitle{text:A.t("Connection ID · select to copy","连接编号 · 可选中复制")}
                         server_connection_id := mod.widgets.HagencyCopyText{text:c.id}
-                        mod.widgets.HagencyListSubtitle{text:A.t("Owner account · select to copy","资源所有者账号 · 可选中复制")}
-                        server_owner_id := mod.widgets.HagencyCopyText{text:c.coordinatorMxid}
                         if checked {mod.widgets.HagencyListSubtitle{padding:Inset{top:6} text:A.t("A connection check stays valid for five minutes.","连接检查的结果 5 分钟内有效。")}}
                     }}
                 }
@@ -16048,7 +16008,7 @@ mod.widgets.HagencyPreset = mod.widgets.RinxKeyButton{width:Fit height:max(44,mo
 mod.widgets.HagencyPresetOn = mod.widgets.HagencyPreset{draw_bg +: {color:mod.widgets.RINX_SELECTED color_focus:mod.widgets.RINX_SELECTED color_disabled:mod.widgets.RINX_SELECTED color_2_disabled:mod.widgets.RINX_SELECTED} draw_text +: {color:mod.widgets.RINX_ACCENT color_hover:mod.widgets.RINX_ACCENT color_down:mod.widgets.RINX_ACCENT color_focus:mod.widgets.RINX_ACCENT}}
 mod.widgets.HagencyPresetCard = mod.widgets.HagencyPreset{draw_bg +: {color:mod.widgets.RINX_SURFACE color_focus:mod.widgets.RINX_SURFACE color_disabled:mod.widgets.RINX_SURFACE color_2_disabled:mod.widgets.RINX_SURFACE}}
 // Selectable, read-only text for IDs a person may need to copy.
-mod.widgets.HagencyCopyText = mod.widgets.RinxInput{width:Fill height:(24+14*mod.widgets.RINX_TEXT_SCALE) padding:0 is_read_only:true
+mod.widgets.HagencyCopyText = mod.widgets.RinxInput{width:Fill height:(30+14*mod.widgets.RINX_TEXT_SCALE) padding:0 is_read_only:true
     draw_bg +: {border_size:0.0 color:#0000 color_hover:#0000 color_focus:#0000 color_empty:#0000 color_down:#0000 border_color:#0000 border_color_hover:#0000 border_color_focus:#0000 border_color_empty:#0000 border_color_down:#0000 border_color_2:#0000}
     draw_text +: {color:mod.widgets.RINX_MUTED color_hover:mod.widgets.RINX_MUTED color_focus:mod.widgets.RINX_MUTED text_style:theme.font_regular{font_size:mod.widgets.RINX_META_SIZE}}}
 mod.widgets.HagencyTallSegment = mod.widgets.HagencySegment{height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) margin:0}
