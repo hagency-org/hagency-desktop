@@ -1890,9 +1890,7 @@ A.reqs_open_raise=fn(q){
     if H.busy {return}
     let rid=A.reqs_pool_rid(q.poolId)
     if rid=="" {return}
-    let b=A.alert_live_left(rid)
-    let need=if b==nil {0} else {b.committed+q.requestedTokens}
-    H.pool_raise={rid:rid drawn:need tokens:nil name:q.definition.name asked:q.requestedTokens}
+    H.pool_raise={rid:rid drawn:0 tokens:nil name:q.definition.name asked:q.requestedTokens}
     H.nav.anchor="pool_max_section"
     A.open_resource(rid)
 }
@@ -2155,9 +2153,7 @@ A.alert_can_raise=fn(rid){
 // Opens the pool's monthly maximum with a value that clears the overrun preselected (A.pool_raise_apply).
 A.alert_open_max=fn(rid){
     if H.busy {return}
-    let open=H.alert_detail!=nil && H.alert_detail.alert.resourceId==rid
-    let drawn=if open {A.alert_params(H.alert_detail.alert).drawn} else {nil}
-    H.pool_raise={rid:rid drawn:if drawn==nil {0} else {drawn} tokens:nil name:nil asked:nil}
+    H.pool_raise={rid:rid drawn:0 tokens:nil name:nil asked:nil}
     H.nav.anchor="pool_max_section"
     A.open_resource(rid)
 }
@@ -5399,7 +5395,9 @@ A.pool_raise_apply=fn(){
     if r==nil || e==nil || H.resource_detail==nil || r.rid!=e.rid {return}
     let v=A.pool_view(H.resource_detail)
     if v.maxMode=="locked" {H.pool_raise=nil return}
-    let drawn=max(r.drawn,v.b.committed)
+    // What this month needs now: used and given out, plus the request it should make room for.
+    let asked=A.recipient_optional(r,"asked")
+    let drawn=v.b.committed+(if asked==nil {0} else {asked})
     if v.b.ceiling==nil || drawn<=v.b.ceiling {H.pool_raise=nil return}
     let want=A.pool_raise_suggest(drawn,v.b.ceiling,v.maxMax)
     if want<=v.b.ceiling {H.pool_raise=nil return}
@@ -5484,7 +5482,15 @@ A.pool_dirty=fn(){
     if H.page!="resource_detail" || H.resource_detail==nil {return false}
     return A.pool_save_state().dirty
 }
+// The value an alert or a request suggested, untouched: leaving drops it without asking.
+A.pool_raise_only=fn(){
+    if H.page!="resource_detail" || H.resource_detail==nil || H.pool_edit==nil {return false}
+    let s=A.pool_save_state()
+    return s.maxDirty && !s.quotaDirty && A.pool_raising(H.resource_detail.resource.id)
+}
+A.pool_raise_drop=fn(){let e=H.pool_edit if e!=nil {e.max=e.maxBase e.unlimited=e.unlimitedBase} H.pool_raise=nil}
 A.pool_leaving=fn(after){
+    if A.pool_raise_only() {A.pool_raise_drop() return false}
     if !A.pool_dirty() {return false}
     H.local_discard="pool" H.local_after=after A.redraw()
     return true
@@ -7540,6 +7546,7 @@ A.local_leaving=fn(page){
     let s={kind:""}
     if H.page=="personal_agent" && (H.personal_mode=="edit" || H.personal_mode=="review") {if A.local_policy_changed() {s.kind="policy"}}
     if H.page=="personal_model" {if A.local_model_changed() {s.kind="model"}}
+    if A.pool_raise_only() {A.pool_raise_drop()}
     if A.pool_dirty() {s.kind="pool"}
     if s.kind=="" {return false}
     H.local_discard=s.kind H.local_after=page A.redraw()
