@@ -39,4 +39,21 @@ mod tests{
         for cap in [LIST,GET,TRIAGE]{assert!(octosense_app_contract::hagency::SERVICES.contains(&cap));assert!(octosense_app_contract::KNOWN_CAPABILITIES.contains(&cap));assert!(octosense_app_contract::hagency::words(cap).is_some());}
         let view=display(json!({"alert":{"firstSeenMs":0,"lastSeenMs":1000,"suppressUntilMs":null},"notes":[{"atMs":2000}]}));assert_eq!(view["alert"]["lastSeen"],"1970-01-01 00:00:01 UTC");assert!(view["alert"]["suppressUntil"].is_null());assert_eq!(view["notes"][0]["at"],"1970-01-01 00:00:02 UTC");
     }
+    /// The UI localizes alerts from `kind`/`params` and shows local, relative
+    /// times from the `*Ms` numbers; the UTC labels are only added beside them.
+    #[test]
+    fn alert_display_keeps_kind_params_and_machine_times(){
+        let params=json!({"ceilingTokens":1000,"drawnTokens":1200,"overByTokens":200,"committedTokens":1200,"measuredTokens":null,
+            "percent":120,"period":"month","periodStartMs":1_790_812_800_000u64,"periodEndMs":1_793_491_200_000u64});
+        let row=json!({"id":"agent_ceiling_overrun:r","kind":"ceiling_overrun","params":params,"summary":"English",
+            "firstSeenMs":1_793_261_520_000u64,"lastSeenMs":1_793_261_520_000u64,"suppressUntilMs":null});
+        let list=display(json!({"alerts":[row.clone()],"observedAtMs":1_793_261_600_000u64}));
+        let shown=&list["alerts"][0];
+        assert_eq!((&shown["kind"],&shown["params"]),(&json!("ceiling_overrun"),&params));
+        assert_eq!(shown["lastSeenMs"],1_793_261_520_000u64);assert_eq!(shown["lastSeen"],"2026-10-29 08:12:00 UTC");
+        assert_eq!(list["observedAtMs"],1_793_261_600_000u64);
+        let detail=display(json!({"alert":row,"notes":[{"atMs":1_793_261_520_000u64}]}));
+        assert_eq!((&detail["alert"]["kind"],&detail["alert"]["params"]),(&json!("ceiling_overrun"),&params));
+        assert_eq!(detail["notes"][0]["atMs"],1_793_261_520_000u64);
+    }
 }
