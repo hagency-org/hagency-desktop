@@ -2248,6 +2248,14 @@ A.alert_headline=fn(row){
     return A.t("An alert from the server","服务器发来的告警")
 }
 // The server's own words for kinds the app doesn't know, shown under the Chinese heading.
+// The lead for an alert the server words itself: in plain Chinese, what it is, how bad, and what to tap.
+// Its English stays under the folded "server's words" row.
+A.alert_server_lead=fn(row){
+    let level=A.recipient_optional(row,"severity")
+    let what=if level=="critical" {A.t("a serious problem","一个严重问题")} else if level=="warning" {A.t("a warning","一条警告")} else {A.t("a notice","一条提示")}
+    let tap=if row.status=="acknowledged" {A.t(" Once it’s fixed, mark it Handled.","处理好后点「已处理好」。")} else {A.t(" Once you’ve seen it, mark it Got It; once it’s fixed, mark it Handled.","看过后点「知道了」；处理好后点「已处理好」。")}
+    return A.t("The server reports "+what+" about this pool. Its own words (English) are below if you need them."+tap,"服务器报告了这个资源池的"+what+"，原文是英文，需要时可以展开下面查看。"+tap)
+}
 A.alert_server_text=fn(row){if A.alert_kind_of(row)=="ceiling" {return ""} return ""+row.summary}
 A.alert_texts=fn(row){
     let {impact="",runbook="",recoveryCondition=""}=row
@@ -2563,7 +2571,12 @@ A.alert_action_icon=fn(state){
     if state=="resolved" {return mod.rinx_icons.check}
     return mod.rinx_icons.sync
 }
+A.alert_has_undo=fn(quick){let f={y:false} for state in quick {if state=="open" {f.y=true}} return f.y}
 A.alert_tile_label=fn(state){
+    let now=if H.alert_detail==nil {""} else {H.alert_detail.alert.status}
+    if state=="open" && now=="acknowledged" {return A.t("Undo Got It","撤销“知道了”")}
+    if state=="open" && now=="suppressed" {return A.t("Unmute","恢复提醒")}
+    if state=="open" && now=="resolved" {return A.t("Reopen","重新打开")}
     if state=="acknowledged" {return A.t("Got It","知道了")}
     if state=="assigned" {return A.t("I’ll Handle It","由我处理")}
     if state=="suppressed" {return A.t("Mute 24 Hours","24 小时不提醒")}
@@ -4973,6 +4986,8 @@ A.pool_todo=fn(){
     return out
 }
 A.pool_todo_count=fn(items){let n={c:0} for item in items {n.c=n.c+max(0,item.count)} return n.c}
+// What waits on Resource Pools itself: Agent requests keep their row in the list but count on their own tab.
+A.pool_todo_here=fn(items){let n={c:0} for item in items {if item.kind!="requests" {n.c=n.c+max(0,item.count)}} return n.c}
 A.pool_todo_title=fn(item){
     let n=item.count
     if item.kind=="device" {return if item.fix {A.t("This computer isn’t set up yet","这台电脑还没设置完")} else {A.t("This computer can’t publish pools now","这台电脑现在不能发布资源池")}}
@@ -7110,8 +7125,8 @@ A.tab_badge=fn(tab){
     let m=H.pool_meta
     if tab=="inbox" {return if m!=nil && m.requests!=nil {A.pool_pending_total()} else {H.tab_requests}}
     if m==nil {return 0}
-    // The same items as the list's "Needs you" section, each counted once (it shows the total).
-    return A.pool_todo_count(A.pool_todo())
+    // The same items as the list's "Needs you" section, each counted once; Agent requests count on their tab.
+    return A.pool_todo_here(A.pool_todo())
 }
 A.tab_counts_load=fn(){
     if H.entry_role!="owner" || H.session==nil || !A.pool_enabled() {return}
@@ -9140,16 +9155,16 @@ A.render_page = fn(){
             }}}
             let todo=A.pool_todo()
             if todo.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
-                // The total is the 资源池 tab's badge: each item once, pool cards plus what all pools share.
-                mod.widgets.HagencyListLabel{text:A.t("NEEDS YOU · "+A.pool_todo_count(todo),"需要你处理 · "+A.pool_todo_count(todo)+" 项")}
+                // No total here: the 资源池 tab's badge counts these rows except Agent requests, whose row carries
+                // its own badge, the same as the Agent 申请 tab's.
+                mod.widgets.HagencyListLabel{text:A.t("NEEDS YOU","需要你处理")}
                 mod.widgets.HagencyList{for index entry in todo {let item=entry View{width:Fill height:Fit flow:Down
                     if index>0 {mod.widgets.HagencyListDivider{}}
                     mod.widgets.HagencyListFit{
                         mod.widgets.HagencyListFitBody{
                             mod.widgets.HagencyRowIcon{draw_bg.color:if item.kind=="alerts" || item.kind=="device" {mod.widgets.RINX_DANGER_BG} else if item.kind=="draft" {mod.widgets.RINX_INFO_BG} else {mod.widgets.RINX_WARNING_BG} mod.widgets.HagencyRowGlyph{draw_icon.svg:A.pool_todo_icon(item.kind) draw_icon.color:if item.kind=="alerts" || item.kind=="device" {mod.widgets.RINX_DANGER_FG} else if item.kind=="draft" {mod.widgets.RINX_INFO_FG} else {mod.widgets.RINX_WARNING_FG}}}
                             mod.widgets.HagencyListText{
-                                if item.kind=="publish" {mod.widgets.HagencyAccentText{max_lines:1 text_overflow:TextOverflow.Ellipsis text:A.pool_todo_title(item)}}
-                                if item.kind!="publish" {mod.widgets.HagencyWrapTitle{text:A.pool_todo_title(item)}}
+                                mod.widgets.HagencyWrapTitle{text:A.pool_todo_title(item)}
                                 mod.widgets.HagencyWrapSubtitle{text:A.pool_todo_line(item)}
                             }
                             if item.kind=="requests" {mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:""+item.count}}}
@@ -9223,7 +9238,6 @@ A.render_page = fn(){
                             }
                             View{width:(20+10*mod.widgets.RINX_TEXT_SCALE) height:Fit align:Align{x:1.0 y:0.5}
                                 if s.badge>0 {mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:""+s.badge}}}
-                                if s.badge==0 && s.unknown {mod.widgets.HagencyMutedBadge{mod.widgets.HagencyMutedCount{text:"—"}}}
                             }
                             mod.widgets.HagencyChevron{}
                         }
@@ -9238,13 +9252,16 @@ A.render_page = fn(){
                     }
                 }}
             }}
-            if H.owner.poolsReady && H.resources.len()>0 && A.pool_list_unknown() {View{width:Fill height:Fit padding:Inset{top:4} mod.widgets.HagencyList{mod.widgets.HagencyListRow{
-                owner_pool_counts_retry := mod.widgets.HagencyListTap{enabled:!H.busy on_click:||{A.pool_meta_load() A.redraw()}}
-                mod.widgets.HagencyListBody{
+            if H.owner.poolsReady && H.resources.len()>0 && A.pool_list_unknown() {View{width:Fill height:Fit padding:Inset{top:4} mod.widgets.HagencyList{mod.widgets.HagencyFitRow{
+                mod.widgets.HagencyRowBody{
                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}}
-                    mod.widgets.HagencyListTitle{max_lines:1 text_overflow:TextOverflow.Ellipsis text:A.t("Some information couldn’t be read","部分信息暂时无法读取")}
+                    mod.widgets.HagencyListText{
+                        mod.widgets.HagencyWrapTitle{text:A.t("Some information couldn’t be read","部分信息暂时无法读取")}
+                        owner_pool_counts_why := mod.widgets.HagencyWrapSubtitle{text:A.t("Some pools’ counts may be missing, so “Needs You” may not show everything.","部分资源池的数字暂时读不到，「需要你处理」可能没列全。")}
+                    }
                     mod.widgets.HagencyAccentText{width:Fit text:A.t("Try Again","重试")}
                 }
+                owner_pool_counts_retry := mod.widgets.HagencyRowCover{enabled:!H.busy on_click:||{A.pool_meta_load() A.redraw()}}
             }}}}
             if H.owner.poolsReady && H.resources.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
                 let accounts=A.pool_account_rows()
@@ -11399,7 +11416,7 @@ A.render_page = fn(){
                     alert_figures_note := mod.widgets.HagencyListNote{text:if recovered {A.alert_when_line(row)} else {A.alert_now_line(row,quota,live)}}
                 }}
                 if !about.local && (server!="" || impact!="" || runbook!="" || recoveryCondition!="") {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListNote{padding:Inset{left:7 right:7 top:8 bottom:2} text:if row.status=="acknowledged" {A.t("The server sent this alert in English. Mark it Handled once it’s fixed.","这条告警是服务器用英文发来的。处理好后点「已处理好」。")} else {A.t("The server sent this alert in English. Mark it Got It once you’ve seen it; mark it Handled once it’s fixed.","这条告警是服务器用英文发来的。看过后点「知道了」；处理好后点「已处理好」。")}}
+                    mod.widgets.HagencyListNote{padding:Inset{left:7 right:7 top:8 bottom:2} text:A.alert_server_lead(row)}
                     mod.widgets.HagencyList{
                         mod.widgets.HagencyListRow{
                             alert_server_toggle := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("alert_server")}
@@ -11476,7 +11493,7 @@ A.render_page = fn(){
                         mod.widgets.HagencyListNote{width:Fill text:A.t("One tap; it only records it and changes no limits.","点一下就记下，不会改动用量或上限。")}
                         alert_note_open := mod.widgets.HagencyBarText{text:A.t("Add a Note…","加备注…") enabled:!H.busy && H.command==nil on_click: || A.choose_alert_action("acknowledged")}
                     }}
-                    if quick.len()==0 || quick[0]!="acknowledged" {mod.widgets.HagencyListNote{text:A.t("One tap; it only records it and changes no limits.","点一下就记下，不会改动用量或上限。")}}
+                    if quick.len()==0 || quick[0]!="acknowledged" {mod.widgets.HagencyListNote{text:A.t("One tap; it only records it and changes no limits.","点一下就记下，不会改动用量或上限。")+(if A.alert_has_undo(quick) {A.t(" Undoing makes it remind you again."," 撤销后会重新提醒你。")} else {""})}}
                 }}
                 if H.alert_draft!=nil && !H.alert_draft.quick {View{width:Fill height:Fit flow:Down spacing:6
                     let draft=H.alert_draft
@@ -12788,28 +12805,28 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             resource_requests_open := mod.widgets.HagencyTileTap{enabled:!H.busy && !locked && v.conn!=nil on_click:||A.open_pool_requests(v.conn)}
                             mod.widgets.HagencyTileBody{mod.widgets.HagencyTileGlyph{draw_icon.svg:mod.rinx_icons.inbox draw_icon.color:if v.conn!=nil {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_DISABLED}} mod.widgets.HagencyTileName{text:A.t("Requests","申请") draw_text.color:if v.conn!=nil {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_DISABLED}}}
                             if v.requests>0 {mod.widgets.HagencyTileBadge{mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:""+v.requests}}}}
-                            if v.requests==-2 {mod.widgets.HagencyTileBadge{mod.widgets.HagencyMutedBadge{mod.widgets.HagencyMutedCount{text:"—"}}}}
                         }
                         mod.widgets.HagencyTile{
                             resource_alerts_open := mod.widgets.HagencyTileTap{enabled:!H.busy && !locked on_click:||A.open_health_hub(row.id)}
                             mod.widgets.HagencyTileBody{mod.widgets.HagencyTileGlyph{draw_icon.svg:mod.rinx_icons.activity} mod.widgets.HagencyTileName{text:A.t("Health & Recovery","健康与恢复")}}
                             if v.health>0 {mod.widgets.HagencyTileBadge{mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:""+v.health}}}}
-                            if v.health==-2 {mod.widgets.HagencyTileBadge{mod.widgets.HagencyMutedBadge{mod.widgets.HagencyMutedCount{text:"—"}}}}
                         }
                         mod.widgets.HagencyTile{
                             resource_tool_approvals := mod.widgets.HagencyTileTap{enabled:!H.busy && !locked on_click:||A.open_tools(row.id,"","","requests")}
                             mod.widgets.HagencyTileBody{mod.widgets.HagencyTileGlyph{draw_icon.svg:mod.rinx_icons.lock} mod.widgets.HagencyTileName{text:A.t("Tools & Permissions","工具与权限")}}
                             if v.tools>0 {mod.widgets.HagencyTileBadge{mod.widgets.HagencyCountBadge{mod.widgets.HagencyCountText{text:""+v.tools}}}}
-                            if v.tools==-2 {mod.widgets.HagencyTileBadge{mod.widgets.HagencyMutedBadge{mod.widgets.HagencyMutedCount{text:"—"}}}}
                         }
                     }
-                    if A.pool_counts_unknown(v) {mod.widgets.HagencyList{mod.widgets.HagencyListRow{
-                        resource_counts_retry := mod.widgets.HagencyListTap{enabled:!H.busy && !locked on_click:||A.pool_info_retry()}
-                        mod.widgets.HagencyListBody{
+                    if A.pool_counts_unknown(v) {mod.widgets.HagencyList{mod.widgets.HagencyFitRow{
+                        mod.widgets.HagencyRowBody{
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_MUTED}}
-                            mod.widgets.HagencyListTitle{max_lines:1 text_overflow:TextOverflow.Ellipsis text:A.t("Some information couldn’t be read","部分信息暂时无法读取")}
+                            mod.widgets.HagencyListText{
+                                mod.widgets.HagencyWrapTitle{text:A.t("Some information couldn’t be read","部分信息暂时无法读取")}
+                                pool_counts_why := mod.widgets.HagencyWrapSubtitle{text:A.t("The counts on the tiles above may be missing some items.","上面图标上的数字可能不全。")}
+                            }
                             mod.widgets.HagencyAccentText{width:Fit text:A.t("Try Again","重试")}
                         }
+                        resource_counts_retry := mod.widgets.HagencyRowCover{enabled:!H.busy && !locked on_click:||A.pool_info_retry()}
                     }}}
 
                     View{width:Fill height:Fit flow:Right align:Align{y:1.0}
