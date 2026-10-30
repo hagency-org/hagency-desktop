@@ -107,8 +107,8 @@ class Family(Workspaces):
             self.req('/event',data='ux:large-text');time.sleep(.3)
             self.wait(lambda:self.row('input')['r'][3]>=55)
             assert self.row('enrollment_tokens')['t']=='345678'
-            # Account identity gets a full-width row at large text sizes.
-            assert self.row('workspace_account')['r'][3]<50
+            # The header is one line; the account shows on the role chooser instead.
+            assert not any(r.get('i')=='workspace_account' and r['r'][3]>0 for r in self.snap())
             self.visible('enrollment_tokens');self.shot('05-large-text-retained')
 
 def main():
