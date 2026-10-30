@@ -429,6 +429,8 @@ fn bundle_uses_the_owner_vocabulary() {
         // primary row, admin jargon, and a lock that sounded permanent.
         "保存每月上限", "本月底到期", "每次申请上限的下限", "最低约 ", "服务器原文（英文）：", "\"Connection Check\",\"连接诊断\"",
         "（电脑要开着）", "显示后，模型和每月上限不能修改", "点下方「保存更改」", "加入本月名单",
+        // Retired in round 10: stopping Agents "under Requests", and a suggestion pill that didn't say why.
+        "在「申请」里停止", "A.t(\"Suggested \",\"建议 \")",
     ] {
         assert!(!source.contains(banned), "the bundle says {banned}");
     }
@@ -484,6 +486,8 @@ fn bundle_uses_the_owner_vocabulary() {
         // One sentence for the per-request floor, its estimate always 约.
         "不能低于正在运行的 Agent 已拿到的约 ", "（确认窗口里有准确数字）",
         "不能低于本月已用和已分出的 ", "（已用和已分出）", "\"已分出 \"", "\"已用 \"",
+        // The save bar names the setting it saves; a suggestion says why.
+        "\"每月上限改成 \"", "\"每次申请上限改成 \"", "每月上限的 1/4",
     ] {
         assert!(source.contains(pattern), "the bundle doesn't say {pattern}");
     }
