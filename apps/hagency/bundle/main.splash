@@ -1262,8 +1262,8 @@ A.nav_entry=fn(){
     if H.entry_role!="owner" || H.session==nil {return nil}
     let p=H.page
     let e={key:"" kind:p title:A.nav_title() a:"" b:"" c:""}
-    if p=="resources" || p=="inbox" {e.key=p return e}
-    if p=="pool_requests" {e.key=(if A.reqs_stop_view() {"stop/"} else {"requests/"})+H.reqs.pool e.a=H.reqs.pool e.b=H.reqs.label e.c=H.reqs.hint return e}
+    if p=="resources" || p=="inbox" {e.key=p if p=="inbox" {e.c=H.reqs.filter} return e}
+    if p=="pool_requests" {e.key=(if A.reqs_stop_view() {"stop/"} else {"requests/"})+H.reqs.pool e.a=H.reqs.pool e.b=H.reqs.label e.c=if A.reqs_stop_view() {"stop"} else {"list:"+H.reqs.filter} return e}
     if p=="pool_agent" {e.key="request/"+H.reqs.agent e.a=H.reqs.agent return e}
     if p=="resource_detail" {e.key="pool/"+H.resource_id e.a=H.resource_id return e}
     if p=="resource_edit" || p=="resource_create" {e.key=p+"/"+H.resource_id e.a=H.resource_id return e}
@@ -1347,10 +1347,17 @@ A.nav_track=fn(){
     let old=if n.here==nil {""} else {n.here.key}
     if key!=old {
         let top=if n.stack.len()>0 {n.stack[n.stack.len()-1].key} else {""}
+        let d=H.detour
         if key=="" || key=="resources" || key=="inbox" {n.stack=[]}
-        else if top==key {n.stack.pop()}
-        else if n.popping=="" && n.here!=nil {n.stack.push(n.here) if n.stack.len()>24 {n.stack.remove(0)}}
+        else if top==key && !H.nav_forward {n.stack.pop()}
+        else if n.popping=="" && n.here!=nil {
+            if H.nav_forward && d!=nil && d.name!="" && n.here.key==d.key {n.here.title=d.name}
+            n.stack.push(n.here) if n.stack.len()>24 {n.stack.remove(0)}
+        }
         n.popping=""
+        if d!=nil && !H.nav_forward && (key==d.key || key=="" || key=="resources") {H.detour=nil}
+        H.nav_forward=false
+        if H.detour_note!=nil && key!=H.detour_note.key {H.detour_note=nil}
     }
     n.here=e
 }
@@ -1374,6 +1381,7 @@ A.nav_back_own=fn(){return (H.page=="template_command" && H.templates.pending!=n
 A.nav_back_sub=fn(){if A.nav_back_own() {return false} return A.nav_back()}
 A.nav_reopen=fn(e){
     let k=e.kind
+    if k=="inbox" && (e.c=="pending" || e.c=="all") {H.reqs.filter=e.c}
     if k=="resources" || k=="inbox" {A.return_list(k) return}
     if k=="pool_requests" {A.reqs_reopen(e.a,e.b,e.c) return}
     if k=="pool_agent" {A.open_pool_agent(e.a) return}
@@ -1827,7 +1835,7 @@ A.open_pool_requests=fn(conn){
     r.filter="pending" r.hint=""
     A.reqs_show("pool_requests")
 }
-A.reqs_reopen=fn(pool,label,hint){if H.busy {return} H.reqs.pool=pool H.reqs.label=label H.reqs.hint=if hint=="stop" {"stop"} else {""} if hint=="stop" {H.reqs.filter="all"} A.reqs_show("pool_requests")}
+A.reqs_reopen=fn(pool,label,hint){if H.busy {return} H.reqs.pool=pool H.reqs.label=label H.reqs.hint=if hint=="stop" {"stop"} else {""} if hint=="stop" {H.reqs.filter="all"} if hint=="list:pending" {H.reqs.filter="pending"} if hint=="list:all" {H.reqs.filter="all"} A.reqs_show("pool_requests")}
 // "Stop Some Agents": the pool's requests page showing only the Agents using it, opened from an alert.
 A.reqs_stop_view=fn(){return H.page=="pool_requests" && A.recipient_optional(H.reqs,"hint")=="stop"}
 A.reqs_show=fn(page){
@@ -1887,6 +1895,7 @@ A.reqs_after=fn(q){
 A.reqs_decidable=fn(q){let {canDecide=false,resourceOwnerMxid=nil}=q return canDecide==true && H.entry_role=="owner" && H.session!=nil && resourceOwnerMxid==H.session.account}
 A.reqs_ask=fn(q,kind){
     if H.busy || H.command!=nil || !A.reqs_decidable(q) {return}
+    H.detour_note=nil
     H.reqs.confirm={row:q kind:kind} H.reqs.result=nil A.redraw()
 }
 // An approved Agent of your pool that you can stop from the list.
@@ -1918,10 +1927,75 @@ A.reqs_open_raise=fn(q){
     if H.busy {return}
     let rid=A.reqs_pool_rid(q.poolId)
     if rid=="" {return}
+    A.detour_start("raise",rid,q)
     H.pool_raise={rid:rid drawn:0 tokens:nil name:q.definition.name asked:q.requestedTokens}
     H.nav.anchor="pool_max_section"
     A.open_resource(rid)
 }
+// From a blocked request: the Agents using its pool, to stop some.
+A.reqs_open_stop=fn(q){
+    if H.busy {return}
+    let rid=A.reqs_pool_rid(q.poolId)
+    if rid=="" {return}
+    A.detour_start("stop",rid,q)
+    A.stop_view_open(rid)
+}
+// A fix started from a blocked request or an alert (raise the maximum, stop some Agents) remembers
+// where it started: back returns there and names the request, and once the maximum is saved the
+// owner lands back there, where the page says what changed and whether approving works now.
+A.detour_start=fn(kind,rid,q){
+    let e=A.nav_entry()
+    H.detour={kind:kind rid:rid key:if e==nil {""} else {e.key} entry:e request:if q==nil {""} else {q.id} name:if q==nil {""} else {q.definition.name}}
+    H.detour_note=nil
+    H.nav_forward=true
+}
+A.detour_from_request=fn(){return H.detour!=nil && H.detour.request!=""}
+A.detour_return=fn(){
+    let d=H.detour
+    if H.busy || d==nil {return}
+    let has={y:false} for e in H.nav.stack {if e.key==d.key {has.y=true}}
+    if has.y {A.nav_unwind(d.key) A.nav_back() return}
+    H.detour=nil
+    if d.entry!=nil {A.nav_reopen(d.entry)}
+}
+A.detour_row=fn(resource){let rows=[] for x in H.resources {if x.id==resource.id {rows.push(resource)} else {rows.push(x)}} H.resources=rows}
+A.detour_finish=fn(rid){
+    let d=H.detour
+    if d==nil || d.kind!="raise" || d.rid!=rid || d.key=="" {return false}
+    let has={y:false} for e in H.nav.stack {if e.key==d.key {has.y=true}}
+    if !has.y {H.detour=nil return false}
+    let saved=H.pool_saved
+    H.pool_saved=nil H.pool_raise=nil H.pool_offer=nil
+    H.detour_note={key:d.key rid:rid request:d.request name:d.name text:if saved==nil {A.t("Saved: monthly maximum","已保存：每月上限")} else {saved.text}}
+    // Read the pool again, so the page it returns to judges approving against the new maximum.
+    host.request("hagency.resources.get",{id:rid},fn(r){
+        if r.is_ok {let {resource=nil}=r.data if resource!=nil && resource.id==rid {H.resource_detail=r.data A.detour_row(resource)}}
+        A.redraw()
+    })
+    A.nav_unwind(d.key)
+    A.nav_back()
+    return true
+}
+// What the page a fix returns to says: what was saved, and whether the request can be approved now.
+A.detour_view=fn(rows){
+    let d=H.detour_note
+    let out={text:"" tone:"running"}
+    if d==nil {return out}
+    if d.request=="" {
+        let live=A.alert_live_left(d.rid)
+        let under=live!=nil && live.ceiling!=nil && live.remaining!=nil && live.remaining>0
+        out.text=d.text+(if under {A.t(". Use is back under the maximum; the alert clears by itself.","。用量已回到上限以内，告警会自动解除。")} else {A.t(". The alert clears by itself once use is back under the maximum.","。用量回到上限以内后，告警会自动解除。")})
+        return out
+    }
+    let q={row:nil} for x in rows {if x.id==d.request {q.row=x}}
+    if q.row==nil || !A.reqs_decidable(q.row) {out.text=d.text+A.t(".","。") return out}
+    let blocked=A.reqs_blocked(q.row)
+    if blocked=="" {out.text=d.text+A.t(". You can approve “"+d.name+"” now.","。现在可以批准「"+d.name+"」了。") return out}
+    out.text=d.text+A.t(". ","。")+blocked out.tone="attention"
+    return out
+}
+A.detour_here=fn(){let d=H.detour_note let e=A.nav_entry() return d!=nil && e!=nil && e.key==d.key}
+A.detour_dismiss=fn(){H.detour_note=nil A.redraw()}
 A.reqs_pool_rid=fn(poolId){
     let found={rid:""}
     if H.pool_meta!=nil && H.pool_meta.conns!=nil {for c in H.pool_meta.conns {if c.id==poolId {found.rid=c.resourceId}}}
@@ -2181,6 +2255,7 @@ A.alert_can_raise=fn(rid){
 // Opens the pool's monthly maximum with a value that clears the overrun preselected (A.pool_raise_apply).
 A.alert_open_max=fn(rid){
     if H.busy {return}
+    A.detour_start("raise",rid,nil)
     H.pool_raise={rid:rid drawn:0 tokens:nil name:nil asked:nil}
     H.nav.anchor="pool_max_section"
     A.open_resource(rid)
@@ -2188,6 +2263,10 @@ A.alert_open_max=fn(rid){
 // The pool's requests, all of them, where an approved Agent can be stopped.
 A.alert_open_agents=fn(rid){
     if H.busy {return}
+    A.detour_start("stop",rid,nil)
+    A.stop_view_open(rid)
+}
+A.stop_view_open=fn(rid){
     let found={c:nil}
     if H.pool_info!=nil && H.pool_info.rid==rid && H.pool_info.conn!=nil {found.c=H.pool_info.conn}
     if found.c==nil && H.pool_meta!=nil && H.pool_meta.conns!=nil {for c in H.pool_meta.conns {if found.c==nil && c.resourceId==rid && A.pool_mine(c) {found.c=c}}}
@@ -5481,8 +5560,8 @@ A.pool_raise_line=fn(rid){
     let r=H.pool_raise
     if r==nil {return ""}
     let name=A.recipient_optional(r,"name")
-    if name!=nil {return A.t("To approve “"+name+"” ("+A.tokens(A.recipient_optional(r,"asked"))+"), this month needs "+A.tokens(r.drawn)+" in all. At "+A.tokens(r.tokens)+" it fits; tap Save Changes below.","批准「"+name+"」（"+A.tokens(A.recipient_optional(r,"asked"))+"）后本月共需 "+A.tokens(r.drawn)+"。调到 "+A.tokens(r.tokens)+" 就够了；点下方「保存更改」。")}
-    return A.t("From the alert: used and given out is "+A.tokens(r.drawn)+". At "+A.tokens(r.tokens)+" this month has room again and the alert clears by itself. Tap Save Changes below.","来自告警：本月已用和已分出 "+A.tokens(r.drawn)+"。调到 "+A.tokens(r.tokens)+" 后本月重新有余量，告警会自动解除；点下方「保存更改」。")
+    if name!=nil {return A.t("To approve “"+name+"” ("+A.tokens(A.recipient_optional(r,"asked"))+"), this month needs "+A.tokens(r.drawn)+" in all. At "+A.tokens(r.tokens)+" it fits: tap “Change to "+A.tokens(r.tokens)+"” below, and once you confirm you’re back at the request.","批准「"+name+"」（"+A.tokens(A.recipient_optional(r,"asked"))+"）后本月共需 "+A.tokens(r.drawn)+"，调到 "+A.tokens(r.tokens)+" 就够了：点下方「改成 "+A.tokens(r.tokens)+"」，确认后会回到这个申请。")}
+    return A.t("From the alert: used and given out is "+A.tokens(r.drawn)+". At "+A.tokens(r.tokens)+" this month has room again and the alert clears by itself: tap “Change to "+A.tokens(r.tokens)+"” below, and once you confirm you’re back at the alert.","来自告警：本月已用和已分出 "+A.tokens(r.drawn)+"，调到 "+A.tokens(r.tokens)+" 后重新有余量，告警会自动解除：点下方「改成 "+A.tokens(r.tokens)+"」，确认后会回到这条告警。")
 }
 // After the monthly maximum went up: the per-request change to offer, or 0.
 A.pool_offer_quota=fn(v){
@@ -7149,7 +7228,7 @@ A.retry_command = fn(){
             if command.service == "hagency.alerts.triage" {H.alert_saved={id:r.data.id to:command.args.to} A.open_alert(r.data.resourceId,r.data.id,0)}
             if command.service=="hagency.resources.publish" {A.open_resource(command.args.resourceId)}
             if command.service=="hagency.resources.edit" && H.page=="default_policy" {A.dpol_saved(command.args)}
-            if command.service == "hagency.resources.rename" || (command.service=="hagency.resources.edit" && H.page!="default_policy") || command.service=="hagency.resources.create" {A.open_resource(r.data.resourceId)}
+            if command.service == "hagency.resources.rename" || (command.service=="hagency.resources.edit" && H.page!="default_policy") || command.service=="hagency.resources.create" {if !(command.service=="hagency.resources.edit" && A.detour_finish(r.data.resourceId)) {A.open_resource(r.data.resourceId)}}
             if (command.service=="hagency.pools.agents.decide" || command.service=="hagency.pools.agents.stop") && A.reqs_page() {A.reqs_load(nil)}
             if command.service=="hagency.pools.agents.decide" || command.service=="hagency.pools.agents.stop" {A.reqs_counts_reload()}
             if command.service == "hagency.personal_agents.policy.save" || command.service == "hagency.personal_agents.observe" {A.open_personal_agent(r.data.agentId)}
@@ -8137,9 +8216,10 @@ A.render_page = fn(){
                 let stopped=A.reqs_stopped_rows(rows)
                 if A.reqs_pool_over() {mod.widgets.HagencyList{mod.widgets.HagencySwitchRow{
                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}}
+                    let stopped_now=r.result!=nil && r.result.stopped
                     mod.widgets.HagencyListText{
-                        mod.widgets.HagencyWrapTitle{text:A.t("New requests can’t be approved for now","暂时不能批准新的 Agent 申请")}
-                        reqs_stop_why := mod.widgets.HagencyWrapSubtitle{text:A.t("This pool is over its monthly maximum. Stopping an Agent returns what it was given but hasn’t used to the pool; the alert clears by itself once use is back under the maximum.","这个资源池超出了每月上限。停止一个 Agent 后，分给它但没用掉的额度会回到资源池；用量回到上限以内后告警自动解除。")}
+                        mod.widgets.HagencyWrapTitle{text:if stopped_now {A.t("Capacity comes back as it finishes up","额度会在它收尾后陆续回到资源池")} else {A.t("New requests can’t be approved for now","暂时不能批准新的 Agent 申请")}}
+                        reqs_stop_why := mod.widgets.HagencyWrapSubtitle{text:if stopped_now {A.t("Once use is back under the monthly maximum, new requests can be approved again and the alert clears by itself.","用量回到每月上限以内后，就能再批准新申请，告警也会自动解除。")} else {A.t("This pool is over its monthly maximum. Stopping an Agent returns what it was given but hasn’t used to the pool; the alert clears by itself once use is back under the maximum.","这个资源池超出了每月上限。停止一个 Agent 后，分给它但没用掉的额度会回到资源池；用量回到上限以内后告警自动解除。")}}
                     }
                 }}}
                 if r.result!=nil {View{width:Fill height:Fit padding:Inset{top:2}
@@ -8150,7 +8230,8 @@ A.render_page = fn(){
                             mod.widgets.HagencyWrapTitle{draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE} text:note.title}
                             mod.widgets.HagencyWrapSubtitle{text:note.text}
                         }
-                        request_result_open := mod.widgets.HagencyGetButton{text:A.t("View","查看") enabled:can on_click: || A.open_pool_agent(r.result.id)}
+                        if !A.detour_from_request() {request_result_open := mod.widgets.HagencyGetButton{text:A.t("View","查看") enabled:can on_click: || A.open_pool_agent(r.result.id)}}
+                        if A.detour_from_request() {request_detour_back := mod.widgets.HagencyGetButton{text:A.t("Back to Request","回到申请") enabled:can on_click: || A.detour_return()}}
                     }}
                 }}
                 mod.widgets.HagencyListLabel{text:A.t("AGENTS USING THIS POOL","使用中的 Agent")}
@@ -8187,6 +8268,18 @@ A.render_page = fn(){
                         }
                     }}}
                 }}
+            }}
+            if !stop_view && A.detour_here() {View{width:Fill height:Fit padding:Inset{top:2 bottom:6}
+                let dv=A.detour_view(rows)
+                detour_note_box := mod.widgets.HagencyResult{draw_bg.color:A.local_tone_bg(dv.tone)
+                    mod.widgets.HagencyResultLine{
+                        mod.widgets.HagencyRowGlyph{draw_icon.svg:if dv.tone=="running" {mod.rinx_icons.check} else {mod.rinx_icons.info} draw_icon.color:A.local_tone_fg(dv.tone)}
+                        detour_note_text := mod.widgets.HagencyCopy{text:dv.text draw_text.color:A.local_tone_fg(dv.tone)}
+                    }
+                    mod.widgets.HagencyResultActions{
+                        detour_note_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.detour_dismiss()}
+                    }
+                }
             }}
             if r.result!=nil && !stop_view {View{width:Fill height:Fit padding:Inset{bottom:6}
                 let note=A.reqs_note(r.result)
@@ -8249,7 +8342,7 @@ A.render_page = fn(){
                         }
                         View{width:Fill height:Fit flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:8
                             request_raise := mod.widgets.HagencyPillTinted{text:A.t("Raise the Maximum","调高每月上限") draw_icon.svg:mod.rinx_icons.gauge icon_walk:Walk{width:16 height:16} enabled:can on_click: || A.reqs_open_raise(q)}
-                            request_stop_some := mod.widgets.HagencyPillTinted{text:A.t("Stop Some Agents","停止部分 Agent") draw_icon.svg:mod.rinx_icons.robot icon_walk:Walk{width:16 height:16} enabled:can on_click: || A.alert_open_agents(A.reqs_pool_rid(q.poolId))}
+                            request_stop_some := mod.widgets.HagencyPillTinted{text:A.t("Stop Some Agents","停止部分 Agent") draw_icon.svg:mod.rinx_icons.robot icon_walk:Walk{width:16 height:16} enabled:can on_click: || A.reqs_open_stop(q)}
                         }
                     }}
                     View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:64 right:14 top:2 bottom:12}
@@ -8560,11 +8653,34 @@ A.render_page = fn(){
                     }
                 }}
             }}
+            if owner && A.detour_here() {View{width:Fill height:Fit padding:Inset{bottom:4}
+                let dv=A.detour_view([r])
+                detour_note_box := mod.widgets.HagencyResult{draw_bg.color:A.local_tone_bg(dv.tone)
+                    mod.widgets.HagencyResultLine{
+                        mod.widgets.HagencyRowGlyph{draw_icon.svg:if dv.tone=="running" {mod.rinx_icons.check} else {mod.rinx_icons.info} draw_icon.color:A.local_tone_fg(dv.tone)}
+                        detour_note_text := mod.widgets.HagencyCopy{text:dv.text draw_text.color:A.local_tone_fg(dv.tone)}
+                    }
+                    mod.widgets.HagencyResultActions{
+                        detour_note_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.detour_dismiss()}
+                    }
+                }
+            }}
+            let blocked=if decide {A.reqs_blocked(r)} else {""}
+            if blocked!="" {mod.widgets.HagencyList{View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:14 right:14 top:12 bottom:12}
+                View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.0}
+                    mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}
+                    request_blocked := mod.widgets.HagencyWrapSubtitle{text:blocked draw_text.color:mod.widgets.RINX_WARNING_FG}
+                }
+                View{width:Fill height:Fit flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:8
+                    request_raise := mod.widgets.HagencyPillTinted{text:A.t("Raise the Maximum","调高每月上限") draw_icon.svg:mod.rinx_icons.gauge icon_walk:Walk{width:16 height:16} enabled:!H.busy && !alert on_click: || A.reqs_open_raise(r)}
+                    request_stop_some := mod.widgets.HagencyPillTinted{text:A.t("Stop Some Agents","停止部分 Agent") draw_icon.svg:mod.rinx_icons.robot icon_walk:Walk{width:16 height:16} enabled:!H.busy && !alert on_click: || A.reqs_open_stop(r)}
+                }
+            }}}
             if decide {View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{top:4 bottom:4}
                 owner_reject := mod.widgets.HagencyPillDanger{text:A.t("Decline","拒绝") enabled:!H.busy && !alert on_click: || {H.pool_confirm="reject" A.redraw()}}
-                owner_approve := mod.widgets.HagencyPillPrimary{text:A.t("Approve","批准") enabled:!H.busy && !alert on_click: || {H.pool_confirm="approve" A.redraw()}}
+                owner_approve := mod.widgets.HagencyPillPrimary{text:A.t("Approve","批准") enabled:!H.busy && !alert && blocked=="" on_click: || {H.pool_confirm="approve" A.redraw()}}
             }}
-            if decide && A.reqs_after(r)!="" {owner_after := mod.widgets.HagencyListNote{align:Align{x:0.5} text:A.reqs_after(r).trim()}}
+            if decide && blocked=="" && A.reqs_after(r)!="" {owner_after := mod.widgets.HagencyListNote{align:Align{x:0.5} text:A.reqs_after(r).trim()}}
             if budget || control {mod.widgets.HagencyTiles{
                 if budget {mod.widgets.HagencyTile{
                     pool_agent_budget := mod.widgets.HagencyTileTap{enabled:!H.busy && !alert on_click: || A.open_agent_budget(r.id,r.definition.name,nil,1)}
@@ -11053,9 +11169,25 @@ A.render_page = fn(){
                     }
                     alert_seen := mod.widgets.HagencyHint{width:Fill align:Align{x:0.5} flow:Flow.Right{wrap:true} text:A.alert_seen_line(row)}
                 }
-                if H.alert_saved!=nil && H.alert_saved.id==row.id {View{width:Fill height:Fit padding:Inset{bottom:6} mod.widgets.HagencyStatus{draw_bg.color:mod.widgets.RINX_SUCCESS_BG
-                    mod.widgets.HagencyCopy{text:A.alert_saved_text(H.alert_saved.to) draw_text.color:mod.widgets.RINX_SUCCESS_FG}
-                    alert_saved_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.health_open(H.alert_resource,nil,nil)}
+                if A.detour_here() {View{width:Fill height:Fit padding:Inset{bottom:6}
+                    let dv=A.detour_view([])
+                    detour_note_box := mod.widgets.HagencyResult{draw_bg.color:A.local_tone_bg(dv.tone)
+                        mod.widgets.HagencyResultLine{
+                            mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:A.local_tone_fg(dv.tone)}
+                            detour_note_text := mod.widgets.HagencyCopy{text:dv.text draw_text.color:A.local_tone_fg(dv.tone)}
+                        }
+                        mod.widgets.HagencyResultActions{
+                            detour_note_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.detour_dismiss()}
+                        }
+                    }
+                }}
+                if H.alert_saved!=nil && H.alert_saved.id==row.id {View{width:Fill height:Fit padding:Inset{bottom:6} mod.widgets.HagencyResult{draw_bg.color:mod.widgets.RINX_SUCCESS_BG
+                    mod.widgets.HagencyResultLine{
+                        mod.widgets.HagencyCopy{text:A.alert_saved_text(H.alert_saved.to) draw_text.color:mod.widgets.RINX_SUCCESS_FG}
+                    }
+                    mod.widgets.HagencyResultActions{
+                        alert_saved_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.health_open(H.alert_resource,nil,nil)}
+                    }
                 }}}
                 if ceiling && recovered && live!=nil && live.ceiling!=nil {View{width:Fill height:Fit flow:Down spacing:6
                     mod.widgets.HagencyListLabel{text:A.t("NOW","现在")}
