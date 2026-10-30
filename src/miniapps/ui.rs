@@ -2016,6 +2016,30 @@ impl MiniAppsPanelRef {
         inner.notify_script_visibility(cx, visible);
     }
 
+    /// The app this panel is reviewing or running, as (manifest id, name), so a
+    /// host with one tab per opened item can find it again. `None` while the
+    /// panel is closed or shows the catalog or Hub.
+    pub(super) fn current_app(&self) -> Option<(String, String)> {
+        let inner = self.borrow()?;
+        if !inner.open || inner.showing_catalog || inner.showing_hub {
+            return None;
+        }
+        inner.package.as_ref().map(|package| (package.manifest.id.clone(), package.manifest.name.clone()))
+    }
+
+    /// Whether the panel is open: closing it stops its app and revokes its lease.
+    pub fn is_open(&self) -> bool {
+        self.borrow().is_some_and(|inner| inner.open)
+    }
+
+    /// Tells the assistant what this panel shows again, for a host whose
+    /// front panel changed: the assistant follows the panel in front.
+    pub(super) fn publish_to_assistant(&self) {
+        if let Some(inner) = self.borrow() {
+            inner.publish_to_assistant();
+        }
+    }
+
     pub fn open_board(&self, cx: &mut Cx, target: super::palpo::ActionsRoomTarget) -> Result<(), String> {
         let mut inner = self.borrow_mut().ok_or("Mini app view unavailable")?;
         inner.open = true;

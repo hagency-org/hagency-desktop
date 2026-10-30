@@ -34,6 +34,7 @@ use crate::agent_chat::ops::ui::{AgentOpsAction, AgentOpsPanelWidgetRefExt};
 use crate::moments::ui::{MomentsAction, MomentsPanelWidgetRefExt};
 use crate::octoscript_apps::{MiniAppsAction, MiniAppsPanelWidgetRefExt};
 use crate::miniapps::window::MiniAppsWindowHostWidgetRefExt;
+use crate::miniapps::side::MiniAppsSideRegionWidgetRefExt;
 use crate::hagency::ui::{HagencyAction, HagencyPanelWidgetRefExt};
 use crate::settings::theme_studio::{ThemeStudioAction, ThemeStudioWidgetRefExt};
 use crate::article_app::{ArticleAction, ArticlePanelWidgetRefExt};
@@ -599,8 +600,8 @@ impl MatchEvent for App {
             }
             if let Some(action) = action.downcast_ref::<crate::hagency::ui::HagencyAction>() {
                 // Management opens beside chat; it never replaces the chat dock.
-                if !self.embedded && cfg!(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")))) {
-                    self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).hagency_action(cx, action);
+                if self.docks_mini_apps() {
+                    self.dock_hagency_action(cx, action);
                 } else {
                     let modal = self.ui.modal(cx, ids!(hagency_management_modal));
                     self.ui.hagency_panel(cx, ids!(hagency_management_modal.content.management)).action(cx, action);
@@ -608,12 +609,16 @@ impl MatchEvent for App {
                 }
                 continue;
             }
+            if let Some(crate::miniapps::side::MiniAppsSideAction::PopOut) = action.downcast_ref() {
+                self.pop_out_mini_app(cx);
+                continue;
+            }
             if let Some(action) = action.downcast_ref::<MiniAppsAction>() {
                 #[cfg(feature = "agent_chat")]
                 if let MiniAppsAction::OpenToolApprovals(target) = action {
                     if current_user_id().as_ref() == Some(&target.account) {
                         self.cancel_signup_navigation();
-                        self.close_mini_apps(cx);
+                        self.leave_mini_apps(cx);
                         cx.action(ApprovalInboxAction::Open { project:Some(target.project_room_id.clone()) });
                     }
                     continue;
@@ -621,7 +626,7 @@ impl MatchEvent for App {
                 if let MiniAppsAction::OpenSignupApproval(target) = action {
                     if current_user_id().as_ref() == Some(&target.account) {
                         self.waiting_to_navigate_to_room = None;
-                        self.close_mini_apps(cx);
+                        self.leave_mini_apps(cx);
                         let room = RoomNameId::empty(target.room_id.clone());
                         if cx.get_global::<RoomsListRef>().get_room_state(&target.room_id) == Some(RoomState::Joined) {
                             self.pending_signup_navigation = None;
@@ -637,7 +642,7 @@ impl MatchEvent for App {
                 if let MiniAppsAction::OpenActionsRoom(target) = action {
                     if current_user_id().as_ref() == Some(&target.account) {
                         self.cancel_signup_navigation();
-                        self.close_mini_apps(cx);
+                        self.leave_mini_apps(cx);
                         cx.action(NavigationBarAction::GoToHome);
                         let room = cx.get_global::<RoomsListRef>().get_room_name(&target.room_id)
                             .unwrap_or_else(|| RoomNameId::new(matrix_sdk::RoomDisplayName::Named("My Actions".into()), target.room_id.clone()));
@@ -654,10 +659,12 @@ impl MatchEvent for App {
                     continue;
                 }
                 let modal = self.ui.modal(cx, ids!(octoscript_apps_modal));
+                // Docked tabs and the pop-out window close their own apps; this
+                // Close comes from the full-screen panel.
                 if matches!(action, MiniAppsAction::Close) {
-                    self.close_mini_apps(cx);
-                } else if !self.embedded && cfg!(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")))) {
-                    self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).action(cx, action);
+                    self.leave_mini_apps(cx);
+                } else if self.docks_mini_apps() {
+                    self.dock_mini_apps_action(cx, action);
                 } else if let Some(panel) = self.hosted_window(cx, HostedWindow::MiniApps) {
                     panel.as_mini_apps_panel().action(cx, ModalRef::default(), action);
                 } else {
@@ -1087,13 +1094,75 @@ impl App {
         self.ui.web_browser(cx, ids!(web_browser_modal.content)).action(cx, modal, &WebBrowserAction::Close);
     }
 
-    fn close_mini_apps(&mut self, cx: &mut Cx) {
+    /// Leaves the mini apps for a chat: full-screen panels close as before,
+    /// and so does the popped-out window when its own app went to the chat.
+    /// Docked tabs stay beside the chat; an overlay steps aside.
+    fn leave_mini_apps(&mut self, cx: &mut Cx) {
         self.ui.hagency_panel(cx, ids!(hagency_management_modal.content.management)).action(cx, &HagencyAction::Close);
         self.ui.modal(cx, ids!(hagency_management_modal)).close(cx);
-        self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).close(cx);
+        let window = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host));
+        if window.take_navigated() {
+            window.close(cx);
+        }
         let modal = self.ui.modal(cx, ids!(octoscript_apps_modal));
         self.ui.mini_apps_panel(cx, ids!(octoscript_apps_modal.content)).action(cx, modal, &MiniAppsAction::Close);
         self.close_hosted_window(cx, HostedWindow::MiniApps, true);
+        self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).reveal_chat(cx);
+    }
+
+    /// Stops every mini app, docked tabs included: on sign-out, a failed
+    /// login, or the main window closing.
+    fn close_mini_apps(&mut self, cx: &mut Cx) {
+        self.leave_mini_apps(cx);
+        self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).close(cx);
+        self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).close_all(cx);
+    }
+
+    /// Desktop windows dock mini apps beside the chat (and can pop one out);
+    /// phones and hosted panes keep their full-screen or host-window panels.
+    fn docks_mini_apps(&self) -> bool {
+        !self.embedded && cfg!(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos"))))
+    }
+
+    /// Opens a mini-apps item: in the popped-out window if that is what it
+    /// shows, otherwise in its docked tab.
+    fn dock_mini_apps_action(&mut self, cx: &mut Cx, action: &MiniAppsAction) {
+        use crate::miniapps::surface::SurfaceKey;
+        let window = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host));
+        let side = self.ui.mini_apps_side_region(cx, ids!(mini_apps_side));
+        let in_window = match SurfaceKey::for_action(action) {
+            Some(wanted) => window.surface_key(cx) == Some(wanted),
+            // The assistant's reviewed app: docked if a tab shows an app, else the window's.
+            None => matches!(action, MiniAppsAction::OpenReviewed)
+                && matches!(window.surface_key(cx), Some(SurfaceKey::App(_)))
+                && !side.has_app(cx),
+        };
+        if in_window {
+            window.action(cx, action);
+        } else {
+            side.open(cx, action);
+        }
+    }
+
+    /// Hagency management: in the popped-out window if it shows management,
+    /// otherwise docked.
+    fn dock_hagency_action(&mut self, cx: &mut Cx, action: &HagencyAction) {
+        let window = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host));
+        if window.surface_key(cx) == Some(crate::miniapps::surface::SurfaceKey::Management) {
+            window.hagency_action(cx, action);
+        } else {
+            self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).hagency_action(cx, action);
+        }
+    }
+
+    /// Moves the docked front tab, still running, into the mini-apps window.
+    /// A tab already there comes back to the docked region.
+    fn pop_out_mini_app(&mut self, cx: &mut Cx) {
+        let side = self.ui.mini_apps_side_region(cx, ids!(mini_apps_side));
+        let Some(surface) = side.take_front(cx) else { return };
+        if let Some(previous) = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).adopt(cx, surface) {
+            side.dock_surface(cx, previous);
+        }
     }
 
     fn clear_session_ui(&mut self, cx: &mut Cx) {
@@ -1230,6 +1299,9 @@ pub fn register_widgets(vm: &mut ScriptVm) {
     crate::verification_modal::script_mod(vm);
     crate::profile::script_mod(vm);
     crate::hagency::ui::script_mod(vm);
+    // A mini-apps host body, the docked region holding them, and the pop-out window.
+    crate::miniapps::surface::script_mod(vm);
+    crate::miniapps::side::script_mod(vm);
     crate::miniapps::window::script_mod(vm);
     crate::home::script_mod(vm);
     crate::moments::script_mod(vm);
@@ -1819,7 +1891,7 @@ impl App {
         }
         self.cancel_signup_navigation();
         self.waiting_to_navigate_to_room = None;
-        self.close_mini_apps(cx);
+        self.leave_mini_apps(cx);
         cx.action(NavigationBarAction::GoToHome);
         let room_name_id = cx.get_global_ref::<RoomsListRef>()
             .and_then(|rooms| rooms.get_room_name(&target.room_id))
@@ -1938,6 +2010,10 @@ pub struct AppState {
     /// keyed by the space ID.
     #[serde(default, deserialize_with = "crate::utils::deserialize_or_default")]
     pub saved_dock_state_per_space: HashMap<OwnedRoomId, SavedDockState>,
+    /// The docked mini-apps region's width beside the chat, as the person last
+    /// dragged it. Kept with the dock layouts above; one width for every space.
+    #[serde(default, deserialize_with = "crate::utils::deserialize_or_default")]
+    pub mini_apps_width: Option<f64>,
     /// Whether a user is currently logged in to Rinx or not.
     #[serde(default, deserialize_with = "crate::utils::deserialize_or_default")]
     pub logged_in: bool,

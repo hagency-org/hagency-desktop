@@ -1,26 +1,26 @@
-//! Hosts the mini-apps in its own native window on desktop.
+//! Hosts a popped-out mini app in its own native window on desktop.
+//!
+//! Mini apps open docked beside the chat (`side.rs`). The region's pop-out
+//! button moves its front tab, still running, into this window: the same
+//! surface, so the app keeps its state, its lease and its startup guard.
+//! Closing the window stops that app and revokes its lease, as closing its tab
+//! would. Popping out another tab sends the window's current one back to the
+//! docked region rather than closing it.
 //!
 //! Makepad creates a window's OS window as soon as its `Window` widget is built,
 //! and has no way to re-show a window once hidden. So this host lives directly
 //! under the app's `Root` (which forwards every event, including draws, to it),
-//! builds the `MiniAppsWindow` widget when a mini app is first opened,
-//! and drops it once the user or the panel closes that window.
+//! builds the `MiniAppsWindow` widget when a surface first pops out, and drops
+//! it once the user or the app closes that window.
 use makepad_widgets::*;
-use super::ui::{MiniAppsAction, MiniAppsPanelWidgetRefExt, MiniAppsPanelRef};
-use crate::hagency::ui::{HagencyAction, HagencyPanelWidgetRefExt};
-use crate::shared::navigation_bar_button::NavigationBarButtonWidgetRefExt;
+use super::surface::{MiniAppsSurfaceDeckRef, MiniAppsSurfaceDeckWidgetRefExt, MiniAppsSurfaceRef, SurfaceKey};
+use super::ui::MiniAppsAction;
+use crate::hagency::ui::HagencyAction;
 
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    let ManagementTab = NavigationBarButton {
-        width: Fit height: 44 flow: Right spacing: 8 padding: Inset{left: 14 right: 14}
-        align: Align{y: 0.5}
-        draw_bg +: {color_hover: mod.widgets.RINX_HOVER color_active: mod.widgets.RINX_SELECTED border_radius: theme.corner_radius}
-        icon := Icon {icon_walk: Walk{width: 18 height: 18} draw_icon.color: mod.widgets.RINX_INK}
-        label := RinxLabel {}
-    }
     mod.widgets.MiniAppsWindow = Window {
         window.inner_size: vec2(1000, 800)
         window.title: #(crate::i18n::tr("Hagency · Mini apps"))
@@ -36,23 +36,17 @@ script_mod! {
         }
         body +: {
             flow: Down
-            management_navigation := View {
-                visible: false width: Fill height: Fit flow: Right spacing: 8
-                padding: Inset{left: 20 right: 20 top: 8 bottom: 8}
-                show_bg: true draw_bg.color: mod.widgets.RINX_PAGE
-                apps := ManagementTab {icon.draw_icon.svg: ICON_ARROW_BACK label.text: #(crate::i18n::tr("Back to Hagency")) label.i18n_text: "Back to Hagency"}
-                context := RinxHint {width: Fill text: ""}
+            deck := MiniAppsSurfaceDeck {
+                Surface := MiniAppsSurface {}
             }
-            mini_apps_panel := MiniAppsPanel {
-                // This window's own caption bar already sits above the panel.
-                padding: Inset{top: 12 right: 20 bottom: 20 left: 20}
-            }
-            management_panel := HagencyPanel {visible: false}
         }
     }
 
     mod.widgets.MiniAppsWindowHost = #(MiniAppsWindowHost::register_widget(vm)) {}
 }
+
+/// The window's one surface, in its deck.
+const SURFACE: LiveId = id!(surface);
 
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct MiniAppsWindowHost {
@@ -70,8 +64,10 @@ pub struct MiniAppsWindowHost {
     closing: bool,
     #[rust]
     focused: bool,
+    /// This window's app sent the person to a chat; the app shell closes the
+    /// window when it follows (as it did when the window was the only host).
     #[rust]
-    management_page: Option<bool>, // None: mini apps; false: Projects; true: Agents.
+    navigated: bool,
 }
 
 impl ScriptHook for MiniAppsWindowHost {
@@ -87,7 +83,6 @@ impl ScriptHook for MiniAppsWindowHost {
                 let value = script_eval!(vm, { mod.widgets.MiniAppsWindow {} });
                 window.script_apply(vm, apply, scope, value);
             }
-            self.update_page(vm.cx_mut());
         }
     }
 }
@@ -119,12 +114,14 @@ impl Widget for MiniAppsWindowHost {
         let Some(window) = self.window.clone() else {
             return;
         };
+        // The app shell handles each batch of actions before this host sees
+        // it, so a navigation it didn't follow doesn't linger.
+        if matches!(event, Event::Actions(_)) {
+            self.navigated = false;
+        }
         if let Event::Actions(actions) = event {
-            if window.navigation_bar_button(cx, ids!(management_navigation.apps)).clicked(actions) {
-                self.show_apps(cx);
-            }
             // A management "Open chat" action returns to the original conversation window.
-            if self.management_page.is_some() && actions.iter().any(|action| {
+            if self.surface(cx).key(cx) == Some(SurfaceKey::Management) && actions.iter().any(|action| {
                 action.downcast_ref::<crate::hagency::ui::ProjectRoomNavigation>().is_some_and(|nav| nav.current())
                     || matches!(action.downcast_ref(), Some(crate::home::main_desktop_ui::MainDesktopUiAction::ShowChats))
             }) {
@@ -152,7 +149,7 @@ impl Widget for MiniAppsWindowHost {
         let closed = matches!(event, Event::WindowClosed(e) if Some(e.window_id) == window_id);
         let visibility = script_visibility_signal(event, window_id, was_focused, self.focused, closed);
         if let Some(visible) = visibility {
-            window.mini_apps_panel(cx, ids!(mini_apps_panel)).script_visibility(cx, visible && self.management_page.is_none());
+            self.surface(cx).set_host_visible(cx, visible);
         }
         // `Window` records its own geometry as the app-wide display context, which
         // drives the main window's desktop/mobile layout choice. This small window
@@ -170,17 +167,18 @@ impl Widget for MiniAppsWindowHost {
             cx.display_context.safe_area_insets = safe_area_insets;
             cx.display_context.updated_on_event_id = updated_on_event_id;
         }
+        // The app asked to close (Back on its catalog, or handing off to a native app).
+        if !self.deck(cx).take_close_requests().is_empty() {
+            self.close(cx);
+        }
+        if self.deck(cx).take_navigated() {
+            self.navigated = true;
+        }
         if closed {
-            window.hagency_panel(cx, ids!(management_panel)).action(cx, &HagencyAction::Close);
-            window.mini_apps_panel(cx, ids!(mini_apps_panel)).action(
-                cx,
-                ModalRef::default(),
-                &MiniAppsAction::Close,
-            );
+            self.surface(cx).close(cx);
             self.window = None;
             self.closing = false;
             self.focused = false;
-            self.management_page = None;
             cx.widget_tree_mark_dirty(self.uid);
         }
     }
@@ -195,45 +193,40 @@ impl Widget for MiniAppsWindowHost {
 }
 
 impl MiniAppsWindowHost {
-    fn update_page(&self, cx: &mut Cx) {
-        let Some(window) = &self.window else { return; };
-        window.widget(cx, ids!(mini_apps_panel)).set_visible(cx, self.management_page.is_none());
-        window.widget(cx, ids!(management_panel)).set_visible(cx, self.management_page.is_some());
-        window.view(cx, ids!(management_navigation)).set_visible(cx, self.management_page.is_some());
-        window.label(cx, ids!(management_navigation.context)).set_text(cx, crate::i18n::tr(
-            if self.management_page == Some(true) { "Local agents · Device and room settings" }
-            else { "Matrix workspaces · Rooms, members and access" }
-        ));
-        window.redraw(cx);
+    fn deck(&self, cx: &mut Cx) -> MiniAppsSurfaceDeckRef {
+        self.window
+            .as_ref()
+            .map(|window| window.mini_apps_surface_deck(cx, ids!(deck)))
+            .unwrap_or_default()
     }
 
-    fn show_apps(&mut self, cx: &mut Cx) {
-        if let Some(window) = &self.window {
-            window.hagency_panel(cx, ids!(management_panel)).action(cx, &HagencyAction::Close);
-            window.mini_apps_panel(cx, ids!(mini_apps_panel)).script_visibility(cx, self.focused);
-        }
-        self.management_page = None;
-        self.update_page(cx);
+    fn surface(&self, cx: &mut Cx) -> MiniAppsSurfaceRef {
+        self.deck(cx).surface(SURFACE)
     }
 
-    pub fn hagency_action(&mut self, cx: &mut Cx, action: &HagencyAction) {
-        log!("Hagency management {action:?}: window open {}, closing {}", self.window.is_some(), self.closing);
-        if matches!(action, HagencyAction::Close) {
-            self.show_apps(cx);
-            return;
-        }
+    /// What the window shows, while it is open.
+    fn surface_key(&self, cx: &mut Cx) -> Option<SurfaceKey> {
         if self.window.is_none() || self.closing {
-            self.action(cx, &MiniAppsAction::Open);
+            return None;
+        }
+        self.surface(cx).key(cx)
+    }
+
+    /// Shows a running surface in this window, opening the window if needed.
+    /// Returns the surface the window held before, still running.
+    pub fn adopt(&mut self, cx: &mut Cx, surface: WidgetRef) -> Option<WidgetRef> {
+        let previous = if self.window.is_some() && !self.closing {
+            self.deck(cx).remove(cx, SURFACE)
         } else {
-            self.ensure_window(cx);
-        }
-        self.management_page = Some(matches!(action,
-            HagencyAction::OpenAgents | HagencyAction::OpenAgent {..} | HagencyAction::NewAgent {..} | HagencyAction::AgentRun {..}));
+            None
+        };
+        self.ensure_window(cx);
+        self.deck(cx).insert(cx, SURFACE, surface);
+        self.surface(cx).set_host_visible(cx, self.focused);
         if let Some(window) = &self.window {
-            window.mini_apps_panel(cx, ids!(mini_apps_panel)).script_visibility(cx, false);
-            window.hagency_panel(cx, ids!(management_panel)).action(cx, action);
+            window.redraw(cx);
         }
-        self.update_page(cx);
+        previous
     }
 
     fn ensure_window(&mut self, cx: &mut Cx) {
@@ -270,32 +263,45 @@ impl MiniAppsWindowHost {
         }
     }
 
-    /// Routes a mini-app action to the window, creating the window if needed.
+    /// The window with a surface in it, bringing an open one to front. A host
+    /// used on its own (the dev examples) opens a fresh window with a new surface.
+    fn ensure_surface(&mut self, cx: &mut Cx) {
+        self.ensure_window(cx);
+        if self.deck(cx).surface_widget(SURFACE).is_none() {
+            self.deck(cx).create(cx, SURFACE);
+            self.surface(cx).set_host_visible(cx, self.focused);
+        }
+    }
+
+    /// Routes a mini-app action to the surface in this window, bringing it to front.
     pub fn action(&mut self, cx: &mut Cx, action: &MiniAppsAction) {
         if matches!(action, MiniAppsAction::Close) {
             self.close(cx);
             return;
         }
-        self.ensure_window(cx);
-        let window = self.window.clone().unwrap();
-        self.show_apps(cx);
-        window
-            .mini_apps_panel(cx, ids!(mini_apps_panel))
-            .action(cx, ModalRef::default(), action);
-        window.redraw(cx);
+        self.ensure_surface(cx);
+        self.surface(cx).action(cx, action);
+        if let Some(window) = &self.window {
+            window.redraw(cx);
+        }
     }
 
-    /// Closes the mini-apps window, if open.
+    /// Routes Hagency management to the surface in this window, bringing it to front.
+    pub fn hagency_action(&mut self, cx: &mut Cx, action: &HagencyAction) {
+        log!("Hagency management {action:?} in the mini-apps window");
+        self.ensure_surface(cx);
+        self.surface(cx).hagency_action(cx, action);
+        if let Some(window) = &self.window {
+            window.redraw(cx);
+        }
+    }
+
+    /// Closes the mini-apps window, if open, stopping its app.
     pub fn close(&mut self, cx: &mut Cx) {
-        let Some(window) = self.window.as_ref() else {
+        let Some(window) = self.window.clone() else {
             return;
         };
-        window.hagency_panel(cx, ids!(management_panel)).action(cx, &HagencyAction::Close);
-        window.mini_apps_panel(cx, ids!(mini_apps_panel)).action(
-            cx,
-            ModalRef::default(),
-            &MiniAppsAction::Close,
-        );
+        self.surface(cx).close(cx);
         if !self.closing {
             if let Some(window_id) = window.as_window().window_id() {
                 cx.push_unique_platform_op(CxOsOp::CloseWindow(window_id));
@@ -306,20 +312,24 @@ impl MiniAppsWindowHost {
 }
 
 impl MiniAppsWindowHostRef {
+    /// Whether this window's own app just sent the person to a chat.
+    pub fn take_navigated(&self) -> bool {
+        self.borrow_mut().is_some_and(|mut inner| std::mem::take(&mut inner.navigated))
+    }
+    pub fn adopt(&self, cx: &mut Cx, surface: WidgetRef) -> Option<WidgetRef> {
+        self.borrow_mut()?.adopt(cx, surface)
+    }
     pub fn hagency_action(&self, cx: &mut Cx, action: &HagencyAction) {
         if let Some(mut inner) = self.borrow_mut() {
             inner.hagency_action(cx, action);
         }
     }
-    pub fn panel(&self, cx: &mut Cx) -> MiniAppsPanelRef {
-        self.borrow()
-            .and_then(|inner| {
-                inner
-                    .window
-                    .as_ref()
-                    .map(|window| window.mini_apps_panel(cx, ids!(mini_apps_panel)))
-            })
-            .unwrap_or_default()
+    /// What the window shows, while it is open.
+    pub fn surface_key(&self, cx: &mut Cx) -> Option<SurfaceKey> {
+        self.borrow().and_then(|inner| inner.surface_key(cx))
+    }
+    pub fn surface(&self, cx: &mut Cx) -> MiniAppsSurfaceRef {
+        self.borrow().map(|inner| inner.surface(cx)).unwrap_or_default()
     }
 
     pub fn window_id(&self) -> Option<WindowId> {

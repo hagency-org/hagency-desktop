@@ -2162,6 +2162,8 @@
   "This preserves the legacy fleet allowance in this connection configuration.": "This preserves the legacy fleet allowance in this connection configuration.",
   "Desktop does not enforce this legacy allowance. Current resource-pool allocations and approved grants are unchanged.": "Desktop does not enforce this legacy allowance. Current resource-pool allocations and approved grants are unchanged.",
   "Back to Hagency": "Back to Hagency",
+  "Back to chat": "Back to chat",
+  "Open in a new window": "Open in a new window",
   "Local agents · Device and room settings": "Local agents · Device and room settings",
   "Matrix workspaces · Rooms, members and access": "Matrix workspaces · Rooms, members and access",
   "Matrix workspaces": "Matrix workspaces",

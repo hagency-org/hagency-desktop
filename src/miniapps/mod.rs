@@ -52,6 +52,8 @@ mod private_export;
 pub mod presentation;
 mod sandbox;
 pub mod ui;
+pub mod side;
+pub mod surface;
 pub mod window;
 pub use crate::host::octos::ContextProvider;
 pub use ui::{MiniAppsAction, MiniAppsPanelWidgetRefExt};
