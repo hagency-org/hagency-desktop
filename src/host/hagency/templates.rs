@@ -10,6 +10,7 @@ pub(super) const UPDATE: &str = "hagency.templates.update";
 pub(super) const DELETE: &str = "hagency.templates.delete";
 pub(super) const REVIEW: &str = "hagency.templates.command.get";
 pub(super) const APPLY: &str = "hagency.templates.command.apply";
+pub(super) const CANCEL: &str = "hagency.templates.command.cancel";
 
 pub(super) fn permissions(service: &str) -> &'static [ManagementPermission] {
     use ManagementPermission::*;
@@ -17,6 +18,9 @@ pub(super) fn permissions(service: &str) -> &'static [ManagementPermission] {
         LIST | GET => &[ReadResourceTemplates],
         CREATE | UPDATE | DELETE => &[ReadResourceTemplates, ManageResourceTemplates],
         REVIEW | APPLY => &[ReadResourceTemplates, ReadIntents],
+        // Withdrawing writes the original command's receipt, like apply, so it
+        // also needs the explicit write grant the original change required.
+        CANCEL => &[ReadResourceTemplates, ManageResourceTemplates, ReadIntents],
         _ => &[],
     }
 }
@@ -62,6 +66,7 @@ pub(super) enum Call {
     Delete(TemplateDeleteInput),
     Review(String),
     Apply(String),
+    Cancel(String),
 }
 pub(super) fn call(service: &str, args: Value) -> Result<Option<Call>, String> {
     Ok(Some(match service {
@@ -94,7 +99,7 @@ pub(super) fn call(service: &str, args: Value) -> Result<Option<Call>, String> {
             input.validate().map_err(|_| invalid())?;
             Call::Delete(input)
         }
-        REVIEW | APPLY => {
+        REVIEW | APPLY | CANCEL => {
             let saved: Saved = parse(args)?;
             if !saved.command_id.starts_with("templatecmd_")
                 || saved.command_id.len() != "templatecmd_".len() + 32
@@ -104,10 +109,10 @@ pub(super) fn call(service: &str, args: Value) -> Result<Option<Call>, String> {
             {
                 return Err(invalid());
             }
-            if service == REVIEW {
-                Call::Review(saved.command_id)
-            } else {
-                Call::Apply(saved.command_id)
+            match service {
+                REVIEW => Call::Review(saved.command_id),
+                CANCEL => Call::Cancel(saved.command_id),
+                _ => Call::Apply(saved.command_id),
             }
         }
         _ => return Ok(None),
@@ -156,6 +161,12 @@ impl Call {
                     .map_err(|e| e.code)?,
             ),
             Self::Apply(id) => value(manager.apply_saved_template(id).await.map_err(|e| e.code)?),
+            Self::Cancel(id) => value(
+                manager
+                    .cancel_saved_template(id)
+                    .await
+                    .map_err(|e| e.code)?,
+            ),
         }
     }
 }
@@ -181,10 +192,23 @@ mod tests {
         ));
         assert!(call(APPLY, json!({"commandId":original,"resourceId":"replacement"})).is_err());
         assert!(call(REVIEW, json!({"commandId":"graphcmd_0123456789abcdef0123456789abcdef"})).is_err());
+        assert!(matches!(
+            call(CANCEL, json!({"commandId":original})),
+            Ok(Some(Call::Cancel(id))) if id == original
+        ));
+        for field in ["resourceId", "owner", "profile", "change", "path", "accessToken"] {
+            let mut input = json!({"commandId":original});
+            input[field] = json!("replacement");
+            assert!(call(CANCEL, input).is_err(), "{field}");
+        }
+        assert!(call(CANCEL, json!({"commandId":"webcatalog_0123456789abcdef0123456789abcdef"})).is_err());
+        assert!(call(CANCEL, json!({"commandId":"templatecmd_0123"})).is_err());
+        assert!(matches!(call(CANCEL, json!({"commandId":original})), Ok(Some(c)) if c.mutates()));
+        assert!(permissions(CANCEL).contains(&ManagementPermission::ManageResourceTemplates));
         assert!(call(GET, json!({"resourceId":"../outside","id":"rad_a"})).is_err());
         assert!(!permissions(LIST).contains(&ManagementPermission::ManageResourceTemplates));
         assert!(permissions(CREATE).contains(&ManagementPermission::ManageResourceTemplates));
-        for service in [LIST, GET, CREATE, UPDATE, DELETE, REVIEW, APPLY] {
+        for service in [LIST, GET, CREATE, UPDATE, DELETE, REVIEW, APPLY, CANCEL] {
             assert!(octosense_app_contract::hagency::SERVICES.contains(&service));
             assert!(octosense_app_contract::KNOWN_CAPABILITIES.contains(&service));
             assert!(octosense_app_contract::hagency::words(service).is_some());

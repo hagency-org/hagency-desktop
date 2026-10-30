@@ -175,6 +175,7 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "hagency.templates.delete",
     "hagency.templates.command.get",
     "hagency.templates.command.apply",
+    "hagency.templates.command.cancel",
     "hagency.tasks.list",
     "hagency.tasks.get",
     "hagency.tasks.board",

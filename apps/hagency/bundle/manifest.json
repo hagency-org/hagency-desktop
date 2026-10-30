@@ -117,6 +117,7 @@
     "hagency.templates.delete",
     "hagency.templates.command.get",
     "hagency.templates.command.apply",
+    "hagency.templates.command.cancel",
     "hagency.web.workforce",
     "hagency.web.capability",
     "hagency.web.usage",
