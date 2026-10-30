@@ -4270,7 +4270,7 @@ A.pool_banner=fn(v){
     if v.grantState=="loading" || v.published {return none}
     if v.grantState!="ready" {return {kind:"error" title:A.t("Couldn’t confirm what is published","暂时无法确认发布状态") text:A.t("Try again before changing the limit.","请重试后再修改额度。") step:0 action:A.t("Try Again","重试")}}
     if v.boardState=="ready" && !v.deviceReady {return {kind:"device" title:A.t("This device can’t publish yet","此设备还不能发布") text:A.t("Finish this device’s setup, then publish this month’s capacity.","完成设备设置后，才能发布本月额度。") step:3 action:A.t("Fix This Device","去处理")}}
-    return {kind:"month" title:A.t("Not published this month","本月未发布") text:A.t("Check the per-request limit below, then publish. Agents can request it after that; capacity is published month by month.","确认下方的每次申请上限，然后发布，Agent 才能申请。额度按月发布。") step:3 action:""}
+    return {kind:"month" title:A.t("Not published this month","本月未发布") text:A.t("Check the per-request limit below and publish; then Agents can request it.","确认下方的每次申请上限并发布后，Agent 就能申请。") step:3 action:""}
 }
 A.pool_banner_action=fn(kind){
     if H.busy || H.resource_detail==nil {return}
@@ -4303,7 +4303,7 @@ A.pool_attention_text=fn(s){
     if s.workspaces>0 {parts.push(A.t("workspaces ","工作区 ")+s.workspaces)}
     let out={t:""}
     for i part in parts {out.t=out.t+(if i>0 {" · "} else {""})+part}
-    if s.badge>0 {return A.t(""+s.badge+" to handle: ",""+s.badge+" 项待处理：")+out.t}
+    if s.badge>0 {return A.t(""+s.badge+" to handle: ",""+s.badge+" 项待处理：")+out.t+(if s.unknown {A.t(" · some couldn’t be read"," · 部分无法读取")} else {""})}
     if s.unknown {return A.t("Some counts couldn’t be read","部分状态无法读取")}
     return ""
 }
@@ -4314,7 +4314,7 @@ A.pool_device_state=fn(board,load){
     if load!="ready" || board==nil {return s}
     let {state=nil,grantReviewAvailable=false,grantIntents=[]}=board
     s.open=grantIntents.len()
-    if state=="active" && grantReviewAvailable==true {s.key="ready" s.text=A.t("Ready","已就绪") s.tone="running" s.detail=A.t("This computer can publish pools and their monthly capacity.","这台电脑可以发布资源池和每月额度。") return s}
+    if state=="active" && grantReviewAvailable==true {s.key="ready" s.text=A.t("Ready","已就绪") s.tone="running" s.detail=A.t("This computer can publish pools.","这台电脑可以发布资源池。") return s}
     s.key="attention" s.text=A.t("Needs attention","需要处理") s.tone="waiting"
     s.detail=A.t("This computer can’t publish right now. Open Move to a New Device to see why, or use the computer that published before.","这台电脑现在不能发布。打开「迁移到新设备」查看原因，或在原来发布的电脑上操作。")
     if state=="legacy" {s.detail=A.t("This computer’s setup needs a check before it can publish pools.","这台电脑的设备设置需要核对，核对后才能发布资源池。")}
@@ -4351,9 +4351,9 @@ A.pool_device_label=fn(){
 }
 // Per-pool drafts of the next publication's per-request amount, kept on this device.
 A.pool_drafts=fn(){
-    if H.pool_drafts!=nil {return H.pool_drafts}
-    let d={quota:[]}
-    if H.session==nil {return d}
+    if H.session==nil {return {account:"" quota:[]}}
+    if H.pool_drafts!=nil && H.pool_drafts.account==H.session.account {return H.pool_drafts}
+    let d={account:H.session.account quota:[]}
     H.pool_drafts=d
     if !fs.exists("pool-drafts-v1.json") {return d}
     try {
@@ -4490,7 +4490,7 @@ A.pool_who_rule=fn(v){
 }
 A.pool_glossary=fn(group){
     if group=="capacity" {return [
-        {term:A.t("Monthly maximum","每月上限") text:A.t("The most this pool may use in a month. It can’t change once the pool is offered to a server.","这个资源池一个月最多能用掉的额度。提交到服务器后不能再改。")},
+        {term:A.t("Monthly maximum","每月上限") text:A.t("The most this pool may use in a month. It can’t change once the pool is offered to a server.","一个月最多能用掉的额度。提交到服务器后不能再改。")},
         {term:A.t("Per-request limit","每次申请上限") text:A.t("The most one Agent gets per request. It takes effect each month when you publish.","每个 Agent 每次申请最多能拿到的额度。每月发布时生效。")},
         {term:A.t("Left","剩余") text:A.t("What can still be given to Agents this month. It resets on the 1st.","这个月还能分给 Agent 的额度，每月 1 日重置。")},
         {term:A.t("Given to Agents, not used yet","已分给 Agent，尚未用") text:A.t("Capacity Agents already hold but haven’t used. It isn’t given to anyone else.","Agent 已经申请到、但还没用掉的额度，不会再分给别人。")},
@@ -7456,7 +7456,7 @@ A.render_page = fn(){
                 execution_refresh := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Refresh observations", "刷新观测") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.refresh on_click: || A.open_execution(H.execution_after)}
             }
             mod.widgets.HagencySection{
-                mod.widgets.HagencyTitle{text:A.t("Execution on this device", "此设备上的执行")}
+                mod.widgets.HagencyTitle{text:if H.device_from=="pool_device" {A.t("Recover Interrupted Work","恢复执行中断")} else {A.t("Execution on this device", "此设备上的执行")}}
                 mod.widgets.HagencyCopy{text:A.t("Start another process for an already approved agent, or recover its original saved start. Your existing assignment and budget stay the same.", "为已获批的 Agent 启动另一进程，或恢复其原始启动请求。已有分配与预算保持不变。")}
                 mod.widgets.HagencyHint{text:A.t("Only the resource owner's original execution device can use these controls. Closing this mini app does not stop an accepted native process.", "这些操作仅适用于资源主人的原执行设备。关闭此小程序不会停止已接受的原生进程。")}
             }
@@ -7493,7 +7493,7 @@ A.render_page = fn(){
                 onboarding_back := mod.widgets.HagencyButton{enabled:!H.busy text:if H.device_from=="pool_device" {A.t("Device Migration & Recovery","设备迁移与恢复")} else {A.t("Coding tools", "编码工具")} icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.back on_click: || {if H.device_from=="pool_device" {A.pool_device_open(H.pool_device_from)} else {A.open_accounts(nil)}}}
                 onboarding_refresh := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Refresh requirements", "刷新条件") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.refresh on_click: || A.open_onboarding()}
             }
-            mod.widgets.HagencyTitle{text:A.t("Device migration & recovery", "设备迁移与恢复")}
+            mod.widgets.HagencyTitle{text:if H.device_from=="pool_device" {A.t("Move to a New Device","迁移到新设备")} else {A.t("Device migration & recovery", "设备迁移与恢复")}}
             mod.widgets.HagencyCopy{text:if H.onboarding != nil && H.onboarding.state == "active" {A.t("This device is ready. Publish pools and set their limits in Resource Pools.", "此设备已就绪。资源池的发布和额度请在「资源池」中设置。")} else {A.t("Set up or migrate this device, then add a provider account. Pools are published in Resource Pools.", "设置或迁移此设备，再添加模型服务账号。资源池在「资源池」中发布。")}}
             if H.onboarding_result != nil {mod.widgets.HagencySection{
                 mod.widgets.HagencySectionTitle{text:A.t("Last native review", "上次原生核对")}
@@ -7593,7 +7593,8 @@ A.render_page = fn(){
             }
             if H.page=="provider_accounts" {mod.widgets.HagencySection{
                 mod.widgets.HagencyHint{text:A.t("Codex sign-in is supported here. Other coding tools are not yet available in this connection flow.","此入口支持 Codex 登录，其他编码工具尚未接入这套连接流程。")}
-                owner_setup := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Device migration & recovery moved to Resource Pools ›","设备迁移与恢复已移到「资源池」 ›") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.device on_click:||A.pool_device_open("accounts")}
+                mod.widgets.HagencyHint{text:A.t("Device migration & recovery moved to the bottom of Resource Pools, under This Device.","设备迁移与恢复已移到「资源池」页面底部的「此设备」。")}
+                owner_setup := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Open Device Migration & Recovery","打开设备迁移与恢复") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.device on_click:||A.pool_device_open("accounts")}
             }}
             if H.page=="provider_account" {
                 if H.account_detail==nil {mod.widgets.HagencySection{mod.widgets.HagencyCopy{text:if H.busy {A.t("Reading account…","正在读取账号…")}else{A.t("Account details unavailable","账号详情暂不可用")}}}}
