@@ -2442,8 +2442,7 @@
   "New requests now get up to {amount}. What’s given to running Agents stays as it is.": "现在每次申请最多 {amount}；已分给正在运行的 Agent 的额度不变。",
   "Also added {people} to this month’s list.": "也已把 {people} 加入本月名单。",
   "Starts {date}. Running Agents carry on without requesting again.": "{date}起生效。正在运行的 Agent 继续运行，不用重新申请。",
-  "People on the list can request now, up to {amount} at a time, until the end of {month}.": "名单上的人现在就能申请，每次最多 {amount}，到 {month}底。",
-  "This month’s per-request limit can’t change any more.": "本月的每次申请上限已经不能再改。",
+  "This month’s per-request limit can’t change any more.": "本月每次申请上限不能再改。",
   "No Longer in Effect": "已不再生效",
   "To add someone, close this window and use Who Can Request on the pool’s page.": "要加人，请关闭这个窗口，在资源池页面的「谁可以申请」里添加。",
   "Proposed": "建议",
@@ -2490,7 +2489,8 @@
   "Someone on the list isn’t an account on your server. Remove them and add them again.": "名单里有人不是你所在服务器上的账号。请移除后重新添加。",
   "The new limit is less than what’s given to running Agents. Choose a larger amount.": "新的上限低于已分给正在运行的 Agent 的额度。请选一个更大的数。",
   "The monthly maximum can’t be lower than what this month has committed: what was used plus what’s given to Agents.": "每月上限不能低于本月已承诺的额度，也就是已用加上已分给 Agent 的部分。",
-  "Starts {date}. The list and the monthly maximum carry over.": "{date}起生效，名单和每月上限沿用本月。",
+  "Starts {date}. The list and the monthly maximum carry over.": "{date}起生效，名单和每月上限不变。",
   "Only people on {server} can be added.": "只能添加 {server} 上的人。",
-  "You chose {chosen}, which is less than the {committed} this month has committed. Choose {committed} or more on the pool’s page.": "你选的 {chosen} 低于本月已承诺的 {committed}。请在资源池页面选 {committed} 或更多。"
+  "You chose {chosen}, which is less than the {committed} this month has committed. Choose {committed} or more on the pool’s page.": "你选的 {chosen} 低于本月已承诺的 {committed}。请在资源池页面选 {committed} 或更多。",
+  "People on the list can request now, up to {amount} at a time.": "名单上的人现在就能申请，每次最多 {amount}。"
 }

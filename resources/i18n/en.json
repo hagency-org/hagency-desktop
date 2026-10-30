@@ -2442,7 +2442,6 @@
   "New requests now get up to {amount}. What’s given to running Agents stays as it is.": "New requests now get up to {amount}. What’s given to running Agents stays as it is.",
   "Also added {people} to this month’s list.": "Also added {people} to this month’s list.",
   "Starts {date}. Running Agents carry on without requesting again.": "Starts {date}. Running Agents carry on without requesting again.",
-  "People on the list can request now, up to {amount} at a time, until the end of {month}.": "People on the list can request now, up to {amount} at a time, until the end of {month}.",
   "This month’s per-request limit can’t change any more.": "This month’s per-request limit can’t change any more.",
   "No Longer in Effect": "No Longer in Effect",
   "To add someone, close this window and use Who Can Request on the pool’s page.": "To add someone, close this window and use Who Can Request on the pool’s page.",
@@ -2492,5 +2491,6 @@
   "The monthly maximum can’t be lower than what this month has committed: what was used plus what’s given to Agents.": "The monthly maximum can’t be lower than what this month has committed: what was used plus what’s given to Agents.",
   "Starts {date}. The list and the monthly maximum carry over.": "Starts {date}. The list and the monthly maximum carry over.",
   "Only people on {server} can be added.": "Only people on {server} can be added.",
-  "You chose {chosen}, which is less than the {committed} this month has committed. Choose {committed} or more on the pool’s page.": "You chose {chosen}, which is less than the {committed} this month has committed. Choose {committed} or more on the pool’s page."
+  "You chose {chosen}, which is less than the {committed} this month has committed. Choose {committed} or more on the pool’s page.": "You chose {chosen}, which is less than the {committed} this month has committed. Choose {committed} or more on the pool’s page.",
+  "People on the list can request now, up to {amount} at a time.": "People on the list can request now, up to {amount} at a time."
 }

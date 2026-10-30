@@ -1274,8 +1274,8 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                         ]),
                         (_, _, false) => fmt("Starts {date}. Running Agents carry on without requesting again.", &[("date", date.clone())]),
                         (true, _, true) => fmt(
-                            "People on the list can request now, up to {amount} at a time, until the end of {month}.",
-                            &[("amount", limit.clone()), ("month", month_text.clone())],
+                            "People on the list can request now, up to {amount} at a time.",
+                            &[("amount", limit.clone())],
                         ),
                         (false, _, true) => fmt(
                             "{month} is published: up to {amount} per request.",
@@ -3421,7 +3421,7 @@ mod tests {
         assert_eq!(view.tone, SheetTone::Done);
         assert_eq!(view.title, "Published October");
         assert_eq!(view.after, Some(Figure::new("2 M", "Now")));
-        assert_eq!(view.lead, "People on the list can request now, up to 2 M at a time, until the end of October.");
+        assert_eq!(view.lead, "People on the list can request now, up to 2 M at a time.");
         assert_eq!((view.primary.as_str(), view.cancel.as_str()), ("Done", ""));
         assert!(view.primary_closes && view.primary_enabled && view.primary_visible);
         assert_eq!(names(&view), [("@manager".to_owned(), false, false)]);
