@@ -231,7 +231,12 @@ fn refresh_ui_in_language(
 /// Substitute named arguments once, after translating the template. Arguments
 /// are opaque: a room name containing braces or English UI words stays intact.
 pub fn format(english: &str, args: &[(&str, String)]) -> String {
-    interpolate(tr(english), args)
+    format_in(language(), english, args)
+}
+/// `format` in an explicit language, for text built outside the UI thread's
+/// current choice (and for tests of both catalogs).
+pub fn format_in(language: Language, english: &str, args: &[(&str, String)]) -> String {
+    interpolate(text_for(language, english), args)
 }
 fn interpolate(template: &str, args: &[(&str, String)]) -> String {
     let mut out = String::new();

@@ -2294,5 +2294,19 @@
   "This grant's UTC month has ended, so the pool has no capacity. Choose this month's limits to publish it again. Last month's Agents must first stop and report their final usage, which happens only while this device is online after the month ends (00:00 UTC).": "此授权所在的 UTC 自然月已结束，资源池目前没有容量。请选择本月额度并重新发布。上月的 Agent 必须先停止并报告最终用量，这只有在月末（UTC 00:00）之后本设备保持在线时才会完成。",
   "Available capacity is unknown until last month's Agents stop and report their final usage. Keep this device online, then refresh.": "在上月的 Agent 停止并报告最终用量之前，可用容量未知。请保持本设备在线，然后刷新。",
   "The proposed limit is filled in when you choose this month's limits.": "选择本月额度时会自动填入提议的上限。",
-  "This server does not accept a new month's grant on the same admission yet. Ask its administrator to update the server.": "此服务器尚不支持在同一准入下发布新月份的授权，请联系服务器管理员更新服务器。"
+  "This server does not accept a new month's grant on the same admission yet. Ask its administrator to update the server.": "此服务器尚不支持在同一准入下发布新月份的授权，请联系服务器管理员更新服务器。",
+  "Monthly maximum (offered pool): {current} → {new}": "每月总上限（已贡献的资源池）：{current} → {new}",
+  "The per-request limit stays {limit} until you change it separately.": "每次申请上限仍为 {limit}，如需调整请另行修改。",
+  "Per-request limits do not change.": "每次申请上限保持不变。",
+  "The pool's definition and its server admission do not change.": "资源池的定义及其服务器准入保持不变。",
+  "Running Agents keep running.": "正在运行的 Agent 会继续运行。",
+  "Change the monthly maximum": "修改每月总上限",
+  "Hagency will recheck this pool's current maximum and this month's commitments before saving. Nothing is sent to the server.": "保存前，Hagency 会重新核对此资源池当前的上限和本月已承诺的额度，不会向服务器发送任何内容。",
+  "This records a new monthly maximum on this device. The pool's definition, its server admission and its running Agents stay as they are. The per-request limit is changed separately.": "此操作只在本设备上记录新的每月总上限。资源池的定义、服务器准入和正在运行的 Agent 都保持不变。每次申请上限需另行修改。",
+  "Save monthly maximum": "保存每月总上限",
+  "This resource's monthly maximum cannot be changed here. Close this review and refresh to see the current reason.": "此处不能修改该资源的每月总上限。请关闭此核对并刷新，查看当前原因。",
+  "The monthly maximum of an offered pool cannot be cleared. Choose a whole number of tokens instead.": "已贡献资源池的每月总上限不能清除，请改为设置一个 token 整数。",
+  "The monthly maximum already has this value. Nothing was changed.": "每月总上限已是这个值，没有做任何更改。",
+  "The monthly maximum cannot be lower than this month's published capacity and Agent holds. Close this review and choose a higher value.": "每月总上限不能低于本月已发布的额度和 Agent 已占用的额度。请关闭此核对并选择更高的值。",
+  "Some Agent usage is still being reported, so the monthly maximum cannot be lowered yet. You can still raise it. Keep this device online, then try again.": "部分 Agent 用量仍在上报中，暂时不能调低每月总上限，但仍可调高。请保持本设备在线，然后重试。"
 }
