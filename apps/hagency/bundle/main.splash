@@ -1044,6 +1044,13 @@ A.workspace_valid=fn(data,resource,workspace){
     if releaseBlock==nil && (activeLeases>0 || quarantined) {return false}
     return true
 }
+A.workspace_next_short=fn(row){
+    if row.releaseBlock=="shared_resource_authority" {return A.t("needs access to every pool that shares it","需要共用它的所有资源池的权限")}
+    if row.quarantined {return A.t("resolve the interrupted task first","先处理中断的任务")}
+    if row.activeLeases>0 {return A.t("nothing to do until it finishes","结束前不用处理")}
+    if row.dirty {return A.t("check it, then let tasks use it again","检查后允许再次使用")}
+    return A.t("nothing to do","不用处理")
+}
 A.workspace_state=fn(row){
     if row.releaseBlock=="shared_resource_authority" {return A.t("Shared workspace · access required","共享工作区 · 需要权限")}
     if row.quarantined {return A.t("Execution outcome needs inspection","需要检查执行结果")}
@@ -1247,7 +1254,7 @@ A.open_tools_hub_tab=fn(resource,tab){
 }
 A.open_tools_hub=fn(resource){A.open_tools_hub_tab(resource,"pending")}
 A.open_tools_tab=fn(tab){A.open_tools_hub_tab(H.tools_resource,tab)}
-A.open_health_hub=fn(resource){A.health_open(resource,nil,"")}
+A.open_health_hub=fn(resource){A.health_open(resource,"open","")}
 // Navigation for the owner's pages: a push/pop stack. An entry is plain data
 // (kind, identity, title) that A.nav_reopen opens again, so back returns to the
 // page it came from, and the back label is that page's title.
@@ -1710,9 +1717,9 @@ A.tool_rows=fn(live){
     for row in approvals {if (row.state=="pending" && row.expiresAt>observedAtMs)==live {out.push(row)}}
     return out
 }
-// The tab counts this pool's own requests, like its tile and its card; questions from chat
-// are shared by all pools and counted once, in Needs you.
-A.tools_pending_count=fn(){return if H.tool_page==nil {0} else {A.tool_live_count(H.tool_page)}}
+// The tab and the pool's tile count what can be decided on this page: the pool's own tool
+// requests and the questions from chat that all pools share (the list counts those once).
+A.tools_pending_count=fn(){return if H.tool_page==nil {0} else {A.tool_live_count(H.tool_page)+A.shared_rows(true).len()}}
 A.tools_pending_label=fn(){
     let n=if H.page=="tool_approvals" && H.tool_page!=nil {A.tools_pending_count()} else {0}
     return A.t("Pending","待处理")+if n>0 {" ("+n+")"} else {""}
@@ -2343,7 +2350,7 @@ A.health_part=fn(kind){let h=H.health if kind=="alerts" {return h.alerts} if kin
 A.health_open=fn(resource,filter,workspace){
     if H.busy || resource=="" {return}
     let h=H.health
-    if h.resource!=resource {h.workspace="" h.alerts.filter="all"}
+    if h.resource!=resource {h.workspace="" h.alerts.filter="open"}
     if filter!=nil {h.alerts.filter=filter}
     if workspace!=nil {h.workspace=workspace}
     h.resource=resource h.epoch=h.epoch+1
@@ -2382,7 +2389,7 @@ A.health_load=fn(kind,epoch,chain){
     let resource=h.resource
     let after=if part.next==nil {""} else {part.next}
     let q={service:"hagency.workspaces.list" args:{resourceId:resource after:after}}
-    if kind=="alerts" {q.service="hagency.alerts.list" q.args={resourceId:resource after:after status:if h.alerts.filter=="open" {"open"} else {nil}}}
+    if kind=="alerts" {q.service="hagency.alerts.list" q.args={resourceId:resource after:after status:nil}}
     if kind=="stopped" {q.service="hagency.stopped.list" q.args={resourceId:resource workspaceId:h.workspace after:after}}
     part.state="loading" part.error=""
     if after=="" {part.items=[]}
@@ -2406,8 +2413,30 @@ A.health_alert_rows=fn(){
     let a=H.health.alerts
     if a.filter!="open" {return a.items}
     let out=[]
-    for row in a.items {if row.status=="open" {out.push(row)}}
+    for row in a.items {if A.alert_to_handle(row) {out.push(row)}}
     return out
+}
+// An alert the owner has to handle: open, and not one that is clearing by itself.
+A.alert_to_handle=fn(row){return row.status=="open" && !A.alert_recovered(row)}
+A.health_alert_others=fn(){let n={c:0} for row in H.health.alerts.items {if !A.alert_to_handle(row) {n.c=n.c+1}} return n.c}
+// The hub's summary names only what waits, in the same words as its sections.
+A.health_parts_line=fn(c){
+    let parts=[]
+    if c.alerts>0 {parts.push(A.t("Alerts ","告警 ")+c.alerts)}
+    if c.stopped>0 {parts.push(A.t("Interrupted tasks ","中断的任务 ")+c.stopped)}
+    if c.workspaces>0 {parts.push(A.t("Workspaces ","工作区 ")+c.workspaces)}
+    let out={t:""} for i p in parts {out.t=out.t+(if i>0 {" · "} else {""})+p}
+    return out.t
+}
+A.health_others_line=fn(){
+    let n=A.health_alert_others()
+    if n==0 {return ""}
+    return A.t(""+n+(if n==1 {" other alert needs"} else {" other alerts need"})+" nothing from you; see All.","另有 "+n+" 条告警不用处理，在「全部」里。")
+}
+// One line under an alert in the hub: where it stands and what to do.
+A.alert_row_line=fn(row){
+    if A.alert_recovered(row) {return A.t("Recovered · clears by itself, nothing to do","已恢复 · 会自动解除，不用处理")}
+    return A.alert_state(row.status)+" · "+A.alert_next(row)
 }
 A.health_more=fn(kind){if H.busy || H.page!="health_hub" {return} A.health_load(kind,H.health.epoch,false)}
 A.health_retry=fn(kind){if H.busy || H.page!="health_hub" {return} A.health_load(kind,H.health.epoch,false)}
@@ -2467,6 +2496,10 @@ A.stopped_where=fn(attempt){
     let name=A.recipient_optional(attempt,"projectName")
     let pool=A.t("Pool ","资源池「")+A.sub_pool_name(attempt.resourceId)+A.t("","」")
     return if name!=nil && name!="" {A.t("Project “"+name+"” · ","项目「"+name+"」 · ")+pool} else {pool}
+}
+A.stopped_reach=fn(attempt){
+    let name=A.recipient_optional(attempt,"projectName")
+    return if name!=nil && name!="" {A.t("Open the “"+name+"” project in chat to see these files.","在聊天里打开「"+name+"」项目，就能看到这些文件。")} else {A.t("Open this Agent’s project in chat to see these files.","在聊天里打开这个 Agent 所在的项目，就能看到这些文件。")}
 }
 A.stopped_tone=fn(row){return if row.inspectionAvailable && row.sharedResourceAuthority {"waiting"} else {""}}
 A.stopped_next=fn(row){
@@ -4907,7 +4940,7 @@ A.pool_info_load=fn(rid){
     let rest=fn(){
         A.pool_enqueue(epoch,"hagency.onboarding.status",{},fn(r){if r.is_ok {p.board=r.data p.boardState="ready"} else {p.board=nil p.boardState="error"}})
         A.pool_enqueue(epoch,"hagency.execution_policy.list",{resourceId:rid after:""},fn(r){p.agents=A.pool_count_agents(r,rid)})
-        A.pool_enqueue_run(epoch,fn(done){A.tools_attention(rid,fn(t){if epoch==H.pool_epoch {p.tools=A.pool_part(t.tools)} done()})})
+        A.pool_enqueue_run(epoch,fn(done){A.tools_attention(rid,fn(t){if epoch==H.pool_epoch {p.tools=if t.tools==nil {-2} else {t.tools+(if t.shared==nil {0} else {t.shared})}} done()})})
         A.pool_enqueue_run(epoch,fn(done){A.health_attention(rid,fn(c){if epoch==H.pool_epoch {p.alerts=A.pool_part(c.alerts) p.stopped=A.pool_part(c.stopped) p.workspaces=A.pool_part(c.workspaces)} done()})})
     }
     A.pool_pages(epoch,"hagency.connections.list",A.pool_after_args,fn(d){let t=A.pool_now(d) if t!=nil && p.now==nil {p.now=t} return A.pool_items(d)},fn(rows){
@@ -10096,11 +10129,9 @@ A.render_page = fn(){
                 let recent=A.tool_rows(false)
                 let decided=A.shared_decided_rows()
                 let observed=H.tool_page.observedAtMs
-                // This pool's own tool requests: decided in the Agent's approval chat.
-                if live.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListLabel{text:A.t("THIS POOL’S TOOL REQUESTS","这个资源池的工具请求")}
-                    mod.widgets.HagencyListNote{padding:Inset{left:7 right:7 top:0 bottom:6} text:A.t("These are decided in the Agent’s approval chat, which shows the exact tool and its parameters.","这些要在 Agent 的审批对话里看过具体参数再决定。")}
-                }}
+                // One section for everything to decide: this pool's tool requests (decided in the Agent's
+                // approval chat) and permission questions from chat, which all pools share.
+                if live.len()+decide.len()>0 {tools_decide_label := mod.widgets.HagencyListLabel{text:A.t("NEEDS YOUR DECISION · ","需要你决定 · ")+(live.len()+decide.len())}}
                 for item in live {let row=item View{width:Fill height:Fit flow:Down padding:Inset{bottom:6}
                     let subject=A.tool_subject(H.tool_page,row.engagementId)
                     let project=A.tool_project_name(subject)
@@ -10110,6 +10141,7 @@ A.render_page = fn(){
                             View{width:Fill height:Fit flow:Down spacing:4 padding:Inset{top:3}
                                 mod.widgets.HagencyWrapTitle{text:A.t(A.tool_agent(subject)+" is waiting for a tool approval",A.sub_join(A.tool_agent(subject),"在等待工具审批")) draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}}
                                 mod.widgets.HagencyWrapSubtitle{text:(if project!="" {project+" · "} else {""})+A.tool_left(row,observed)}
+                                mod.widgets.HagencyWrapSubtitle{text:A.t("Decide it in the Agent’s approval chat, after seeing the exact parameters.","要在 Agent 的审批对话里看过具体参数再决定。")}
                             }
                         }
                         View{width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:14 right:14 top:6 bottom:12}
@@ -10126,14 +10158,15 @@ A.render_page = fn(){
                     }
                 }}
                 // Permission questions from chat carry no pool: listed here on every pool, counted once in Needs you.
-                if decide.len()>0 || H.shared_done.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListLabel{text:A.t("QUESTIONS FROM CHAT · SHARED BY ALL POOLS","聊天里的权限请求 · 所有资源池共用")}
-                }}
                 for item in H.shared_done {let done=item View{width:Fill height:Fit flow:Down padding:Inset{bottom:6}
-                    mod.widgets.HagencyStatus{draw_bg.color:A.local_tone_bg(if done.decision=="deny" {"attention"} else {"running"})
-                        mod.widgets.HagencyRowGlyph{draw_icon.svg:if done.decision=="deny" {mod.rinx_icons.close} else {mod.rinx_icons.check} draw_icon.color:A.local_tone_fg(if done.decision=="deny" {"attention"} else {"running"})}
-                        approval_result := mod.widgets.HagencyCopy{text:A.shared_done_text(done) draw_text.color:A.local_tone_fg(if done.decision=="deny" {"attention"} else {"running"})}
-                        approval_result_ok := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.shared_done_dismiss(done.id)}
+                    mod.widgets.HagencyResult{draw_bg.color:A.local_tone_bg(if done.decision=="deny" {"attention"} else {"running"})
+                        mod.widgets.HagencyResultLine{
+                            mod.widgets.HagencyRowGlyph{draw_icon.svg:if done.decision=="deny" {mod.rinx_icons.close} else {mod.rinx_icons.check} draw_icon.color:A.local_tone_fg(if done.decision=="deny" {"attention"} else {"running"})}
+                            approval_result := mod.widgets.HagencyCopy{text:A.shared_done_text(done) draw_text.color:A.local_tone_fg(if done.decision=="deny" {"attention"} else {"running"})}
+                        }
+                        mod.widgets.HagencyResultActions{
+                            approval_result_ok := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.shared_done_dismiss(done.id)}
+                        }
                     }
                 }}
                 for row in decide {View{width:Fill height:Fit flow:Down padding:Inset{bottom:6}
@@ -10146,7 +10179,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:info.icon draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                             View{width:Fill height:Fit flow:Down spacing:4 padding:Inset{top:3}
                                 mod.widgets.HagencyWrapTitle{text:info.title draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}}
-                                mod.widgets.HagencyWrapSubtitle{text:A.t("Asked in a chat with ","来自 ")+A.sub_person(a.requesterMxid)+A.t(""," 的对话")}
+                                mod.widgets.HagencyWrapSubtitle{text:A.t("Asked in a chat with ","来自 ")+A.sub_person(a.requesterMxid)+A.t(" · shared by all pools"," 的对话 · 所有资源池共用")}
                             }
                         }
                         if info.exact!="" {View{width:Fill height:Fit padding:Inset{left:55 right:14 bottom:6} mod.widgets.HagencyCode{mod.widgets.HagencyCodeText{text:info.exact}}}}
@@ -10209,7 +10242,6 @@ A.render_page = fn(){
                 }}
 
                 if waiting.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListLabel{text:A.t("WAITING","等待中")}
                     mod.widgets.HagencyList{for index row in waiting {View{width:Fill height:Fit flow:Down
                         let info=A.perm_info(row)
                         if index>0 {mod.widgets.HagencyListDivider{}}
@@ -10223,10 +10255,19 @@ A.render_page = fn(){
                     }}}
                 }}
 
-                if recent.len()>0 || decided.len()>0 {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListLabel{text:A.t("RECENT TOOL APPROVALS","最近的工具审批")}
+                if recent.len()>0 || decided.len()>0 || H.tool_after!="" {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:6}
+                    let open=H.details_open=="recent_tools"
+                    mod.widgets.HagencyList{mod.widgets.HagencyListRow{
+                        tools_recent_toggle := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("recent_tools")}
+                        mod.widgets.HagencyListBody{
+                            mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_MUTED}}
+                            mod.widgets.HagencyListTitle{text:A.t("Recent tool approvals","最近的工具审批")}
+                            mod.widgets.HagencyListValue{text:""+(recent.len()+decided.len())}
+                            mod.widgets.HagencyRowGlyph{draw_icon.svg:if open {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
+                        }
+                    }}
                     // Questions from chat you already answered, newest first, above this pool's own.
-                    if decided.len()>0 {mod.widgets.HagencyList{for index row in decided {View{width:Fill height:Fit flow:Down
+                    if open && decided.len()>0 {mod.widgets.HagencyList{for index row in decided {View{width:Fill height:Fit flow:Down
                         let denied=row.decision=="deny"
                         if index>0 {mod.widgets.HagencyListDivider{}}
                         mod.widgets.HagencySwitchRow{
@@ -10237,7 +10278,7 @@ A.render_page = fn(){
                             }
                         }
                     }}}}
-                    if recent.len()>0 {mod.widgets.HagencyList{for index row in recent {View{width:Fill height:Fit flow:Down
+                    if open && recent.len()>0 {mod.widgets.HagencyList{for index row in recent {View{width:Fill height:Fit flow:Down
                         let subject=A.tool_subject(H.tool_page,row.engagementId)
                         let denied=row.choice=="deny"
                         if index>0 {mod.widgets.HagencyListDivider{}}
@@ -10254,7 +10295,7 @@ A.render_page = fn(){
                         }
                     }}}}
                 }}
-                if H.tool_page.nextAfter!=nil || H.tool_after!="" {mod.widgets.HagencyList{
+                if H.details_open=="recent_tools" && (H.tool_page.nextAfter!=nil || H.tool_after!="") {mod.widgets.HagencyList{
                     if H.tool_page.nextAfter!=nil {mod.widgets.HagencyListRow{
                         tools_next := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.open_tools(H.tool_resource,H.tool_engagement,H.tool_page.nextAfter,"requests")}
                         mod.widgets.HagencyListBody{mod.widgets.HagencyAccentText{text:A.t("Show Older","显示更早的记录")}}
@@ -10265,7 +10306,6 @@ A.render_page = fn(){
                         mod.widgets.HagencyListBody{mod.widgets.HagencyAccentText{text:A.t("Back to Newest","回到最新")}}
                     }}
                 }}
-                mod.widgets.HagencyListNote{padding:Inset{left:7 right:7 top:6 bottom:2} text:A.t("This list updates by itself.","这个列表会自动更新。")}
             }}
 
             if tab=="agents" && H.policy_list==nil && H.busy {View{width:Fill height:Fit flow:Down spacing:6
@@ -10427,7 +10467,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyListNote{text:A.t("Open a chat to see its saved tool permissions or to remove it.","打开审批对话可查看其中保存的工具权限，或移除它。")}
                 }}
             }}
-            if tab!="rooms" {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:10}
+            if tab=="agents" {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:10}
                 mod.widgets.HagencyList{mod.widgets.HagencyListRow{
                     tools_tab_rooms := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.open_tools_tab("rooms")}
                     mod.widgets.HagencyListBody{
@@ -10568,9 +10608,13 @@ A.render_page = fn(){
                     }
                     if project!="" {mod.widgets.HagencyHint{width:Fit text:A.t("In project chat ","所在项目（聊天）：")+project}}
                 }
-                if H.policy_mode=="result" {View{width:Fill height:Fit padding:Inset{bottom:6} mod.widgets.HagencyStatus{draw_bg.color:mod.widgets.RINX_SUCCESS_BG
-                    mod.widgets.HagencyCopy{text:A.t("Saved. It applies when "+row.agent+" starts its next task.","已保存，"+A.sub_join(row.agent,"的下一个任务开始时生效。")) draw_text.color:mod.widgets.RINX_SUCCESS_FG}
-                    policy_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.open_policy(H.policy_resource,H.policy_engagement)}
+                if H.policy_mode=="result" {View{width:Fill height:Fit padding:Inset{bottom:6} mod.widgets.HagencyResult{draw_bg.color:mod.widgets.RINX_SUCCESS_BG
+                    mod.widgets.HagencyResultLine{
+                        mod.widgets.HagencyCopy{text:A.t("Saved. It applies when "+row.agent+" starts its next task.","已保存，"+A.sub_join(row.agent,"的下一个任务开始时生效。")) draw_text.color:mod.widgets.RINX_SUCCESS_FG}
+                    }
+                    mod.widgets.HagencyResultActions{
+                        policy_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.open_policy(H.policy_resource,H.policy_engagement)}
+                    }
                 }}}
                 mod.widgets.HagencyListLabel{text:A.t("WHAT IT MAY DO","执行权限")}
                 mod.widgets.HagencyList{
@@ -10790,7 +10834,7 @@ A.render_page = fn(){
                 if !c.loading && c.total==0 && !c.failed {mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}}
                 View{width:Fill height:Fit flow:Down spacing:3
                     mod.widgets.HagencyWrapTitle{draw_text.text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE} text:if c.loading {A.t("Checking this pool…","正在检查这个资源池…")} else if c.total>0 {A.t(""+c.total+(if c.more {"+"} else {""})+(if c.total==1 && !c.more {" item needs"} else {" items need"})+" your attention","有 "+c.total+(if c.more {"+"} else {""})+" 项需要你处理")} else if c.failed {A.t("Some information couldn’t be read","部分信息暂时无法读取")} else {A.t("Everything looks fine","一切正常")}}
-                    mod.widgets.HagencyWrapSubtitle{text:if c.loading {A.t("Alerts, interrupted tasks and workspaces","告警、中断的任务和工作区")} else if c.total>0 {A.t("Alerts "+c.alerts+" · Tasks "+c.stopped+" · Workspaces "+c.workspaces,"告警 "+c.alerts+" · 中断任务 "+c.stopped+" · 工作区 "+c.workspaces)} else if c.failed {A.t("Try again in the section below.","请在下方对应部分重试。")} else {A.t("No open alerts, interrupted tasks or workspaces to clean up.","没有待处理的告警、中断的任务或需要清理的工作区。")}}
+                    mod.widgets.HagencyWrapSubtitle{text:if c.loading {A.t("Alerts, interrupted tasks and workspaces","告警、中断的任务和工作区")} else if c.total>0 {A.health_parts_line(c)} else if c.failed {A.t("Try again in the section below.","请在下方对应部分重试。")} else {A.t("No alerts, interrupted tasks or workspaces to handle.","没有要处理的告警、中断的任务或工作区。")}}
                 }
             }}
 
@@ -10798,17 +10842,20 @@ A.render_page = fn(){
             mod.widgets.HagencyList{
                 View{width:Fill height:Fit padding:Inset{left:12 right:12 top:10 bottom:10}
                     mod.widgets.HagencySegments{
+                        if h.alerts.filter=="open" {alerts_open := mod.widgets.HagencyTabOn{text:A.t("Open","待处理")+(if c.alerts>0 {" ("+c.alerts+")"} else {""}) enabled:!H.busy on_click: || A.health_filter("open")}}
+                        if h.alerts.filter!="open" {alerts_open := mod.widgets.HagencyTab{text:A.t("Open","待处理")+(if c.alerts>0 {" ("+c.alerts+")"} else {""}) enabled:!H.busy on_click: || A.health_filter("open")}}
                         if h.alerts.filter=="all" {alerts_all := mod.widgets.HagencyTabOn{text:A.t("All","全部") enabled:!H.busy on_click: || A.health_filter("all")}}
                         if h.alerts.filter!="all" {alerts_all := mod.widgets.HagencyTab{text:A.t("All","全部") enabled:!H.busy on_click: || A.health_filter("all")}}
-                        if h.alerts.filter=="open" {alerts_open := mod.widgets.HagencyTabOn{text:A.t("Open","待处理") enabled:!H.busy on_click: || A.health_filter("open")}}
-                        if h.alerts.filter!="open" {alerts_open := mod.widgets.HagencyTab{text:A.t("Open","待处理") enabled:!H.busy on_click: || A.health_filter("open")}}
                     }
                 }
                 mod.widgets.HagencyListDivider{margin:Inset{left:0}}
                 if h.alerts.state=="loading" && h.alerts.items.len()==0 {mod.widgets.HagencySwitchRow{mod.widgets.HagencySkeleton{width:29 height:29} mod.widgets.HagencySkeleton{width:200 height:14}}}
                 if h.alerts.state=="ready" && A.health_alert_rows().len()==0 {mod.widgets.HagencySwitchRow{
                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SUCCESS_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}}
-                    mod.widgets.HagencyWrapTitle{text:if h.alerts.filter=="open" {A.t("No open alerts","没有待处理的告警")} else {A.t("No alerts recorded","没有告警记录")}}
+                    mod.widgets.HagencyListText{
+                        mod.widgets.HagencyWrapTitle{text:if h.alerts.filter=="open" {A.t("No alerts to handle","没有要处理的告警")} else {A.t("No alerts recorded","没有告警记录")}}
+                        if h.alerts.filter=="open" && A.health_others_line()!="" {mod.widgets.HagencyWrapSubtitle{text:A.health_others_line()}}
+                    }
                 }}
                 for index row in A.health_alert_rows() {View{width:Fill height:Fit flow:Down
                     let tone=A.alert_tone(row)
@@ -10818,14 +10865,16 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{draw_bg.color:A.local_tone_bg(tone) mod.widgets.HagencyRowGlyph{draw_icon.svg:if tone=="running" {mod.rinx_icons.check} else {mod.rinx_icons.alert} draw_icon.color:A.local_tone_fg(tone)}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{max_lines:1 text_overflow:Ellipsis text:A.alert_headline(row)}
-                                mod.widgets.HagencyListSubtitle{text:A.alert_status_line(row)}
-                                if A.alert_server_text(row)!="" {mod.widgets.HagencyWrapSubtitle{max_lines:2 text_overflow:Ellipsis text:A.t("Server’s words: ","服务器原文（英文）：")+A.alert_server_text(row)}}
-                                mod.widgets.HagencyWrapSubtitle{text:A.alert_next(row) draw_text.color:if tone=="running" {mod.widgets.RINX_SUCCESS_FG} else if tone=="" {mod.widgets.RINX_MUTED} else {mod.widgets.RINX_ACCENT}}
+                                alert_row_line := mod.widgets.HagencyWrapSubtitle{text:A.alert_row_line(row) draw_text.color:if tone=="running" {mod.widgets.RINX_SUCCESS_FG} else if tone=="" || !A.alert_to_handle(row) {mod.widgets.RINX_MUTED} else {mod.widgets.RINX_ACCENT}}
                             }
                             mod.widgets.HagencyChevron{}
                         }
                         alert_open := mod.widgets.HagencyListFitTap{enabled:!H.busy on_click: || A.open_alert(row.resourceId,row.id,0)}
                     }
+                }}
+                if h.alerts.state=="ready" && h.alerts.filter=="open" && A.health_alert_rows().len()>0 && A.health_others_line()!="" {View{width:Fill height:Fit flow:Down
+                    mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                    View{width:Fill height:Fit padding:Inset{left:16 right:16 top:10 bottom:10} health_others := mod.widgets.HagencyWrapSubtitle{text:A.health_others_line()}}
                 }}
                 if h.alerts.state=="error" {View{width:Fill height:Fit flow:Down
                     if h.alerts.items.len()>0 {mod.widgets.HagencyListDivider{}}
@@ -10878,8 +10927,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{draw_bg.color:A.local_tone_bg(tone) mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.tasks draw_icon.color:A.local_tone_fg(tone)}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{max_lines:1 text_overflow:Ellipsis text:A.t(row.agent+"’s task stopped",A.sub_join(row.agent,"的任务中断了"))}
-                                mod.widgets.HagencyListSubtitle{text:if ready {A.t("Waiting for your decision","等待你决定怎么处理")} else {A.t("Can’t be handled yet","暂时不能处理")}}
-                                mod.widgets.HagencyWrapSubtitle{text:A.stopped_next(row) draw_text.color:if ready {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_MUTED}}
+                                stopped_row_line := mod.widgets.HagencyWrapSubtitle{text:if ready {A.t("Waiting for you · see where it stopped, then decide","等你决定 · 看看它停在哪里，再决定怎么处理")} else {A.t("Can’t be handled yet · ","暂时不能处理 · ")+A.stopped_next(row)} draw_text.color:if ready {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_MUTED}}
                             }
                             if ready {mod.widgets.HagencyChevron{}}
                         }
@@ -10912,7 +10960,6 @@ A.render_page = fn(){
                     }
                 }}
             }
-            mod.widgets.HagencyListNote{text:A.t("See where a task stopped, then let it finish, accept it as done, or pause it.","看看任务停在哪里，再决定继续、确认完成或先暂停。")}
 
             health_workspaces := View{width:Fill height:Fit mod.widgets.HagencyListLabel{text:A.t("WORKSPACES","工作区")}}
             mod.widgets.HagencyList{
@@ -10930,8 +10977,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{draw_bg.color:A.local_tone_bg(tone) mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.folder draw_icon.color:A.local_tone_fg(tone)}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{max_lines:1 text_overflow:Ellipsis text:A.workspace_state(row)}
-                                mod.widgets.HagencyListSubtitle{text:A.workspace_usage(row)}
-                                mod.widgets.HagencyWrapSubtitle{text:A.workspace_next(row) draw_text.color:if todo {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_MUTED}}
+                                workspace_row_line := mod.widgets.HagencyWrapSubtitle{text:A.workspace_usage(row)+" · "+A.workspace_next_short(row) draw_text.color:if todo {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_MUTED}}
                             }
                             if todo {mod.widgets.HagencyChevron{}}
                         }
@@ -11001,7 +11047,6 @@ A.render_page = fn(){
                 View{width:Fill height:Fit flow:Down spacing:10 align:Align{x:0.5} padding:Inset{top:6 bottom:8}
                     mod.widgets.HagencyAvatar{draw_bg.color:A.local_tone_bg(tone) mod.widgets.HagencyAvatarGlyph{draw_icon.svg:if recovered {mod.rinx_icons.check} else {mod.rinx_icons.alert} draw_icon.color:A.local_tone_fg(tone)}}
                     alert_headline := mod.widgets.HagencyHeroName{width:Fill align:Align{x:0.5} flow:Flow.Right{wrap:true} text:A.alert_headline(row)}
-                    if server!="" {mod.widgets.HagencyHint{width:Fill align:Align{x:0.5} flow:Flow.Right{wrap:true} text:A.t("Server’s words: ","服务器原文（英文）：")+server}}
                     mod.widgets.HagencyPill{draw_bg.color:A.local_tone_bg(tone)
                         mod.widgets.HagencyPillDot{draw_bg.color:A.local_tone_fg(tone)}
                         alert_pill := mod.widgets.HagencyPillText{text:A.alert_pill_text(row) draw_text.color:A.local_tone_fg(tone)}
@@ -11102,8 +11147,27 @@ A.render_page = fn(){
                     }
                     alert_figures_note := mod.widgets.HagencyListNote{text:if recovered {A.alert_when_line(row)} else {A.alert_now_line(row,quota,live)}}
                 }}
-                if !recovered && (impact!="" || recoveryCondition!="" || (!ceiling && runbook!="")) {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListLabel{text:if about.local {A.t("ABOUT THIS ALERT","说明")} else {A.t("FROM THE SERVER","服务器的说明")}}
+                if !about.local && (server!="" || impact!="" || runbook!="" || recoveryCondition!="") {View{width:Fill height:Fit flow:Down spacing:6
+                    mod.widgets.HagencyListNote{padding:Inset{left:7 right:7 top:8 bottom:2} text:if row.status=="acknowledged" {A.t("The server sent this alert in English. Mark it Handled once it’s fixed.","这条告警是服务器用英文发来的。处理好后点「已处理好」。")} else {A.t("The server sent this alert in English. Mark it Got It once you’ve seen it; mark it Handled once it’s fixed.","这条告警是服务器用英文发来的。看过后点「知道了」；处理好后点「已处理好」。")}}
+                    mod.widgets.HagencyList{
+                        mod.widgets.HagencyListRow{
+                            alert_server_toggle := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.sub_toggle("alert_server")}
+                            mod.widgets.HagencyListBody{
+                                mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_MUTED}}
+                                mod.widgets.HagencyListTitle{text:A.t("The server’s words (English)","服务器原文（英文）")}
+                                mod.widgets.HagencyRowGlyph{draw_icon.svg:if H.details_open=="alert_server" {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
+                            }
+                        }
+                        if H.details_open=="alert_server" {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:16 right:16 top:4 bottom:14}
+                            if server!="" {View{width:Fill height:Fit flow:Down spacing:2 mod.widgets.HagencyListSubtitle{text:A.t("Summary","摘要")} alert_server_summary := mod.widgets.HagencyWrapTitle{text:server}}}
+                            if impact!="" {View{width:Fill height:Fit flow:Down spacing:2 mod.widgets.HagencyListSubtitle{text:A.t("What it affects","影响")} mod.widgets.HagencyWrapTitle{text:impact}}}
+                            if runbook!="" {View{width:Fill height:Fit flow:Down spacing:2 mod.widgets.HagencyListSubtitle{text:A.t("What to do","建议的处理")} mod.widgets.HagencyWrapTitle{text:runbook}}}
+                            if recoveryCondition!="" {View{width:Fill height:Fit flow:Down spacing:2 mod.widgets.HagencyListSubtitle{text:A.t("When it clears","恢复条件")} mod.widgets.HagencyWrapTitle{text:recoveryCondition}}}
+                        }}
+                    }
+                }}
+                if about.local && !recovered && (impact!="" || recoveryCondition!="") {View{width:Fill height:Fit flow:Down spacing:6
+                    mod.widgets.HagencyListLabel{text:A.t("ABOUT THIS ALERT","说明")}
                     mod.widgets.HagencyList{
                         if impact!="" {View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:16 top:11 bottom:11} align:Align{y:0.0}
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_WARNING_FG}}
@@ -11148,8 +11212,16 @@ A.render_page = fn(){
                                 mod.widgets.HagencyTileLabel{text:A.alert_tile_label(state) draw_text.color:if state=="resolved" {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_ACCENT}}
                             }
                         }}
+                        if quick.len()==1 && quick[0]=="acknowledged" {mod.widgets.HagencyActionTile{
+                            alert_note_open := mod.widgets.HagencyTileTap{enabled:!H.busy && H.command==nil on_click: || A.choose_alert_action("acknowledged")}
+                            mod.widgets.HagencyActionTileBody{
+                                mod.widgets.HagencyTileGlyph{draw_icon.svg:mod.rinx_icons.edit}
+                                mod.widgets.HagencyTileLabel{text:A.t("Got It, with a Note","知道了，加备注")}
+                            }
+                        }}
                     }
-                    if quick.len()>0 && quick[0]=="acknowledged" {View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}
+                    if quick.len()==1 && quick[0]=="acknowledged" {mod.widgets.HagencyListNote{text:A.t("One tap; it only records it and changes no limits.","点一下就记下，不会改动用量或上限。")}}
+                    if quick.len()>1 && quick[0]=="acknowledged" {View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}
                         mod.widgets.HagencyListNote{width:Fill text:A.t("One tap; it only records it and changes no limits.","点一下就记下，不会改动用量或上限。")}
                         alert_note_open := mod.widgets.HagencyBarText{text:A.t("Add a Note…","加备注…") enabled:!H.busy && H.command==nil on_click: || A.choose_alert_action("acknowledged")}
                     }}
@@ -11265,6 +11337,7 @@ A.render_page = fn(){
                         mod.widgets.HagencyListText{
                             mod.widgets.HagencyWrapTitle{text:A.t("In its project’s workspace on this computer","在这台电脑上它所在项目的工作区里")}
                             stopped_location := mod.widgets.HagencyWrapSubtitle{text:A.stopped_where(d.attempt)}
+                            stopped_reach := mod.widgets.HagencyWrapSubtitle{text:A.stopped_reach(d.attempt)}
                         }
                     }}
                     mod.widgets.HagencyListLabel{text:A.t("FILES IT LEFT ("+d.entryCount+")","它留下的文件（"+d.entryCount+"）")}
@@ -11553,8 +11626,9 @@ A.render_page = fn(){
                     mod.widgets.HagencyListNote{text:A.t("Look these over. If they’re fine, let new tasks use the folder; nothing is deleted or undone.","看过这些文件后再决定：没问题就让新的任务继续用这个文件夹；不会删除或撤销任何文件。")}
                     // Side by side; with large text the long label needs the full width, so they stack.
                     View{width:Fill height:Fit flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:12 padding:Inset{top:6}
-                        workspace_later := mod.widgets.HagencyWideTinted{text:A.t("Not Now","先不用") enabled:!H.busy on_click: || A.health_open(H.workspace_resource,nil,nil)}
-                        workspace_review := mod.widgets.HagencyWideButton{text:A.t("Looked, Use It Again","看过了，允许再次使用") enabled:!H.busy && H.command==nil on_click: || A.review_workspace()}
+                        if mod.widgets.RINX_TEXT_SCALE>1.2 {View{width:Fill height:Fit workspace_review := mod.widgets.HagencyWideButton{text:A.t("Looked, Use It Again","看过了，允许再次使用") enabled:!H.busy && H.command==nil on_click: || A.review_workspace()}}}
+                        View{width:Fill height:Fit workspace_later := mod.widgets.HagencyWideTinted{text:A.t("Not Now","先不用") enabled:!H.busy on_click: || A.health_open(H.workspace_resource,nil,nil)}}
+                        if mod.widgets.RINX_TEXT_SCALE<=1.2 {View{width:Fill height:Fit workspace_review := mod.widgets.HagencyWideButton{text:A.t("Looked, Use It Again","看过了，允许再次使用") enabled:!H.busy && H.command==nil on_click: || A.review_workspace()}}}
                     }
                 }}
                 if H.workspace_mode=="review" && H.workspace_review!=nil {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:8}
@@ -15326,7 +15400,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             connection_diagnostics := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || {H.ux.connectionDiagnostics=if diag {""} else {c.id} A.redraw()}}
                             mod.widgets.HagencyListBody{
                                 mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.activity}}
-                                mod.widgets.HagencyListTitle{text:A.t("Connection Check","连接诊断")}
+                                mod.widgets.HagencyListTitle{text:A.t("Check the Connection","检查连接")}
                                 mod.widgets.HagencyListValue{text:if checked {A.t("Checked","已检查")} else if c.verification!=nil {A.t("Needs a fresh check","需要重新检查")} else {A.t("Not checked","尚未检查")}}
                                 mod.widgets.HagencyRowGlyph{draw_icon.svg:if diag {mod.rinx_icons.collapse} else {mod.rinx_icons.expand} draw_icon.color:mod.widgets.RINX_MUTED}
                             }
@@ -15334,7 +15408,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         if diag {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:57 right:14 top:2 bottom:12}
                             mod.widgets.HagencyWrapSubtitle{text:A.t("Server connection: ","连接服务器：")+A.state_text(c.state)}
                             mod.widgets.HagencyWrapSubtitle{text:A.t("This computer: ","这台电脑：")+if checked {A.t("pool and provider checked","已检查资源池和模型服务")} else if c.verification!=nil {A.t("the check record needs updating","检查记录需要更新")} else {A.t("not checked yet","尚未检查")}}
-                            mod.widgets.HagencyWrapSubtitle{text:if checked {A.t("A check lasts five minutes. It doesn’t affect approval or what is published.","检查结果 5 分钟内有效，过期不影响批准和已发布的额度。")} else {A.t("Checks that this device still has the approved pool and its provider account. Optional.","检查这台电脑是否仍有获准的资源池和模型服务账号。可选。")}}
+                            mod.widgets.HagencyWrapSubtitle{text:if checked {A.t("This computer has the approved pool and its provider account. Approval and what is published don’t depend on it.","这台电脑上有获准的资源池和模型服务账号。批准和已发布的额度不受它影响。")} else {A.t("Checks that this computer still has the approved pool and its provider account. Optional.","检查这台电脑是否仍有获准的资源池和模型服务账号。可选。")}}
                             if A.can_verify(c) && H.command==nil {View{width:Fit height:Fit verify := mod.widgets.HagencyGetButton{text:if checked {A.t("Check Again","重新检查")} else {A.t("Check Now","立即检查")} enabled:can on_click: || A.verify(c)}}}
                             if !A.can_verify(c) {mod.widgets.HagencyWrapSubtitle{text:A.t("Run it on the device this pool was set up on.","需要在创建这个资源池的电脑上检查。")}}
                         }}
@@ -15376,6 +15450,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         server_connection_id := mod.widgets.HagencyCopyText{text:c.id}
                         mod.widgets.HagencyListSubtitle{text:A.t("Owner account · select to copy","资源所有者账号 · 可选中复制")}
                         server_owner_id := mod.widgets.HagencyCopyText{text:c.coordinatorMxid}
+                        if checked {mod.widgets.HagencyListSubtitle{padding:Inset{top:6} text:A.t("A connection check stays valid for five minutes.","连接检查的结果 5 分钟内有效。")}}
                     }}
                 }
                 if c.state!="revoked" && !q.canDecide && (c.ownerMxid==H.session.account || H.session.canAdmitResources) && H.command==nil {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:14}
