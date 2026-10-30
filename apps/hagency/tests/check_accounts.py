@@ -13,6 +13,10 @@ def main():
     fixture='''
 let Down=3
 mod.widgets.RINX_FIELD=1
+mod.widgets.RINX_INFO_BG=1 mod.widgets.RINX_INFO_FG=1
+mod.widgets.HagencyList=base mod.widgets.HagencyFitRow=base mod.widgets.HagencyRowBody=base mod.widgets.HagencyRowIcon=base
+mod.widgets.HagencyRowGlyph=base mod.widgets.HagencyListText=base mod.widgets.HagencyWrapTitle=base mod.widgets.HagencyWrapSubtitle=base
+mod.widgets.HagencyChevron=base mod.widgets.HagencyRowCover=base
 mod.widgets.RINX_SPACING=1 mod.rinx_icons.connection=1 mod.rinx_icons.close=1
 H.ux.accountId="" H.ux.resourceJourney=false
 H.owner={accountId:"" accountLabel:"" accountTab:"login" creatingPool:false setupOpen:false}
