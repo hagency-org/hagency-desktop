@@ -1397,7 +1397,7 @@ A.sub_back=fn(){
     if p=="action" {if H.selected!=nil {A.open_resource(H.selected.contribution.resourceId)} else {A.navigate("resources")} return}
 }
 A.sub_back_enabled=fn(){
-    if H.page=="template_command" {let t=H.templates return t.phase!="saving" && t.phase!="submitting"}
+    if H.page=="template_command" {let t=H.templates return t.phase!="saving" && t.phase!="submitting" && t.phase!="cancelling"}
     if H.page=="web_catalog_command" {let w=H.web return w.phase!="saving" && w.phase!="submitting"}
     return true
 }
@@ -2878,6 +2878,7 @@ A.template_reason=fn(code){
     if code=="management_resource_in_use"{return A.t("This name is reserved or already in use. Existing agents keep their identity; disable future allocation instead of removing or renaming an in-use template.","此名称已预留或正在使用。现有 Agent 保持其身份；已使用的模板可以禁用未来分配，不能移除或重命名。")}
     if code=="management_model_unqualified"{return A.t("This resource cannot supply that role. Check its model and capacity or choose an available role.","此资源无法提供该角色，请检查模型与容量，或选择可用角色。")}
     if code=="management_not_found"{return A.t("This resource or template is no longer available. Check the original saved request before making another change.","此资源或模板已不可用，请先检查已保存的原请求，再决定是否更改。")}
+    if code=="management_change_cancelled"{return A.t("This change was discarded; nothing was saved.","这项更改已经放弃，没有保存。")}
     return A.error_text(code)
 }
 A.template_read=fn(service,args,done){if H.busy{return} let t=H.templates t.epoch=t.epoch+1 let epoch=t.epoch let page=H.page H.busy=true H.notice="" A.redraw()
@@ -2905,7 +2906,7 @@ A.template_prepared=fn(v){let t=H.templates
     t.pending=v t.commandId=v.commandId t.phase=if v.result!=nil{"recorded"}else if v.error!=nil{"failed"}else{"saved"} t.error=if v.error==nil{""}else{A.template_reason(v.error)} H.page="template_command"
 }
 A.template_prepare=fn(op,args){let t=H.templates if H.busy || H.command!=nil || t.pending!=nil || t.phase!="editing"{return}
-    t.epoch=t.epoch+1 let epoch=t.epoch H.busy=true t.phase="saving" t.error="" H.page="template_command" A.redraw()
+    t.epoch=t.epoch+1 let epoch=t.epoch H.busy=true t.phase="saving" t.error="" t.late=false H.page="template_command" A.redraw()
     host.request("hagency.templates."+op,args,fn(reply){if t.epoch!=epoch{return} H.busy=false let apply=t.apply_after t.apply_after=false if H.page!="template_command"{A.redraw() return}
         if reply.is_ok{if reply.data.resourceId!=args.resourceId || reply.data.expectedRevision!=args.expectedRevision || reply.data.change.operation!=op || (op!="create" && reply.data.definitionId!=args.id){t.phase="unknown" A.template_bad()}else{A.template_prepared(reply.data) if apply && t.phase=="saved"{t.preview=nil A.template_apply() return}}}else{
             t.error=A.template_reason(reply.error)
@@ -2939,13 +2940,36 @@ A.template_discard=fn(){let t=H.templates if H.busy || t.phase!="review" || t.pr
 A.template_confirm=fn(){let t=H.templates if H.busy || H.command!=nil || t.pending!=nil || t.phase!="review" || t.preview==nil{return} let v=t.preview
     t.phase="editing" t.apply_after=true A.template_prepare(v.op,v.args)
 }
-A.open_saved_template=fn(row){if H.busy{return} let t=H.templates t.pending=nil t.phase="loading" t.error="" H.page="template_command" let id=row.commandId t.commandId=id
+A.open_saved_template=fn(row){if H.busy{return} let t=H.templates t.pending=nil t.phase="loading" t.error="" t.late=false H.page="template_command" let id=row.commandId t.commandId=id
     A.template_read("hagency.templates.command.get",{commandId:id},fn(v){if v==nil || v.commandId!=id{t.phase="unknown" A.template_bad() return} A.template_prepared(v)})
 }
 A.template_apply=fn(){let t=H.templates if H.busy || t.pending==nil || t.phase!="saved"{return} let p=t.pending if p.result!=nil || p.error!=nil{return}
     t.epoch=t.epoch+1 let epoch=t.epoch H.busy=true t.phase="submitting" t.error="" A.redraw()
     host.request("hagency.templates.command.apply",{commandId:p.commandId},fn(reply){if t.epoch!=epoch{return} H.busy=false if H.page!="template_command" || t.pending==nil || t.pending.commandId!=p.commandId{A.redraw() return}
+        if !reply.is_ok && reply.error=="management_change_cancelled"{A.template_withdrawn(p,epoch) return}
         if reply.is_ok && reply.data.commandId==p.commandId && reply.data.resourceId==p.resourceId && reply.data.definitionId==p.definitionId{p.result=reply.data t.phase="recorded"}else{t.phase="unknown" t.error=A.template_reason(if reply.is_ok{"management_outcome_unknown"}else{reply.error})} A.redraw()
+    })
+}
+// 放弃更改 for a change already sent: withdraw it natively, then acknowledge it.
+// If it was applied meanwhile, say so; it can't be discarded any more.
+A.template_cancel=fn(){let t=H.templates if H.busy || t.pending==nil || t.phase!="saved"{return} let p=t.pending
+    t.epoch=t.epoch+1 let epoch=t.epoch H.busy=true t.phase="cancelling" t.error="" A.redraw()
+    host.request("hagency.templates.command.cancel",{commandId:p.commandId},fn(reply){if t.epoch!=epoch{return} H.busy=false
+        if t.pending==nil || t.pending.commandId!=p.commandId{A.redraw() return}
+        if !reply.is_ok{t.phase="saved" t.error=A.template_reason(reply.error) A.redraw() return}
+        let result=A.recipient_optional(reply.data,"result")
+        let error=A.recipient_optional(reply.data,"error")
+        if result!=nil{p.result=result t.phase="recorded" t.error="" t.late=true A.redraw() return}
+        if error!="management_change_cancelled"{t.phase="unknown" t.error=A.template_reason(if error==nil {"management_outcome_unknown"} else {error}) A.redraw() return}
+        A.template_withdrawn(p,epoch)
+    })
+}
+A.template_withdrawn=fn(p,epoch){let t=H.templates H.busy=true A.redraw()
+    host.request("hagency.intent.acknowledge",{commandId:p.commandId},fn(reply){if t.epoch!=epoch{return} H.busy=false
+        if reply.is_ok{let keep=[] for row in H.saved_commands{if row.commandId!=p.commandId{keep.push(row)}} H.saved_commands=keep}
+        let back=if p.change.operation=="create" {"templates"} else {"template"}
+        t.pending=nil t.commandId="" t.phase="" t.draft=nil t.preview=nil t.error="" t.discarded=back t.discardFresh=true
+        if back=="templates" {A.nav_unwind("templates/"+p.resourceId) A.open_templates(p.resourceId,t.after)} else {A.nav_unwind("template/"+p.definitionId) A.open_template(p.resourceId,p.definitionId)}
     })
 }
 A.template_check=fn(){if H.busy{return} let t=H.templates let saved_id=A.recipient_optional(H.templates,"commandId") if t.pending!=nil{A.open_saved_template(t.pending)}else if saved_id!=nil && saved_id!=""{A.open_saved_template({commandId:saved_id})}else{A.refresh()}}
@@ -9374,7 +9398,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:info.icon draw_icon.color:mod.widgets.RINX_MUTED}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyWrapTitle{text:info.title}
-                                mod.widgets.HagencyWrapSubtitle{text:if A.recipient_optional(row,"encryptedPending")==true {A.t("You can review this request after its encrypted details arrive.","收到加密详情后即可核对此请求。")} else {A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}}
+                                mod.widgets.HagencyWrapSubtitle{text:if A.recipient_optional(row,"encryptedPending")==true {A.t("You can review this request after its encrypted details arrive.","加密详情送达后，就能查看这个请求。")} else {A.t("Only ","只有 ")+A.sub_person(row.approval.ownerMxid)+A.t(" can decide this"," 可以决定")}}
                             }
                         }
                     }}}
@@ -11348,12 +11372,13 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
             let t=H.templates
             let done=t.phase=="recorded"
             let failed=t.phase=="failed"
+            let withdrawn=failed && t.pending!=nil && A.recipient_optional(t.pending,"error")=="management_change_cancelled"
             let unknown=t.phase=="unknown"
             let review=t.phase=="review"
             View{width:Fill height:Fit flow:Down spacing:10 align:Align{x:0.5} padding:Inset{top:6 bottom:8}
                 mod.widgets.HagencyAvatar{draw_bg.color:if done {mod.widgets.RINX_SUCCESS_BG} else if failed {mod.widgets.RINX_DANGER_BG} else if unknown {mod.widgets.RINX_WARNING_BG} else {mod.widgets.RINX_INFO_BG} mod.widgets.HagencyAvatarGlyph{draw_icon.svg:if done {mod.rinx_icons.check} else if failed {mod.rinx_icons.close} else if unknown {mod.rinx_icons.alert} else {mod.rinx_icons.robot} draw_icon.color:if done {mod.widgets.RINX_SUCCESS_FG} else if failed {mod.widgets.RINX_DANGER_FG} else if unknown {mod.widgets.RINX_WARNING_FG} else {mod.widgets.RINX_INFO_FG}}}
-                mod.widgets.HagencyHeroName{text:if done {A.t("Template Saved","模板已保存")} else if failed {A.t("Change Refused","更改被拒绝")} else if unknown {A.t("Check the Saved Change","请检查保存的更改")} else if t.phase=="saved" || review {A.t("Confirm This Change","确认这项更改")} else {A.t("Preparing…","正在准备…")}}
-                mod.widgets.HagencyHint{width:Fill align:Align{x:0.5} flow:Flow.Right{wrap:true} text:if review {A.t("Nothing changes until you confirm.","确认之前，不会保存任何内容。")} else if done {A.t("It applies to future allocations.","它对以后的分配生效。")} else if failed {A.t("Nothing was changed.","模板没有改变。")} else if unknown {A.t("It may already be saved. Check it; don’t submit it again.","它可能已经保存。请检查，不要重复提交。")} else if t.phase=="saved" {A.t("Nothing changes until you confirm.","确认之前不会有任何改变。")} else {A.t("Saving your change for review.","正在保存你的更改，稍后请确认。")}}
+                mod.widgets.HagencyHeroName{text:if done {A.t("Template Saved","模板已保存")} else if withdrawn {A.t("Change Discarded","更改已放弃")} else if failed {A.t("Change Refused","更改被拒绝")} else if unknown {A.t("Check the Saved Change","请检查保存的更改")} else if t.phase=="cancelling" {A.t("Discarding…","正在放弃…")} else if t.phase=="saved" || review {A.t("Confirm This Change","确认这项更改")} else {A.t("Preparing…","正在准备…")}}
+                mod.widgets.HagencyHint{width:Fill align:Align{x:0.5} flow:Flow.Right{wrap:true} text:if review {A.t("Nothing changes until you confirm.","确认之前，不会保存任何内容。")} else if done {A.t("It applies to future allocations.","它对以后的分配生效。")} else if failed {A.t("Nothing was changed.","模板没有改变。")} else if unknown {A.t("It may already be saved. Check it; don’t submit it again.","它可能已经保存。请检查，不要重复提交。")} else if t.phase=="saved" {A.t("Nothing changes until you confirm.","确认之前不会有任何改变。")} else if t.phase=="cancelling" {A.t("Withdrawing the change; nothing will be saved.","正在撤回这项更改，不会保存任何内容。")} else {A.t("Saving your change for review.","正在保存你的更改，稍后请确认。")}}
             }
             if t.pending!=nil || (review && t.preview!=nil) {View{width:Fill height:Fit flow:Down spacing:6
                 let p=if t.pending!=nil {t.pending} else {A.template_preview()}
@@ -11391,14 +11416,20 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                     }
                     mod.widgets.HagencyListNote{text:A.t("Nothing is saved until you confirm. Discarding leaves no record.","确认之后才会保存；放弃更改不会留下任何记录。")}
                 }}
-                if t.phase=="saved" {View{width:Fill height:Fit flow:Down spacing:6
+                if t.phase=="saved" || t.phase=="cancelling" {View{width:Fill height:Fit flow:Down spacing:6
                     View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{top:10}
-                        template_command_later := mod.widgets.HagencyWideTinted{text:A.t("Later","稍后") enabled:!H.busy on_click: || A.open_templates(t.resourceId,t.after)}
-                        if removing {template_command_apply := mod.widgets.HagencyWideDanger{text:A.t("Remove","移除模板") enabled:!H.busy on_click: || A.template_apply()}}
-                        if !removing {template_command_apply := mod.widgets.HagencyWideButton{text:A.t("Confirm","确认更改") enabled:!H.busy on_click: || A.template_apply()}}
+                        template_command_cancel := mod.widgets.HagencyWideTinted{text:A.t("Discard Change","放弃更改") enabled:!H.busy && t.phase=="saved" on_click: || A.template_cancel()}
+                        if removing {template_command_apply := mod.widgets.HagencyWideDanger{text:A.t("Remove","移除模板") enabled:!H.busy && t.phase=="saved" on_click: || A.template_apply()}}
+                        if !removing {template_command_apply := mod.widgets.HagencyWideButton{text:A.t("Confirm","确认更改") enabled:!H.busy && t.phase=="saved" on_click: || A.template_apply()}}
                     }
-                    mod.widgets.HagencyListNote{text:A.t("If you choose Later, the change waits for you; you can edit templates again once you confirm it.","选「稍后」的话，这项更改会一直等你确认，确认后才能再次编辑模板。")}
+                    View{width:Fill height:Fit flow:Right align:Align{x:0.5}
+                        template_command_later := mod.widgets.HagencyBarText{text:A.t("Decide Later","稍后再决定") enabled:!H.busy && t.phase=="saved" on_click: || A.open_templates(t.resourceId,t.after)}
+                    }
+                    mod.widgets.HagencyListNote{text:A.t("This change was sent but isn’t saved yet. Discarding withdraws it; if you decide later, it waits, and templates can be edited again once it’s settled.","这项更改已经发出，但还没有保存。放弃会把它撤回；稍后再决定的话，它会一直等你，处理完之后才能再次编辑模板。")}
                 }}
+                if done && A.recipient_optional(t,"late")==true {View{width:Fill height:Fit padding:Inset{top:6} mod.widgets.HagencyStatus{draw_bg.color:mod.widgets.RINX_INFO_BG
+                    template_command_late := mod.widgets.HagencyCopy{text:A.t("It had already been applied, so it couldn’t be discarded.","放弃之前，这项更改已经生效，所以没有撤回。") draw_text.color:mod.widgets.RINX_INFO_FG}
+                }}}
                 if done || failed {View{width:Fill height:Fit padding:Inset{top:10}
                     template_command_close := mod.widgets.HagencyWideButton{text:A.t("Done","完成") enabled:!H.busy on_click: || A.template_finish()}
                 }}
