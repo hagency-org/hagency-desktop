@@ -11468,7 +11468,8 @@ A.render_page = fn(){
                         }
                     }
                     mod.widgets.HagencyListNote{text:A.t("Look these over. If they’re fine, let new tasks use the folder; nothing is deleted or undone.","看过这些文件后再决定：没问题就让新的任务继续用这个文件夹；不会删除或撤销任何文件。")}
-                    View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{top:6}
+                    // Side by side; with large text the long label needs the full width, so they stack.
+                    View{width:Fill height:Fit flow:(if mod.widgets.RINX_TEXT_SCALE>1.2 {Flow.Down} else {Flow.Right}) spacing:12 padding:Inset{top:6}
                         workspace_later := mod.widgets.HagencyWideTinted{text:A.t("Not Now","先不用") enabled:!H.busy on_click: || A.health_open(H.workspace_resource,nil,nil)}
                         workspace_review := mod.widgets.HagencyWideButton{text:A.t("Looked, Use It Again","看过了，允许再次使用") enabled:!H.busy && H.command==nil on_click: || A.review_workspace()}
                     }
