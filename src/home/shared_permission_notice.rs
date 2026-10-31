@@ -71,14 +71,15 @@ pub struct SharedPermissionNotice {
     #[rust] selected:usize,
     #[rust] execution_text:String,
     #[rust] execution_busy:bool,
-    #[rust] animation_timer:Timer,
 }
 impl SharedPermissionNotice {
+    /// Shows the spinner while the Agent works. It needs no clock of ours: its
+    /// shader reads `draw_pass.time`, so the platform repaints it every frame on
+    /// the GPU. Redrawing it from a timer re-ran the draw of the whole timeline it
+    /// sits in, many times a second for as long as the Agent worked.
     fn sync_animation(&mut self,cx:&mut Cx) {
         let animate=self.active && self.execution_busy && self.rows.is_empty() && self.error.is_empty();
         self.view.widget(cx,ids!(activity_spinner)).set_visible(cx,animate);
-        if animate && self.animation_timer.is_empty(){self.animation_timer=cx.start_interval(1.0/20.0);}
-        else if !animate {cx.stop_timer(self.animation_timer);self.animation_timer=Timer::default();}
     }
     fn render(&mut self,cx:&mut Cx) {
         self.sync_animation(cx);
@@ -133,7 +134,6 @@ impl SharedPermissionNotice {
 impl Widget for SharedPermissionNotice {
     fn handle_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope) {
         if !Service::for_current().is_ok_and(|s|s.identity()==self.identity){self.execution_busy=false;self.sync_animation(cx);self.view.set_visible(cx,false);self.rows.clear();return;}
-        if self.animation_timer.is_event(event).is_some(){self.view.widget(cx,ids!(activity_spinner)).redraw(cx);}
         if self.timer.is_event(event).is_some(){self.timer=Timer::default();self.request(cx,None);}
         if let Event::Actions(actions)=event {
             for action in actions {
@@ -201,8 +201,14 @@ mod tests {
         assert!(!execution_busy(&json!({"executions":[{"roomId":"!room","state":"replied"},{"roomId":"!room","state":"started"}]}),"!room",""));
     }
 
+    /// How many timers `f` starts: `Cx` hands out timer ids in sequence.
+    fn timers_started(cx:&mut Cx,f:impl FnOnce(&mut Cx))->u64 {
+        let probe=|cx:&mut Cx|{let t=cx.start_timeout(60.0);cx.stop_timer(t);t.0};
+        let before=probe(cx);f(cx);probe(cx)-before-1
+    }
+
     #[test]
-    fn native_activity_widget_runs_only_while_visible_busy_and_not_awaiting_permission() {
+    fn native_activity_spinner_shows_only_while_busy_and_starts_no_redraw_clock() {
         let mut cx=Cx::new(Box::new(|_,_|{}));
         let widget=cx.with_vm(|vm| {
             makepad_widgets::script_mod(vm);
@@ -215,18 +221,27 @@ mod tests {
             widget.as_shared_permission_notice()
         });
         let mut inner=widget.borrow_mut().unwrap();
-        inner.active=true;inner.execution_busy=true;inner.execution_text="Agent is working…".into();inner.render(&mut cx);
-        assert!(inner.view.visible());
-        assert!(inner.view.widget(&mut cx,ids!(activity_spinner)).visible());
-        assert!(!inner.animation_timer.is_empty());
-        inner.rows.push(json!({"approval":{},"decision":null}));inner.render(&mut cx);
-        assert!(inner.animation_timer.is_empty());
-        assert!(!inner.view.widget(&mut cx,ids!(activity_spinner)).visible());
-        inner.rows.clear();inner.render(&mut cx);assert!(!inner.animation_timer.is_empty());
-        inner.error="offline".into();inner.render(&mut cx);assert!(inner.animation_timer.is_empty());
-        inner.error.clear();inner.active=false;inner.render(&mut cx);assert!(inner.animation_timer.is_empty());
-        inner.active=true;inner.render(&mut cx);assert!(!inner.animation_timer.is_empty());
-        inner.execution_busy=false;inner.execution_text.clear();inner.render(&mut cx);
-        assert!(inner.animation_timer.is_empty());assert!(!inner.view.visible());
+        // (step, change, card shown, spinner shown)
+        let steps:[(&str,fn(&mut SharedPermissionNotice),bool,bool);7]=[
+            ("agent working",|n|{n.active=true;n.execution_busy=true;n.execution_text="Agent is working…".into();},true,true),
+            ("permission requested",|n|n.rows.push(json!({"approval":{},"decision":null})),true,false),
+            ("request answered",|n|n.rows.clear(),true,true),
+            ("offline",|n|n.error="offline".into(),true,false),
+            ("room deselected",|n|{n.error.clear();n.active=false;},true,false),
+            ("room selected again",|n|n.active=true,true,true),
+            ("agent finished",|n|{n.execution_busy=false;n.execution_text.clear();},false,false),
+        ];
+        for (step,change,card,spinner) in steps {
+            change(&mut inner);
+            let started=timers_started(&mut cx,|cx|inner.render(cx));
+            assert_eq!(inner.view.visible(),card,"{step}: card");
+            assert_eq!(inner.view.widget(&mut cx,ids!(activity_spinner)).visible(),spinner,"{step}: spinner");
+            // The notice is drawn as the timeline's last row. A clock that redraws
+            // the spinner re-runs the draw of every visible message on each tick,
+            // re-reading the PNG header of every color emoji glyph in them (the
+            // 20 Hz loop seen while an Agent worked). The spinner's shader animates
+            // from `draw_pass.time` without any redraw.
+            assert_eq!(started,0,"{step}: the notice must not start its own redraw clock");
+        }
     }
 }
