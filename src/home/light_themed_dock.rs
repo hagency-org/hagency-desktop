@@ -5,65 +5,32 @@ script_mod! {
     use mod.widgets.*
 
     mod.widgets.RobrixSplitter = Splitter {
-        // size: theme.splitter_size
-        // min_horizontal: theme.splitter_min_horizontal
-        // max_horizontal: theme.splitter_max_horizontal
-        // min_vertical: theme.splitter_min_vertical
-        // max_vertical: theme.splitter_max_vertical
+        // The short grip sits on the boundary, not beside it. The strip and
+        // native hit margins keep it easy to drag without a second long bar.
+        size: 4.0
 
         draw_bg +: {
-            color: COLOR_SECONDARY
-            color_hover: COLOR_ROBRIX_PURPLE
-            color_drag: COLOR_ROBRIX_PURPLE
+            bar_size: 32.0
+            color_bg: mod.widgets.RINX_PAGE
+            color: mix(mod.widgets.RINX_PAGE, mod.widgets.RINX_INK, 0.08)
+            color_hover: mix(mod.widgets.RINX_PAGE, mod.widgets.RINX_INK, 0.35)
+            color_drag: mix(mod.widgets.RINX_PAGE, mod.widgets.RINX_INK, 0.50)
 
             pixel: fn() {
                 let sdf = Sdf2d.viewport(self.pos * self.rect_size)
-                let active = max(self.hover, self.drag)
-
-                // Body: blends into the background when idle, so panels read as
-                // one surface; tinted only while hovered or dragged.
-                sdf.box(
-                    0.0,
-                    0.0,
-                    self.rect_size.x,
-                    self.rect_size.y,
-                    1.5
-                )
-                sdf.fill(mix(
-                    self.color
-                    mix(self.color_hover, self.color_drag, self.drag)
-                    active
-                ))
-
-                // A faint 1px hairline marks the boundary while idle.
+                sdf.clear(self.color_bg)
                 if self.is_vertical > 0.5 {
+                    sdf.rect(self.rect_size.x * 0.5 - 0.5, 0.0, 1.0, self.rect_size.y)
+                } else {
                     sdf.rect(0.0, self.rect_size.y * 0.5 - 0.5, self.rect_size.x, 1.0)
                 }
-                else {
-                    sdf.rect(self.rect_size.x * 0.5 - 0.5, 0.0, 1.0, self.rect_size.y)
-                }
-                sdf.fill(mix(#x00000012, #x00000000, active))
-
-                // Grab bar: only appears (white) when hovered/dragged.
+                sdf.fill(self.color)
                 if self.is_vertical > 0.5 {
-                    sdf.box(
-                        self.splitter_pad
-                        self.rect_size.y * 0.5 - self.bar_size * 0.5
-                        self.rect_size.x - 2.0 * self.splitter_pad
-                        self.bar_size
-                        self.border_radius
-                    )
+                    sdf.box(self.rect_size.x * 0.5 - 1.5, self.rect_size.y * 0.5 - self.bar_size * 0.5, 3.0, self.bar_size, 1.5)
+                } else {
+                    sdf.box(self.rect_size.x * 0.5 - self.bar_size * 0.5, self.rect_size.y * 0.5 - 1.5, self.bar_size, 3.0, 1.5)
                 }
-                else {
-                    sdf.box(
-                        self.rect_size.x * 0.5 - self.bar_size * 0.5
-                        self.splitter_pad
-                        self.bar_size
-                        self.rect_size.y - 2.0 * self.splitter_pad
-                        self.border_radius
-                    )
-                }
-                return sdf.fill_keep(mix(#xffffff00, mod.widgets.RINX_SURFACE, self.hover))
+                return sdf.fill(self.color_hover.mix(self.color_drag, self.drag) * vec4(1.0, 1.0, 1.0, max(self.hover, self.drag)))
             }
         }
 

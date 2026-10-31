@@ -472,8 +472,23 @@ fn scheduled_grant(phase: &Phase, now: u64) -> bool {
 const ENDED_LEAD: &str = "Last month’s capacity has ended, so this pool has none right now.";
 const ENDED_STATUS: &str = "Set this month’s capacity to publish again. Last month’s Agents must first stop and report their final use, which needs this computer online after the month ends.";
 /// This month's form cannot show capacity while last month's usage is unknown.
-const REGRANT_UNKNOWN_STATUS: &str = "How much can be shared isn’t known until last month’s Agents report their final use. Keep this computer online, then refresh.";
-const UNKNOWN_CAPACITY_STATUS: &str = "How much can still be shared isn’t known, so this can’t be confirmed now. Keep this computer online, then refresh.";
+const REGRANT_UNKNOWN_STATUS: &str = "Last month’s Agent usage is not settled. Check the execution records and refresh after settlement. This month has not been published.";
+const UNKNOWN_CAPACITY_STATUS: &str = "Available capacity could not be verified. Refresh to read the pool again. Nothing has been published.";
+
+fn capacity_problem(s: &GrantState) -> String {
+    let tr = crate::i18n::tr;
+    let context = s.context();
+    tr(match context.and_then(|c| c.capacity_blocker.as_deref()) {
+        Some("pool_limit_missing") => "Set a monthly maximum for this pool before publishing.",
+        Some("usage_unsettled") => "Final usage is still unsettled for calls covered by this pool’s budget. Check the Agent execution records, then refresh after settlement.",
+        Some("account_period_mismatch") => "The explicitly declared account limit and this pool use different periods. Their available capacity cannot be combined.",
+        Some("account_limit_reached") => "The explicitly declared shared account limit is fully allocated. Review its existing allocations before publishing more capacity.",
+        Some("pool_limit_reached") => "This pool has no capacity left to publish. Review its existing allocations or change its monthly maximum.",
+        _ if s.regrant => REGRANT_UNKNOWN_STATUS,
+        _ if context.is_some_and(|c| c.remaining_tokens == Some(0)) => "This pool has no capacity left to publish. Review its existing allocations or change its monthly maximum.",
+        _ => UNKNOWN_CAPACITY_STATUS,
+    }).into()
+}
 
 /// What the window is about, named the way the mini app names it.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1213,11 +1228,19 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
                 );
             }
             if !capacity_known {
-                v.status = tr(if s.regrant { REGRANT_UNKNOWN_STATUS } else { UNKNOWN_CAPACITY_STATUS }).into();
+                v.problem = capacity_problem(s);
             } else if bounds.as_ref().is_some_and(|b| b.remaining == Some(0)) {
-                v.problem = tr("Nothing is left to share this month. Raise the monthly maximum on the pool’s page first.").into();
+                v.problem = capacity_problem(s);
             } else if let Some(problem) = bounds.as_ref().and_then(|b| draft_problem(b, s.draft, renew_month.as_deref(), now)) {
                 v.problem = problem;
+            }
+            if !capacity_known || bounds.as_ref().is_some_and(|b| b.remaining == Some(0)) {
+                v.tone = SheetTone::Failed;
+                v.title = tr(if matches!(kind, GrantKind::Publish | GrantKind::Renew | GrantKind::Record) { "Cannot Publish" } else { "Cannot Save Changes" }).into();
+                v.status = tr("Nothing has been published or changed.").into();
+                v.lead.clear();
+                v.caution.clear();
+                if let Some(after) = &mut v.after { after.tag = tr("You chose").into(); }
             }
             // An amount that can't be confirmed isn't described as if it would apply.
             if !v.problem.is_empty() && kind == GrantKind::Amend && tokens != current && allowed_amount(bounds.as_ref(), tokens).is_none() {
@@ -1328,7 +1351,14 @@ fn grant_view(s: &GrantState, now: u64) -> GrantView {
         Phase::Review(review) => {
             let s2 = review.summary();
             summary_hero(&mut v, kind, &s2, &base, &this_month, false, renew_capacity);
-            v.status = tr(if review.capacity_available() { "Not published yet. Publish to finish." } else { UNKNOWN_CAPACITY_STATUS }).into();
+            if review.capacity_available() {
+                v.status = tr("Not published yet. Publish to finish.").into();
+            } else {
+                v.tone = SheetTone::Failed;
+                v.title = tr("Cannot Publish").into();
+                v.problem = capacity_problem(s);
+                v.status = tr("Nothing has been published or changed.").into();
+            }
             if kind == GrantKind::Renew { primary = "Publish Ahead"; }
         }
         Phase::PublicationReview(review) => {
@@ -3061,6 +3091,7 @@ impl GrantPreview {
             remaining_tokens: f["remaining"].as_u64(),
             resource_total_tokens: Some(f["total"].as_u64().unwrap_or(1_000_000)),
             shared_account_total_tokens: f["accountLimit"].as_u64(),
+            capacity_blocker: f["blockedReason"].as_str().map(str::to_owned),
             observed_at_ms: now,
         };
         let summary = |tokens: u64, people: Vec<String>, period: (String, u64, u64), succession: Option<::hagency::native_owner::OwnerGrantSuccessionSummary>| OwnerGrantSummary {
@@ -3271,6 +3302,31 @@ impl MiniAppsPanel {
 }
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn blocked_publication_explains_the_reason_and_keeps_publish_disabled() {
+        for (remaining, reason, message) in [
+            (Value::Null, "usage_unsettled", "Final usage is still unsettled"),
+            (json!(0), "pool_limit_reached", "This pool has no capacity left"),
+            (Value::Null, "pool_limit_missing", "Set a monthly maximum"),
+        ] {
+            let fixture = json!({"state":"publish","total":20_000_000,"remaining":remaining,"proposed":5_000_000,"managers":["@chris:test"],"blockedReason":reason});
+            let preview = GrantPreview::from_fixture(&fixture, now_ms()).unwrap();
+            let view = grant_view(&preview.state(), preview.now);
+            assert_eq!(view.tone, SheetTone::Failed);
+            assert_eq!(view.title, "Cannot Publish");
+            assert!(view.problem.starts_with(message), "{}", view.problem);
+            assert!(!view.primary_enabled);
+            assert!(view.lead.is_empty(), "a blocked choice must not promise publication");
+            assert_eq!(view.status, "Nothing has been published or changed.");
+        }
+        let preview = GrantPreview::from_fixture(&json!({"state":"publish","total":20_000_000,"remaining":20_000_000,"proposed":5_000_000,"managers":["@chris:test"]}), now_ms()).unwrap();
+        let view = grant_view(&preview.state(), preview.now);
+        assert_eq!(view.tone, SheetTone::Proposal);
+        assert!(view.problem.is_empty());
+        assert!(view.primary_enabled);
+        let unknown = GrantPreview::from_fixture(&json!({"state":"failed","code":"management_outcome_unknown"}), now_ms()).unwrap();
+        assert_eq!(grant_view(&unknown.state(), unknown.now).tone, SheetTone::Unsure);
+    }
     use super::*;
     #[test]
     fn directory_hides_selected_people_and_bounds_the_visible_menu() {
@@ -3309,7 +3365,7 @@ mod tests {
             context: ::hagency::native_owner::OwnerGrantReviewContext {
                 server_origin:"https://matrix.test".into(),profile_id:"profile".into(),resource_revision:"revision".into(),
                 framework:"codex".into(),model:"model".into(),remaining_tokens:Some(1_000_001),
-                resource_total_tokens:Some(2_000_000),shared_account_total_tokens:Some(9_000_000),observed_at_ms:1,
+                resource_total_tokens:Some(2_000_000),shared_account_total_tokens:Some(9_000_000),capacity_blocker:None,observed_at_ms:1,
             }};
         let mut draft=GrantChoices {coordinator:"@owner:test".into(),managers:"@manager:test".into(),tokens:"1000001".into(),expires_utc:publication_expiry(None),self_approval:false};
         assert!(form_choices_valid(&form,&draft));
@@ -3331,7 +3387,7 @@ mod tests {
             context: ::hagency::native_owner::OwnerGrantReviewContext {
                 server_origin:"https://matrix.test".into(),profile_id:"profile".into(),resource_revision:"revision".into(),
                 framework:"codex".into(),model:"model".into(),remaining_tokens:Some(remaining),
-                resource_total_tokens:Some(20_000_000),shared_account_total_tokens:None,observed_at_ms:1,
+                resource_total_tokens:Some(20_000_000),shared_account_total_tokens:None,capacity_blocker:None,observed_at_ms:1,
             }}
     }
     fn summary(tokens: u64) -> OwnerGrantSummary {

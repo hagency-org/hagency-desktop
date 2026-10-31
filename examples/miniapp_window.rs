@@ -2,7 +2,11 @@
 //! No account, Matrix client or live backend is started.
 pub use makepad_widgets;
 use makepad_widgets::*;
-use rinx::miniapps::{MiniAppsAction, window::MiniAppsWindowHostWidgetRefExt};
+use rinx::miniapps::{
+    MiniAppsAction,
+    surface::MiniAppsSurfaceDeckWidgetRefExt,
+    window::{MiniAppsWindowAction, MiniAppsWindowHostWidgetRefExt},
+};
 use rinx::theme::{self, Accent, Appearance, Selection};
 app_main!(App);
 
@@ -19,6 +23,7 @@ script_mod! {
                     RinxPageTitle {text: "Main conversation stays open"}
                     draft := RinxInput {text: "Unsent chat draft"}
                     open := RinxPrimaryButton {text: "Open mini apps"}
+                    docked := MiniAppsSurfaceDeck {Surface := MiniAppsSurface {}}
                 }
             }
         }
@@ -32,12 +37,28 @@ struct App {
 impl MatchEvent for App {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
         let host = self.ui.mini_apps_window_host(cx, ids!(miniapps));
+        let dock = self.ui.mini_apps_surface_deck(cx, ids!(docked));
         if self.ui.button(cx, ids!(open)).clicked(actions) {
-            host.action(cx, &MiniAppsAction::Open);
+            if let Some(surface) = dock.remove(cx, id!(running)) {
+                host.adopt(cx, surface);
+            } else {
+                host.action(cx, &MiniAppsAction::Open);
+            }
         }
         for action in actions {
+            if let Some(MiniAppsWindowAction::DockBack(id)) = action.downcast_ref() {
+                if let Some(surface) = host.take_for_dock(cx, *id) {
+                    dock.insert(cx, id!(running), surface);
+                    dock.surface(id!(running)).set_host_visible(cx, true);
+                    self.ui.redraw(cx);
+                }
+            }
             if let Some(action) = action.downcast_ref::<MiniAppsAction>() {
-                host.action(cx, action);
+                if dock.surface_widget(id!(running)).is_some() {
+                    dock.surface(id!(running)).action(cx, action);
+                } else {
+                    host.action(cx, action);
+                }
             }
         }
     }
@@ -66,6 +87,7 @@ impl AppMain for App {
                     "miniapp_window": host.window_id().map(|id| id.id()),
                     "screen_width": cx.display_context.screen_size.x,
                     "chat_draft": self.ui.text_input(cx, ids!(draft)).text(),
+                    "docked": self.ui.mini_apps_surface_deck(cx, ids!(docked)).surface_widget(id!(running)).is_some(),
                 });
                 std::fs::write(rinx::app_data_dir().join("inspection.json"), data.to_string()).unwrap();
             }

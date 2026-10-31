@@ -13,7 +13,7 @@
 //! builds the `MiniAppsWindow` widget when a surface first pops out, and drops
 //! it once the user or the app closes that window.
 use makepad_widgets::*;
-use super::surface::{MiniAppsSurfaceDeckRef, MiniAppsSurfaceDeckWidgetRefExt, MiniAppsSurfaceRef, SurfaceKey};
+use super::surface::{MiniAppsSurfaceDeckRef, MiniAppsSurfaceDeckWidgetRefExt, MiniAppsSurfaceRef, MiniAppsSurfaceWidgetRefExt, SurfaceKey};
 use super::ui::MiniAppsAction;
 use crate::hagency::ui::HagencyAction;
 
@@ -36,6 +36,14 @@ script_mod! {
         }
         body +: {
             flow: Down
+            toolbar := SolidView {
+                width: Fill height: Fit flow: Right
+                padding: 8 align: Align {x: 1.0 y: 0.5}
+                draw_bg.color: RINX_SURFACE
+                dock_back := RinxBackButton {
+                    text: #(crate::i18n::tr("Dock back")) i18n_text: "Dock back"
+                }
+            }
             deck := MiniAppsSurfaceDeck {
                 Surface := MiniAppsSurface {}
             }
@@ -47,6 +55,13 @@ script_mod! {
 
 /// The window's one surface, in its deck.
 const SURFACE: LiveId = id!(surface);
+
+#[derive(Clone, Debug, Default)]
+pub enum MiniAppsWindowAction {
+    DockBack(WindowId),
+    #[default]
+    None,
+}
 
 #[derive(Script, WidgetRef, WidgetRegister)]
 pub struct MiniAppsWindowHost {
@@ -129,6 +144,13 @@ impl Widget for MiniAppsWindowHost {
             }
         }
         let window_id = window.as_window().window_id();
+        if let Event::Actions(actions) = event {
+            if !self.closing && window.button(cx, ids!(dock_back)).clicked(actions) {
+                if let Some(id) = window_id {
+                    cx.action(MiniAppsWindowAction::DockBack(id));
+                }
+            }
+        }
         let was_focused = self.focused;
         match event {
             Event::WindowGotFocus(id) => self.focused = Some(*id) == window_id,
@@ -229,6 +251,21 @@ impl MiniAppsWindowHost {
         previous
     }
 
+    /// Detach the running app before closing its now-empty native window.
+    /// A delayed click from an older window must not move a newer app.
+    fn take_for_dock(&mut self, cx: &mut Cx, expected: WindowId) -> Option<WidgetRef> {
+        if self.closing || self.window.as_ref()?.as_window().window_id() != Some(expected) {
+            return None;
+        }
+        let surface = self.deck(cx).remove(cx, SURFACE)?;
+        surface.as_mini_apps_surface().set_host_visible(cx, false);
+        self.navigated = false;
+        self.focused = false;
+        self.closing = true;
+        cx.push_unique_platform_op(CxOsOp::CloseWindow(expected));
+        Some(surface)
+    }
+
     fn ensure_window(&mut self, cx: &mut Cx) {
         if self.window.is_none() || self.closing {
             let window = cx.with_vm(|vm| {
@@ -318,6 +355,9 @@ impl MiniAppsWindowHostRef {
     }
     pub fn adopt(&self, cx: &mut Cx, surface: WidgetRef) -> Option<WidgetRef> {
         self.borrow_mut()?.adopt(cx, surface)
+    }
+    pub fn take_for_dock(&self, cx: &mut Cx, expected: WindowId) -> Option<WidgetRef> {
+        self.borrow_mut()?.take_for_dock(cx, expected)
     }
     pub fn hagency_action(&self, cx: &mut Cx, action: &HagencyAction) {
         if let Some(mut inner) = self.borrow_mut() {

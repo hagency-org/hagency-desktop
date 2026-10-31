@@ -66,6 +66,27 @@ callbacks[0](wrong) assert(H.agent_control==nil && H.notice!="")
 'older_server_does_not_issue_control_requests': '''
 H.session.features=[] A.open_agent_control("mas_original","Original agent") A.set_agent_control("running") A.set_agent_control("paused") assert(calls.len()==0)
 ''',
+'control_refresh_reads_setting_and_execution_without_writes': '''
+H.page="agent_control" H.pool_detail={id:"par_original" assignmentId:"mas_original" runtimeState:"issued"}
+H.control_poll_pool=false
+let first=A.web_refresh_plan()
+assert(first.service=="hagency.agents.control.readiness" && first.args.assignmentId=="mas_original")
+first.done(H.agent_control)
+let second=A.web_refresh_plan()
+assert(second.service=="hagency.pools.agents.get" && second.args.id=="par_original")
+second.done({request:{id:"par_original" assignmentId:"mas_original" runtimeState:"stopped"}})
+assert(H.pool_detail.runtimeState=="stopped" && !H.control_poll_pool && calls.len()==0)
+H.control_assignment="mas_other" first.done({readiness:{control:{assignmentId:"mas_original"}}})
+assert(!H.control_poll_pool && calls.len()==0)
+''',
+'pool_execution_state_does_not_fall_back_to_approval': '''
+let r={state:"approved_waiting_executor" reservationState:"reserved" runtimeState:"stopped" membershipState:"matrix_verified" blockingReason:nil}
+assert(A.local_pool_state(r)==A.t("Execution stopped","执行已停止"))
+r.runtimeState="issued" assert(A.local_pool_state(r)==A.t("Starting","正在启动"))
+r.runtimeState="qualified" assert(A.local_pool_state(r)==A.t("Process started · last reported","进程已启动 · 最近记录"))
+r.runtimeState="failed" assert(A.local_pool_state(r)==A.t("Start failed","启动失败") && A.pool_tone(r)=="attention")
+r.runtimeState="outcome_unknown" assert(A.local_pool_state(r)==A.t("Execution status unknown","执行状态未知") && A.pool_tone(r)=="attention")
+''',
 'control_setting_never_claims_process_is_running': '''
 assert(A.control_mode_text("running")!="Running" && A.control_mode_text("paused")!="Stopped")
 assert(A.control_reason("already_running")=="")

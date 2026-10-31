@@ -44,7 +44,7 @@ def main():
     run("package", ["bash", "tools/package-system-apps/check.sh"])
     run("script-vm", ["cargo", "build", "--locked", "--manifest-path", "tools/hagency-script-review/Cargo.toml"])
     vm = ROOT / "tools/hagency-script-review/target/debug/hagency-script-review"
-    for name in ["check_full_bundle", "check_agent_budget", "check_pool_application", "check_entry_workspaces", "check_account_identity", "check_accounts", "check_owner_tasks", "check_encrypted_approvals", "check_pool_fixes"]:
+    for name in ["check_full_bundle", "check_agent_budget", "check_agent_control", "check_pool_application", "check_entry_workspaces", "check_account_identity", "check_accounts", "check_owner_tasks", "check_encrypted_approvals", "check_pool_fixes", "check_shared_web"]:
         run(name, ["python3", f"apps/hagency/tests/{name}.py", str(vm), "--output", str(output / name)])
     # Keep these together: a budget fix must not erase rendering, activity or answer actions.
     for name, pattern in [
@@ -71,6 +71,12 @@ def main():
         run("apple-system-fonts", ["cargo", "test", "--locked", "--manifest-path", "crates/article-makepad/Cargo.toml", "--lib", "apple_fonts", "--", "--test-threads=1"], rust_tests=True)
     run("answer-export", ["cargo", "test", "--locked", "--manifest-path", "crates/answer-export/Cargo.toml", "--lib"], rust_tests=True)
     if args.client:
+        for name, package, pattern in [
+            ("native-agent-permissions", "hagency-store", "execution_policy"),
+            ("native-agent-web-search", "hagency-store", "web_policy"),
+            ("native-permission-recovery", "hagency", "execution_policy"),
+        ]:
+            run(name, ["cargo", "test", "--locked", "-p", package, "--features", "shared-budget-execution,resource-adoption", "--lib", pattern, "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         run("native-owner-restart", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "owner_host::tests", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         for name, pattern in [("native-publication-form", "publication_form"), ("native-publication-recovery", "native_grant_publication_")]:
             run(name, ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", pattern, "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
@@ -85,9 +91,12 @@ def main():
         env["HAGENCY_TEST_RUNTIME_PROBE"] = probes[0]
         run("native-thread-context", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution", "--lib", "shared_context_", "--", "--include-ignored", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         run("native-thread-context-http", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "native_shared_context_", "--", "--include-ignored", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-encrypted-execution", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "native_shared_encrypted_", "--", "--include-ignored", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-demand-promotion-recovery", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "native_demand_recovered_promotion", "--", "--include-ignored", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         for name, pattern in [("native-budget", "agent_budget"), ("native-http-replay", "budget_http")]:
             run(name, ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", pattern, "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         run("native-account-inventory", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution,resource-adoption", "--lib", "account_inventory", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-owner-pool-limits", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution,resource-adoption", "--lib", "automatic_account_quota_does_not_couple_pools_or_erase_unknown_usage", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         run("native-capacity", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution", "--lib", "pool_agent_topup_requires_owner_keeps_unknown_usage_and_conserves_siblings", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
 
 

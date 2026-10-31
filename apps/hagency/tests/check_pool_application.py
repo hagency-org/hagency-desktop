@@ -25,6 +25,49 @@ let collect=fn(value){if !value.is_object(){return} for i key child in value {bu
 '''
 
 CASES = {
+    "selected_pool_replaces_old_unsubmitted_pool": '''
+let terra=pool.to_json().parse_json()
+terra.id="terra" terra.label="Terra" terra.publishedTokens=5000000 terra.capabilities=["review"]
+H.pool_draft.tokens="4000000" H.pool_draft.review=true
+A.pool_begin(terra) render()
+assert(H.pool_draft.pool.id=="terra" && A.pool_limit(H.pool_draft.pool)==5000000)
+assert(H.pool_draft.name=="小蓝" && H.pool_draft.description=="Assistant" && H.pool_draft.tokens=="4000000")
+assert(H.pool_draft.capability=="review" && !H.pool_draft.review && H.calls.len()==0)
+assert(button("pool_limit").text.search("5 M")>=0 && button("pool_review").enabled)
+assert(H.persisted.parse_json().pool.id=="terra")
+// Switching back keeps the typed amount and explains the smaller limit.
+A.pool_begin(pool) render()
+assert(H.pool_draft.pool.id=="pool" && H.pool_draft.tokens=="4000000")
+assert(!button("pool_review").enabled && button("pool_validation").text!="")
+''',
+    "old_lookup_cannot_overwrite_new_selection": '''
+A.pool_refresh() let old_reply=H.callback
+let terra=pool.to_json().parse_json() terra.id="terra" terra.publishedTokens=5000000
+A.pool_begin(terra)
+old_reply({items:[pool] nextAfter:nil})
+assert(H.pool_draft.pool.id=="terra" && A.pool_limit(H.pool_draft.pool)==5000000 && H.pool_checked)
+''',
+    "existing_room_and_unresolved_request_cannot_be_retargeted": '''
+A.navigate=fn(page){H.page=page}
+let terra=pool.to_json().parse_json() terra.id="terra" terra.publishedTokens=5000000
+H.pool_draft.roomCommand="original-room" H.pool_draft.roomId="!original:test"
+let original=H.pool_draft.to_json()
+A.pool_begin(terra)
+assert(H.pool_draft.to_json()==original && H.notice.search("Codex")>=0 && H.calls.len()==0)
+H.pool_draft.roomCommand="" H.pool_draft.roomId=""
+H.saved_commands=[{operation:"pool_agent_request" reply:nil commandId:"saved"}]
+original=H.pool_draft.to_json() A.pool_begin(terra)
+assert(H.pool_draft.to_json()==original && H.calls.len()==0)
+''',
+    "missing_name_and_capability_have_visible_reasons": '''
+H.pool_draft.tokens="1000" H.pool_draft.name="  " render()
+assert(!button("pool_review").enabled && button("pool_validation").visible)
+assert(button("pool_validation").text==A.t("Enter an Agent name to continue.","请填写 Agent 名称后继续。"))
+H.pool_draft.name="Terra helper" H.pool_draft.capability="invalid" render()
+assert(!button("pool_review").enabled && button("pool_validation").text.search(A.t("capability","能力"))>=0)
+H.pool_draft.capability="coding" render()
+assert(button("pool_review").enabled && !button("pool_validation").visible)
+''',
     "over_limit_blocks_before_room": '''
 render()
 assert(!button("pool_review").enabled && button("pool_amount_error").text!="")

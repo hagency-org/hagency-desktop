@@ -2,9 +2,6 @@
 use makepad_widgets::*;
 use crate::theme::{self, Accent, Appearance, Selection};
 
-#[derive(Clone, Debug)]
-pub struct OpenAppearance;
-
 fn mode_labels(translated: bool) -> Vec<String> {
     let labels: &[&str] = if theme::system::supported() {
         &["Light", "Dark", "System"]

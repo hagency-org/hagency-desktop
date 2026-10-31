@@ -74,14 +74,6 @@ mod embedded_content {
                 image_viewer_modal := Modal {
                     content := ImageViewer {}
                 }
-                appearance_modal := Modal {
-                    content := RoundedView {
-                        width: Fill{max: 420} height: Fit flow: Down padding: 24 spacing: 12
-                        draw_bg +: {color: RINX_SURFACE border_radius: 12}
-                        appearance := AppearanceSettings {}
-                        appearance_close := RinxButton {text: #(crate::i18n::tr("Close")) i18n_text: "Close"}
-                    }
-                }
                 theme_studio_modal := Modal {can_dismiss: false content := ThemeStudio {}}
                 web_browser_modal := Modal {can_dismiss: false content := WebBrowser {}}
                 
@@ -362,9 +354,6 @@ impl MatchEvent for App {
             self.ui.modal(cx, ids!(positive_confirmation_modal)).close(cx);
         }
 
-        if self.ui.button(cx, ids!(appearance_close)).clicked(actions) {
-            self.ui.modal(cx, ids!(appearance_modal)).close(cx);
-        }
         for action in actions {
             if let Some(action) = action.downcast_ref::<crate::accounts::AccountAction>() {
                 if !crate::sliding_sync::account_changing() {
@@ -383,12 +372,7 @@ impl MatchEvent for App {
                 }
                 continue;
             }
-            if action.downcast_ref::<crate::settings::appearance::OpenAppearance>().is_some() {
-                self.ui.modal(cx, ids!(appearance_modal)).open(cx);
-                continue;
-            }
             if let Some(action) = action.downcast_ref::<ThemeStudioAction>() {
-                self.ui.modal(cx, ids!(appearance_modal)).close(cx);
                 let modal = self.ui.modal(cx, ids!(theme_studio_modal));
                 self.ui
                     .theme_studio(cx, ids!(theme_studio_modal.content))
@@ -611,6 +595,10 @@ impl MatchEvent for App {
             }
             if let Some(crate::miniapps::side::MiniAppsSideAction::PopOut) = action.downcast_ref() {
                 self.pop_out_mini_app(cx);
+                continue;
+            }
+            if let Some(crate::miniapps::window::MiniAppsWindowAction::DockBack(window)) = action.downcast_ref() {
+                self.dock_back_mini_app(cx, *window);
                 continue;
             }
             if let Some(action) = action.downcast_ref::<MiniAppsAction>() {
@@ -1162,6 +1150,25 @@ impl App {
         let Some(surface) = side.take_front(cx) else { return };
         if let Some(previous) = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).adopt(cx, surface) {
             side.dock_surface(cx, previous);
+        }
+    }
+
+    fn dock_back_mini_app(&mut self, cx: &mut Cx, window: WindowId) {
+        let host = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host));
+        let Some(surface) = host.take_for_dock(cx, window) else { return };
+        self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).dock_surface(cx, surface);
+        self.ui.redraw(cx);
+        #[cfg(target_os = "macos")]
+        if let Some(main) = self.ui.window(cx, ids!(main_window)).window_id() {
+            // Activate outside the UI borrow: AppKit may re-enter the event handler.
+            dispatch2::DispatchQueue::main().exec_async(move || {
+                use makepad_widgets::makepad_platform::os::apple::macos::macos_app::{
+                    activate_cocoa_window_on_pointer_down, try_with_macos_app,
+                };
+                if let Some(native) = try_with_macos_app(|app| app.cocoa_window_for_id(main)).flatten() {
+                    activate_cocoa_window_on_pointer_down(native);
+                }
+            });
         }
     }
 

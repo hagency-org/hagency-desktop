@@ -876,6 +876,7 @@ script_mod! {
         new_batch: true
 
         list := PortalList {
+            scroll_bar: mod.widgets.ChatScrollBar {}
             height: Fill,
             width: Fill
             flow: Down

@@ -226,7 +226,15 @@ impl MiniAppsPanel {
         show(self, cx, &[id!(scroll), id!(hero), id!(figures), id!(arrow)], v.before.is_some() && v.after.is_some());
         text(self, cx, &[id!(scroll), id!(hero), id!(lead)], &v.lead);
         text(self, cx, &[id!(scroll), id!(status)], &v.status);
-        text(self, cx, &[id!(scroll), id!(problem)], &v.problem);
+        let mut status = self.view.label(cx, &at(&[id!(scroll), id!(status)]));
+        match v.tone {
+            SheetTone::Failed => script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_DANGER_FG}}),
+            SheetTone::Unsure => script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_WARNING_FG}}),
+            SheetTone::Done => script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_SUCCESS_FG}}),
+            _ => script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_INK}}),
+        }
+        show(self, cx, &[id!(scroll), id!(problem_banner)], !v.problem.is_empty());
+        text(self, cx, &[id!(scroll), id!(problem_banner), id!(problem)], &v.problem);
         show(self, cx, &[id!(scroll), id!(caution)], !v.caution.is_empty());
         self.view.label(cx, &at(&[id!(scroll), id!(caution), id!(caution_text)])).set_text(cx, &v.caution);
         text(self, cx, &[id!(scroll), id!(change)], v.notice.as_deref().unwrap_or_default());

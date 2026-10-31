@@ -917,6 +917,7 @@ mod tests {
                 remaining_tokens: Some(9_000_000),
                 resource_total_tokens: Some(9_000_000),
                 shared_account_total_tokens: None,
+                capacity_blocker: None,
                 observed_at_ms: 1,
             },
             predecessor: progress("root", OwnerGrantState::Recorded).summary,

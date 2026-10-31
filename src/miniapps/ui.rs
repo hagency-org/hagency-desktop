@@ -171,6 +171,11 @@ script_mod! {
                 title := RinxPageTitle {width: Fill align: Align{x: 0.5} flow: Flow.Right{wrap: true}}
                 pool := RinxHint {width: Fill align: Align{x: 0.5} flow: Flow.Right{wrap: true}}
             }
+            problem_banner := RoundedView {visible: false width: Fill{max: 640} height: Fit flow: Right spacing: 10 padding: Inset{left: 14 right: 14 top: 12 bottom: 12} show_bg: true
+                draw_bg +: {color: RINX_DANGER_BG border_radius: 12.0}
+                Icon {width: 20 height: 20 icon_walk: Walk{width: 20 height: 20} draw_icon +: {svg: mod.rinx_icons.alert color: RINX_DANGER_FG}}
+                problem := RinxLabel {width: Fill flow: Flow.Right{wrap: true} draw_text +: {color: RINX_DANGER_FG}}
+            }
             // What changes, in big numbers: before → after, then one sentence.
             hero := SheetGroup {visible: false width: Fill{max: 640} padding: Inset{left: 18 right: 18 top: 14 bottom: 16} spacing: 8
                 caption := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
@@ -185,8 +190,7 @@ script_mod! {
                 }
                 lead := RinxLabel {width: Fill flow: Flow.Right{wrap: true}}
             }
-            status := RinxHint {visible: false width: Fill{max: 640} flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8}}
-            problem := RinxLabel {visible: false width: Fill{max: 640} flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8} draw_text +: {color: RINX_DANGER_FG}}
+            status := RinxLabel {visible: false width: Fill{max: 640} flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8}}
             // A consequence the owner must know before confirming.
             caution := RoundedView {visible: false width: Fill{max: 640} height: Fit flow: Right spacing: 10 padding: Inset{left: 14 right: 14 top: 12 bottom: 12} show_bg: true
                 draw_bg +: {color: RINX_WARNING_BG border_radius: 12.0}

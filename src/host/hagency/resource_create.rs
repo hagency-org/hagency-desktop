@@ -129,8 +129,10 @@ impl ResourceCreateConsent {
                     .filter(|name| !name.is_empty())
                     .unwrap_or(old.model.as_str())
                     .to_owned();
+                let account_note = old.budget.seat.quota.map(|n| format!("{}: {}", tr("Explicit shared account limit"), ceiling(Some(u64::from(n)))))
+                    .unwrap_or_else(|| tr("Each pool uses the monthly maximum set by its owner.").into());
                 format!(
-                    "{}\n\n{}\n{} · {}\n{}: {}\n{}: {}\n\n{}\n{} · {}\n{}: {}\n{}: {}\n\n{}: {}\n{}",
+                    "{}\n\n{}\n{} · {}\n{}: {}\n{}: {}\n\n{}\n{} · {}\n{}: {}\n{}: {}\n\n{}\n{}",
                     name,
                     tr("Source configuration"),
                     old.model,
@@ -146,8 +148,7 @@ impl ResourceCreateConsent {
                     ceiling(next),
                     tr("Default permissions for new Agents"),
                     super::resource_edit::policy_text(self.input.execution_policy.unwrap_or(detail.execution_policy).yolo),
-                    tr("Shared account monthly limit · unchanged"),
-                    ceiling(old.budget.seat.quota.map(u64::from)),
+                    account_note,
                     tr("Existing Agents keep their current permissions.")
                 )
             }

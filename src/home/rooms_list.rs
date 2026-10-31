@@ -141,6 +141,7 @@ script_mod! {
         space_lobby_entry := SpaceLobbyEntry {}
 
         list := PortalList {
+            scroll_bar: mod.widgets.ChatListScrollBar {}
             keep_invisible: false,
             // Nothing here listens for scroll position changes.
             emit_scroll_actions: false,

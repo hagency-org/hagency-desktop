@@ -91,8 +91,8 @@ H.agents=agents H.agent_after=agent_after H.agent_readiness=agent_readiness H.ag
 H.agent_confirmation=agent_confirmation H.agent_review=agent_review H.agent_draft=agent_draft
 let {agent_status=nil}=H
 H.agent_status=agent_status
-let {agent_control=nil,control_assignment="",control_agent_name=""}=H
-H.agent_control=agent_control H.control_assignment=control_assignment H.control_agent_name=control_agent_name
+let {agent_control=nil,control_assignment="",control_agent_name="",control_poll_pool=false}=H
+H.agent_control=agent_control H.control_assignment=control_assignment H.control_agent_name=control_agent_name H.control_poll_pool=control_poll_pool
 let {settlement=nil}=H
 H.settlement=settlement
 let {removal=nil,removals=nil,removal_id="",removal_project=nil,removal_after=nil,removal_page=1,removal_confirmation="",removal_details=false}=H
@@ -1154,12 +1154,20 @@ H.shared_approvals=[]
 A.shared_mode = fn(row){let {sharedMode=nil}=row return sharedMode}
 A.policy_mode_label = fn(row){return if A.shared_mode(row)=="chat" {A.t("Chat only","仅聊天")}else{A.policy_label(row.executionPolicy.yolo)}}
 A.policy_label = fn(yolo){return if yolo {A.t("Full trust (unrestricted)","完全信任（不受限）")}else{A.t("Standard permissions","标准权限")}}
+A.policy_web = fn(row){let {webSearch=nil}=row return webSearch}
+A.toggle_policy_web = fn(){
+    if H.busy || H.command!=nil || H.page!="execution_policy" || H.policy_detail==nil || (H.policy_mode!="detail" && H.policy_mode!="result") {return}
+    let row=H.policy_detail let web=A.policy_web(row)
+    if (web!=true && web!=false) || A.shared_mode(row)==nil || row.framework!="codex" || row.resourceId!=H.policy_resource || row.engagementId!=H.policy_engagement {return}
+    A.submit("hagency.execution_policy.edit",{resourceId:row.resourceId engagementId:row.engagementId expectedRevision:row.revision executionPolicy:{yolo:row.executionPolicy.yolo} webSearch:!web})
+}
 A.policy_valid = fn(data,resource,engagement){
     if !data.is_object() {return false}
     let {resourceId=nil,engagementId=nil,agent=nil,projectId=nil,framework=nil,executionPolicy=nil,revision=nil,appliesTo=nil}=data
     if resourceId!=resource || engagementId!=engagement || !agent.is_string() || !projectId.is_string() || !framework.is_string() || !revision.is_string() || revision.len()!=64 || appliesTo!="next_dispatch" || !executionPolicy.is_object() {return false}
     let {yolo=nil}=executionPolicy
-    return (yolo==true || yolo==false) && (!yolo || framework=="codex")
+    let {webSearch=nil}=data
+    return (yolo==true || yolo==false) && (!yolo || framework=="codex") && (webSearch==nil || ((webSearch==true || webSearch==false) && A.shared_mode(data)!=nil && framework=="codex"))
 }
 // Permission requests are part of the Tools & Permissions hub's Pending tab.
 A.open_shared_approvals = fn(){
@@ -1229,7 +1237,10 @@ A.submit_policy = fn(){
     if d.resourceId!=H.policy_resource || d.engagementId!=H.policy_engagement || d.expectedRevision!=row.revision || (d.executionPolicy.yolo && row.framework!="codex") {return}
     A.submit("hagency.execution_policy.edit",d.to_json().parse_json())
 }
-A.valid_policy_result = fn(data,args){return A.policy_valid(data,args.resourceId,args.engagementId) && data.executionPolicy.yolo==args.executionPolicy.yolo}
+A.valid_policy_result = fn(data,args){
+    let {webSearch=nil}=args
+    return A.policy_valid(data,args.resourceId,args.engagementId) && data.executionPolicy.yolo==args.executionPolicy.yolo && (webSearch==nil || A.policy_web(data)==webSearch)
+}
 A.policy_received = fn(data){
     H.policy_resource=data.resourceId H.policy_engagement=data.engagementId H.policy_detail=data H.policy_draft=nil H.policy_list=nil H.policy_mode="result" H.page="execution_policy" H.notice=""
 }
@@ -1850,6 +1861,20 @@ A.reqs_stop_view=fn(){let h=A.recipient_optional(H.reqs,"hint") return H.page=="
 // The same list opened from the pool's "Agents using this pool" row: named after that row, with each Agent's permissions one tap away.
 A.reqs_using_view=fn(){return H.page=="pool_requests" && A.recipient_optional(H.reqs,"hint")=="using"}
 A.reqs_permissions_open=fn(){let rid=A.recipient_optional(H.reqs,"rid") if H.busy || rid==nil || rid=="" {return} A.open_policies(rid,"")}
+A.pool_agent_permissions=fn(row,after){
+    if H.busy || H.command!=nil || H.entry_role!="owner" || H.session==nil || row.resourceOwnerMxid!=H.session.account || row.assignmentId==nil {return}
+    let rid=A.reqs_pool_rid(row.poolId)
+    if rid!="" {A.open_policy(rid,row.agentId) return}
+    A.request("hagency.connections.list",{after:after},fn(data){
+        if H.page!="pool_agent" || H.pool_detail==nil || H.pool_detail.id!=row.id || H.entry_role!="owner" {return}
+        let found={rid:""}
+        for c in A.pool_items(data) {if c.id==row.poolId && A.pool_mine(c) {found.rid=c.resourceId}}
+        if found.rid!="" {A.open_policy(found.rid,row.agentId) return}
+        let {nextAfter=nil}=data
+        if nextAfter!=nil && nextAfter!=after {A.pool_agent_permissions(row,nextAfter) return}
+        H.notice=A.t("Couldn’t find this Agent’s resource pool. Refresh and try again.","暂时找不到此 Agent 的资源池，请刷新重试。") A.redraw()
+    })
+}
 A.reqs_show=fn(page){
     let r=H.reqs
     r.confirm=nil r.result=nil r.items=nil r.next=nil
@@ -3599,6 +3624,14 @@ A.web_refresh_plan=fn(){let w=H.web let c=H.webConnection
         let service=if w.section=="offers"{"hagency.web_catalog.offers"}else if w.section=="trust"{"hagency.web_catalog.trust"}else{"hagency.web_catalog.get"}
         return {service:service args:{resourceId:w.resourceId after:w.after} done:fn(v){if v.resourceId==w.resourceId{w.catalog=v if w.section=="settings"{w.rate=A.web_rate_text(v.rateCapPerDay)}}}}
     }
+    if H.page=="agent_control" && H.agent_control!=nil {
+        let assignment=H.control_assignment
+        if H.pool_detail!=nil && H.pool_detail.assignmentId==assignment && H.control_poll_pool {
+            let id=H.pool_detail.id
+            return {service:"hagency.pools.agents.get" args:{id:id} done:fn(v){if H.control_assignment==assignment && v.request.id==id{H.pool_detail=v.request H.control_poll_pool=false}}}
+        }
+        return {service:"hagency.agents.control.readiness" args:{assignmentId:assignment} done:fn(v){if H.control_assignment==assignment && v.readiness.control.assignmentId==assignment{H.agent_control=v H.control_poll_pool=true}}}
+    }
     if H.page=="overview"{return nil}
     if H.page=="pool_agent" && H.pool_detail!=nil && H.pool_confirm==""{return {service:"hagency.pools.agents.get" args:{id:H.pool_detail.id} done:fn(v){if H.pool_detail!=nil && v.request.id==H.pool_detail.id{H.pool_detail=v.request}}}}
     if H.page=="connections" && H.connections.len()<=16{return {service:"hagency.connections.list" args:{} done:A.connections_received}}
@@ -4277,25 +4310,29 @@ A.control_enabled = fn(){
 A.control_reason = fn(code){
     if code == nil {return ""}
     if code == "management_agent_control_local_stop_pending" {return A.t("This device has recorded the pause. Server confirmation is pending.","本机已记录暂停，等待服务器确认。")}
-    if code == "role_required" || code == "shared_run_control_forbidden" {return A.t("Only the project manager can enable automatic replies. The resource owner can pause execution.","只有项目经理可以启用自动回复。资源所有者可以暂停执行。")}
+    if code == "role_required" || code == "shared_run_control_forbidden" {return A.t("Only the project manager can enable message responses. The resource owner can pause execution.","只有项目经理可以启用消息响应。资源所有者可以暂停执行。")}
     if code == "intake_disabled" || code == "shared_durable_intake_unavailable" {return A.t("Automatic message intake is disabled on this server. You can still pause an existing assignment.","此服务器已关闭自动消息接收，已有分配仍可暂停。")}
     if code == "assignment_authority_changed" || code == "shared_assignment_authority_changed" {return A.t("The assignment or project authorization changed. Refresh its status before enabling replies.","分配或项目授权已变化，请刷新状态后再启用回复。")}
     if code == "shared_control_revision_changed" {return A.t("Another person changed this setting. Recover the saved request, then refresh to see the latest setting.","其他人已更改此设置。请恢复已保存的请求，再刷新查看最新设置。")}
     if code == "already_running" {return ""}
-    if code == "shared_run_control_unavailable" || code == "shared_intake_disabled" {return A.t("Automatic reply controls are not supported by this client and server combination.","当前客户端与服务器组合尚不支持自动回复控制。")}
+    if code == "shared_run_control_unavailable" || code == "shared_intake_disabled" {return A.t("Message response controls are not supported by this client and server combination.","当前客户端与服务器组合尚不支持消息响应控制。")}
     return A.error_text(code)
 }
 A.control_mode_text = fn(mode){
-    if mode == "running" {return A.t("Automatic replies enabled", "已启用自动回复")}
-    if mode == "paused" {return A.t("Automatic replies paused", "已暂停自动回复")}
-    return A.t("Automatic replies not enabled", "尚未启用自动回复")
+    if mode == "running" {return A.t("Message responses enabled", "已启用消息响应")}
+    if mode == "paused" {return A.t("Message responses paused", "已暂停消息响应")}
+    return A.t("Message responses not enabled", "尚未启用消息响应")
 }
 A.open_agent_control = fn(assignment,name){
     if H.busy || !A.control_enabled() {return}
-    H.control_assignment=assignment H.control_agent_name=name H.agent_control=nil H.page="agent_control"
+    H.control_assignment=assignment H.control_agent_name=name H.agent_control=nil H.control_poll_pool=false H.page="agent_control"
     A.request("hagency.agents.control.readiness",{assignmentId:assignment},fn(data){
         if data.readiness.control.assignmentId != H.control_assignment {H.notice=A.t("The reply setting belongs to another assignment. Refresh to check again.","回复设置属于其他分配，请刷新后重试。") return}
         H.agent_control=data
+        if H.pool_detail!=nil && H.pool_detail.assignmentId==assignment {
+            let id=H.pool_detail.id
+            A.request("hagency.pools.agents.get",{id:id},fn(v){if H.control_assignment==assignment && v.request.id==id{H.pool_detail=v.request}})
+        }
     })
 }
 A.set_agent_control = fn(mode){
@@ -7110,7 +7147,7 @@ A.pool_glossary=fn(){
         {key:"workspace" term:A.t("Workspace","工作区") gist:A.t("The folder an Agent works in","Agent 干活用的文件夹") text:A.t("The folder on this computer where an Agent reads and writes its project’s files. When a task stops unexpectedly, it’s marked so you check it before it’s used again.","Agent 在这台电脑上读写项目文件的文件夹。任务意外停止后它会被标记，你看过后才能再用。")},
         {key:"room" term:A.t("Approval chat","审批对话") gist:A.t("Where an Agent asks before using a tool","Agent 用工具前来问你的聊天") text:A.t("A chat with only you and one Agent. When it wants to use a tool that needs your OK, it asks you there. It’s set up for you and rarely needs changing.","只有你和一个 Agent 的聊天。它要用需要你同意的工具时，会在这里问你。它是自动建好的，一般不用管。")},
         {key:"intro" term:A.t("Public introduction","公开介绍") gist:A.t("What applicants can read about a pool","申请者能看到的资源池介绍") text:A.t("An optional description of the pool for people looking for one: its roles and how much it is used a day. It doesn’t limit anything; people on your list can request either way.","可选的资源池说明，给正在找资源池的人看：它能做什么、每天大约用多少。它不限制任何东西；名单上的人不管公开不公开都能申请。")},
-        {key:"m" term:"1 M" gist:A.t("One million tokens","100 万 token") text:A.t("Tokens are how model use is counted. Amounts are Hagency’s records, not the provider’s balance. Pools on one account share its account limit.","token 是模型用量的计算单位。额度来自 Hagency 的记录，不是服务商余额。同一账号下的资源池共用账号上限。")}
+        {key:"m" term:"1 M" gist:A.t("One million tokens","100 万 token") text:A.t("Tokens are how model use is counted. Amounts are Hagency’s records, not the provider’s balance. Each pool’s limits are set by its owner.","token 是模型用量的计算单位。额度来自 Hagency 的记录，不是服务商余额。每个资源池的上限由其 owner 设置。")}
     ]
 }
 A.glossary_toggle=fn(key){H.glossary_open=if H.glossary_open==key {""} else {key} A.redraw()}
@@ -7606,7 +7643,7 @@ A.saved_label = fn(operation){
     if A.is_task_operation(operation){return A.t("Saved task change", "已保存的任务更改")}
     if A.topup_operation(operation) {return A.t("Agent budget request", "Agent 额度申请")}
     if operation == "agent_settlement_request" {return A.t("Agent accounting recheck", "Agent 重新核算")}
-    if operation == "agent_run_control" {return A.t("Automatic reply setting", "自动回复设置")}
+    if operation == "agent_run_control" {return A.t("Message response setting", "消息响应设置")}
     if operation == "login_account" {return A.t("Provider sign-in", "模型服务登录")}
     if operation == "retire_account" {return A.t("Retire account space","停用账号空间")}
     if operation == "prepare_account" {return A.t("Prepare provider account", "准备模型服务账号")}
@@ -8227,8 +8264,14 @@ A.local_pool_state=fn(r){
     if r.state=="revoked" {return A.t("Stopped","已停止")}
     if r.state=="expired" {return A.t("Expired","已过期")}
     if r.reservationState=="refused" {return A.t("Not enough capacity","容量不足")}
-    if r.runtimeState=="qualified" {return A.t("Ready to start","可以启动")}
-    if r.membershipState=="matrix_verified" {return A.t("Approved · not started","已批准 · 待启动")}
+    if r.runtimeState=="pending" {return A.t("Waiting for execution device","等待执行设备")}
+    if r.runtimeState=="issued" {return A.t("Starting","正在启动")}
+    if r.runtimeState=="qualified" {return A.t("Process started · last reported","进程已启动 · 最近记录")}
+    if r.runtimeState=="stopped" {return A.t("Execution stopped","执行已停止")}
+    if r.runtimeState=="failed" || r.runtimeState=="refused" {return A.t("Start failed","启动失败")}
+    if r.runtimeState=="cleanup_pending" || r.runtimeState=="fenced" {return A.t("Stopping","正在停止")}
+    if r.runtimeState=="outcome_unknown" {return A.t("Execution status unknown","执行状态未知")}
+    if r.membershipState=="matrix_verified" {return A.t("Approved","已批准")}
     return A.t("Approved · setting up","已批准 · 正在准备")
 }
 A.page_bar_visible=fn(){return (H.page=="wizard" && H.wizard.step==3) || H.page=="personal_agent" || H.page=="personal_model" || H.page=="pool_agent" || H.page=="resource_detail" || (H.page=="pool_create" && H.pool_create!=nil) || (H.page=="resource_edit" && H.resource_edit_draft!=nil && H.resource_detail!=nil) || (H.page=="resource_create" && H.resource_create_draft!=nil && H.resource_detail!=nil) || A.sub_page()}
@@ -8418,8 +8461,8 @@ A.open_pool_agent=fn(id){
     A.request("hagency.pools.agents.get",{id:id},fn(v){H.pool_detail=v.request})
 }
 A.pool_tone=fn(r){
-    if r.state=="rejected" || r.reservationState=="refused" || r.blockingReason!=nil {return "attention"}
-    if r.state=="cancelled" || r.state=="revoked" || r.state=="expired" {return ""}
+    if r.state=="rejected" || r.reservationState=="refused" || r.blockingReason!=nil || r.runtimeState=="failed" || r.runtimeState=="refused" || r.runtimeState=="outcome_unknown" {return "attention"}
+    if r.state=="cancelled" || r.state=="revoked" || r.state=="expired" || r.runtimeState=="stopped" {return ""}
     if r.state=="pending_approval" {return "waiting"}
     if r.runtimeState=="qualified" {return "elsewhere"}
     return "waiting"
@@ -8448,12 +8491,23 @@ A.pool_state=fn(r){
     return A.t("Approved · waiting for resource device","已批准 · 等你的电脑确认")
 }
 A.pool_begin=fn(pool){
-    if H.busy || H.command!=nil || !pool.canRequest{return}
-    if H.pool_draft!=nil {A.navigate("pool_apply") return}
-    H.pool_draft={pool:pool name:"" description:"" capability:"" tokens:"1000" roomCommand:"" roomId:"" review:false}
+    if !A.pool_editable() || !pool.canRequest{return}
+    let previous=H.pool_draft
+    // A room creation already has an identity to recover. Never retarget it.
+    if previous!=nil && previous.pool.id!=pool.id && previous.roomCommand!="" {
+        A.navigate("pool_apply")
+        H.notice=A.t("Finish the existing request for ","请先完成已有申请：")+previous.pool.label+A.t(" before requesting another pool.","，再申请其他资源池。")
+        A.redraw() return
+    }
+    // Detach from any pending lookup callback, and use the pool the person clicked.
+    H.pool_draft=if previous==nil {{pool:pool name:"" description:"" capability:"" tokens:"1000" roomCommand:"" roomId:"" review:false}} else {previous.to_json().parse_json()}
+    let d=H.pool_draft
+    d.pool=pool d.review=false d.failure=nil
     H.pool_checked=true
-    let limit=A.pool_limit(pool) if limit!=nil {H.pool_draft.tokens=""+min(1000,limit)}
-    if pool.capabilities.len()>0{H.pool_draft.capability=pool.capabilities[0]}
+    let limit=A.pool_limit(pool) if previous==nil && limit!=nil {d.tokens=""+min(1000,limit)}
+    let supported={yes:false}
+    for cap in pool.capabilities {if cap==d.capability {supported.yes=true}}
+    if !supported.yes {d.capability=if pool.capabilities.len()>0 {pool.capabilities[0]} else {""}}
     H.page="pool_apply" H.notice="" A.save() A.redraw()
 }
 A.pool_editable=fn(){
@@ -8489,10 +8543,19 @@ A.pool_amount_error=fn(d){
     if amount>limit{return A.t("Requested ","申请 ")+A.tokens(amount)+A.t(" tokens exceeds the limit of "," tokens，超过本次申请上限 ")+A.tokens(limit)+A.t(" tokens. Reduce the amount before submitting."," tokens。请调低额度后提交。")}
     return ""
 }
-A.pool_valid=fn(d){
-    if d==nil || d.name.trim()=="" || A.pool_amount_error(d)!=""{return false}
-    for cap in d.pool.capabilities {if cap==d.capability{return true}}
-    return false
+A.pool_form_error=fn(d){
+    if d==nil{return ""}
+    if d.name.trim()==""{return A.t("Enter an Agent name to continue.","请填写 Agent 名称后继续。")}
+    let supported={yes:false}
+    for cap in d.pool.capabilities {if cap==d.capability{supported.yes=true}}
+    if !supported.yes{return A.t("Select a capability supported by this pool.","请选择此资源池支持的能力。")}
+    return A.pool_amount_error(d)
+}
+A.pool_valid=fn(d){return d!=nil && A.pool_form_error(d)==""}
+A.pool_sync_validation=fn(){
+    let error=A.pool_form_error(H.pool_draft)
+    ui.pool_validation.set_text(error) ui.pool_validation.set_visible(error!="")
+    ui.pool_review.set_enabled(A.pool_valid(H.pool_draft))
 }
 A.pool_refresh=fn(){A.pool_lookup(fn(){if !A.pool_valid(H.pool_draft){H.pool_draft.review=false A.save()}})}
 A.pool_lookup=fn(done){
@@ -8569,7 +8632,7 @@ A.pool_sync_amount=fn(){
     ui.pool_slider.set_value(if limit!=nil && limit>0{max(0,min(1,amount/limit))}else{0})
     ui.pool_amount_error.set_text(error) ui.pool_amount_error_box.set_visible(error!="")
     ui.pool_failure_box.set_visible(false)
-    ui.pool_review.set_enabled(A.pool_valid(H.pool_draft))
+    A.pool_sync_validation()
 }
 
 A.render_page = fn(){
@@ -8936,7 +8999,7 @@ A.render_page = fn(){
             }
             pool_editor := mod.widgets.HagencyFormGroup{visible:!d.review
                     mod.widgets.HagencyFieldLabel{text:A.t("Agent name","Agent 名称")}
-                    pool_name := mod.widgets.HagencyInput{text:d.name is_read_only:!editable || d.roomCommand!="" on_change:|s|{if A.pool_editable() && d.roomCommand=="" {d.name=s A.save() ui.pool_review.set_enabled(A.pool_valid(H.pool_draft))}}}
+                    pool_name := mod.widgets.HagencyInput{text:d.name is_read_only:!editable || d.roomCommand!="" on_change:|s|{if A.pool_editable() && d.roomCommand=="" {d.name=s A.save() A.pool_sync_validation()}}}
                     mod.widgets.HagencyFieldLabel{text:A.t("Instructions","说明")}
                     pool_description := mod.widgets.HagencyInput{text:d.description is_read_only:!editable on_change:|s|{if A.pool_editable(){d.description=s A.save()}}}
                     mod.widgets.HagencyFieldLabel{text:A.t("Capability","能力")}
@@ -8981,6 +9044,7 @@ A.render_page = fn(){
                 mod.widgets.HagencyHint{text:A.t("This is the request ceiling, not a confirmed reservation. Actual available capacity is checked after owner approval.","这是申请上限，额度尚未预留；owner 批准后还需确认实际可用容量。")}
             }
             pool_room_hint := mod.widgets.HagencyHint{visible:d.roomId!="" text:A.t("The existing conversation will be reused for this application.","此申请将继续使用已创建的聊天房间。")}
+            pool_validation := mod.widgets.HagencyCopy{visible:A.pool_form_error(d)!="" text:A.pool_form_error(d) draw_text.color:mod.widgets.RINX_DANGER_FG}
             pool_actions := mod.widgets.HagencyActions{
 
                 pool_review := mod.widgets.RinxKeyPrimaryButton{visible:!d.review text:A.t("Review request","核对申请") enabled:editable && A.pool_valid(d) on_click:||A.pool_review()}
@@ -9120,7 +9184,10 @@ A.render_page = fn(){
                 }
                 mod.widgets.HagencyHint{width:Fit text:if owner {A.reqs_line(r)} else {A.t("Project Agent","项目 Agent")}}
                 if next {View{width:Fit height:Fit padding:Inset{top:4}
-                    pool_agent_start := mod.widgets.HagencyCapsule{text:A.t("Turn On Execution","开启执行") draw_icon.svg:mod.rinx_icons.power enabled:!H.busy && !alert on_click: || A.open_agent_control(r.assignmentId,r.definition.name)}
+                    pool_agent_start := mod.widgets.HagencyCapsule{text:A.t("Message response settings","消息响应设置") draw_icon.svg:mod.rinx_icons.power enabled:!H.busy && !alert on_click: || A.open_agent_control(r.assignmentId,r.definition.name)}
+                }}
+                if owner && r.assignmentId!=nil && r.resourceOwnerMxid==H.session.account && r.reservationState=="reserved" {View{width:Fit height:Fit padding:Inset{top:4}
+                    pool_agent_permissions := mod.widgets.HagencyCapsule{text:A.t("Agent Permissions","Agent 权限") draw_icon.svg:mod.rinx_icons.lock enabled:!H.busy && !alert && H.command==nil on_click: || A.pool_agent_permissions(r,"")}
                 }}
                 if refused && remove {View{width:Fit height:Fit padding:Inset{top:4}
                     pool_agent_reapply := mod.widgets.HagencyCapsule{text:A.t("Request Again","重新申请") draw_icon.svg:mod.rinx_icons.add enabled:!H.busy && !alert on_click: || A.navigate("pools")}
@@ -9238,7 +9305,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyListValue{text:if owner {A.sub_person(r.resourceOwnerMxid)} else {A.pool_person(r.resourceOwnerMxid)}}
                 }
             }
-            if control && r.membershipState=="matrix_verified" {mod.widgets.HagencyListNote{text:A.t("Turn on auto-reply in Execution, then send it work in the “"+r.definition.name+"” chat.","在「执行设置」中开启自动回复后，即可在「"+r.definition.name+"」会话中派发任务。")}}
+            if control && r.membershipState=="matrix_verified" {mod.widgets.HagencyListNote{text:A.t("Turn on message responses in Execution, then send it work in the “"+r.definition.name+"” chat.","在「执行设置」中开启消息响应后，即可在「"+r.definition.name+"」会话中派发任务。")}}
 
             if remove || stop {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:12}
                 mod.widgets.HagencyList{mod.widgets.HagencyListRow{
@@ -9620,7 +9687,7 @@ A.render_page = fn(){
                         }
                     }
                 }}}}}
-                mod.widgets.HagencyListNote{text:A.t("Pools on one account share its limit. 1 M is one million tokens.","同一账号下的资源池共用账号上限；1 M 即 100 万 token。")}
+                mod.widgets.HagencyListNote{text:A.t("Each pool uses the limits set by its owner. 1 M is one million tokens.","每个资源池使用 owner 设置的上限；1 M 即 100 万 token。")}
             }}
             if !(!H.owner.poolsReady && H.busy) {View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:8}
                 mod.widgets.HagencyListLabel{text:A.t("DEVICE","设备")}
@@ -10682,11 +10749,11 @@ A.render_page = fn(){
                         enrollment_preset := mod.widgets.HagencyChoice{text:A.tokens(amount) enabled:!H.busy && H.command==nil on_click:||{A.enrollment_tokens_changed(""+amount) ui.enrollment_tokens.set_text(""+amount)}}
                     }}
                 }
-                mod.widgets.HagencyHint{text:if sourceRequired{A.t("This is the pool's own limit. The existing shared account limit stays unchanged; available capacity is constrained by both limits.","这是此资源池的上限，不会提高账号已有的共享上限；实际可用容量同时受两项上限约束。")}else{A.t("Resources using the same provider account share one declared limit. This number is not the provider’s remaining balance.","使用同一模型服务账号的资源共享一个声明上限；此数值不是服务商的剩余额度。")}}
+                mod.widgets.HagencyHint{text:if sourceRequired{A.t("Set the monthly maximum for this pool. Other pools keep their own limits.","在这里设置此资源池的每月上限，其他资源池保留各自的上限。")}else{A.t("Each pool uses the monthly maximum set by its owner. This number is not the provider’s remaining balance.","每个资源池使用 owner 设置的每月上限；此数值不是服务商的剩余额度。")}}
             }
             mod.widgets.HagencySection{
                 mod.widgets.HagencySectionTitle{text:A.t("What happens next","下一步")}
-                mod.widgets.HagencyCopy{text:if sourceRequired{A.t("Create a separate resource pool using this account's existing login and shared limit. The original pool and its published grants stay unchanged.","复用此账号的登录和共享上限，创建独立资源池。原有资源池及其已发布授权保持不变。")}else{A.t("Hagency verifies this account and model, then saves an unpublished resource. You can review it before requesting a connection to this Matrix server.","Hagency 将验证此账号与模型，并保存未发布的资源。你可以先检查资源，再申请连接到此 Matrix 服务器。")}}
+                mod.widgets.HagencyCopy{text:if sourceRequired{A.t("Create a separate resource pool using this account's existing login. The original pool and its published grants stay unchanged.","复用此账号的登录，创建独立资源池。原有资源池及其已发布授权保持不变。")}else{A.t("Hagency verifies this account and model, then saves an unpublished resource. You can review it before requesting a connection to this Matrix server.","Hagency 将验证此账号与模型，并保存未发布的资源。你可以先检查资源，再申请连接到此 Matrix 服务器。")}}
                 enrollment_review := mod.widgets.RinxKeyPrimaryButton{enabled:!H.busy && H.command==nil && (!sourceRequired || source!=nil) text:A.t("Review in Hagency","在 Hagency 中确认") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.resources on_click: || A.enroll_account()}
             }
         }}
@@ -11230,7 +11297,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyListTitle{text:A.t("Full trust (unrestricted)","完全信任（不受限）") draw_text.color:if codex {mod.widgets.RINX_WARNING_FG} else {mod.widgets.RINX_MUTED}}
-                                mod.widgets.HagencyWrapSubtitle{text:if codex {A.t("Can use files outside its workspace and the network without asking","可使用工作区以外的文件和网络，且不再请求批准")} else {A.t("Only available for Codex Agents","仅 Codex Agent 可以使用")}}
+                                mod.widgets.HagencyWrapSubtitle{text:if codex {A.t("Can run commands, use files and access the network without asking; web search is controlled separately","运行命令、读写文件和命令联网无需审批；联网搜索单独设置")} else {A.t("Only available for Codex Agents","仅 Codex Agent 可以使用")}}
                             }
                             if full {mod.widgets.HagencyCheck{draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                         }
@@ -11238,6 +11305,18 @@ A.render_page = fn(){
                     }
                 }
                 mod.widgets.HagencyListNote{text:A.t("Changes apply when its next task starts; a task that is already running isn’t affected.","修改在下一个任务开始时生效，正在运行的任务不受影响。")}
+                if A.policy_web(row)!=nil {View{width:Fill height:Fit flow:Down spacing:6
+                    mod.widgets.HagencyListLabel{text:A.t("WEB SEARCH","联网搜索")}
+                    mod.widgets.HagencyList{mod.widgets.HagencySwitchRow{
+                        mod.widgets.HagencyRowIcon{mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.globe}}
+                        mod.widgets.HagencyListText{
+                            mod.widgets.HagencyListTitle{text:A.t("Live web search","联网搜索")}
+                            mod.widgets.HagencyWrapSubtitle{text:A.t("Search the web for up-to-date information and sources","搜索网页，获取最新信息和来源")}
+                        }
+                        policy_web_search := mod.widgets.HagencySwitch{draw_bg.selected:if A.policy_web(row) {1.0} else {0.0} enabled:!H.busy && H.command==nil && (H.policy_mode=="detail" || H.policy_mode=="result") on_click: || A.toggle_policy_web()}
+                    }}
+                    mod.widgets.HagencyListNote{text:A.t("Saved immediately for its next task. Works independently of file and command permissions.","切换后自动保存，下一个任务生效。与文件、命令权限独立。")}
+                }}
                 mod.widgets.HagencyListLabel{text:A.t("TOOLS","工具")}
                 mod.widgets.HagencyList{mod.widgets.HagencyListRow{
                     policy_grants := mod.widgets.HagencyListTap{enabled:!H.busy && H.command==nil && (H.policy_mode=="detail" || H.policy_mode=="result") on_click: || A.open_policy_grants()}
@@ -12366,7 +12445,7 @@ A.render_page = fn(){
                         if data.items.len()==0{mod.widgets.HagencyCopy{text:A.t("No provider accounts yet.","暂无模型服务账号。")}}
                         for row in data.items{mod.widgets.HagencySection{
                             mod.widgets.HagencySectionTitle{text:row.account.runtime+" · "+row.account.id}
-                            mod.widgets.HagencyCopy{text:A.t("Remaining / account quota","剩余 / 账号总额度")+" · "+if row.capacity==nil{A.t("Unknown","未知")}else{A.tokens(row.capacity.remainingTokens)+" / "+A.tokens(row.capacity.quotaTokens)}}
+                            mod.widgets.HagencyCopy{text:if row.capacity==nil || row.capacity.quotaTokens==nil {A.t("Limits are set per resource pool.","额度上限在各资源池中设置。")}else{A.t("Remaining / explicit account limit","剩余 / 已设置的账号上限")+" · "+A.tokens(row.capacity.remainingTokens)+" / "+A.tokens(row.capacity.quotaTokens)}}
                             mod.widgets.HagencyCopy{text:A.t("Used and given out","已用和已分出")+" · "+if row.capacity==nil{A.t("Unknown","未知")}else{A.tokens(row.capacity.committedTokens)}}
                             mod.widgets.HagencyHint{text:A.t("Account resources","账号资源")+" · "+A.amount(row.account.resourceCount)}
                             for index period amount in row.declaredByPeriod{mod.widgets.HagencyCopy{text:A.t("Declared resource limits","声明的资源上限")+" · "+period.to_string()+" · "+A.tokens(amount)}}
@@ -14374,7 +14453,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 }}
                 if d.limitMode=="clear" {mod.widgets.HagencyListSubtitle{text:A.t("Until a maximum is set, Agents can’t request this pool. You can set it later on the pool’s page.","设好每月上限之前，Agent 不能申请这个资源池。以后可以在资源池页面设置。")}}
             }}
-            mod.widgets.HagencyListNote{text:A.t("1 M is one million tokens. Both pools share the account’s limit. Next, connect the new pool to a server and publish it from its page.","1 M 即 100 万 token。两个资源池共用账号上限。创建后，在新资源池页面连接服务器并发布。")}
+            mod.widgets.HagencyListNote{text:A.t("1 M is one million tokens. Set the new pool’s own monthly maximum. Next, connect it to a server and publish it from its page.","1 M 即 100 万 token。请设置新资源池自己的每月上限。创建后，在新资源池页面连接服务器并发布。")}
         }}}
         if H.page=="personal_model"{View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{top:18 bottom:28}
             let p=H.personal_config
@@ -14947,7 +15026,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 mod.widgets.HagencySectionTitle{text:request.definition.name}
                 mod.widgets.HagencyActions{status_budget_open := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Budget and top-ups", "额度与追加") on_click: || A.open_agent_budget(request.id,request.definition.name,nil,1)}}
                 if A.control_enabled() && status.assignment.record != nil {mod.widgets.HagencyActions{
-                    agent_control_open := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Automatic replies", "自动回复") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.resources on_click: || A.open_agent_control(status.assignment.record.id,request.definition.name)}
+                    agent_control_open := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Message responses", "消息响应") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.resources on_click: || A.open_agent_control(status.assignment.record.id,request.definition.name)}
                 }}
                 mod.widgets.HagencyHint{text:A.t("Stages are read separately from the server and can advance between reads. Refresh for new observations.", "各阶段分别从服务器读取，状态可能在读取期间推进。请刷新获取最新状态。")}
                 mod.widgets.HagencySection{
@@ -15112,21 +15191,27 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 control_back := mod.widgets.HagencyButton{enabled:!H.busy text:if H.agent_id == "" {A.t("Overview", "概览")} else {A.t("Agent status", "Agent 状态")} icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.back on_click: || {if H.agent_id == "" {A.navigate("overview")} else {A.open_agent_status(H.agent_id)}}}
                 control_refresh := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Refresh setting", "刷新设置") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.refresh on_click: || A.open_agent_control(H.control_assignment,H.control_agent_name)}
             }
-            mod.widgets.HagencyTitle{text:A.t("Automatic replies", "自动回复")}
+            mod.widgets.HagencyTitle{text:A.t("Message responses", "消息响应")}
             mod.widgets.HagencySectionTitle{text:if H.control_agent_name == "" {H.control_assignment} else {H.control_agent_name}}
             if H.agent_control == nil {mod.widgets.HagencyCopy{text:if H.busy {A.t("Reading the current setting…", "正在读取当前设置…")} else {A.t("Refresh to read the current setting. A saved request must be recovered before making another change.", "请刷新读取当前设置。再次修改前，需要先恢复已保存的请求。")}}}
             if H.agent_control != nil {mod.widgets.HagencySection{
                 let r=H.agent_control.readiness
                 mod.widgets.HagencyCopy{text:A.control_mode_text(r.control.mode)}
+                if H.pool_detail!=nil && H.pool_detail.assignmentId==H.control_assignment {mod.widgets.HagencySection{
+                    mod.widgets.HagencyFieldLabel{text:A.t("Execution status","执行状态")}
+                    mod.widgets.HagencyCopy{text:A.local_pool_state(H.pool_detail)}
+                    mod.widgets.HagencyHint{text:A.t("Updates automatically. A stopped process can start again for a new message; work history shows whether a response was completed.","状态会自动更新。进程停止后，新消息仍可触发下一次执行；是否已完成回答请查看任务记录。")}
+                    control_work := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("View work history","查看任务记录") on_click: || A.open_agent_work(H.pool_detail.id,nil,1)}
+                }}
                 if H.agent_control.observedAtUtc != nil {mod.widgets.HagencyHint{text:A.t("Checked: ", "查询时间：")+H.agent_control.observedAtUtc}}
                 if !r.intakeEnabled || !r.automaticDeliveryEnabled {mod.widgets.HagencyHint{text:A.t("Automatic processing is disabled on the server. This saved setting does not mean replies can run now.","服务器已关闭自动处理。此已保存设置不代表当前可以执行回复。")}}
                 if r.runBlockingReason != nil && r.runBlockingReason != "already_running" {mod.widgets.HagencyHint{text:A.control_reason(r.runBlockingReason)}}
                 if H.command == nil {mod.widgets.HagencyActions{
-                    if r.canRun {View{width:Fit height:Fit control_run := mod.widgets.RinxKeyPrimaryButton{enabled:!H.busy text:A.t("Enable automatic replies", "启用自动回复") on_click: || A.set_agent_control("running")}}}
-                    if r.canStop {View{width:Fit height:Fit control_pause := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Pause automatic replies", "暂停自动回复") on_click: || A.set_agent_control("paused")}}}
+                    if r.canRun {View{width:Fit height:Fit control_run := mod.widgets.RinxKeyPrimaryButton{enabled:!H.busy text:A.t("Enable message responses", "启用消息响应") on_click: || A.set_agent_control("running")}}}
+                    if r.canStop {View{width:Fit height:Fit control_pause := mod.widgets.HagencyButton{enabled:!H.busy text:A.t("Pause message responses", "暂停消息响应") on_click: || A.set_agent_control("paused")}}}
                 }}
-                mod.widgets.HagencyHint{text:A.t("When enabled, approved messages can be processed while this mini app is closed. The executor must remain connected with available budget.","启用后，即使关闭此小程序，获准的消息仍可继续处理。执行设备需要保持连接，并有可用额度。")}
-                mod.widgets.HagencyHint{text:A.t("This setting does not show whether a process is running. Check agent status and work history for recorded execution and usage.","此设置不表示进程正在运行。请查看 Agent 状态和任务历史，了解已记录的执行情况与用量。")}
+                mod.widgets.HagencyHint{text:A.t("When enabled, messages addressed to this Agent trigger model responses. The execution device needs to be online with available budget. Closing this mini app does not pause processing.","启用后，发给此 Agent 的消息会触发模型回答。执行设备需要在线且有可用额度；关闭此小程序不影响处理。")}
+                mod.widgets.HagencyHint{text:A.t("This switch controls whether the Agent accepts messages. Check work history for actual execution and usage.","此开关控制 Agent 是否接收消息。实际执行情况与用量请查看任务记录。")}
             }}
         }}
         if H.page == "agent_removals" {mod.widgets.HagencyDetailCard{

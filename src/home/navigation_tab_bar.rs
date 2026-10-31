@@ -20,7 +20,7 @@
 //! 5. ----- separator -----
 //!      SpacesBar content
 //! 6. ----- separator -----
-//! 7. Appearance, Account
+//! 7. Account (appearance is in Settings → Preferences)
 //!
 //! "New or Join" is not a rail button: it is the "+" beside the chat list's
 //! search field (see `rooms_sidebar`). Explore Rooms, which its menu opens,
@@ -301,7 +301,7 @@ script_mod! {
             }
 
             // The tools end at File Transfer, as far above this line as
-            // Appearance sits below the lower one.
+            // Account sits below the lower one.
             top_separator := mod.widgets.Separator {}
 
             CachedWidget {
@@ -312,10 +312,6 @@ script_mod! {
 
             // Bottom-left account menu button. The spaces bar above is height: Fill,
             // which pins this to the very bottom of the rail.
-            appearance_button := mod.widgets.NavigationTabButton {
-                tooltip_text: #(crate::i18n::tr("App appearance"))
-                icon.draw_icon.svg: ICON_APPEARANCE
-            }
             CachedWidget {
                 account_switcher_button := mod.widgets.AccountSwitcherButton {}
             }
@@ -691,9 +687,6 @@ impl Widget for NavigationTabBar {
             if self.view.navigation_bar_button(cx, ids!(file_transfer_button)).clicked(actions) {
                 cx.action(crate::moments::ui::MomentsAction::FileTransfer);
             }
-            if self.view.navigation_bar_button(cx, ids!(appearance_button)).clicked(actions) {
-                cx.action(crate::settings::appearance::OpenAppearance);
-            }
             if self.view.navigation_bar_button(cx, ids!(toggle_spaces_bar_button)).clicked(actions) {
                 self.is_spaces_bar_shown = !self.is_spaces_bar_shown;
                 cx.action(NavigationBarAction::ToggleSpacesBar);
@@ -742,7 +735,6 @@ impl Widget for NavigationTabBar {
             (ids!(moments_button), crate::i18n::tr("Moments")),
             (ids!(octoscript_apps_button), crate::i18n::tr("Mini apps")),
             (ids!(file_transfer_button), crate::i18n::tr("File Transfer")),
-            (ids!(appearance_button), crate::i18n::tr("App appearance")),
             (ids!(account_switcher_button), crate::i18n::tr("Account")),
         ] {
             if let Some(mut button) = self.view.navigation_bar_button(cx, id).borrow_mut() {
@@ -979,9 +971,9 @@ mod rail_tests {
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
 
     /// Every rail button below the avatar, top to bottom.
-    const BUTTONS: [&[LiveId; 1]; 7] = [
+    const BUTTONS: [&[LiveId; 1]; 6] = [
         ids!(home_button), ids!(contacts_button), ids!(moments_button), ids!(octoscript_apps_button),
-        ids!(file_transfer_button), ids!(appearance_button), ids!(account_switcher_button),
+        ids!(file_transfer_button), ids!(account_switcher_button),
     ];
 
     fn rail() -> (Cx, NavigationTabBar) {
@@ -1049,7 +1041,7 @@ mod rail_tests {
         draw(&mut cx, &mut bar);
         assert_eq!(bar.view.active_variant(), Some(id!(Desktop)));
         // New or Join is the "+" beside the chat list's search field now.
-        for gone in [ids!(new_or_join_button), ids!(add_room_button)] {
+        for gone in [ids!(new_or_join_button), ids!(add_room_button), ids!(appearance_button)] {
             assert!(bar.view.widget(&mut cx, gone).is_empty(), "{gone:?} is not on the rail");
         }
 
@@ -1091,13 +1083,13 @@ mod rail_tests {
             assert!((gap - 4.0).abs() < 0.5, "even steps through the tools: {pair:?}");
         }
         // File Transfer closes the group exactly as far above the upper line as
-        // Appearance sits below the lower one, so no gap is left where + was.
+        // Account sits below the lower one, with no gap for removed shortcuts.
         let file_transfer = tools[4];
         let top = rect(&mut cx, &bar, ids!(top_separator));
         let bottom = rect(&mut cx, &bar, ids!(bottom_separator));
-        let appearance = rect(&mut cx, &bar, ids!(appearance_button));
+        let account = rect(&mut cx, &bar, ids!(account_switcher_button));
         let above_line = top.pos.y - (file_transfer.pos.y + file_transfer.size.y);
-        let below_line = appearance.pos.y - (bottom.pos.y + bottom.size.y);
+        let below_line = account.pos.y - (bottom.pos.y + bottom.size.y);
         assert!(above_line > 0.0 && (above_line - below_line).abs() < 0.5, "{above_line} above the upper line, {below_line} below the lower one");
         assert!(top.size.y > 0.0 && top.size.y < 4.0 && bottom.pos.y > top.pos.y, "two hairlines frame the spaces: {top:?} {bottom:?}");
     }
@@ -1105,9 +1097,8 @@ mod rail_tests {
     #[test]
     fn short_windows_keep_every_rail_button_on_screen_and_at_least_44_points() {
         // A 600-point window still has room for full 64-point buttons; shorter
-        // ones share the shortfall evenly instead of pushing Appearance and
-        // Account off the rail.
-        for (height, full) in [(800.0, true), (600.0, true), (560.0, false), (480.0, false)] {
+        // ones share the shortfall evenly instead of pushing Account off the rail.
+        for (height, full) in [(800.0, true), (600.0, true), (560.0, true), (480.0, false)] {
             let (mut cx, mut bar) = rail();
             draw_at(&mut cx, &mut bar, height);
             let mut above = 0.0;
@@ -1121,7 +1112,7 @@ mod rail_tests {
         }
         // Below that, targets stop at 44 points rather than shrinking further.
         let (mut cx, mut bar) = rail();
-        draw_at(&mut cx, &mut bar, 440.0);
+        draw_at(&mut cx, &mut bar, 400.0);
         for button in BUTTONS {
             let rect = rect(&mut cx, &bar, button);
             assert!((rect.size.y - 44.0).abs() < 0.5, "{button:?} {rect:?}");

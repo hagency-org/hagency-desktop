@@ -1586,6 +1586,7 @@ mod mini_apps_side_tests {
             WidgetRef::script_from_value(vm, value)
         });
         use crate::miniapps::window::MiniAppsWindowHostWidgetRefExt;
+        let host_widget = host.clone();
         let host = host.as_mini_apps_window_host();
         let surface = region.take_front(&mut cx).expect("the front tab");
         assert_eq!(surface.widget_uid(), management.widget_uid());
@@ -1593,6 +1594,37 @@ mod mini_apps_side_tests {
         assert_eq!(host.surface_key(&mut cx), Some(SurfaceKey::Management));
         assert_eq!(region.tabs(), vec![tabs[0]]);
         assert!(panel.is_open(), "popping out keeps the app running and its lease");
+
+        // The explicit Dock back button moves the same running surface home.
+        let first_window = host.window_id().unwrap();
+        let dock_back = host_widget.widget(&mut cx, ids!(mini_apps_window.dock_back)).widget_uid();
+        let clicked = cx.capture_actions(|cx| cx.widget_action(dock_back, ButtonAction::Clicked(KeyModifiers::default())));
+        let emitted = cx.capture_actions(|cx| host_widget.handle_event(cx, &Event::Actions(clicked), &mut Scope::empty()));
+        assert!(emitted.iter().any(|a| matches!(a.downcast_ref(), Some(crate::miniapps::window::MiniAppsWindowAction::DockBack(id)) if *id == first_window)));
+        assert!(host.take_for_dock(&mut cx, WindowId(999, 1)).is_none());
+        let returned = host.take_for_dock(&mut cx, first_window).expect("dock the running app");
+        assert_eq!(returned.widget_uid(), management.widget_uid());
+        assert!(host.take_for_dock(&mut cx, first_window).is_none(), "duplicate clicks do not transfer twice");
+        region.dock_surface(&mut cx, returned);
+        assert!(panel.is_open(), "docking keeps its lease and app state");
+        assert_eq!(region.key(&mut cx, region.selected().unwrap()), Some(SurfaceKey::Management));
+
+        // Reopen before the previous window's close notification arrives.
+        let surface = region.take_front(&mut cx).unwrap();
+        host.adopt(&mut cx, surface);
+        let second_window = host.window_id().unwrap();
+        assert_ne!(second_window, first_window);
+        host_widget.handle_event(&mut cx, &Event::WindowClosed(WindowClosedEvent {window_id: first_window}), &mut Scope::empty());
+        assert_eq!(host.window_id(), Some(second_window));
+        assert!(host.take_for_dock(&mut cx, first_window).is_none());
+        assert!(panel.is_open(), "an old window's close event cannot stop the moved app");
+        let returned = host.take_for_dock(&mut cx, second_window).unwrap();
+        region.dock_surface(&mut cx, returned);
+        host_widget.handle_event(&mut cx, &Event::WindowClosed(WindowClosedEvent {window_id: second_window}), &mut Scope::empty());
+        assert_eq!(host.window_id(), None);
+        assert!(panel.is_open(), "closing the empty native window preserves the docked app");
+        let surface = region.take_front(&mut cx).unwrap();
+        host.adopt(&mut cx, surface);
 
         // Popping out the other tab sends the first back, still running.
         let catalog = region.take_front(&mut cx).expect("the catalog tab");

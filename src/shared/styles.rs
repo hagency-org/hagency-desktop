@@ -272,6 +272,27 @@ script_mod! {
     }
 
 
+    // Chat scrollbars use a neutral rounded thumb, without a track or bevel.
+    // Keep the native proportional thumb and hit area for scrolling/dragging.
+    mod.widgets.ChatScrollBar = mod.widgets.ScrollBar {
+        bar_side_margin: 2.0
+        draw_bg +: {
+            size: uniform(5.0)
+            border_size: uniform(0.0)
+            border_radius: uniform(2.5)
+            color: uniform(mix(mod.widgets.RINX_SURFACE, mod.widgets.RINX_INK, 0.28))
+            color_hover: uniform(mix(mod.widgets.RINX_SURFACE, mod.widgets.RINX_INK, 0.45))
+            color_drag: uniform(mix(mod.widgets.RINX_SURFACE, mod.widgets.RINX_INK, 0.60))
+        }
+    }
+    // The conversation list uses wheel/touch scrolling, like SpacesList. The
+    // pane boundary owns the single resize grip; no parallel scrollbar target.
+    mod.widgets.ChatListScrollBar = mod.widgets.ChatScrollBar {
+        bar_size: 0.0
+        min_handle_size: 0.0
+        draw_bg +: {size: uniform(0.0)}
+    }
+
     // A text input widget styled for Rinx.
     mod.widgets.RobrixTextInput = TextInput {
         width: Fill, height: Fit

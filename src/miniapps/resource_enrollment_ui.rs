@@ -24,10 +24,10 @@ impl ProviderReview {
             Self::Retire(_)=>("Retire this account space","Hagency will stop using this account space on this device. It must have no associated resources or sign-in in progress.","This cannot be undone here. Provider sign-out is not performed, and credentials are not deleted. Existing resources and agents are not removed.","Retire account space"),
             Self::Enroll(_)=>("Enroll this account’s resource","Hagency will verify this account and model again, then save an unpublished resource on this device. Credentials stay with Codex.","The monthly limit is your declaration, not a provider balance. Resources using the same provider account share one limit. Enrollment does not publish capacity or start an agent.","Enroll resource"),
             Self::Create(v) if v.recovering() => ("Recover saved configuration creation","This original request already created a configuration. Recover its recorded result without creating another.","The recorded result identifies the new resource. Open its details to see its current configuration.","Recover saved result"),
-            Self::Create(_) => ("Add another pool","Hagency keeps the current pool as it is and creates a new one with the same account and account limit.","The new pool is saved on this computer. Offering it to a server and publishing capacity are separate steps. This doesn’t raise the account limit, sign in again or start an Agent.","Create pool"),
+            Self::Create(_) => ("Add another pool","Hagency keeps the current pool as it is and creates a separate pool using the same account.","Set the new pool’s monthly maximum here. Connecting it to a server and publishing capacity are separate steps.","Create pool"),
             Self::Edit(v) if v.recovering() => ("Recover saved resource edit","This original request was already saved. Recover its recorded result without applying another edit.","The recorded result describes that request. Refresh resource details to see the latest configuration.","Recover saved result"),
             Self::Edit(v) if v.amending() || v.amendment_requested() => resource_edit_ui::AMENDMENT_WORDS,
-            Self::Edit(_) => ("Change model settings","Hagency checks this account, model and pool again before saving.","This changes the pool on this computer for every profile that uses it. It doesn’t raise the account limit or hand out capacity. Clearing its maximum makes the available capacity unknown.","Save settings"),
+            Self::Edit(_) => ("Change model settings","Hagency checks this account, model and pool again before saving.","This changes the pool on this computer for every profile that uses it. Clearing its monthly maximum pauses new requests.","Save settings"),
         }
     }
     /// A monthly-maximum request: shown in its own sheet of the confirmation
@@ -114,7 +114,7 @@ mod tests {
             panel.view.label(&cx,ids!(provider_confirmation.scroll.heading.title)).set_text(&mut cx,crate::i18n::text_for(language,"Review resource configuration"));
             panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.account)).set_text(&mut cx,"@original-owner:matrix.example");
             panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&"account_0123456789abcdef0123456789abcdef\nModel and declared capacity\n".repeat(12));
-            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"This changes the resource on this device for every profile that uses it. It does not increase the shared account limit or allocate capacity. Clearing its limit leaves available capacity unknown."));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"This changes the pool on this computer for every profile that uses it. Clearing its monthly maximum pauses new requests."));
             panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,"Save configuration"));
             panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
             let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
@@ -173,7 +173,7 @@ mod tests {
             panel.view.label(&cx,ids!(provider_confirmation.scroll.heading.title)).set_text(&mut cx,crate::i18n::text_for(language,"Create an additional configuration"));
             panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.account)).set_text(&mut cx,"@original-owner:matrix.example");
             panel.view.label(&cx,ids!(provider_confirmation.scroll.identity.runtime)).set_text(&mut cx,&"account_0123456789abcdef0123456789abcdef\nModel and declared capacity\n".repeat(12));
-            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"The new configuration is published locally. Server admission and capacity allocation remain separate. This does not increase the account limit, verify sign-in or start an agent."));
+            panel.view.label(&cx,ids!(provider_confirmation.scroll.warning)).set_text(&mut cx,crate::i18n::text_for(language,"The new pool is saved on this computer. Connecting it to a server and publishing capacity remain separate steps."));
             panel.view.button(&cx,ids!(provider_confirmation.buttons.connect)).set_text(&mut cx,crate::i18n::text_for(language,"Create configuration"));
             panel.view.button(&cx,ids!(provider_confirmation.buttons.cancel)).set_text(&mut cx,crate::i18n::text_for(language,"Cancel"));
             let pass=DrawPass::new(&mut cx);pass.set_size(&mut cx,dvec2(width,height));let mut list=DrawList2d::new(&mut cx);
