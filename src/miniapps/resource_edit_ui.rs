@@ -307,10 +307,12 @@ pub(super) fn ceiling_view(s: &CeilingState) -> SheetView {
                     ),
                     Some(_) => String::new(),
                 };
-                // A value that can't be saved isn't described as if it would apply.
+                // A value that can't be saved isn't described as if it would apply,
+                // and the button doesn't name it: it keeps a plain name, disabled.
                 if !v.problem.is_empty() {
                     v.lead.clear();
                     v.after = Some(Figure::new(amount(value), tr("You chose")));
+                    v.primary = tr("Confirm Changes").into();
                 }
                 if s.reviewing {
                     v.status = tr("Checking this amount…").into();
@@ -912,6 +914,7 @@ mod tests {
             let view = preview(&fixture(json!({"chosen": chosen}))).unwrap();
             assert_eq!(view.problem, problem, "{chosen}");
             assert!(!view.primary_enabled, "{chosen}");
+            assert_eq!(view.primary, "Confirm Changes", "{chosen}");
             // A value that can't be saved isn't described as if it would apply.
             assert!(view.lead.is_empty(), "{chosen}: {}", view.lead);
             assert_eq!(view.after.clone().map(|f| f.tag), Some("You chose".to_owned()), "{chosen}");
