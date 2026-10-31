@@ -139,8 +139,9 @@ Agent 不限额不会绕过 Room／成员的有限额度或显式请求拒绝。
 **Chats** 保留搜索、附件、Room 信息、成员与邀请；**Contacts** 可发起普通聊天。
 **Mini apps** 保留非 Palpo 内置应用、App Hub、本地导入、权限审阅和受限运行。
 左侧栏的 **File Transfer**（文件传输助手）打开你的私密文件传输聊天（手机版在
-Discover 中）；**+**（New or Join，新建或加入）菜单包含 New workspace、
-New room or space、Join or explore rooms。**More** 中有 Discover、Explore rooms、
+Discover 中）。桌面版聊天列表搜索框右侧的 **+**（New or Join，新建或加入）菜单
+包含 New workspace、New room or space、Join or explore rooms；手机版的
+Explore Groups & Spaces 在 Discover 中。**More** 中有 Discover、Explore rooms、
 Moments、Article editor、Browser、Settings。
 
 设置分为 Account、Preferences、Privacy、About。通用外部 Agent Access／

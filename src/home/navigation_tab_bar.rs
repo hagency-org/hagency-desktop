@@ -14,13 +14,17 @@
 //!
 //! The order in Desktop view (vertically from top to bottom) is:
 //! 1. Profile/Settings
-//! 2. Home
+//! 2. Home (All Rooms)
 //! 3. Contacts, Moments, Mini apps
 //! 4. File Transfer (opens the same private File Transfer chat as before)
-//! 5. New or Join: a menu with New workspace, New room or space and
-//!    Join or explore rooms (see `sidebar_action_menu`)
-//! 6. ----- separator -----
+//! 5. ----- separator -----
 //!      SpacesBar content
+//! 6. ----- separator -----
+//! 7. Appearance, Account
+//!
+//! "New or Join" is not a rail button: it is the "+" beside the chat list's
+//! search field (see `rooms_sidebar`). Explore Rooms, which its menu opens,
+//! keeps Home marked, since it is reached from the chat list.
 //!
 
 use crate::theme::Snapshot as ThemeSnapshot;
@@ -28,7 +32,6 @@ use makepad_widgets::*;
 use serde::{Deserialize, Serialize};
 use crate::{
     home::account_menu::{is_desktop_layout, AccountMenuAction},
-    home::sidebar_action_menu::{SidebarMenuAction, SidebarMenuKind},
     avatar_cache::{self, AvatarCacheEntry},
     login::login_screen::LoginAction,
     logout::logout_confirm_modal::LogoutAction,
@@ -215,19 +218,9 @@ script_mod! {
         }
     }
 
-    // Opens the "New or Join" menu: New workspace, New room or space, and
-    // Join or explore rooms. Stays marked while the Explore Rooms page is open.
-    mod.widgets.NewOrJoinButton = mod.widgets.NavigationTabButton {
-        tooltip_text: #(crate::i18n::tr("New or Join"))
-        icon +: {
-            icon_walk: Walk{width: 20 height: 20}
-            draw_icon +: { svg: (ICON_ADD) }
-        }
-    }
-
     // The bottom rail item that opens the account menu (ported from robrix2). A plain
     // icon button, NOT a second ProfileIcon: the menu is an action, not the user's
-    // avatar, and this keeps the rail's icon language consistent with Home / "+".
+    // avatar, and this keeps the rail's icon language consistent with Home and the tools.
     // The top avatar keeps opening Settings directly.
     mod.widgets.AccountSwitcherButton = mod.widgets.NavigationTabButton {
         tooltip_text: #(crate::i18n::tr("Account"))
@@ -306,17 +299,16 @@ script_mod! {
                 tooltip_text: #(crate::i18n::tr("File Transfer"))
                 icon.draw_icon.svg: ICON_FILE
             }
-            CachedWidget {
-                new_or_join_button := mod.widgets.NewOrJoinButton {}
-            }
 
-            mod.widgets.Separator {}
+            // The tools end at File Transfer, as far above this line as
+            // Appearance sits below the lower one.
+            top_separator := mod.widgets.Separator {}
 
             CachedWidget {
                 root_spaces_bar := mod.widgets.SpacesBar {}
             }
 
-            mod.widgets.Separator {}
+            bottom_separator := mod.widgets.Separator {}
 
             // Bottom-left account menu button. The spaces bar above is height: Fill,
             // which pins this to the very bottom of the rail.
@@ -613,12 +605,11 @@ impl NavigationTabBar {
         }
         let home    = self.view.navigation_bar_button(cx, ids!(home_button));
         let contacts = self.view.navigation_bar_button(cx, ids!(contacts_button));
-        // "New or Join" stays marked while its Explore Rooms page is open.
-        let add     = self.view.navigation_bar_button(cx, ids!(new_or_join_button));
         let profile = self.view.profile_icon(cx, ids!(profile_icon));
-        home.set_selected(cx, self.selected_tab == SelectedTab::Home);
+        // Explore Rooms keeps Home marked: on desktop it is opened from the chat
+        // list's "New or Join" menu, so it belongs to Home (as mobile marks Discover).
+        home.set_selected(cx, matches!(self.selected_tab, SelectedTab::Home | SelectedTab::AddRoom));
         contacts.set_selected(cx, self.selected_tab == SelectedTab::Contacts);
-        add.set_selected(cx, self.selected_tab == SelectedTab::AddRoom);
         profile.set_selected(cx, matches!(self.selected_tab, SelectedTab::Settings | SelectedTab::Me));
         let chats_uid = self.view.navigation_bar_button(cx, ids!(chats_tab)).widget_uid();
         let palette = (chats_uid, self.selected_tab.clone());
@@ -668,16 +659,6 @@ impl Widget for NavigationTabBar {
             if self.view.navigation_bar_button(cx, ids!(home_button)).clicked(actions) {
                 self.apply_selected_tab(cx, Some(SelectedTab::Home));
                 cx.action(NavigationBarAction::GoToHome);
-            }
-            else if self.view.navigation_bar_button(cx, ids!(new_or_join_button)).clicked(actions) {
-                // Opens the "New or Join" menu beside the button, top-aligned with it.
-                // Only its "Join or explore rooms" row changes the selected tab
-                // (through the HomeScreen's `TabSelected`), so nothing is marked here.
-                let rect = self.view.widget(cx, ids!(new_or_join_button)).area().rect(cx);
-                cx.action(SidebarMenuAction::Open {
-                    kind: SidebarMenuKind::Add,
-                    pos: dvec2(rect.pos.x + rect.size.x + 4.0, rect.pos.y),
-                });
             }
             else {
                 // ProfileIcon's inner NavigationBarButton emits the click action,
@@ -761,7 +742,6 @@ impl Widget for NavigationTabBar {
             (ids!(moments_button), crate::i18n::tr("Moments")),
             (ids!(octoscript_apps_button), crate::i18n::tr("Mini apps")),
             (ids!(file_transfer_button), crate::i18n::tr("File Transfer")),
-            (ids!(new_or_join_button), crate::i18n::tr("New or Join")),
             (ids!(appearance_button), crate::i18n::tr("App appearance")),
             (ids!(account_switcher_button), crate::i18n::tr("Account")),
         ] {
@@ -841,7 +821,7 @@ pub enum NavigationBarAction {
     /// Go to the main rooms content view.
     GoToHome,
     /// Go to the Explore Rooms view (join, search or preview rooms).
-    /// On desktop it comes from the rail's "New or Join" menu.
+    /// On desktop it comes from the "New or Join" menu beside the chat list's search.
     GoToAddRoom,
     /// Leave Explore Rooms and restore the tab that opened it.
     CloseAddRoom,
@@ -993,9 +973,16 @@ impl Widget for HagencyAccountBar {
 #[cfg(test)]
 mod rail_tests {
     use super::*;
+    use crate::home::sidebar_action_menu::SidebarMenuAction;
     use crate::i18n::{text_for, Language};
     use crate::shared::navigation_bar_button::NavigationBarButtonAction;
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+
+    /// Every rail button below the avatar, top to bottom.
+    const BUTTONS: [&[LiveId; 1]; 7] = [
+        ids!(home_button), ids!(contacts_button), ids!(moments_button), ids!(octoscript_apps_button),
+        ids!(file_transfer_button), ids!(appearance_button), ids!(account_switcher_button),
+    ];
 
     fn rail() -> (Cx, NavigationTabBar) {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -1052,20 +1039,26 @@ mod rail_tests {
         inner.animator_in_state(cx, ids!(active.on))
     }
 
+    fn rect(cx: &mut Cx, bar: &NavigationTabBar, path: &[LiveId; 1]) -> Rect {
+        bar.view.widget(cx, path).area().rect(cx)
+    }
+
     #[test]
-    fn rail_has_file_transfer_and_one_new_or_join_entry() {
+    fn rail_ends_its_tools_at_file_transfer_without_new_or_join() {
         let (mut cx, mut bar) = rail();
         draw(&mut cx, &mut bar);
         assert_eq!(bar.view.active_variant(), Some(id!(Desktop)));
-        assert!(bar.view.widget(&mut cx, ids!(add_room_button)).is_empty(), "the old direct add-room button is replaced");
+        // New or Join is the "+" beside the chat list's search field now.
+        for gone in [ids!(new_or_join_button), ids!(add_room_button)] {
+            assert!(bar.view.widget(&mut cx, gone).is_empty(), "{gone:?} is not on the rail");
+        }
 
-        // Mini apps, then File Transfer, then New or Join: each a full rail target
-        // with a tooltip in the interface language (English in unit tests).
+        // Mini apps, then File Transfer: full rail targets with tooltips in the
+        // interface language (English in unit tests).
         let mut above = 0.0;
         for (button, english, chinese) in [
             (ids!(octoscript_apps_button), "Mini apps", "小应用"),
             (ids!(file_transfer_button), "File Transfer", "文件传输助手"),
-            (ids!(new_or_join_button), "New or Join", "新建或加入"),
         ] {
             let found = bar.view.navigation_bar_button(&mut cx, button);
             assert_eq!(found.borrow().expect("rail button exists").tooltip_text(), english);
@@ -1080,32 +1073,46 @@ mod rail_tests {
         let emitted = click(&mut cx, &mut bar, ids!(file_transfer_button));
         assert_eq!(emitted.iter().filter(|a| matches!(a.downcast_ref(), Some(crate::moments::ui::MomentsAction::FileTransfer))).count(), 1);
         assert!(!emitted.iter().any(|a| a.downcast_ref::<NavigationBarAction>().is_some() || a.downcast_ref::<SidebarMenuAction>().is_some()));
+        // No rail button opens the New or Join menu any more.
+        for button in BUTTONS {
+            let emitted = click(&mut cx, &mut bar, button);
+            assert!(!emitted.iter().any(|a| a.downcast_ref::<SidebarMenuAction>().is_some()), "{button:?} opens no sidebar menu");
+        }
+    }
 
-        // New or Join opens its menu beside the button instead of navigating.
-        let rect = bar.view.widget(&mut cx, ids!(new_or_join_button)).area().rect(&cx);
-        let emitted = click(&mut cx, &mut bar, ids!(new_or_join_button));
-        let menus: Vec<_> = emitted.iter().filter_map(|a| match a.downcast_ref() {
-            Some(SidebarMenuAction::Open {kind, pos}) => Some((*kind, *pos)),
-            _ => None,
-        }).collect();
-        assert_eq!(menus, vec![(SidebarMenuKind::Add, dvec2(rect.pos.x + rect.size.x + 4.0, rect.pos.y))]);
-        assert!(!emitted.iter().any(|a| a.downcast_ref::<NavigationBarAction>().is_some()), "the menu row, not the button, navigates");
+    #[test]
+    fn rail_groups_keep_even_spacing_without_new_or_join() {
+        let (mut cx, mut bar) = rail();
+        draw(&mut cx, &mut bar);
+        // The tools sit 4 points apart, Home to File Transfer.
+        let tools = [BUTTONS[0], BUTTONS[1], BUTTONS[2], BUTTONS[3], BUTTONS[4]].map(|button| rect(&mut cx, &bar, button));
+        for pair in tools.windows(2) {
+            let gap = pair[1].pos.y - (pair[0].pos.y + pair[0].size.y);
+            assert!((gap - 4.0).abs() < 0.5, "even steps through the tools: {pair:?}");
+        }
+        // File Transfer closes the group exactly as far above the upper line as
+        // Appearance sits below the lower one, so no gap is left where + was.
+        let file_transfer = tools[4];
+        let top = rect(&mut cx, &bar, ids!(top_separator));
+        let bottom = rect(&mut cx, &bar, ids!(bottom_separator));
+        let appearance = rect(&mut cx, &bar, ids!(appearance_button));
+        let above_line = top.pos.y - (file_transfer.pos.y + file_transfer.size.y);
+        let below_line = appearance.pos.y - (bottom.pos.y + bottom.size.y);
+        assert!(above_line > 0.0 && (above_line - below_line).abs() < 0.5, "{above_line} above the upper line, {below_line} below the lower one");
+        assert!(top.size.y > 0.0 && top.size.y < 4.0 && bottom.pos.y > top.pos.y, "two hairlines frame the spaces: {top:?} {bottom:?}");
     }
 
     #[test]
     fn short_windows_keep_every_rail_button_on_screen_and_at_least_44_points() {
-        let buttons = [
-            ids!(home_button), ids!(contacts_button), ids!(moments_button), ids!(octoscript_apps_button),
-            ids!(file_transfer_button), ids!(new_or_join_button), ids!(appearance_button), ids!(account_switcher_button),
-        ];
-        // The default window keeps the full 64-point buttons; shorter ones share
-        // the shortfall evenly instead of pushing Appearance and Account off the rail.
-        for (height, full) in [(800.0, true), (668.0, true), (600.0, false), (520.0, false)] {
+        // A 600-point window still has room for full 64-point buttons; shorter
+        // ones share the shortfall evenly instead of pushing Appearance and
+        // Account off the rail.
+        for (height, full) in [(800.0, true), (600.0, true), (560.0, false), (480.0, false)] {
             let (mut cx, mut bar) = rail();
             draw_at(&mut cx, &mut bar, height);
             let mut above = 0.0;
-            for button in buttons {
-                let rect = bar.view.widget(&mut cx, button).area().rect(&cx);
+            for button in BUTTONS {
+                let rect = rect(&mut cx, &bar, button);
                 assert!(rect.size.y >= 44.0 && rect.size.x >= 44.0, "{height}: {button:?} {rect:?}");
                 assert_eq!((rect.size.y - 64.0).abs() < 0.5, full, "{height}: {button:?} {rect:?}");
                 assert!(rect.pos.y >= above && rect.pos.y + rect.size.y <= height, "{height}: {button:?} is on the rail: {rect:?}");
@@ -1115,29 +1122,28 @@ mod rail_tests {
         // Below that, targets stop at 44 points rather than shrinking further.
         let (mut cx, mut bar) = rail();
         draw_at(&mut cx, &mut bar, 440.0);
-        for button in buttons {
-            let rect = bar.view.widget(&mut cx, button).area().rect(&cx);
+        for button in BUTTONS {
+            let rect = rect(&mut cx, &bar, button);
             assert!((rect.size.y - 44.0).abs() < 0.5, "{button:?} {rect:?}");
         }
     }
 
     #[test]
-    fn new_or_join_is_marked_while_explore_rooms_is_open() {
+    fn explore_rooms_keeps_all_rooms_marked() {
         let (mut cx, mut bar) = rail();
         draw(&mut cx, &mut bar);
         assert!(selected(&mut cx, &bar, ids!(home_button)));
-        // Opening the menu does not move the selection by itself.
-        click(&mut cx, &mut bar, ids!(new_or_join_button));
-        assert!(selected(&mut cx, &bar, ids!(home_button)) && !selected(&mut cx, &bar, ids!(new_or_join_button)));
-        // The HomeScreen confirms the Explore Rooms page; the rail marks New or Join.
+        // The HomeScreen confirms each page. Explore Rooms is opened from the chat
+        // list's New or Join menu, so All Rooms stays marked while it is open.
         for (tab, marked) in [
-            (SelectedTab::AddRoom, ids!(new_or_join_button)),
+            (SelectedTab::AddRoom, ids!(home_button)),
             (SelectedTab::Contacts, ids!(contacts_button)),
+            (SelectedTab::AddRoom, ids!(home_button)),
             (SelectedTab::Home, ids!(home_button)),
         ] {
             let confirmed = cx.capture_actions(|cx| cx.action(NavigationBarAction::TabSelected(tab.clone())));
             bar.handle_event(&mut cx, &Event::Actions(confirmed), &mut Scope::empty());
-            for button in [ids!(home_button), ids!(contacts_button), ids!(new_or_join_button), ids!(file_transfer_button)] {
+            for button in BUTTONS {
                 assert_eq!(selected(&mut cx, &bar, button), button == marked, "{tab:?}: {button:?}");
             }
         }

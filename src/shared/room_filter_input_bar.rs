@@ -7,12 +7,19 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    // The field's height: 35 points, taller with large text so the typed text
+    // always fits inside it (one line is up to about 1.9 times the font size
+    // with the system fonts, plus the input's and the field's padding). Whole
+    // points at the offered text sizes (35, 45, 55), so nothing lands between
+    // pixels. Buttons that sit beside it in one row (the desktop chat list's
+    // "New or Join") use it too, so the row reads as one unit.
+    mod.widgets.ROOM_FILTER_HEIGHT = max(35.0, 20.0 * mod.widgets.RINX_TEXT_SCALE + 15.0)
 
     mod.widgets.RoomFilterInputBar = set_type_default() do #(RoomFilterInputBar::register_widget(vm)) {
         ..mod.widgets.RoundedView
 
         width: Fill,
-        height: 35,
+        height: (mod.widgets.ROOM_FILTER_HEIGHT),
 
         show_bg: true,
         draw_bg +: {
