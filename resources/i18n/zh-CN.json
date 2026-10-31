@@ -2510,5 +2510,16 @@
   "Sharing Period and Technical Details": "共享期限和技术详情",
   "Choose when sharing ends under Sharing Period.": "请点「共享到」，选择什么时候结束共享。",
   "You were adding {people}.": "这次要添加 {people}。",
-  "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.": "可能已经生效，也可能没有。「再查一次」只会查看结果，不会重复修改。"
+  "It may or may not have taken effect. Check Again only looks at the result; it won’t make the change again.": "可能已经生效，也可能没有。「再查一次」只会查看结果，不会重复修改。",
+  "Select a person to add": "选择要添加的账号",
+  "Search by name or username": "搜索显示名称或用户名",
+  "Searching server accounts…": "正在搜索服务器上的账号…",
+  "Couldn’t load accounts. Press Search to try again.": "无法读取账号，请点「搜索」重试。",
+  "Press Search to find matching accounts.": "点「搜索」查找匹配的账号。",
+  "No additional local accounts found. Try an exact username.": "未找到其他本地账号，请尝试完整的用户名。",
+  "More accounts are available. Search by name to narrow the list.": "还有更多账号，请输入名称缩小搜索范围。",
+  "Choose a verified account to add. Already selected people are hidden.": "选择已核实的账号添加，已选账号不再重复显示。",
+  "An account on the list no longer exists. Remove it and search for the person again.": "名单中有账号已不存在，请移除后重新搜索。",
+  "Couldn’t verify people with the server. Your choices are kept. Try again when the connection is available.": "暂时无法向服务器核实账号。已保留你的选择，请在连接恢复后重试。",
+  "Type a username or display name to find people.": "输入用户名或显示名称查找好友。"
 }

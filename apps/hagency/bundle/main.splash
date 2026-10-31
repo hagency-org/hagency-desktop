@@ -5809,6 +5809,7 @@ A.pool_succeed=fn(kind,tokens,applicants){
     if tokens!=nil && !(tokens>=1 && tokens<=9007199254740991) {return}
     let rid=p.rid let cid=c.id
     let args={contributionId:cid succession:kind}
+    if H.page=="pool_who" {args.choosePeople=true}
     if tokens!=nil {args.proposedTokens=tokens}
     if applicants!=nil && applicants.len()>0 {args.applicants=applicants}
     H.pool_result=nil H.pool_offer=nil
@@ -5842,7 +5843,7 @@ A.pool_succeed_reply=fn(rid,cid,kind,r,applicants,ctx){
     // Adding people from Who Can Request stays on that page, with its own result.
     if H.page=="pool_who" {
         if !r.is_ok && applicants!=nil {note.v={tone:"attention" text:A.t("Not added: ","没有添加：")+A.pool_succession_error(r.error)}}
-        if r.is_ok && note.v!=nil && note.v.tone=="running" && applicants!=nil {
+        if r.is_ok && note.v!=nil && note.v.tone=="running" && applicants!=nil && applicants.len()>0 {
             let names={t:""} for i id in applicants {names.t=names.t+(if i>0 {A.t(", ","、")} else {""})+A.pool_person(id)}
             note.v={tone:"running" text:if applicants.len()==1 {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。对方现在就能申请。")} else {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。他们现在就能申请。")}}
             H.who.picks=[]
@@ -6727,9 +6728,9 @@ A.who_source=fn(v,mxid){
 }
 // What the page's main button does with the people picked.
 A.who_action=fn(v){
-    let n=A.who_count()
-    if v.quotaEditable {return {kind:"publish" label:A.pool_publish_label(v.now) note:if n>0 {A.t(""+n+" picked in advance; confirm the list in the window on this computer.","已先选好 "+n+" 人；在这台电脑的确认窗口里确认名单。")} else {A.t("You can also add people in the confirmation window.","也可以在确认窗口里再加人。")} ready:true}}
-    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单")+(if n>0 {A.t(" ("+n+")","（"+n+" 人）")} else {""}) note:if n>0 {A.t(""+n+" picked. Once you confirm in the window on this computer, they can request.","已选 "+n+" 人。在这台电脑的确认窗口里确认后，对方就能申请。")} else if A.who_candidates(v).len()>0 {A.t("Tick people above or type a username; they can request once you confirm in the window.","勾选上面的人，或输入用户名；在确认窗口里确认后，对方就能申请。")} else {A.t("Type a username; they can request once you confirm in the window.","输入用户名；在确认窗口里确认后，对方就能申请。")} ready:n>0}}
+    let note=A.t("Search real accounts on this server and choose who can request in the confirmation window.","在确认窗口里搜索此服务器上的真实账号，选择谁可以申请。")
+    if v.quotaEditable {return {kind:"publish" label:A.t("Choose People and Publish","选人并发布") note:note ready:true}}
+    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单") note:note ready:true}}
     return {kind:"" label:"" note:"" ready:false}
 }
 A.who_submit=fn(){
@@ -6737,11 +6738,10 @@ A.who_submit=fn(){
     let v=A.pool_view(H.resource_detail)
     let a=A.who_action(v)
     if !a.ready {return}
-    // The username typed is part of this one Add.
-    let typed=A.who_typed()
-    if typed!=nil && H.who.picks.len()<64 {H.who.picks.push(typed) H.who.name=""}
+    // Choose accounts in the native server-backed picker.
+    H.who.picks=[] H.who.name=""
     if a.kind=="publish" {A.pool_publish_quota() return}
-    if a.kind=="amend" && v.publishedTokens!=nil {A.pool_succeed("amendment",v.publishedTokens,H.who.picks)}
+    if a.kind=="amend" && v.publishedTokens!=nil {A.pool_succeed("amendment",v.publishedTokens,nil)}
 }
 // Picks to pre-select on this pool's next confirmation window, when this computer can.
 A.who_picks=fn(rid){
@@ -13547,35 +13547,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 }}
                 if !(v.published && l.state=="elsewhere") {mod.widgets.HagencyListNote{text:A.pool_who_rule(v)}}
                 if can_add {View{width:Fill height:Fit flow:Down spacing:6
-                    mod.widgets.HagencyListLabel{text:if action.kind=="amend" {A.t("ADD PEOPLE","添加可以申请的人")} else {A.t("PICK PEOPLE IN ADVANCE","预先选好可以申请的人")}}
-                    mod.widgets.HagencyList{
-                        for index mxid in people {View{width:Fill height:Fit flow:Down
-                            let picked=A.who_has(who.picks,mxid)
-                            if index>0 {mod.widgets.HagencyListDivider{}}
-                            mod.widgets.HagencyListFit{
-                                mod.widgets.HagencyListFitBody{
-                                    mod.widgets.HagencyRowIcon{draw_bg.color:if picked {mod.widgets.RINX_INFO_BG} else {mod.widgets.RINX_SELECTED} mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:if picked {mod.widgets.RINX_INFO_FG} else {mod.widgets.RINX_MUTED}}}
-                                    mod.widgets.HagencyListText{
-                                        mod.widgets.HagencyWrapTitle{text:A.pool_person(mxid)}
-                                        mod.widgets.HagencyListSubtitle{text:A.who_source(v,mxid)}
-                                    }
-                                    if picked {mod.widgets.HagencyPickOn{}}
-                                    if !picked {mod.widgets.HagencyPickOff{}}
-                                }
-                                pool_who_pick := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_toggle(mxid)}
-                            }
-                        }}
-                        if people.len()>0 && v.published && !listed {View{width:Fill height:Fit flow:Down
-                            mod.widgets.HagencyListDivider{margin:Inset{left:16}}
-                            View{width:Fill height:Fit padding:Inset{left:16 right:14 top:10 bottom:10} pool_who_maybe := mod.widgets.HagencyWrapSubtitle{text:A.t("While the list can’t be read, anyone already on it is marked in the confirmation window and isn’t added twice.","名单暂时读不到：已在名单里的人，确认窗口会标出来，不会重复添加。")}}
-                        }}
-                        if people.len()>0 {mod.widgets.HagencyListDivider{margin:Inset{left:16}}}
-                        View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:14 right:14 top:10 bottom:12}
-                            pool_who_name := mod.widgets.HagencyInput{width:Fill text:who.name empty_text:A.t("Someone else? Username, e.g. lisi","其他人？输入用户名，例如 lisi") on_change:|t|{A.who_typing(t)}}
-                            pool_who_name_hint := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()=="" text:A.who_name_hint()}
-                            pool_who_name_error := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()!="" text:A.who_name_bad() draw_text.color:mod.widgets.RINX_DANGER_FG}
-                        }
-                    }
+                    mod.widgets.HagencyListNote{text:A.t("The server checks the account before it can be added. You can search by display name or username.","添加前会向服务器核实账号。可以按显示名称或用户名搜索。")}
                     let added=H.pool_result!=nil && H.pool_result.tone=="running" && who.picks.len()==0
                     if added {View{width:Fill height:Fit padding:Inset{top:6} mod.widgets.HagencyResult{draw_bg.color:A.local_tone_bg("running")
                         mod.widgets.HagencyResultLine{

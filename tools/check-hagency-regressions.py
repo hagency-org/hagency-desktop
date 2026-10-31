@@ -53,6 +53,8 @@ def main():
         ("token-units", "token_unit_tests"),
         ("native-resource-units", "host::hagency::enrollment"),
         ("publication-host", "host::hagency::grants"),
+        ("whitelist-accounts", "host::hagency::grant_people"),
+        ("friend-search", "home::mobile::new_chat_tests"),
         ("publication-ui", "grant_ui::"),
         ("agent-chat", "agent_chat"),
         ("link-preview", "link_preview"),
