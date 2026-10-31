@@ -2171,6 +2171,8 @@
   "This preserves the legacy fleet allowance in this connection configuration.": "此操作在连接配置中保存旧版集群配额。",
   "Desktop does not enforce this legacy allowance. Current resource-pool allocations and approved grants are unchanged.": "桌面端不执行此旧版配额限制，不会更改当前资源池分配或已批准的授权。",
   "Back to Hagency": "返回 Hagency",
+  "Back to chat": "返回聊天",
+  "Open in a new window": "在新窗口中打开",
   "Local agents · Device and room settings": "本地 Agent · 设备与房间设置",
   "Matrix workspaces · Rooms, members and access": "Matrix 工作区 · 房间、成员与权限",
   "Matrix workspaces": "Matrix 工作区",

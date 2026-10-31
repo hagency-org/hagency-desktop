@@ -214,11 +214,19 @@ script_mod! {
                         }
                     }
                 }
+
+                // Mini apps open here, beside the chat (or over it when the
+                // window is too narrow for both). The same instance moves to
+                // the Mobile layout, so its tabs survive a layout switch.
+                CachedWidget {
+                    mini_apps_side := mod.widgets.MiniAppsSideRegion {}
+                }
             }
 
             Mobile := SolidView {
                 width: Fill, height: Fill
-                flow: Down
+                // Overlay: the mini-apps region covers the screen when shown.
+                flow: Overlay
 
                 show_bg: true
                 draw_bg.color: (COLOR_PRIMARY)
@@ -326,6 +334,10 @@ script_mod! {
                             }
                         }
                     }
+                }
+
+                CachedWidget {
+                    mini_apps_side := mod.widgets.MiniAppsSideRegion {}
                 }
             }
         }
@@ -445,6 +457,9 @@ pub struct HomeScreen {
 
     /// The last effective AdaptiveView mode we observed. `Some(true)` means desktop mode.
     #[rust] last_effective_is_desktop: Option<bool>,
+
+    /// The frame (redraw id) the mini-apps region was last laid out for.
+    #[rust] mini_apps_side_redraw: u64,
 }
 
 impl ScriptHook for HomeScreen {
@@ -728,7 +743,50 @@ impl Widget for HomeScreen {
             }
         }
 
+        // Lay out the mini-apps region once per frame: a draw resumed after a
+        // step runs in another turtle and must not measure again.
+        if self.mini_apps_side_redraw != cx.redraw_id {
+            self.mini_apps_side_redraw = cx.redraw_id;
+            let saved_width = app_state.mini_apps_width;
+            self.prepare_mini_apps_side(cx, walk, saved_width);
+        }
+
         self.view.draw_walk(cx, scope, walk)
+    }
+}
+
+impl HomeScreen {
+    /// Docks the mini-apps region beside the chat when the rooms list, the
+    /// chat's minimum and the region's minimum all fit; otherwise it shows
+    /// over the page (desktop) or over everything (mobile).
+    fn prepare_mini_apps_side(&mut self, cx: &mut Cx2d, walk: Walk, saved_width: Option<f64>) {
+        use crate::miniapps::side::{MiniAppsSideRegionWidgetExt, ROOMS_DEFAULT};
+        let side = self.view.mini_apps_side_region(cx, ids!(mini_apps_side));
+        if side.borrow().is_none() {
+            return;
+        }
+        let size = cx.peek_walk_turtle(walk).size;
+        // The variant this frame will draw, decided before the AdaptiveView draws it.
+        let desktop = (self.applied_view_mode.variant_selector())(cx, &size) == live_id!(Desktop);
+        let [rail, inset] = cx.with_vm(|vm| {
+            let widgets = vm.module(id!(widgets));
+            ["NAVIGATION_TAB_BAR_SIZE", "SAFE_INSET_PAD_LEFT"].map(|name| {
+                vm.bx.heap.value(widgets, LiveId::from_str(name).into(), NoTrap).as_number().unwrap_or(0.0)
+            })
+        });
+        let rooms = self.view.dock(cx, ids!(dock)).splitter_position(id!(root))
+            .filter(|width| *width > 0.0)
+            .unwrap_or(ROOMS_DEFAULT);
+        let covers = side.prepare(cx, size.x - rail - inset, rooms, desktop, saved_width);
+        // Only the desktop page beside the left bar gives way to an overlay;
+        // an unswitched Mobile variant this frame is never touched.
+        let page = self.view.widget(cx, ids!(Desktop.home_screen_page_flip));
+        if !page.is_empty() {
+            page.set_visible(cx, !covers);
+        } else if desktop {
+            // The Desktop layout is created by this frame's draw: lay out again next frame.
+            self.view.redraw(cx);
+        }
     }
 }
 
@@ -1141,5 +1199,415 @@ mod responsive_layout_tests {
             draw_pane(&mut cx, &mut home, &mut state, 375.0);
             assert_layout(&mut cx, &home, desktop);
         }
+    }
+}
+
+/// The docked mini-apps region beside the chat, in the desktop UI drawn offscreen.
+#[cfg(test)]
+mod mini_apps_side_tests {
+    use super::*;
+    use crate::hagency::ui::HagencyAction;
+    use crate::miniapps::{
+        MiniAppsAction,
+        side::{MiniAppsSideRegionRef, MiniAppsSideRegionWidgetExt, SideLayout, CHAT_MIN, HANDLE, SIDE_DEFAULT, SIDE_MIN},
+        surface::SurfaceKey,
+    };
+    use crate::shared::navigation_bar_button::NavigationBarButtonAction;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+
+    const HEIGHT: f64 = 800.0;
+
+    fn home(width: f64) -> (Cx, HomeScreen, AppState) {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        cx.display_context.screen_size = dvec2(width, HEIGHT);
+        let home = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, { mod.widgets.HomeScreen {} });
+            let home = HomeScreen::script_from_value(vm, value);
+            let errors = vm.take_errors();
+            assert!(errors.is_empty(), "Home screen registration: {errors:?}");
+            home
+        });
+        (cx, home, AppState::default())
+    }
+
+    /// Draws one frame and delivers what it emitted, as the event loop would.
+    fn frame(cx: &mut Cx, home: &mut HomeScreen, state: &mut AppState, width: f64) {
+        let emitted = cx.capture_actions(|cx| {
+            cx.redraw_all();
+            let pass = DrawPass::new(cx);
+            pass.set_size(cx, dvec2(width, HEIGHT));
+            let mut list = DrawList2d::new(cx);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            list.begin_always(&mut cx2d);
+            cx2d.begin_root_turtle(dvec2(width, HEIGHT), Layout::flow_overlay());
+            home.draw_walk_all(&mut cx2d, &mut Scope::with_data(state), Walk {
+                width: Size::Fixed(width),
+                height: Size::Fixed(HEIGHT),
+                ..Walk::default()
+            });
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        });
+        deliver(cx, home, state, emitted);
+    }
+
+    fn deliver(cx: &mut Cx, home: &mut HomeScreen, state: &mut AppState, actions: ActionsBuf) {
+        if !actions.is_empty() {
+            let more = cx.capture_actions(|cx| home.handle_event(cx, &Event::Actions(actions), &mut Scope::with_data(state)));
+            if !more.is_empty() {
+                home.handle_event(cx, &Event::Actions(more), &mut Scope::with_data(state));
+            }
+        }
+    }
+
+    fn side(cx: &mut Cx, home: &HomeScreen) -> MiniAppsSideRegionRef {
+        home.view.mini_apps_side_region(cx, ids!(mini_apps_side))
+    }
+
+    fn rect(cx: &mut Cx, home: &HomeScreen, path: &[LiveId]) -> Rect {
+        home.view.widget(cx, path).area().rect(cx)
+    }
+
+    /// Opens a chat tab the way the rooms list does.
+    fn open_chat(cx: &mut Cx, home: &mut HomeScreen, state: &mut AppState) -> SelectedRoom {
+        let room = SelectedRoom::JoinedRoom {
+            room_name_id: RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Design".into()), "!design:example.org".try_into().unwrap()),
+        };
+        let uid = home.view.widget(cx, ids!(rooms_list)).widget_uid();
+        let selected = cx.capture_actions(|cx| cx.widget_action(uid, RoomsListAction::Selected(room.clone())));
+        deliver(cx, home, state, selected);
+        room
+    }
+
+    /// The tab `main_tabs` shows, from the dock's own state.
+    fn main_tabs_selection(cx: &mut Cx, home: &HomeScreen) -> Option<LiveId> {
+        let dock = home.view.dock(cx, ids!(dock));
+        let (tabs_id, _) = dock.find_tab_bar_of_tab(id!(home_tab))?;
+        match dock.clone_state()?.get(&tabs_id)? {
+            DockItem::Tabs {tabs, selected, ..} => tabs.get(*selected).copied(),
+            _ => None,
+        }
+    }
+
+    fn click(cx: &mut Cx, home: &mut HomeScreen, state: &mut AppState, uid: WidgetUid) {
+        let clicked = cx.capture_actions(|cx| cx.widget_action(uid, NavigationBarButtonAction::Clicked));
+        deliver(cx, home, state, clicked);
+    }
+
+    #[test]
+    fn opening_mini_apps_docks_tabs_beside_the_chat_and_closing_the_last_hides_them() {
+        let width = 1440.0;
+        let (mut cx, mut home, mut state) = home(width);
+        frame(&mut cx, &mut home, &mut state, width);
+        frame(&mut cx, &mut home, &mut state, width);
+        let room = open_chat(&mut cx, &mut home, &mut state);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert_eq!(main_tabs_selection(&mut cx, &home), Some(room.tab_id()), "the chat is open in main_tabs");
+        let full_chat = rect(&mut cx, &home, ids!(dock));
+        let region = side(&mut cx, &home);
+        assert!(region.tabs().is_empty() && region.layout() == SideLayout::Hidden);
+
+        // The left bar's Mini apps: a side tab, while the chat stays selected and usable.
+        region.open(&mut cx, &MiniAppsAction::Open);
+        frame(&mut cx, &mut home, &mut state, width);
+        let catalog = region.tabs();
+        assert_eq!(catalog.len(), 1);
+        assert_eq!(region.selected(), catalog.first().copied());
+        assert_eq!(region.key(&mut cx, catalog[0]), Some(SurfaceKey::Catalog));
+        assert_eq!(region.layout(), SideLayout::Docked);
+        assert_eq!(main_tabs_selection(&mut cx, &home), Some(room.tab_id()), "the chat tab stays selected in main_tabs");
+        let dock = rect(&mut cx, &home, ids!(dock));
+        let docked = rect(&mut cx, &home, ids!(mini_apps_side));
+        assert!((docked.size.x - (SIDE_DEFAULT + HANDLE)).abs() < 1.0, "docked at its default width: {docked:?}");
+        assert!(dock.pos.x + dock.size.x <= docked.pos.x + 0.5, "beside the chat, not over it: {dock:?} {docked:?}");
+        assert!((docked.pos.x + docked.size.x - width).abs() < 1.0, "on the right edge: {docked:?}");
+        let chat = dock.size.x - 300.0;
+        assert!(chat >= CHAT_MIN && dock.size.x < full_chat.size.x, "the chat keeps its minimum: {dock:?}");
+        assert!(home.view.widget(&mut cx, ids!(Desktop.home_screen_page_flip)).visible());
+
+        // Reopening focuses the same tab.
+        region.open(&mut cx, &MiniAppsAction::Open);
+        assert_eq!(region.tabs(), catalog);
+
+        // Hagency management is its own item, in its own tab.
+        region.hagency_action(&mut cx, &HagencyAction::OpenProjects);
+        frame(&mut cx, &mut home, &mut state, width);
+        let tabs = region.tabs();
+        assert_eq!(tabs.len(), 2);
+        let management = tabs[1];
+        assert_eq!(region.selected(), Some(management));
+        assert_eq!(region.key(&mut cx, management), Some(SurfaceKey::Management));
+        region.hagency_action(&mut cx, &HagencyAction::OpenAgents);
+        assert_eq!(region.tabs(), tabs, "management opens again in its tab");
+        region.open(&mut cx, &MiniAppsAction::Open);
+        assert_eq!((region.tabs(), region.selected()), (tabs.clone(), Some(catalog[0])), "the catalog's tab is focused again");
+        assert_eq!(main_tabs_selection(&mut cx, &home), Some(room.tab_id()));
+
+        // Closing a tab stops its panel; closing the last hides the region and
+        // gives the chat its width back.
+        let panels: Vec<_> = tabs.iter().map(|id| region.surface(&mut cx, *id).panel(&mut cx)).collect();
+        assert!(panels.iter().all(|panel| panel.is_open()));
+        for (index, id) in tabs.iter().rev().enumerate() {
+            frame(&mut cx, &mut home, &mut state, width);
+            let strip = home.view.widget(&mut cx, ids!(mini_apps_side.frame.header.tabs));
+            let mut close = None;
+            strip.children(&mut |tab_id, tab| if tab_id == *id {
+                close = Some(tab.widget(&cx, ids!(close)).widget_uid());
+            });
+            click(&mut cx, &mut home, &mut state, close.expect("each tab has a close button"));
+            assert_eq!(region.tabs().len(), 1 - index);
+            assert!(!panels[tabs.len() - 1 - index].is_open(), "closing a tab stops its app and revokes its lease");
+        }
+        frame(&mut cx, &mut home, &mut state, width);
+        assert_eq!(region.layout(), SideLayout::Hidden);
+        assert!(!home.view.widget(&mut cx, ids!(mini_apps_side)).visible());
+        assert_eq!(rect(&mut cx, &home, ids!(dock)).size.x, full_chat.size.x);
+        assert_eq!(main_tabs_selection(&mut cx, &home), Some(room.tab_id()));
+    }
+
+    #[test]
+    fn a_tabs_own_back_on_its_catalog_closes_only_that_tab() {
+        let width = 1440.0;
+        let (mut cx, mut home, mut state) = home(width);
+        frame(&mut cx, &mut home, &mut state, width);
+        frame(&mut cx, &mut home, &mut state, width);
+        let region = side(&mut cx, &home);
+        region.hagency_action(&mut cx, &HagencyAction::OpenProjects);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        frame(&mut cx, &mut home, &mut state, width);
+        let tabs = region.tabs();
+        assert_eq!(tabs.len(), 2);
+        let catalog = tabs[1];
+        assert_eq!(region.key(&mut cx, catalog), Some(SurfaceKey::Catalog));
+        // The catalog panel's own Back, as the person taps it.
+        let back = home.view.widget(&mut cx, &[id!(mini_apps_side), catalog, id!(mini_apps_panel), id!(close)]).widget_uid();
+        let tapped = cx.capture_actions(|cx| cx.widget_action(back, ButtonAction::Clicked(KeyModifiers::default())));
+        let emitted = cx.capture_actions(|cx| home.handle_event(cx, &Event::Actions(tapped), &mut Scope::with_data(&mut state)));
+        assert_eq!(region.tabs(), vec![tabs[0]], "only its own tab closes");
+        assert_eq!(region.selected(), Some(tabs[0]));
+        assert!(!emitted.iter().any(|action| matches!(action.downcast_ref(), Some(MiniAppsAction::Close))),
+            "the app shell never sees it, so other tabs and the window stay open");
+    }
+
+    #[test]
+    fn a_window_too_narrow_for_both_shows_the_region_over_the_chat_with_back() {
+        // A desktop layout, but too narrow for the rooms list, the chat and the region.
+        let width = 1000.0;
+        let (mut cx, mut home, mut state) = home(width);
+        frame(&mut cx, &mut home, &mut state, width);
+        frame(&mut cx, &mut home, &mut state, width);
+        let region = side(&mut cx, &home);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert_eq!(region.layout(), SideLayout::Overlay);
+        let page = home.view.widget(&mut cx, ids!(Desktop.home_screen_page_flip));
+        assert!(!page.visible(), "the overlay replaces the page instead of squeezing the chat");
+        let over = rect(&mut cx, &home, ids!(mini_apps_side));
+        let rail = rect(&mut cx, &home, ids!(navigation_tab_bar.Desktop));
+        assert!(rail.size.x > 0.0);
+        assert!((over.pos.x - (rail.pos.x + rail.size.x)).abs() < 1.0 && (over.pos.x + over.size.x - width).abs() < 1.0, "{over:?}");
+        assert!(home.view.widget(&mut cx, ids!(mini_apps_side.frame.header.back)).visible());
+        assert!(!home.view.widget(&mut cx, ids!(mini_apps_side.handle)).visible());
+
+        // Back returns to the chat; the tab keeps running and comes back on reopening.
+        let back = home.view.widget(&mut cx, ids!(mini_apps_side.frame.header.back)).widget_uid();
+        let tabs = region.tabs();
+        let panel = region.surface(&mut cx, tabs[0]).panel(&mut cx);
+        click(&mut cx, &mut home, &mut state, back);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert!(page.visible() && !home.view.widget(&mut cx, ids!(mini_apps_side)).visible());
+        assert_eq!(region.tabs(), tabs);
+        assert!(panel.is_open());
+        region.open(&mut cx, &MiniAppsAction::Open);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert_eq!(region.tabs(), tabs);
+        assert!(!page.visible() && home.view.widget(&mut cx, ids!(mini_apps_side)).visible());
+
+        // Widening docks it beside the chat; narrowing again never covers the chat by itself.
+        frame(&mut cx, &mut home, &mut state, 1440.0);
+        assert_eq!(region.layout(), SideLayout::Docked);
+        assert!(page.visible());
+        frame(&mut cx, &mut home, &mut state, width);
+        assert_eq!(region.layout(), SideLayout::Overlay);
+        assert!(page.visible() && !home.view.widget(&mut cx, ids!(mini_apps_side)).visible());
+        assert!(panel.is_open());
+    }
+
+    #[test]
+    fn the_mobile_layout_shows_the_region_over_the_screen_and_left_bar_navigation_steps_it_aside() {
+        let width = 600.0;
+        let (mut cx, mut home, mut state) = home(width);
+        frame(&mut cx, &mut home, &mut state, width);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert!(!effective_is_desktop(&mut cx));
+        let region = side(&mut cx, &home);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert_eq!(region.layout(), SideLayout::Overlay);
+        let over = rect(&mut cx, &home, ids!(mini_apps_side));
+        assert!(over.pos.x.abs() < 1.0 && (over.size.x - width).abs() < 1.0 && (over.size.y - HEIGHT).abs() < 1.0, "{over:?}");
+        assert!(home.view.widget(&mut cx, ids!(mini_apps_side.frame.header.back)).visible());
+        let back = home.view.widget(&mut cx, ids!(mini_apps_side.frame.header.back)).widget_uid();
+        click(&mut cx, &mut home, &mut state, back);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert!(!home.view.widget(&mut cx, ids!(mini_apps_side)).visible());
+        assert_eq!(region.tabs().len(), 1, "Back keeps the tab");
+
+        // In a narrow desktop window, choosing another page in the left bar steps the overlay aside.
+        let width = 1000.0;
+        frame(&mut cx, &mut home, &mut state, width);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert!(home.view.widget(&mut cx, ids!(mini_apps_side)).visible());
+        let chosen = cx.capture_actions(|cx| cx.action(NavigationBarAction::TabSelected(SelectedTab::Contacts)));
+        deliver(&mut cx, &mut home, &mut state, chosen);
+        frame(&mut cx, &mut home, &mut state, width);
+        assert!(!home.view.widget(&mut cx, ids!(mini_apps_side)).visible());
+        assert!(home.view.widget(&mut cx, ids!(Desktop.home_screen_page_flip)).visible());
+    }
+
+    /// Every rect drawn under `list`, sub lists included.
+    fn drawn_rects(cx: &Cx, list: DrawListId, out: &mut Vec<Rect>) {
+        let draw_list = &cx.draw_lists[list];
+        for index in 0..draw_list.draw_items.len() {
+            let item = &draw_list.draw_items[index];
+            if let Some(sub) = item.sub_list() {
+                drawn_rects(cx, sub, out);
+                continue;
+            }
+            let (Some(call), Some(instances)) = (item.draw_call(), item.instances.as_ref()) else { continue };
+            let mapping = &cx.draw_shaders.shaders[call.draw_shader_id.index].mapping;
+            let (Some(pos), Some(size)) = (mapping.rect_pos, mapping.rect_size) else { continue };
+            for instance in instances.chunks_exact(mapping.instances.total_slots) {
+                out.push(Rect {
+                    pos: dvec2(instance[pos] as f64, instance[pos + 1] as f64),
+                    size: dvec2(instance[size] as f64, instance[size + 1] as f64),
+                });
+            }
+        }
+    }
+
+    #[test]
+    fn the_mini_apps_panel_fits_a_minimum_width_tab() {
+        let width = 1440.0;
+        let (mut cx, mut home, mut state) = home(width);
+        state.mini_apps_width = Some(SIDE_MIN);
+        frame(&mut cx, &mut home, &mut state, width);
+        frame(&mut cx, &mut home, &mut state, width);
+        let region = side(&mut cx, &home);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        for _ in 0..3 {
+            frame(&mut cx, &mut home, &mut state, width);
+        }
+        let docked = rect(&mut cx, &home, ids!(mini_apps_side));
+        assert!((docked.size.x - (SIDE_MIN + HANDLE)).abs() < 1.0, "{docked:?}");
+        let catalog = rect(&mut cx, &home, ids!(mini_apps_side.catalog_list));
+        assert!(catalog.size.x > 0.0 && catalog.size.y > 0.0, "the catalog shows: {catalog:?}");
+        // Draw once more and inspect what was submitted for the region.
+        let root;
+        {
+            cx.redraw_all();
+            let pass = DrawPass::new(&mut cx);
+            pass.set_size(&mut cx, dvec2(width, HEIGHT));
+            let mut list = DrawList2d::new(&mut cx);
+            let event = DrawEvent::default();
+            let mut draw = CxDraw::new(&mut cx, &event);
+            let mut cx2d = Cx2d::new(&mut draw);
+            cx2d.begin_pass(&pass, None);
+            list.begin_always(&mut cx2d);
+            root = cx2d.get_current_draw_list_id().unwrap();
+            cx2d.begin_root_turtle(dvec2(width, HEIGHT), Layout::flow_overlay());
+            home.draw_walk_all(&mut cx2d, &mut Scope::with_data(&mut state), Walk {width: Size::Fixed(width), height: Size::Fixed(HEIGHT), ..Walk::default()});
+            cx2d.end_pass_sized_turtle();
+            list.end(&mut cx2d);
+            cx2d.end_pass(&pass);
+        }
+        let mut rects = Vec::new();
+        drawn_rects(&cx, root, &mut rects);
+        let inside: Vec<_> = rects.iter()
+            .filter(|r| r.size.x > 0.0 && r.size.y > 0.0 && r.pos.x >= docked.pos.x + HANDLE && r.pos.y >= catalog.pos.y && r.pos.y < catalog.pos.y + catalog.size.y)
+            .collect();
+        assert!(inside.len() > 10, "the catalog's cards were drawn: {}", inside.len());
+        for r in inside {
+            assert!(r.pos.x + r.size.x <= docked.pos.x + docked.size.x + 1.0, "nothing runs past the tab's right edge: {r:?} in {docked:?}");
+        }
+    }
+
+    #[test]
+    fn the_docked_width_is_remembered_and_never_squeezes_the_chat() {
+        let (mut cx, mut home, mut state) = home(1600.0);
+        frame(&mut cx, &mut home, &mut state, 1600.0);
+        frame(&mut cx, &mut home, &mut state, 1600.0);
+        let region = side(&mut cx, &home);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        state.mini_apps_width = Some(560.0);
+        frame(&mut cx, &mut home, &mut state, 1600.0);
+        assert!((rect(&mut cx, &home, ids!(mini_apps_side)).size.x - (560.0 + HANDLE)).abs() < 1.0);
+        // Narrower, the remembered width gives way so the chat keeps its minimum.
+        let width = 1280.0;
+        frame(&mut cx, &mut home, &mut state, width);
+        let docked = rect(&mut cx, &home, ids!(mini_apps_side));
+        let dock = rect(&mut cx, &home, ids!(dock));
+        assert!(docked.size.x - HANDLE >= SIDE_MIN && docked.size.x < 560.0, "{docked:?}");
+        assert!(dock.size.x - 300.0 >= CHAT_MIN - 0.5, "{dock:?}");
+        assert_eq!(state.mini_apps_width, Some(560.0), "the person's choice is kept for wider windows");
+    }
+
+    #[test]
+    fn pop_out_moves_the_running_tab_into_its_window_and_back() {
+        let width = 1440.0;
+        let (mut cx, mut home, mut state) = home(width);
+        frame(&mut cx, &mut home, &mut state, width);
+        frame(&mut cx, &mut home, &mut state, width);
+        let region = side(&mut cx, &home);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        region.hagency_action(&mut cx, &HagencyAction::OpenProjects);
+        frame(&mut cx, &mut home, &mut state, width);
+        let tabs = region.tabs();
+        let management = region.surface(&mut cx, tabs[1]);
+        let panel = management.panel(&mut cx);
+
+        // The pop-out button asks the app shell to move the front tab.
+        let pop_out = home.view.widget(&mut cx, ids!(mini_apps_side.frame.header.pop_out)).widget_uid();
+        let clicked = cx.capture_actions(|cx| cx.widget_action(pop_out, NavigationBarButtonAction::Clicked));
+        let emitted = cx.capture_actions(|cx| home.handle_event(cx, &Event::Actions(clicked), &mut Scope::with_data(&mut state)));
+        assert!(emitted.iter().any(|a| matches!(a.downcast_ref(), Some(crate::miniapps::side::MiniAppsSideAction::PopOut))));
+
+        // What the app shell does with it: the same surface, still running, in the window.
+        let host = cx.with_vm(|vm| {
+            let value = script_eval!(vm, { mod.widgets.MiniAppsWindowHost {} });
+            WidgetRef::script_from_value(vm, value)
+        });
+        use crate::miniapps::window::MiniAppsWindowHostWidgetRefExt;
+        let host = host.as_mini_apps_window_host();
+        let surface = region.take_front(&mut cx).expect("the front tab");
+        assert_eq!(surface.widget_uid(), management.widget_uid());
+        assert!(host.adopt(&mut cx, surface).is_none());
+        assert_eq!(host.surface_key(&mut cx), Some(SurfaceKey::Management));
+        assert_eq!(region.tabs(), vec![tabs[0]]);
+        assert!(panel.is_open(), "popping out keeps the app running and its lease");
+
+        // Popping out the other tab sends the first back, still running.
+        let catalog = region.take_front(&mut cx).expect("the catalog tab");
+        let previous = host.adopt(&mut cx, catalog).expect("the window's previous surface");
+        assert_eq!(previous.widget_uid(), management.widget_uid());
+        region.dock_surface(&mut cx, previous);
+        assert_eq!(region.tabs().len(), 1);
+        assert_eq!(region.key(&mut cx, region.tabs()[0]), Some(SurfaceKey::Management));
+        assert_eq!(host.surface_key(&mut cx), Some(SurfaceKey::Catalog));
+
+        // Closing the window stops its app, as closing its tab would.
+        let window_panel = host.surface(&mut cx).panel(&mut cx);
+        assert!(window_panel.is_open());
+        host.close(&mut cx);
+        assert!(!window_panel.is_open());
+        assert!(panel.is_open());
     }
 }
