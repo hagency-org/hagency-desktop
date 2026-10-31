@@ -1,0 +1,61 @@
+#!/usr/bin/env python3
+"""Retained settings state during async saves, identity changes and retry failures."""
+import argparse, json, subprocess
+from pathlib import Path
+from check_full_bundle import APP, fixture
+SETUP = r'''
+A.redraw=fn(){} A.save=fn(){return true}
+H.busy=false H.command=nil H.calls=[] H.callbacks=[] H.bar_past=true
+A.request=fn(service,args,done){H.calls.push(service) H.callbacks.push(done)}
+A.sub_read=fn(service,args,done,fail){H.calls.push(service) H.callbacks.push(done) H.failed=fail return true}
+host.request=fn(service,args,done){H.calls.push(service) H.callbacks.push(done)}
+'''
+CASES = {
+"pool_refresh_keeps_content_and_scroll": r'''
+H.resource_id="pool" H.resource_detail={resource:{id:"pool"}} H.pool_saved=nil
+A.open_resource("pool")
+assert(H.resource_detail.resource.id=="pool" && H.bar_past)
+let before=timers.len()
+A.pool_say("quota","running","Saved")
+assert(timers.len()==before)
+assert(A.settings_feedback().text=="Saved")
+A.settings_feedback_done("pool")
+assert(H.pool_result==nil && H.resource_detail!=nil)
+A.open_resource("different")
+assert(H.resource_detail==nil && !H.bar_past)
+''',
+"default_refresh_keeps_controls_and_blocks_stale_writes": r'''
+H.dpol.resource="pool" H.dpol.detail={resource:{id:"pool"}} H.dpol.mode="resource" H.dpol.state="ready" H.dpol.yolo=true H.dpol.saved=true
+A.dpol_open("pool")
+assert(H.dpol.detail!=nil && H.dpol.state=="ready" && H.dpol.yolo && H.bar_past)
+assert(!A.dpol_can() && A.settings_feedback().tone=="waiting")
+H.failed("management_unavailable")
+assert(H.dpol.detail!=nil && H.dpol.state=="ready" && !A.dpol_can())
+assert(A.settings_feedback().kind=="default_error")
+A.dpol_open("different")
+assert(H.dpol.detail==nil && H.dpol.state=="loading" && !H.bar_past && H.dpol.saved==nil)
+''',
+"personal_refresh_keeps_snapshot_but_not_across_agents": r'''
+H.personal_id="agent" H.personal_detail={agent:{id:"agent"}} H.local_status={state:"running"} H.local_models=["one"]
+A.open_personal_agent("agent")
+assert(H.personal_detail.agent.id=="agent" && H.local_status.state=="running" && H.local_models.len()==1)
+A.personal_saved({agentId:"agent"})
+assert(H.personal_detail.agent.id=="agent" && A.settings_feedback().kind=="personal")
+A.personal_observation_received({agentId:"agent"})
+assert(H.personal_detail.agent.id=="agent" && A.settings_feedback().tone=="waiting")
+A.open_personal_agent("different")
+assert(H.personal_detail==nil && H.local_status==nil && H.local_models==nil && H.personal_result==nil)
+''',
+}
+def main():
+    p=argparse.ArgumentParser(); p.add_argument("vm",type=Path); p.add_argument("--output",type=Path,required=True); a=p.parse_args(); a.output.mkdir(parents=True,exist_ok=True)
+    source=(APP/"bundle/main.splash").read_text(); results=[]
+    for language in ("en","zh-CN"):
+        for name, case in CASES.items():
+            path=a.output/(language+"-"+name+".splash"); path.write_text(fixture(source+SETUP+case,language))
+            r=subprocess.run([str(a.vm.resolve()),"root",str(path)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
+            path.with_suffix(".log").write_text(r.stdout); results.append(dict(case=name,language=language,passed=r.returncode==0))
+    (a.output/"report.json").write_text(json.dumps(results,indent=2)+"\n")
+    print(json.dumps(dict(passed=sum(r["passed"] for r in results),total=len(results))))
+    raise SystemExit(not all(r["passed"] for r in results))
+if __name__=="__main__": main()

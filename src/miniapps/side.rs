@@ -24,6 +24,8 @@ use makepad_widgets::*;
 use super::surface::{MiniAppsSurfaceDeckRef, MiniAppsSurfaceDeckWidgetExt, MiniAppsSurfaceRef, MiniAppsSurfaceWidgetRefExt, SurfaceKey};
 use super::ui::MiniAppsAction;
 use crate::hagency::ui::HagencyAction;
+use crate::shared::web_browser::{WebBrowserAction, WebBrowserRef};
+use crate::article_app::ArticleAction;
 use crate::shared::navigation_bar_button::{NavigationBarButtonWidgetExt, NavigationBarButtonWidgetRefExt};
 
 /// The narrowest docked region: about the width at which the release probes
@@ -203,7 +205,10 @@ impl ScriptHook for MiniAppsTabStrip {
         if let Some((template_ref, value)) = template {
             if !apply.is_new() {
                 for (_, tab) in &mut self.tabs {
+                    let selected = tab.navigation_bar_button(vm.cx_mut(), ids!(select)).borrow()
+                        .is_some_and(|button| button.animator_in_state(vm.cx_mut(), ids!(active.on)));
                     tab.script_apply(vm, apply, scope, value);
+                    tab.navigation_bar_button(vm.cx_mut(), ids!(select)).set_selected(vm.cx_mut(), selected);
                 }
             }
             self.template = Some(template_ref);
@@ -620,6 +625,26 @@ impl MiniAppsSideRegion {
         self.refresh(cx);
     }
 
+    fn native_tab(&mut self, cx: &mut Cx, key: SurfaceKey, close: bool) -> Option<LiveId> {
+        let existing = self.find(cx, &key);
+        if close { if let Some(id) = existing { self.close_tab(cx, id); } return None; }
+        let id = existing.or_else(|| self.new_tab(cx))?;
+        self.select(cx, id);
+        Some(id)
+    }
+
+    fn web_action(&mut self, cx: &mut Cx, action: &WebBrowserAction) {
+        let Some(id) = self.native_tab(cx, SurfaceKey::Reader, matches!(action, WebBrowserAction::Close)) else { return };
+        self.run_on(cx, id, |cx, surface| surface.web_action(cx, action));
+        self.remember_keys(cx); self.refresh(cx);
+    }
+
+    fn article_action(&mut self, cx: &mut Cx, action: &ArticleAction) {
+        let Some(id) = self.native_tab(cx, SurfaceKey::Articles, matches!(action, ArticleAction::Close)) else { return };
+        self.run_on(cx, id, |cx, surface| surface.article_action(cx, action));
+        self.remember_keys(cx); self.refresh(cx);
+    }
+
     /// Stops the tab's app, revoking its lease, and removes the tab.
     fn close_tab(&mut self, cx: &mut Cx, id: LiveId) {
         let Some(index) = self.tabs.iter().position(|tab| *tab == id) else { return };
@@ -719,6 +744,16 @@ impl MiniAppsSideRegion {
 }
 
 impl MiniAppsSideRegionRef {
+    pub fn web_action(&self, cx: &mut Cx, action: &WebBrowserAction) {
+        if let Some(mut inner) = self.borrow_mut() { inner.web_action(cx, action); }
+    }
+    pub fn article_action(&self, cx: &mut Cx, action: &ArticleAction) {
+        if let Some(mut inner) = self.borrow_mut() { inner.article_action(cx, action); }
+    }
+    pub fn reader(&self, cx: &mut Cx) -> WebBrowserRef {
+        self.borrow().and_then(|inner| inner.find(cx, &SurfaceKey::Reader).map(|id| inner.surface(cx, id).reader())).unwrap_or_default()
+    }
+
     /// See [`MiniAppsSideRegion::prepare`].
     pub fn prepare(&self, cx: &mut Cx, page_width: f64, rooms_width: f64, desktop: bool, saved_width: Option<f64>) -> bool {
         self.borrow_mut()

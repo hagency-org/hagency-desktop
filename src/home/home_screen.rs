@@ -1561,6 +1561,60 @@ mod mini_apps_side_tests {
     }
 
     #[test]
+    fn native_reader_and_editor_reuse_tabs_and_survive_docking() {
+        use crate::article_app::{ArticleAction, ArticlePanelWidgetRefExt};
+        use crate::shared::web_browser::WebBrowserAction;
+        use crate::miniapps::window::MiniAppsWindowHostWidgetRefExt;
+        let (mut cx, mut home, mut state) = home(1440.0);
+        frame(&mut cx, &mut home, &mut state, 1440.0);
+        let region = side(&mut cx, &home);
+        region.open(&mut cx, &MiniAppsAction::Open);
+        region.web_action(&mut cx, &WebBrowserAction::Open("https://example.org/first".parse().unwrap()));
+        let reader = region.reader(&mut cx);
+        let browser = reader.browser_id().unwrap();
+        region.article_action(&mut cx, &ArticleAction::Open);
+        let editor_id = region.selected().unwrap();
+        let editor = region.surface(&mut cx, editor_id);
+        let title = editor.text_input(&mut cx, ids!(article_title));
+        assert!(title.borrow().is_some(), "the real native editor is hosted in the tab");
+        title.set_text(&mut cx, "Unsent article draft");
+        let article = editor.widget(&mut cx, ids!(native_content.panel)).as_article_panel();
+        article.read_markdown(&mut cx, "Retained document", "# Body\n\nKeep this content.").unwrap();
+        assert_eq!(region.tabs().len(), 3);
+        region.web_action(&mut cx, &WebBrowserAction::Open("https://example.org/second".parse().unwrap()));
+        assert_eq!(region.reader(&mut cx).widget_uid(), reader.widget_uid());
+        assert_eq!(reader.session().tabs.len(), 2);
+        region.article_action(&mut cx, &ArticleAction::Open);
+        assert_eq!(region.selected(), Some(editor_id));
+        assert_eq!(article.reader_title(), "Retained document", "reopening must not reset the document model");
+        assert_eq!(title.text(), "Unsent article draft");
+        cx.with_vm(|vm| {
+            let value = script_eval!(vm, {mod.widgets.MiniAppsSurface {}});
+            editor.clone().script_apply(vm, &Apply::ScriptReapply, &mut Scope::empty(), value);
+        });
+        assert_eq!(article.reader_title(), "Retained document", "restyling retains the native document");
+        let host = cx.with_vm(|vm| {
+            let value = script_eval!(vm, {mod.widgets.MiniAppsWindowHost {}});
+            WidgetRef::script_from_value(vm, value)
+        }).as_mini_apps_window_host();
+        let popped = region.take_front(&mut cx).unwrap();
+        host.adopt(&mut cx, popped);
+        assert_eq!(host.surface_key(&mut cx), Some(SurfaceKey::Articles));
+        host.surface(&mut cx).article_action(&mut cx, &ArticleAction::Open);
+        assert_eq!(title.text(), "Unsent article draft");
+        let returned = host.take_for_dock(&mut cx, host.window_id().unwrap()).unwrap();
+        region.dock_surface(&mut cx, returned);
+        assert_eq!(region.surface(&mut cx, region.selected().unwrap()).widget_uid(), editor.widget_uid());
+        assert_eq!(title.text(), "Unsent article draft");
+        region.web_action(&mut cx, &WebBrowserAction::Close);
+        assert_eq!(region.tabs().len(), 2);
+        assert!(!region.tabs().iter().any(|id| region.key(&mut cx, *id) == Some(SurfaceKey::Reader)));
+        assert!(reader.browser_id().is_none(), "closing destroys the browser {browser:?}");
+        region.article_action(&mut cx, &ArticleAction::Close);
+        assert_eq!(region.tabs().len(), 1, "closing native tabs keeps the mini-app catalog");
+    }
+
+    #[test]
     fn pop_out_moves_the_running_tab_into_its_window_and_back() {
         let width = 1440.0;
         let (mut cx, mut home, mut state) = home(width);

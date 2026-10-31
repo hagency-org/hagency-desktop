@@ -44,7 +44,7 @@ def main():
     run("package", ["bash", "tools/package-system-apps/check.sh"])
     run("script-vm", ["cargo", "build", "--locked", "--manifest-path", "tools/hagency-script-review/Cargo.toml"])
     vm = ROOT / "tools/hagency-script-review/target/debug/hagency-script-review"
-    for name in ["check_full_bundle", "check_agent_budget", "check_agent_control", "check_pool_application", "check_entry_workspaces", "check_account_identity", "check_accounts", "check_owner_tasks", "check_encrypted_approvals", "check_pool_fixes", "check_shared_web"]:
+    for name in ["check_full_bundle", "check_agent_budget", "check_agent_control", "check_pool_application", "check_entry_workspaces", "check_account_identity", "check_accounts", "check_owner_tasks", "check_encrypted_approvals", "check_pool_fixes", "check_shared_web", "check_settings_stability"]:
         run(name, ["python3", f"apps/hagency/tests/{name}.py", str(vm), "--output", str(output / name)])
     # Keep these together: a budget fix must not erase rendering, activity or answer actions.
     for name, pattern in [
@@ -64,6 +64,7 @@ def main():
         ("theme-contrast", "semantic_token_pairs_meet_wcag_aa"),
         ("chat-information", "home::mobile_chat_info"),
         ("chat-information-layout", "desktop_information_columns_tests"),
+        ("miniapp-dock", "mini_apps_side_tests"),
     ]:
         run(name, ["cargo", "test", "--locked", "--lib", "--features", "onboarding-test-support", pattern], rust_tests=True)
     if sys.platform == "darwin":

@@ -385,8 +385,13 @@ impl MatchEvent for App {
                 if matches!(action, WebBrowserAction::Close) {
                     self.close_web_browser(cx);
                     self.close_hosted_window(cx, HostedWindow::WebBrowser, true);
-                } else if !self.embedded && cfg!(any(target_os = "macos", target_os = "windows", all(target_os = "linux", not(target_env = "ohos")))) {
-                    self.ui.web_browser_window_host(cx, ids!(web_browser_window_host)).action(cx, action);
+                } else if self.docks_mini_apps() {
+                    let window = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host));
+                    if window.surface_key(cx) == Some(crate::miniapps::surface::SurfaceKey::Reader) {
+                        window.surface(cx).web_action(cx, action);
+                    } else {
+                        self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).web_action(cx, action);
+                    }
                 } else if let Some(panel) = self.hosted_window(cx, HostedWindow::WebBrowser) {
                     panel.as_web_browser().action(cx, ModalRef::default(), action);
                 } else {
@@ -538,8 +543,7 @@ impl MatchEvent for App {
                 self.ui.forward_panel(cx, ids!(forward_modal.content)).action(cx, modal, action);
                 continue;
             }
-            // On desktop, the article editor (and reader) opens in its own window;
-            // on mobile, in a full-screen modal.
+            // Desktop articles and editing share the mini-app dock. Mobile uses a modal.
             if let Some(action) = action.downcast_ref::<ArticleAction>() {
                 if let ArticleAction::Read { room, event } = action {
                     cx.action(WebBrowserAction::ReadArticle { room: room.clone(), event: event.clone() });
@@ -548,11 +552,17 @@ impl MatchEvent for App {
                 let modal = self.ui.modal(cx, ids!(article_app_modal));
                 let window_host = self.article_window_host(cx);
                 if matches!(action, ArticleAction::Close) {
+                    self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).article_action(cx, action);
                     self.ui.article_panel(cx, ids!(article_app_modal.content)).action(cx, modal, action);
                     window_host.close(cx);
                     self.close_hosted_window(cx, HostedWindow::Article, true);
-                } else if !self.embedded && crate::home::home_screen::effective_is_desktop(cx) {
-                    window_host.action(cx, action);
+                } else if self.docks_mini_apps() {
+                    let window = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host));
+                    if window.surface_key(cx) == Some(crate::miniapps::surface::SurfaceKey::Articles) {
+                        window.surface(cx).article_action(cx, action);
+                    } else {
+                        self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).article_action(cx, action);
+                    }
                 } else if let Some(panel) = self.hosted_window(cx, HostedWindow::Article) {
                     panel.as_article_panel().action(cx, ModalRef::default(), action);
                 } else {
@@ -661,6 +671,16 @@ impl MatchEvent for App {
                 continue;
             }
             if let Some(action) = action.downcast_ref::<MiniAppAction>() {
+                if self.docks_mini_apps() {
+                    if let MiniAppAction::Open { app, .. } = action {
+                        if let Ok(url) = url::Url::parse(&app.url) {
+                            if matches!(url.scheme(), "http" | "https") {
+                                cx.action(WebBrowserAction::Open(url));
+                                continue;
+                            }
+                        }
+                    }
+                }
                 let modal = self.ui.modal(cx, ids!(mini_app_modal));
                 self.ui.mini_app_panel(cx, ids!(mini_app_modal.content)).action(cx, modal, action);
                 continue;
@@ -1069,6 +1089,8 @@ impl MatchEvent for App {
 
 impl App {
     fn preserve_reader_session(&self, cx: &mut Cx) {
+        self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).reader(cx).prepare_shutdown();
+        self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host)).surface(cx).reader().prepare_shutdown();
         self.ui.web_browser_window_host(cx, ids!(web_browser_window_host)).browser(cx).prepare_shutdown();
         self.ui.web_browser(cx, ids!(web_browser_modal.content)).prepare_shutdown();
         if let Some((_, panel)) = self.hosted_windows.iter().find(|(kind, _)| *kind == HostedWindow::WebBrowser) {
@@ -1077,6 +1099,9 @@ impl App {
     }
 
     fn close_web_browser(&self, cx: &mut Cx) {
+        self.ui.mini_apps_side_region(cx, ids!(mini_apps_side)).web_action(cx, &WebBrowserAction::Close);
+        let mini_window = self.ui.mini_apps_window_host(cx, ids!(mini_apps_window_host));
+        if mini_window.surface_key(cx) == Some(crate::miniapps::surface::SurfaceKey::Reader) { mini_window.close(cx); }
         self.ui.web_browser_window_host(cx, ids!(web_browser_window_host)).close(cx);
         let modal = self.ui.modal(cx, ids!(web_browser_modal));
         self.ui.web_browser(cx, ids!(web_browser_modal.content)).action(cx, modal, &WebBrowserAction::Close);

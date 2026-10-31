@@ -14,6 +14,8 @@
 use makepad_widgets::*;
 use super::ui::{MiniAppsAction, MiniAppsPanelRef, MiniAppsPanelWidgetExt};
 use crate::hagency::ui::{HagencyAction, HagencyPanelWidgetExt};
+use crate::shared::web_browser::{WebBrowserAction, WebBrowserRef, WebBrowserWidgetRefExt};
+use crate::article_app::{ArticleAction, ArticlePanelWidgetRefExt};
 use crate::shared::navigation_bar_button::NavigationBarButtonWidgetExt;
 
 script_mod! {
@@ -41,6 +43,7 @@ script_mod! {
             padding: Inset{top: 12 right: 20 bottom: 20 left: 20}
         }
         management_panel := HagencyPanel {visible: false}
+        native_content := View {visible: false width: Fill height: Fill}
     }
     // Each deck declares `Surface := mod.widgets.MiniAppsSurface {...}`, the
     // template its new surfaces are built from.
@@ -58,6 +61,8 @@ pub enum SurfaceKey {
     App(String),
     /// Hagency's native management pages.
     Management,
+    Reader,
+    Articles,
 }
 
 impl SurfaceKey {
@@ -85,12 +90,24 @@ pub struct MiniAppsSurface {
     /// The visibility last told to the running app, so it hears only changes.
     #[rust]
     notified: Option<bool>,
+    #[rust]
+    native: Option<(SurfaceKey, WidgetRef)>,
 }
 
 impl ScriptHook for MiniAppsSurface {
-    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
+    fn on_after_apply(&mut self, vm: &mut ScriptVm, apply: &Apply, scope: &mut Scope, _value: ScriptValue) {
         // A restyle reapplies the DSL's visibility defaults; keep the page shown.
         if apply.is_script_reapply() {
+            // Native panels are mounted lazily, outside the DSL's child list.
+            // Restyle their existing instances so documents and drafts survive.
+            if let Some((key, panel)) = &mut self.native {
+                let value = if *key == SurfaceKey::Reader {
+                    script_eval!(vm, {mod.widgets.WebBrowser {padding: 0}})
+                } else {
+                    script_eval!(vm, {mod.widgets.ArticlePanel {padding: 0}})
+                };
+                panel.script_apply(vm, apply, scope, value);
+            }
             self.update_page(vm.cx_mut());
         }
     }
@@ -98,7 +115,15 @@ impl ScriptHook for MiniAppsSurface {
 
 impl Widget for MiniAppsSurface {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
-        self.view.handle_event(cx, event, scope);
+        let emitted = cx.capture_actions(|cx| self.view.handle_event(cx, event, scope));
+        for action in emitted {
+            let close = match self.native.as_ref().map(|(kind, _)| kind) {
+                Some(SurfaceKey::Reader) => matches!(action.downcast_ref(), Some(WebBrowserAction::Close)),
+                Some(SurfaceKey::Articles) => matches!(action.downcast_ref(), Some(ArticleAction::Close)),
+                _ => false,
+            };
+            if close { cx.action(MiniAppsAction::Close); } else { cx.extend_actions(vec![action]); }
+        }
         if let Event::Actions(actions) = event
             && self.view.navigation_bar_button(cx, ids!(management_navigation.apps)).clicked(actions)
         {
@@ -117,13 +142,14 @@ impl MiniAppsSurface {
     }
 
     fn update_page(&mut self, cx: &mut Cx) {
-        self.view.widget(cx, ids!(mini_apps_panel)).set_visible(cx, self.management_page.is_none());
+        self.view.widget(cx, ids!(mini_apps_panel)).set_visible(cx, self.management_page.is_none() && self.native.is_none());
         self.view.widget(cx, ids!(management_panel)).set_visible(cx, self.management_page.is_some());
         self.view.view(cx, ids!(management_navigation)).set_visible(cx, self.management_page.is_some());
         self.view.label(cx, ids!(management_navigation.context)).set_text(cx, crate::i18n::tr(
             if self.management_page == Some(true) { "Local agents · Device and room settings" }
             else { "Matrix workspaces · Rooms, members and access" }
         ));
+        self.view.widget(cx, ids!(native_content)).set_visible(cx, self.native.is_some());
         self.sync_script_visibility(cx);
         self.view.redraw(cx);
     }
@@ -136,7 +162,10 @@ impl MiniAppsSurface {
 
     /// Only the Hagency app listens, and only while its apps page is in front.
     fn sync_script_visibility(&mut self, cx: &mut Cx) {
-        let visible = self.host_visible && self.management_page.is_none();
+        let visible = self.host_visible && self.management_page.is_none() && self.native.is_none();
+        if let Some((SurfaceKey::Reader, reader)) = &self.native {
+            reader.as_web_browser().set_host_visible(cx, self.host_visible);
+        }
         if self.notified != Some(visible) {
             self.notified = Some(visible);
             self.panel(cx).script_visibility(cx, visible);
@@ -144,6 +173,7 @@ impl MiniAppsSurface {
     }
 
     fn key(&self, cx: &mut Cx) -> SurfaceKey {
+        if let Some((key, _)) = &self.native { return key.clone(); }
         if self.management_page.is_some() {
             return SurfaceKey::Management;
         }
@@ -154,6 +184,9 @@ impl MiniAppsSurface {
     }
 
     fn title(&self, cx: &mut Cx) -> String {
+        if let Some((key, _)) = &self.native {
+            return crate::i18n::tr(if *key == SurfaceKey::Reader {"Web pages"} else {"Article editor"}).to_owned();
+        }
         match self.management_page {
             Some(true) => crate::i18n::tr("Local agents").to_owned(),
             Some(false) => crate::i18n::tr("Matrix workspaces").to_owned(),
@@ -189,8 +222,52 @@ impl MiniAppsSurface {
         self.update_page(cx);
     }
 
+    fn native_panel(&mut self, cx: &mut Cx, key: SurfaceKey) -> (WidgetRef, bool) {
+        if let Some((existing, panel)) = &self.native {
+            if *existing == key { return (panel.clone(), false); }
+        }
+        let panel = cx.with_vm(|vm| {
+            let value = if key == SurfaceKey::Reader {
+                script_eval!(vm, {mod.widgets.WebBrowser {padding: 0}})
+            } else {
+                script_eval!(vm, {mod.widgets.ArticlePanel {padding: 0}})
+            };
+            WidgetRef::script_from_value(vm, value)
+        });
+        if let Some(mut slot) = self.view.view(cx, ids!(native_content)).borrow_mut() {
+            slot.children = vec![(id!(panel), panel.clone())].into();
+            cx.widget_tree_mark_dirty(slot.widget_uid());
+        }
+        self.native = Some((key, panel.clone()));
+        self.management_page = None;
+        self.update_page(cx);
+        (panel, true)
+    }
+
+    fn web_action(&mut self, cx: &mut Cx, action: &WebBrowserAction) {
+        let (panel, _) = self.native_panel(cx, SurfaceKey::Reader);
+        panel.as_web_browser().action(cx, ModalRef::default(), action);
+        self.update_page(cx);
+    }
+
+    fn article_action(&mut self, cx: &mut Cx, action: &ArticleAction) {
+        let (panel, fresh) = self.native_panel(cx, SurfaceKey::Articles);
+        // Selecting an already-open publisher must retain its draft and current page.
+        if fresh || !matches!(action, ArticleAction::Open) {
+            panel.as_article_panel().action(cx, ModalRef::default(), action);
+        }
+        self.update_page(cx);
+    }
+
     /// Stops the app (revoking its lease) and closes management.
     fn close(&mut self, cx: &mut Cx) {
+        if let Some((kind, panel)) = self.native.take() {
+            if kind == SurfaceKey::Reader {
+                panel.as_web_browser().action(cx, ModalRef::default(), &WebBrowserAction::Close);
+            } else {
+                panel.as_article_panel().action(cx, ModalRef::default(), &ArticleAction::Close);
+            }
+        }
         self.view.hagency_panel(cx, ids!(management_panel)).action(cx, &HagencyAction::Close);
         self.panel(cx).action(cx, ModalRef::default(), &MiniAppsAction::Close);
         self.notified = Some(false);
@@ -198,6 +275,17 @@ impl MiniAppsSurface {
 }
 
 impl MiniAppsSurfaceRef {
+    pub fn web_action(&self, cx: &mut Cx, action: &WebBrowserAction) {
+        if let Some(mut inner) = self.borrow_mut() { inner.web_action(cx, action); }
+    }
+    pub fn article_action(&self, cx: &mut Cx, action: &ArticleAction) {
+        if let Some(mut inner) = self.borrow_mut() { inner.article_action(cx, action); }
+    }
+    pub fn reader(&self) -> WebBrowserRef {
+        self.borrow().and_then(|inner| inner.native.as_ref().filter(|(key, _)| *key == SurfaceKey::Reader)
+            .map(|(_, panel)| panel.as_web_browser())).unwrap_or_default()
+    }
+
     pub fn key(&self, cx: &mut Cx) -> Option<SurfaceKey> {
         self.borrow().map(|inner| inner.key(cx))
     }

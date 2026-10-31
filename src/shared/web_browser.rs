@@ -146,6 +146,8 @@ pub struct WebBrowser {
     preserve_session: bool,
     #[rust]
     restore_after_theme: bool,
+    #[rust]
+    host_hidden: bool,
 }
 
 impl ScriptHook for WebBrowser {
@@ -730,13 +732,23 @@ impl Widget for WebBrowser {
         }
         if let Some(id) = self.browser_id() {
             let area = self.view(cx, ids!(web_surface)).area();
-            cx.system_browser(id).update(area, true);
+            cx.system_browser(id).update(area, !self.host_hidden);
         }
         DrawStep::done()
     }
 }
 
 impl WebBrowserRef {
+    /// Background dock tabs keep their browser session without covering the foreground tab.
+    pub fn set_host_visible(&self, cx: &mut Cx, visible: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.host_hidden = !visible;
+            if !visible {
+                if let Some(id) = inner.browser_id() { cx.system_browser(id).detach(); }
+            }
+        }
+    }
+
     pub fn action(&self, cx: &mut Cx, modal: ModalRef, action: &WebBrowserAction) {
         if !action.allowed() {
             return;
