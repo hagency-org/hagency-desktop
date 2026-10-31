@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
-"""A pool whose running Agent holds the whole monthly maximum.
+"""A pool whose running Agent holds the whole monthly maximum, and the list of who may request.
 
 Reproduces what an owner hit on a published pool (9 M a month, one running Agent holding all
 9 M): the per-request floor came from an estimate that missed the Agent, so the page offered
-1 M - 9 M; the maximum's lock reason hid the amendment's own; and nothing said the month was
-all given out.
+1 M - 9 M; the maximum's lock reason hid the amendment's own; nothing said the month was all
+given out; and a username typed with a capital was refused while a misspelt one counted.
 """
 import argparse, json, subprocess
 from pathlib import Path
@@ -113,6 +113,50 @@ assert(A.pool_max_reason("retained_commitments",nil)==A.pool_lock_rule())
 open(main)
 let v=A.pool_view(H.resource_detail)
 assert(v.maxMode=="amend" && v.maxMin==9000000 && v.maxMax==50000000)
+''',
+'typed_names_are_lower_case_and_count_once_they_exist': '''
+open(main)
+H.who.rid="resource_main" H.who.picks=[]
+// "LiSi" was refused for its capitals; it means @lisi.
+assert(A.who_mxid("LiSi")=="@lisi:test" && A.who_mxid("@ZHAOLIU:test")=="@zhaoliu:test")
+assert(A.who_mxid("li si")==nil && A.who_mxid("@lisi:elsewhere.test")==nil)
+// A typed name counts only once the server says it exists: the misspelt "zhaolu" never did.
+H.who.name="zhaolu"
+A.who_search(H.who.name)
+assert(A.who_typed()==nil && A.who_count()==0)
+timers[timers.len()-1]()
+let at=find("hagency.people.search")
+assert(at>=0 && H.calls[at].args.query=="zhaolu")
+reply(at,{server:"test" query:"zhaolu" people:[] exact:{userId:"@zhaolu:test" exists:false}})
+assert(A.who_typed()==nil && A.who_count()==0 && A.who_name_bad()!="")
+H.who.name="LiSi"
+A.who_search(H.who.name)
+timers[timers.len()-1]()
+let at2=H.calls.len()-1
+assert(H.calls[at2].service=="hagency.people.search" && H.calls[at2].args.query=="lisi")
+reply(at2,{server:"test" query:"lisi" people:[{userId:"@lisi:test" displayName:"Li Si"}] exact:{userId:"@lisi:test" exists:true}})
+assert(A.who_typed()=="@lisi:test" && A.who_count()==1 && A.who_name_bad()=="")
+let hits=A.who_hits()
+assert(hits.len()==1 && hits[0].id=="@lisi:test" && hits[0].name=="Li Si")
+// A later keystroke drops an earlier answer.
+H.who.name="li" A.who_search(H.who.name)
+let late=H.calls.len()-1
+assert(A.who_typed()==nil)
+''',
+'the_starting_list_is_the_people_the_owner_chats_with': '''
+open(main)
+H.who.rid="resource_main" H.who.picks=[] H.who.name=""
+H.who_list={rid:"resource_main" cid:"con_main" state:"ready" data:{contributionId:"con_main" state:"published" applicants:["@wangwu:test"] changePending:false} code:""}
+H.who_people.rid="" H.who_people.knownState="idle"
+A.who_people_load("resource_main")
+let at=find("hagency.people.search")
+assert(at>=0 && H.calls[at].args.query=="")
+reply(at,{server:"test" query:"" people:[{userId:"@lisi:test" displayName:"Li Si"},{userId:"@wangwu:test" displayName:"Wang Wu"},{userId:"@zhaoliu:test" displayName:"Zhao Liu"}] exact:nil})
+let v=A.pool_view(H.resource_detail)
+let people=A.who_candidates(v)
+// Everyone the owner chats with on this server, except who is already on this month's list.
+assert(people.len()==2 && people[0]=="@lisi:test" && people[1]=="@zhaoliu:test")
+assert(A.who_display("@zhaoliu:test")=="Zhao Liu" && A.who_source(v,"@zhaoliu:test")==A.t("In a chat with you","和你在同一个聊天里"))
 ''',
 }
 def main():

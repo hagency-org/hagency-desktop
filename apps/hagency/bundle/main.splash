@@ -54,6 +54,11 @@ H.who=who
 // Round 9: this month's list, read from this computer's native grant record (hagency.grants.applicants).
 let {who_list=nil}=H
 H.who_list=who_list
+// Accounts on the owner's server for Who Can Request (hagency.people.search): the people the owner
+// shares rooms with, what a typed name finds, and whether the typed username exists.
+let {who_people=nil}=H
+if who_people==nil {who_people={rid:"" known:[] knownState:"idle" query:"" found:[] exact:nil state:"idle" epoch:0}}
+H.who_people=who_people
 let {local_list=nil,local_status=nil,local_pending="",local_confirm="",local_error="",local_discard="",local_models=nil,local_after="",local_effort_note="",bar_past=false,local_epoch=0,local_failure="",local_failure_reason="",local_failure_code="",local_kept=nil,local_rechecked=false}=H
 H.local_list=local_list H.local_status=local_status H.local_pending=local_pending H.local_confirm=local_confirm H.local_error=local_error H.local_discard=local_discard H.local_models=local_models
 H.local_after=local_after H.local_effort_note=local_effort_note H.bar_past=bar_past H.local_epoch=local_epoch H.local_failure=local_failure H.local_failure_reason=local_failure_reason H.local_failure_code=local_failure_code H.local_kept=local_kept H.local_rechecked=local_rechecked
@@ -6697,7 +6702,7 @@ A.pool_sub_page=fn(){return A.has_page(["pool_device","pool_device_setup","pool_
 A.pool_sub_open=fn(page,rid){
     if H.busy {return}
     H.pool_sub_rid=rid H.page=page H.notice="" H.bar_past=false
-    if page=="pool_who" {A.who_open(rid) A.who_list_load() A.pool_who_load(nil) return}
+    if page=="pool_who" {A.who_open(rid) A.who_people_load(rid) A.who_list_load() A.pool_who_load(nil) return}
     if page=="pool_advanced" {A.pool_adv_load(rid)}
     A.redraw()
 }
@@ -6794,7 +6799,7 @@ A.pool_sub_back=fn(){
 A.pool_sub_refresh=fn(){
     if H.page=="pool_device_tasks" {A.dev_tasks_load() A.redraw() return}
     if A.dev_page() {A.pool_device_load() return}
-    if H.page=="pool_who" {A.who_list_load() A.pool_who_load(nil) return}
+    if H.page=="pool_who" {H.who_people.knownState="idle" A.who_people_load(H.pool_sub_rid) A.who_list_load() A.pool_who_load(nil) return}
     A.redraw()
 }
 A.pool_tip=fn(key){H.pool_tip=if H.pool_tip==key {""} else {key} A.redraw()}
@@ -6842,44 +6847,170 @@ A.who_mxid=fn(text){
         let rest={t:""} for i part in parts {if i>0 {rest.t=rest.t+(if i>1 {":"} else {""})+part}}
         if rest.t!=server {return nil}
     }
-    let local=parts[0]
+    let local=A.who_lower(parts[0])
     if local=="" || local.len()>64 {return nil}
-    let allowed="abcdefghijklmnopqrstuvwxyz0123456789._=-/".to_chars()
+    let allowed="abcdefghijklmnopqrstuvwxyz0123456789._=-/+".to_chars()
     for ch in local.to_chars() {let found={y:false} for c in allowed {if c==ch {found.y=true}} if !found.y {return nil}}
     return "@"+local+":"+server
 }
-A.who_name_hint=fn(){
-    let w=H.who
-    let none=H.resource_detail==nil || A.who_candidates(A.pool_view(H.resource_detail)).len()==0
-    if w.name.trim()=="" && none {return A.t("Their username on "+A.who_server()+".","对方在 "+A.who_server()+" 上的用户名。")}
-    if w.name.trim()=="" {return A.t("Their username on "+A.who_server()+"; they’re added with the people ticked above.","对方在 "+A.who_server()+" 上的用户名，会和上面勾选的人一起添加。")}
-    let id=A.who_mxid(w.name)
-    if id==nil {return ""}
-    if A.who_has(H.who.picks,id) {return A.pool_person(id)+A.t(" is already ticked above."," 已经在上面勾选了。")}
-    return A.t("Adds ","会一起添加 ")+A.pool_person(id)+A.t(" too.","。")
+// Matrix usernames are lower case; Splash has no lowercase, so map A-Z by hand.
+A.who_lower=fn(text){
+    let upper="ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_chars()
+    let lower="abcdefghijklmnopqrstuvwxyz".to_chars()
+    let out="".to_chars()
+    for ch in text.to_chars() {let c={v:ch} for i u in upper {if u==ch {c.v=lower[i]}} out.push(c.v)}
+    return out.to_string()
 }
-// A valid username typed in the field and not ticked yet: it counts as picked.
+// What is searched for: the typed text without a leading @, in lower case.
+A.who_query=fn(text){let t=text.trim() let name=t.strip_prefix("@") return A.who_lower(name.trim())}
+A.who_people_rows=fn(d){
+    let {people=[]}=d
+    let out=[]
+    if people==nil || !people.is_array() {return out}
+    for p in people {let {userId=nil,displayName=nil}=p if userId!=nil && userId.is_string() {out.push({id:userId name:if displayName!=nil && displayName.is_string() {displayName} else {""}})}}
+    return out
+}
+A.who_exact=fn(d){
+    let {exact=nil}=d
+    if exact==nil || !exact.is_object() {return nil}
+    let {userId=nil,exists=nil}=exact
+    if userId==nil || !userId.is_string() {return nil}
+    return {userId:userId exists:exists}
+}
+// The people the owner shares rooms with on this server: the starting list.
+A.who_people_load=fn(rid){
+    let wp=H.who_people
+    if wp.rid==rid && (wp.knownState=="ready" || wp.knownState=="loading") {return}
+    wp.rid=rid wp.knownState="loading" wp.known=[]
+    host.request("hagency.people.search",{query:""},fn(r){
+        let wp=H.who_people
+        if wp.rid!=rid {return}
+        if r.is_ok {wp.known=A.who_people_rows(r.data) wp.knownState="ready"} else {wp.knownState="error"}
+        // Never while the owner types: a render would take the field's focus.
+        if H.page=="pool_who" && H.who.name=="" {A.redraw()}
+    })
+}
+// Search as the owner types, once typing pauses; a later keystroke drops an earlier answer.
+A.who_search=fn(text){
+    let wp=H.who_people
+    let q=A.who_query(text)
+    wp.epoch=wp.epoch+1
+    let epoch=wp.epoch
+    wp.query=q wp.found=[] wp.exact=nil
+    if q=="" {wp.state="idle" return}
+    wp.state="searching"
+    start_timeout(0.3,||{
+        if H.who_people.epoch!=epoch {return}
+        host.request("hagency.people.search",{query:q},fn(r){
+            let wp=H.who_people
+            if wp.epoch!=epoch {return}
+            if r.is_ok {wp.found=A.who_people_rows(r.data) wp.exact=A.who_exact(r.data) wp.state="ready"} else {wp.state="error"}
+            if H.page=="pool_who" {A.who_typing_show()}
+        })
+    })
+}
+// A display name for an account, when one is known.
+A.who_display=fn(mxid){
+    let wp=H.who_people
+    let out={n:""}
+    for p in wp.known {if p.id==mxid && p.name!="" {out.n=p.name}}
+    for p in wp.found {if out.n=="" && p.id==mxid && p.name!="" {out.n=p.name}}
+    return out.n
+}
+// Whether an account exists on this server: true, false, or nil while it isn't known.
+A.who_exists=fn(mxid){
+    let wp=H.who_people
+    let e=wp.exact
+    if e!=nil && e.userId==mxid {return e.exists}
+    let found={y:false}
+    for p in wp.known {if p.id==mxid {found.y=true}}
+    for p in wp.found {if p.id==mxid {found.y=true}}
+    if found.y {return true}
+    return nil
+}
+// Accounts that match what is typed, for the rows under the field: the exact username first,
+// then what the server's directory found, then the people the owner shares rooms with. At most 5,
+// without the people already ticked or on this month's list.
+A.who_hits=fn(){
+    let out=[]
+    let wp=H.who_people
+    if wp.query=="" || H.resource_detail==nil {return out}
+    let v=A.pool_view(H.resource_detail)
+    let skip=fn(id){return id==nil || (H.session!=nil && id==H.session.account) || A.who_has(H.who.picks,id) || A.who_has(A.who_on_list(v),id) || A.who_has_id(out,id)}
+    let e=wp.exact
+    if e!=nil && e.exists==true && !skip(e.userId) {out.push({id:e.userId name:A.who_display(e.userId)})}
+    for p in wp.found {if out.len()<5 && !skip(p.id) {out.push(p)}}
+    for p in wp.known {if out.len()<5 && !skip(p.id) && (A.who_contains(p.id,wp.query) || A.who_contains(A.who_lower(p.name),wp.query)) {out.push(p)}}
+    return out
+}
+A.who_has_id=fn(rows,id){let f={y:false} for p in rows {if p.id==id {f.y=true}} return f.y}
+A.who_contains=fn(text,part){return part!="" && text.search(part)>=0}
+A.who_pick_hit=fn(i){
+    let hits=A.who_hits()
+    if i>=hits.len() || H.busy || H.command!=nil {return}
+    let w=H.who
+    if !A.who_has(w.picks,hits[i].id) && w.picks.len()<64 {w.picks.push(hits[i].id)}
+    w.name=""
+    A.who_search("")
+    A.redraw()
+}
+// The line under the field: {text, error}. An account counts only once it is known to exist.
+A.who_name_state=fn(){
+    let w=H.who
+    let wp=H.who_people
+    let server=A.who_server()
+    if w.name.trim()=="" {return {text:A.t("Search by name or username on "+server+".","按名字或用户名搜索 "+server+" 上的人。") error:false}}
+    let hits=A.who_hits()
+    let id=A.who_mxid(w.name)
+    if id!=nil && A.who_has(w.picks,id) {return {text:A.pool_person(id)+A.t(" is already ticked."," 已经勾选了。") error:false}}
+    let exists=if id==nil {nil} else {A.who_exists(id)}
+    if exists==true {return {text:A.t("Adds ","会一起添加 ")+A.pool_person(id)+A.t(" too.","。") error:false}}
+    if wp.state=="searching" {return {text:A.t("Looking on "+server+"…","正在 "+server+" 上查找…") error:false}}
+    // Still typing a name that has matches: no red, just the matches.
+    if exists==false && id!=nil && hits.len()>0 {return {text:A.t("No "+A.pool_person(id)+" on "+server+"; is it someone below?",server+" 上没有 "+A.pool_person(id)+"，是下面的人吗？") error:false}}
+    if exists==false && id!=nil {return {text:A.t("There’s no "+A.pool_person(id)+" on "+server+". Check the spelling.",server+" 上没有 "+A.pool_person(id)+"。请检查拼写。") error:true}}
+    if wp.state=="error" || (id!=nil && exists==nil) {return {text:A.t("Couldn’t check that name on "+server+" right now. Try again, or add them in the confirmation window.","暂时无法在 "+server+" 上确认这个名字。请稍后再试，或在确认窗口里添加。") error:false}}
+    if hits.len()>0 {return {text:A.t("Tap someone below to add them.","点下面的人即可添加。") error:false}}
+    return {text:A.t("No one on "+server+" matches “"+w.name.trim()+"”.",server+" 上没有和「"+w.name.trim()+"」匹配的人。") error:true}
+}
+A.who_name_hint=fn(){let st=A.who_name_state() return if st.error {""} else {st.text}}
+A.who_name_bad=fn(){let st=A.who_name_state() return if st.error {st.text} else {""}}
+// A username typed in the field, known to exist and not ticked yet: it counts as picked.
 A.who_typed=fn(){
     let id=A.who_mxid(H.who.name)
-    if id==nil || A.who_has(H.who.picks,id) {return nil}
+    if id==nil || A.who_has(H.who.picks,id) || A.who_exists(id)!=true {return nil}
     return id
 }
 A.who_count=fn(){return H.who.picks.len()+(if A.who_typed()!=nil {1} else {0})}
-// While typing: the one Add button's count and its note follow the field, without a re-render.
+// While typing: the matches under the field, the line under it and the one Add button follow
+// the field without a re-render, which would take its focus.
 A.who_typing=fn(t){
     H.who.name=t
-    ui.pool_who_name_hint.set_text(A.who_name_hint()) ui.pool_who_name_hint.set_visible(A.who_name_bad()=="")
-    ui.pool_who_name_error.set_text(A.who_name_bad()) ui.pool_who_name_error.set_visible(A.who_name_bad()!="")
+    A.who_search(t)
+    A.who_typing_show()
+}
+A.who_hit_show=fn(row,title,sub,on,off,hits,i){
+    row.set_visible(i<hits.len())
+    // The username typed counts once it exists: its row shows ticked, as the line under the field says.
+    let counted=i<hits.len() && A.who_typed()==hits[i].id
+    on.set_visible(counted) off.set_visible(!counted)
+    if i<hits.len() {let h=hits[i] title.set_text(if h.name!="" {h.name} else {A.pool_person(h.id)}) sub.set_text(A.pool_person(h.id))}
+}
+A.who_typing_show=fn(){
+    let st=A.who_name_state()
+    ui.pool_who_name_hint.set_text(if st.error {""} else {st.text}) ui.pool_who_name_hint.set_visible(!st.error)
+    ui.pool_who_name_error.set_text(if st.error {st.text} else {""}) ui.pool_who_name_error.set_visible(st.error)
+    let hits=A.who_hits()
+    ui.pool_who_people.set_visible(H.who.name.trim()=="")
+    A.who_hit_show(ui.pool_who_hit0,ui.pool_who_hit0_name,ui.pool_who_hit0_id,ui.pool_who_hit0_on,ui.pool_who_hit0_off,hits,0)
+    A.who_hit_show(ui.pool_who_hit1,ui.pool_who_hit1_name,ui.pool_who_hit1_id,ui.pool_who_hit1_on,ui.pool_who_hit1_off,hits,1)
+    A.who_hit_show(ui.pool_who_hit2,ui.pool_who_hit2_name,ui.pool_who_hit2_id,ui.pool_who_hit2_on,ui.pool_who_hit2_off,hits,2)
+    A.who_hit_show(ui.pool_who_hit3,ui.pool_who_hit3_name,ui.pool_who_hit3_id,ui.pool_who_hit3_on,ui.pool_who_hit3_off,hits,3)
+    A.who_hit_show(ui.pool_who_hit4,ui.pool_who_hit4_name,ui.pool_who_hit4_id,ui.pool_who_hit4_on,ui.pool_who_hit4_off,hits,4)
     if H.resource_detail!=nil {
         let a=A.who_action(A.pool_view(H.resource_detail))
         ui.pool_who_publish.set_text(a.label) ui.pool_who_publish.set_enabled(a.ready && !H.busy && H.command==nil) ui.pool_who_note.set_text(a.note)
     }
-}
-// The username typed can't be used: said in red under the field.
-A.who_name_bad=fn(){
-    let w=H.who
-    if w.name.trim()=="" || A.who_mxid(w.name)!=nil {return ""}
-    return A.t("Use a username on "+A.who_server()+": lowercase letters, digits and . _ = - /","请输入 "+A.who_server()+" 上的用户名：小写字母、数字和 . _ = - /")
 }
 A.who_open=fn(rid){
     let w=H.who
@@ -6903,6 +7034,8 @@ A.who_candidates=fn(v){
     if H.reqs.items!=nil {for q in H.reqs.items {let {poolId=nil,managerMxid=nil}=q if poolId==cid && !A.who_skip(v,out,managerMxid) {out.push(managerMxid)}}}
     for g in H.pool_grants {let ids=A.pool_summary_managers(g.summary) if ids!=nil {for id in ids {if !A.who_skip(v,out,id) {out.push(id)}}}}
     for id in H.who.picks {if !A.who_skip(v,out,id) {out.push(id)}}
+    let wp=H.who_people
+    if wp.rid==v.row.id {for p in wp.known {if out.len()<24 && !A.who_skip(v,out,p.id) {out.push(p.id)}}}
     return out
 }
 A.who_source=fn(v,mxid){
@@ -6912,13 +7045,14 @@ A.who_source=fn(v,mxid){
     if H.reqs.items!=nil {for q in H.reqs.items {let {poolId=nil,managerMxid=nil}=q if poolId==cid && managerMxid==mxid {asked.y=true}}}
     if asked.y {return A.t("Asked for this pool","申请过这个资源池")}
     for g in H.pool_grants {if A.who_has(A.pool_summary_managers(g.summary),mxid) {return A.t("On another pool’s list","在你其他资源池的名单里")}}
-    return A.t("Added by you","你添加的")
+    if A.who_has(H.who.picks,mxid) {return A.t("Added by you","你添加的")}
+    return A.t("In a chat with you","和你在同一个聊天里")
 }
 // What the page's main button does with the people picked.
 A.who_action=fn(v){
     let n=A.who_count()
     if v.quotaEditable {return {kind:"publish" label:A.pool_publish_label(v.now) note:if n>0 {A.t(""+n+" picked in advance; confirm the list in the window on this computer.","已先选好 "+n+" 人；在这台电脑的确认窗口里确认名单。")} else {A.t("You can also add people in the confirmation window.","也可以在确认窗口里再加人。")} ready:true}}
-    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单")+(if n>0 {A.t(" ("+n+")","（"+n+" 人）")} else {""}) note:if n>0 {A.t(""+n+" picked. Once you confirm in the window on this computer, they can request.","已选 "+n+" 人。在这台电脑的确认窗口里确认后，对方就能申请。")} else if A.who_candidates(v).len()>0 {A.t("Tick people above or type a username; they can request once you confirm in the window.","勾选上面的人，或输入用户名；在确认窗口里确认后，对方就能申请。")} else {A.t("Type a username; they can request once you confirm in the window.","输入用户名；在确认窗口里确认后，对方就能申请。")} ready:n>0}}
+    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单")+(if n>0 {A.t(" ("+n+")","（"+n+" 人）")} else {""}) note:if n>0 {A.t(""+n+" picked. Once you confirm in the window on this computer, they can request.","已选 "+n+" 人。在这台电脑的确认窗口里确认后，对方就能申请。")} else if A.who_candidates(v).len()>0 {A.t("Tick people below or search for a username; they can request once you confirm in the window.","勾选下面的人，或搜索用户名；在确认窗口里确认后，对方就能申请。")} else {A.t("Search for a username; they can request once you confirm in the window.","搜索用户名；在确认窗口里确认后，对方就能申请。")} ready:n>0}}
     return {kind:"" label:"" note:"" ready:false}
 }
 A.who_submit=fn(){
@@ -13789,15 +13923,100 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                     }}}
                     mod.widgets.HagencyList{
+                        // Search the owner's server first; matches appear under the field as it's typed.
+                        let hits=A.who_hits()
+                        let state=A.who_name_state()
+                        View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:14 right:14 top:10 bottom:10}
+                            pool_who_name := mod.widgets.HagencyInput{width:Fill text:who.name empty_text:A.t("Name or username, e.g. lisi","名字或用户名，例如 lisi") on_change:|t|{A.who_typing(t)}}
+                            pool_who_name_hint := mod.widgets.HagencyWrapSubtitle{visible:!state.error text:if state.error {""} else {state.text}}
+                            pool_who_name_error := mod.widgets.HagencyWrapSubtitle{visible:state.error text:if state.error {state.text} else {""} draw_text.color:mod.widgets.RINX_DANGER_FG}
+                        }
+                            pool_who_hit0 := View{visible:hits.len()>0 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit0_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>0 {if hits[0].name!="" {hits[0].name} else {A.pool_person(hits[0].id)}} else {""}}
+                                            pool_who_hit0_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>0 {A.pool_person(hits[0].id)} else {""}}
+                                        }
+                                        pool_who_hit0_on := View{visible:hits.len()>0 && A.who_typed()==hits[0].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit0_off := View{visible:!(hits.len()>0 && A.who_typed()==hits[0].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit0_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(0)}
+                                }
+                            }
+                            pool_who_hit1 := View{visible:hits.len()>1 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit1_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>1 {if hits[1].name!="" {hits[1].name} else {A.pool_person(hits[1].id)}} else {""}}
+                                            pool_who_hit1_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>1 {A.pool_person(hits[1].id)} else {""}}
+                                        }
+                                        pool_who_hit1_on := View{visible:hits.len()>1 && A.who_typed()==hits[1].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit1_off := View{visible:!(hits.len()>1 && A.who_typed()==hits[1].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit1_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(1)}
+                                }
+                            }
+                            pool_who_hit2 := View{visible:hits.len()>2 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit2_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>2 {if hits[2].name!="" {hits[2].name} else {A.pool_person(hits[2].id)}} else {""}}
+                                            pool_who_hit2_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>2 {A.pool_person(hits[2].id)} else {""}}
+                                        }
+                                        pool_who_hit2_on := View{visible:hits.len()>2 && A.who_typed()==hits[2].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit2_off := View{visible:!(hits.len()>2 && A.who_typed()==hits[2].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit2_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(2)}
+                                }
+                            }
+                            pool_who_hit3 := View{visible:hits.len()>3 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit3_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>3 {if hits[3].name!="" {hits[3].name} else {A.pool_person(hits[3].id)}} else {""}}
+                                            pool_who_hit3_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>3 {A.pool_person(hits[3].id)} else {""}}
+                                        }
+                                        pool_who_hit3_on := View{visible:hits.len()>3 && A.who_typed()==hits[3].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit3_off := View{visible:!(hits.len()>3 && A.who_typed()==hits[3].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit3_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(3)}
+                                }
+                            }
+                            pool_who_hit4 := View{visible:hits.len()>4 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit4_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>4 {if hits[4].name!="" {hits[4].name} else {A.pool_person(hits[4].id)}} else {""}}
+                                            pool_who_hit4_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>4 {A.pool_person(hits[4].id)} else {""}}
+                                        }
+                                        pool_who_hit4_on := View{visible:hits.len()>4 && A.who_typed()==hits[4].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit4_off := View{visible:!(hits.len()>4 && A.who_typed()==hits[4].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit4_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(4)}
+                                }
+                            }
+                        pool_who_people := View{visible:who.name.trim()=="" width:Fill height:Fit flow:Down
                         for index mxid in people {View{width:Fill height:Fit flow:Down
                             let picked=A.who_has(who.picks,mxid)
-                            if index>0 {mod.widgets.HagencyListDivider{}}
+                            let shown=A.who_display(mxid)
+                            mod.widgets.HagencyListDivider{margin:Inset{left:(if index>0 {57} else {16})}}
                             mod.widgets.HagencyListFit{
                                 mod.widgets.HagencyListFitBody{
                                     mod.widgets.HagencyRowIcon{draw_bg.color:if picked {mod.widgets.RINX_INFO_BG} else {mod.widgets.RINX_SELECTED} mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:if picked {mod.widgets.RINX_INFO_FG} else {mod.widgets.RINX_MUTED}}}
                                     mod.widgets.HagencyListText{
-                                        mod.widgets.HagencyWrapTitle{text:A.pool_person(mxid)}
-                                        mod.widgets.HagencyListSubtitle{text:A.who_source(v,mxid)}
+                                        mod.widgets.HagencyWrapTitle{text:if shown!="" {shown} else {A.pool_person(mxid)}}
+                                        mod.widgets.HagencyListSubtitle{text:(if shown!="" {A.pool_person(mxid)+" · "} else {""})+A.who_source(v,mxid)}
                                     }
                                     if picked {mod.widgets.HagencyPickOn{}}
                                     if !picked {mod.widgets.HagencyPickOff{}}
@@ -13805,15 +14024,17 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 pool_who_pick := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_toggle(mxid)}
                             }
                         }}
+                        if H.who_people.rid==detail.resource.id && H.who_people.knownState=="loading" {View{width:Fill height:Fit flow:Down
+                            mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                            mod.widgets.HagencySwitchRow{
+                                mod.widgets.HagencySkeleton{width:29 height:29}
+                                pool_who_people_reading := mod.widgets.HagencyListSubtitle{text:A.t("Finding people you chat with…","正在查找和你聊过天的人…")}
+                            }
+                        }}
                         if people.len()>0 && v.published && !listed {View{width:Fill height:Fit flow:Down
                             mod.widgets.HagencyListDivider{margin:Inset{left:16}}
                             View{width:Fill height:Fit padding:Inset{left:16 right:14 top:10 bottom:10} pool_who_maybe := mod.widgets.HagencyWrapSubtitle{text:A.t("While the list can’t be read, anyone already on it is marked in the confirmation window and isn’t added twice.","名单暂时读不到：已在名单里的人，确认窗口会标出来，不会重复添加。")}}
                         }}
-                        if people.len()>0 {mod.widgets.HagencyListDivider{margin:Inset{left:16}}}
-                        View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:14 right:14 top:10 bottom:12}
-                            pool_who_name := mod.widgets.HagencyInput{width:Fill text:who.name empty_text:A.t("Someone else? Username, e.g. lisi","其他人？输入用户名，例如 lisi") on_change:|t|{A.who_typing(t)}}
-                            pool_who_name_hint := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()=="" text:A.who_name_hint()}
-                            pool_who_name_error := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()!="" text:A.who_name_bad() draw_text.color:mod.widgets.RINX_DANGER_FG}
                         }
                     }
                     let added=H.pool_result!=nil && H.pool_result.tone=="running" && who.picks.len()==0
