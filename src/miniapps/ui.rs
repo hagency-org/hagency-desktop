@@ -271,8 +271,8 @@ script_mod! {
                             day_on := SheetPresetOn {text: #(crate::i18n::tr("1 day")) i18n_text: "1 day"}
                             week := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
                             week_on := SheetPresetOn {text: #(crate::i18n::tr("7 days")) i18n_text: "7 days"}
-                            month := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
-                            month_on := SheetPresetOn {text: #(crate::i18n::tr("To month end")) i18n_text: "To month end"}
+                            month := RinxKeyButton {width: Fill height: 44 margin: 0 text: #(crate::i18n::tr("Month end")) i18n_text: "Month end"}
+                            month_on := SheetPresetOn {text: #(crate::i18n::tr("Month end")) i18n_text: "Month end"}
                         }
                         expiry_note := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
                     }
@@ -1825,6 +1825,11 @@ impl Widget for MiniAppsPanel {
                 else if self.view.button(cx,ids!(adoption_confirmation.buttons.recover)).clicked(actions) {self.adoption_recover(cx);}
                 return;
             }
+            // A headless preview of the grant window takes the same taps; it has no flow.
+            #[cfg(any(test, feature = "onboarding-test-support"))]
+            if self.grant_confirmation.is_none() && self.preview_grant_actions(cx, actions) {
+                return;
+            }
             if self.grant_confirmation.is_some() {
                 self.capture_grant_choices(cx);
                 let add_field = self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name));
@@ -1832,9 +1837,7 @@ impl Widget for MiniAppsPanel {
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.primary)).clicked(actions) {self.grant_primary(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.actions.recover)).clicked(actions) {self.grant_recover(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.actions.cancel_intent)).clicked(actions) {self.grant_cancel_intent(cx);}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.period.expiry_presets.day)).clicked(actions) {self.grant_expiry_preset(cx,Some(1));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.period.expiry_presets.week)).clicked(actions) {self.grant_expiry_preset(cx,Some(7));}
-                else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.period.expiry_presets.month)).clicked(actions) {self.grant_expiry_preset(cx,None);}
+                else if let Some(days) = self.grant_preset_clicked(cx,actions) {self.grant_expiry_preset(cx,days);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.sharing.sharing_row.sharing_toggle)).clicked(actions) {self.grant_sharing_toggle(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.open_add.open_add_button)).clicked(actions) {self.grant_add_people(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.more.more_row.more_toggle)).clicked(actions) {self.grant_disclose(cx);}

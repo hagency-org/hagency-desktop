@@ -2458,7 +2458,7 @@
   "For now it can only go up from": "现在只能从这个数往上调",
   "Remove": "移除",
   "Add": "添加",
-  "To month end": "到月底",
+  "Month end": "到月底",
   "For your server administrator": "给服务器管理员看的信息",
   "Advanced Options and Technical Details": "高级选项和技术详情",
   "Someone on the list isn’t an account on your server. Remove them and add them again.": "名单里有人不是你所在服务器上的账号。请移除后重新添加。",
@@ -2515,5 +2515,15 @@
   "{month} capacity": "{month}额度",
   "Up to {amount} per request": "每次最多 {amount}",
   "Starts {when}. The list, the monthly maximum and the per-request limit carry over.": "{when}起生效，名单、每月上限和每次申请上限都不变。",
-  "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.": "{month}额度 {amount}，{when}起生效，名单和每月上限不变。"
+  "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.": "{month}额度 {amount}，{when}起生效，名单和每月上限不变。",
+  "Change Sharing Period": "修改共享期限",
+  "Sharing then ends before {when}.": "共享改为 {when}前结束。",
+  "Now until {now}. Once you confirm, people on the list can request until {when}; the per-request limit and what running Agents hold stay as they are.": "现在共享到 {now}前。确认后，名单上的人可以申请到 {when}前；每次申请上限和正在运行的 Agent 已拿到的额度不变。",
+  "You chose {page} on the pool’s page, but running Agents hold all {amount} this month can give out, so the per-request limit can only be {amount} now. To give more, raise the monthly maximum on the pool’s page.": "你在资源池页面选了 {page}，但正在运行的 Agent 已拿到本月能分出的全部 {amount}，所以每次申请上限现在只能是 {amount}。要分出更多，请先在资源池页面调高每月上限。",
+  "Running Agents hold all {amount} this month can give out, so the per-request limit can only be {amount} now. To give more, raise the monthly maximum on the pool’s page.": "正在运行的 Agent 已拿到本月能分出的全部 {amount}，所以每次申请上限现在只能是 {amount}。要分出更多，请先在资源池页面调高每月上限。",
+  "You chose {page} on the pool’s page, but it can’t be lower than the {held} held by running Agents. Choose a larger amount below, or add people.": "你在资源池页面选了 {page}，但不能低于正在运行的 Agent 已拿到的 {held}。请在下面选一个更大的额度，或添加可以申请的人。",
+  "You chose {page} on the pool’s page; it can’t be lower than the {held} held by running Agents, so it starts at {held}.": "你在资源池页面选了 {page}；不能低于正在运行的 Agent 已拿到的 {held}，所以从 {held} 开始。",
+  "You chose {page} on the pool’s page; at most {max} can be given out, so it starts at {max}.": "你在资源池页面选了 {page}；最多只能分出 {max}，所以从 {max} 开始。",
+  "Sharing Period Saved": "已保存共享期限",
+  "People on the list can request until {when}. The per-request limit stays {amount}.": "名单上的人可以申请到 {when}前，每次申请上限仍是 {amount}。"
 }

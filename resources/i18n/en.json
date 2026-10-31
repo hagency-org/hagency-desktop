@@ -2458,7 +2458,7 @@
   "For now it can only go up from": "For now it can only go up from",
   "Remove": "Remove",
   "Add": "Add",
-  "To month end": "To month end",
+  "Month end": "Month end",
   "For your server administrator": "For your server administrator",
   "Advanced Options and Technical Details": "Advanced Options and Technical Details",
   "Someone on the list isn’t an account on your server. Remove them and add them again.": "Someone on the list isn’t an account on your server. Remove them and add them again.",
@@ -2515,5 +2515,15 @@
   "{month} capacity": "{month} capacity",
   "Up to {amount} per request": "Up to {amount} per request",
   "Starts {when}. The list, the monthly maximum and the per-request limit carry over.": "Starts {when}. The list, the monthly maximum and the per-request limit carry over.",
-  "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.": "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over."
+  "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.": "{month} capacity is {amount}. Starts {when}; the list and the monthly maximum carry over.",
+  "Change Sharing Period": "Change Sharing Period",
+  "Sharing then ends before {when}.": "Sharing then ends before {when}.",
+  "Now until {now}. Once you confirm, people on the list can request until {when}; the per-request limit and what running Agents hold stay as they are.": "Now until {now}. Once you confirm, people on the list can request until {when}; the per-request limit and what running Agents hold stay as they are.",
+  "You chose {page} on the pool’s page, but running Agents hold all {amount} this month can give out, so the per-request limit can only be {amount} now. To give more, raise the monthly maximum on the pool’s page.": "You chose {page} on the pool’s page, but running Agents hold all {amount} this month can give out, so the per-request limit can only be {amount} now. To give more, raise the monthly maximum on the pool’s page.",
+  "Running Agents hold all {amount} this month can give out, so the per-request limit can only be {amount} now. To give more, raise the monthly maximum on the pool’s page.": "Running Agents hold all {amount} this month can give out, so the per-request limit can only be {amount} now. To give more, raise the monthly maximum on the pool’s page.",
+  "You chose {page} on the pool’s page, but it can’t be lower than the {held} held by running Agents. Choose a larger amount below, or add people.": "You chose {page} on the pool’s page, but it can’t be lower than the {held} held by running Agents. Choose a larger amount below, or add people.",
+  "You chose {page} on the pool’s page; it can’t be lower than the {held} held by running Agents, so it starts at {held}.": "You chose {page} on the pool’s page; it can’t be lower than the {held} held by running Agents, so it starts at {held}.",
+  "You chose {page} on the pool’s page; at most {max} can be given out, so it starts at {max}.": "You chose {page} on the pool’s page; at most {max} can be given out, so it starts at {max}.",
+  "Sharing Period Saved": "Sharing Period Saved",
+  "People on the list can request until {when}. The per-request limit stays {amount}.": "People on the list can request until {when}. The per-request limit stays {amount}."
 }

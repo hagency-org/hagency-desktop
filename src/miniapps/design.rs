@@ -202,6 +202,14 @@ fn slider_value(position: f64, low: u64, high: u64) -> u64 {
     (((exact / step as f64).round() as u64) * step).clamp(low, high)
 }
 
+/// Whether a key button (`RinxKeyButton`, a `MiniAppButton`) was clicked.
+/// `ButtonRef::clicked` downcasts to `Button`, which this wrapper isn't, so it
+/// never fires for one: find the click by the button's widget uid instead, as
+/// `MiniAppNumberInput` finds its slider's moves.
+pub(crate) fn key_button_clicked(button: &WidgetRef, actions: &Actions) -> bool {
+    matches!(actions.find_widget_action(button.widget_uid()).cast(), ButtonAction::Clicked(_))
+}
+
 /// 885626 → "88.56"; whole numbers stay whole.
 fn token_wan(tokens: u64) -> String {
     let hundredths = tokens / 100;
