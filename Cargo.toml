@@ -14,7 +14,7 @@ version = "0.5.0"
 metadata.makepad-auto-version = "zqpv-Yj-K7WNVK2I8h5Okhho46Q="
 
 [dependencies]
-hagency = { git = "https://github.com/hagency-org/hagency-client.git", rev = "08e85fca3d7ed9f02ff9d4a91ceb9d238ef8cd6e" }
+hagency = { git = "https://github.com/hagency-org/hagency-client.git", rev = "077970ce118ee347804e159dd28865d2c8d2ba1d" }
 octosense-theme-contract = { path = "crates/theme-contract", version = "0.1.0" }
 rinx-system-apps = { path = "crates/system-apps" }
 article-core = { path = "crates/article-core", features = ["l0"] }
@@ -149,7 +149,7 @@ reqwest = { version = "0.12", default-features = false, optional = true, feature
 
 [dev-dependencies]
 # Native writer fixtures must never acquire the user's installation authority.
-hagency = { git = "https://github.com/hagency-org/hagency-client.git", rev = "08e85fca3d7ed9f02ff9d4a91ceb9d238ef8cd6e", features = ["test-support"] }
+hagency = { git = "https://github.com/hagency-org/hagency-client.git", rev = "077970ce118ee347804e159dd28865d2c8d2ba1d", features = ["test-support"] }
 
 ## For OAuth/SSO login on iOS, via `ASWebAuthenticationSession`. Ugh....
 [target.'cfg(target_os = "ios")'.dependencies]

@@ -72,6 +72,10 @@ def main():
         run("apple-system-fonts", ["cargo", "test", "--locked", "--manifest-path", "crates/article-makepad/Cargo.toml", "--lib", "apple_fonts", "--", "--test-threads=1"], rust_tests=True)
     run("answer-export", ["cargo", "test", "--locked", "--manifest-path", "crates/answer-export/Cargo.toml", "--lib"], rust_tests=True)
     if args.client:
+        run("native-room-workspaces", ["cargo", "test", "--locked", "-p", "hagency-runtime", "--features", "shared-context", "--lib", "room_workspace"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-room-workspace-launch", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "shared_tools_first_launch", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-room-workspace-protocol", ["cargo", "test", "--locked", "-p", "hagency-runtime", "--features", "shared-context", "--test", "managed_qualification", "shared_room_workspace", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
+        run("native-room-workspace-approvals", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "shared_execution::approvals::tests", "--", "--test-threads=1"], cwd=args.client.resolve(), rust_tests=True)
         for name, package, pattern in [
             ("native-agent-permissions", "hagency-store", "execution_policy"),
             ("native-agent-web-search", "hagency-store", "web_policy"),
