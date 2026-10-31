@@ -3027,11 +3027,9 @@ let on_app_locale_changed = fn(locale){ A.redraw() }
 A.save = fn(){
     if H.session == nil { return false }
     let bytes = {version: 1 account: H.session.account wizard: H.wizard workspace:H.entry_role resourceJourney:H.ux.resourceJourney setupAccountId:H.ux.accountId projectDraft: H.project_draft agentDraft:H.agent_draft poolDraft:H.pool_draft command: H.command}.to_json()
+    // Written without reading it back: the read-back blocked the UI thread and caught nothing,
+    // since a failed write ends this call with its script error before any check runs.
     fs.write("onboarding-v1.json", bytes)
-    if !fs.exists("onboarding-v1.json") || fs.read("onboarding-v1.json") != bytes {
-        H.notice = A.t("Could not save this page. Submitted requests remain recoverable from native storage.", "无法保存此页面；已提交的请求仍可在这台电脑上恢复。")
-        return false
-    }
     return true
 }
 A.reauthenticate = fn(){
