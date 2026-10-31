@@ -334,7 +334,31 @@ pub fn snapshot_for_vm(vm: &mut ScriptVm) -> Snapshot {
     result
 }
 
+/// The colors of a list's selected row (the open chat).
+pub struct RowSelected {
+    pub bg: Vec4f,
+    pub hover: Vec4f,
+    pub muted: Vec4f,
+    pub link: Vec4f,
+}
+
 impl Snapshot {
+    /// The selected row must read at a glance against the page, so it takes a
+    /// deeper accent wash than chips and badges (`selected`), and hovering
+    /// deepens it rather than turning it gray. The page's muted ink and the
+    /// accent link lose contrast on that wash, so the row has its own.
+    pub fn row_selected(&self) -> RowSelected {
+        let dark = luminance(self.page) < 0.5;
+        let bg = mix(self.surface, self.accent, 0.26);
+        let hover = mix(self.surface, self.accent, 0.32);
+        RowSelected {
+            bg,
+            hover,
+            muted: mix(self.ink, hover, 0.20),
+            link: mix(self.accent, self.ink, if dark { 0.50 } else { 0.40 }),
+        }
+    }
+
     pub fn role(&self, name: &str) -> Vec4f {
         self.tokens
             .get(name)
@@ -374,6 +398,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     let nav_hover = mix(nav_bg, nav_ink, 0.10);
     let nav_selected = mix(nav_bg, s.accent, 0.28);
     let nav_border = mix(nav_bg, nav_ink, 0.20);
+    let row = s.row_selected();
     // TextFlow paints its selection rectangles over glyphs. Keep the highlight
     // translucent so selected text remains legible on both light and dark UI.
     let text_selection_bg = vec4(
@@ -400,6 +425,10 @@ pub fn script_mod(vm: &mut ScriptVm) {
         mod.widgets.RINX_HOVER = #(s.hover)
         mod.widgets.RINX_PRESSED = #(s.pressed)
         mod.widgets.RINX_SELECTED = #(s.selected)
+        mod.widgets.RINX_ROW_SELECTED = #(row.bg)
+        mod.widgets.RINX_ROW_SELECTED_HOVER = #(row.hover)
+        mod.widgets.RINX_ROW_SELECTED_MUTED = #(row.muted)
+        mod.widgets.RINX_ROW_SELECTED_LINK = #(row.link)
         mod.widgets.RINX_TEXT_SELECTION_BG = #(text_selection_bg)
         mod.widgets.RINX_ACCENT_HOVER = #(accent_hover)
         mod.widgets.RINX_ACCENT_DOWN = #(accent_down)

@@ -24,6 +24,13 @@ script_mod! {
     mod.widgets.RBX_BG_HOVER          = mod.widgets.RINX_HOVER
     // Selected row / item background (== RBX_ACCENT_SOFT).
     mod.widgets.RBX_BG_SELECTED       = mod.widgets.RINX_SELECTED
+    // The selected row of a list (the open chat): a deeper wash that reads at a glance.
+    mod.widgets.RBX_BG_ROW_SELECTED   = mod.widgets.RINX_ROW_SELECTED
+    // That row while hovered: deeper still, never gray.
+    mod.widgets.RBX_BG_ROW_SELECTED_HOVER = mod.widgets.RINX_ROW_SELECTED_HOVER
+    // Secondary text and links on that row, which keep their contrast on its wash.
+    mod.widgets.RBX_FG_ROW_SELECTED_SECONDARY = mod.widgets.RINX_ROW_SELECTED_MUTED
+    mod.widgets.RBX_LINK_ROW_SELECTED = mod.widgets.RINX_ROW_SELECTED_LINK
     // Pressed surface (rows, list items, ghost buttons).
     mod.widgets.RBX_BG_PRESSED        = mod.widgets.RINX_PRESSED
     // Disabled control surface.
@@ -339,6 +346,12 @@ mod tests {
         ("RBX_FG_SECONDARY", "RBX_BG_CANVAS", "subtitles / meta on the canvas"),
         ("RBX_FG_TERTIARY", "RBX_BG_SURFACE", "timestamps on a card"),
         ("RBX_FG_TERTIARY", "RBX_BG_CANVAS", "timestamps on the canvas"),
+        ("RBX_FG_PRIMARY", "RBX_BG_ROW_SELECTED", "chat name on the open chat's row"),
+        ("RBX_FG_ROW_SELECTED_SECONDARY", "RBX_BG_ROW_SELECTED", "last message and time on the open chat's row"),
+        ("RBX_LINK_ROW_SELECTED", "RBX_BG_ROW_SELECTED", "link in the last message on the open chat's row"),
+        ("RBX_FG_PRIMARY", "RBX_BG_ROW_SELECTED_HOVER", "chat name on the open chat's hovered row"),
+        ("RBX_FG_ROW_SELECTED_SECONDARY", "RBX_BG_ROW_SELECTED_HOVER", "last message on the open chat's hovered row"),
+        ("RBX_LINK_ROW_SELECTED", "RBX_BG_ROW_SELECTED_HOVER", "link on the open chat's hovered row"),
         ("RBX_FG_ON_ACCENT", "RBX_ACCENT", "label on the primary CTA"),
         ("RBX_FG_ON_ACCENT", "RBX_ACCENT_HOVER", "label on a hovered CTA"),
         ("RBX_LINK", "RBX_BG_SURFACE", "inline link on a card"),
@@ -411,5 +424,31 @@ mod tests {
             "design tokens below WCAG AA 4.5:1:\n  {}",
             failures.join("\n  "),
         );
+    }
+
+    /// The open chat's row has to stand out from the list at a glance. It once
+    /// sat at 1.08:1 against the page and was easy to miss; hover deepens it.
+    #[test]
+    fn selected_row_stands_out_from_the_page() {
+        use makepad_widgets::*;
+        use crate::theme::{Accent, Appearance, Selection};
+        let mut failures = Vec::new();
+        let mut cx = Cx::new(Box::new(|_,_|{}));
+        let mut first = true;
+        for appearance in [Appearance::Light, Appearance::Dark] {
+            for accent in [Accent::Teal, Accent::Violet] {
+                cx.with_vm(|vm| {
+                    if first {crate::theme::tests::install(vm,Selection{appearance,accent}); first=false;}
+                    else {vm.with_reload(|vm| crate::theme::tests::install(vm,Selection{appearance,accent}));}
+                    super::script_mod(vm);
+                    let page = token_hex(vm,"RBX_BG_CANVAS");
+                    let row = contrast(token_hex(vm,"RBX_BG_ROW_SELECTED"),page);
+                    let hover = contrast(token_hex(vm,"RBX_BG_ROW_SELECTED_HOVER"),page);
+                    if row < 1.3 { failures.push(format!("{appearance:?}/{accent:?}: selected row {row:.2}:1 against the page")); }
+                    if hover <= row { failures.push(format!("{appearance:?}/{accent:?}: hovered selected row {hover:.2}:1 isn't deeper than {row:.2}:1")); }
+                });
+            }
+        }
+        assert!(failures.is_empty(), "selected row too faint:\n  {}", failures.join("\n  "));
     }
 }

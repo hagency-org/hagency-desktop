@@ -128,13 +128,13 @@ script_mod! {
         draw_bg +: {
             active: instance(0.0)
             hover: instance(0.0)
-            // Idle rows sit flat on the surface; hover is a faint wash and the
-            // selected room is a soft teal tint — no solid fill, so the text
-            // keeps the same dark ink in every state.
+            // Idle rows sit flat on the surface and hover is a faint wash. The
+            // open chat takes a deeper accent wash that reads at a glance and
+            // deepens a little on hover; the text keeps its ink in every state.
             color: instance(#0000)
             color_hover: instance(RBX_BG_HOVER)
-            color_selected: instance(RBX_BG_SELECTED)
-            color_selected_hover: instance(RBX_BG_PRESSED)
+            color_selected: instance(RBX_BG_ROW_SELECTED)
+            color_selected_hover: instance(RBX_BG_ROW_SELECTED_HOVER)
             border_color: instance(#0000)
             border_size: uniform(0.0)
             border_radius: uniform(6.0)
@@ -724,12 +724,13 @@ impl RoomsListEntryContent {
     /// Updates styling of the latest event preview based on whether the room is selected or not.
     pub fn update_latest_event_colors(&mut self, cx: &mut Cx, is_selected: bool) {
         // Link colors must be re-applied on every draw because the HTML's link widgets
-        // get created dynamically during the draw walk. Both states sit on a light
-        // surface (transparent / soft-teal wash), so the token link colour is used
-        // in both cases.
+        // get created dynamically during the draw walk. The selected row's accent
+        // wash takes a deeper link color, which keeps its contrast there.
+        let row = self.appearance.row_selected();
+        let link_color = if is_selected { row.link } else { self.appearance.accent };
         self.view
             .html_or_plaintext(cx, ids!(latest_message))
-            .set_link_color(cx, Some(self.appearance.accent));
+            .set_link_color(cx, Some(link_color));
 
         // Skip redrawing if nothing changed.
         if self.last_selection_drawn == Some(is_selected) {
@@ -737,12 +738,13 @@ impl RoomsListEntryContent {
         }
         self.last_selection_drawn = Some(is_selected);
 
-        // The selected row signals the active room with the soft teal wash alone
-        // (see the draw_bg shader), so the text keeps identical dark ink in both
-        // states and stays fully legible.
-        let message_text_color = self.appearance.muted;
+        // The selected row signals the active room with its accent wash (see the
+        // draw_bg shader). The name keeps its ink; the last message and time take
+        // the row's deeper secondary ink, which keeps its contrast on the wash.
+        let secondary = if is_selected { row.muted } else { self.appearance.muted };
+        let message_text_color = secondary;
         let room_name_color = self.appearance.ink;
-        let timestamp_color = self.appearance.muted;
+        let timestamp_color = secondary;
         let code_bg_color = self.appearance.role("color.code.background");
 
         // Toggle the background color via the animator (handles selected/deselected bg).
