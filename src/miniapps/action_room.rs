@@ -1,7 +1,22 @@
 //! A verified room projection of the installed Palpo app, with a chat fallback.
-use super::{palpo::{ActionsRoomTarget, PalpoHost, APP_ID}, package::Package, ui::MiniAppsPanelWidgetExt, InstanceId, Lease};
+use super::{palpo::{ActionsRoomTarget, PalpoHost, APP_ID}, ui::MiniAppsPanelWidgetExt, InstanceId, Lease};
+#[cfg(feature = "palpo-instrument")]
+use super::package::Package;
+use crate::system_apps::PackedApp;
 use makepad_widgets::*;
 use std::{sync::mpsc::{self, Receiver}, time::{Duration, Instant}};
+
+/// The one service the board calls: which room is this account's Actions room.
+const ROOM_LOOKUP: &str = "palpo.actions.room.get";
+
+/// The digest the board's consent and host are bound to, when the bundled
+/// app requests the room lookup. It comes from the catalog the build sealed
+/// into Rinx, the same value `Package::load_builtin` checks a materialized
+/// copy against, so deciding needs no file.
+fn room_lookup_digest(app: Option<&PackedApp>) -> Option<&str> {
+    let app = app?;
+    app.manifest.capabilities.iter().any(|c| c == ROOM_LOOKUP).then_some(app.manifest.integrity.bundle_blake3.as_str())
+}
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -20,6 +35,9 @@ script_mod! {
 pub struct ActionRoomBoard {
     #[deref] view: View,
     #[rust] room: Option<ruma::OwnedRoomId>,
+    /// The account whose consent record a worker is reading, and its answer.
+    #[rust] account: Option<String>,
+    #[rust] consent: Option<Receiver<bool>>,
     #[rust] lease: Option<Lease>,
     #[rust] host: Option<PalpoHost>,
     #[rust] pending: Option<Receiver<Result<Option<ActionsRoomTarget>, String>>>,
@@ -47,6 +65,8 @@ impl ActionRoomBoard {
         self.verified = None;
         self.host = None;
         self.room = None;
+        self.account = None;
+        self.consent = None;
         self.history = false;
         self.active = false;
         self.view.mini_apps_panel(cx, ids!(panel)).close_board(cx);
@@ -55,19 +75,41 @@ impl ActionRoomBoard {
     fn select(&mut self, cx: &mut Cx, room: Option<ruma::OwnedRoomId>) {
         self.reset(cx);
         let Some(room) = room else { return };
-        let Some(account) = crate::sliding_sync::current_user_id() else { return };
+        // Every room switch runs this on the UI thread, so it must not touch the
+        // disk. The shipped app does not request the lookup (the build refuses
+        // `palpo.*` services), and the sealed catalog says so: the board used to
+        // learn it by writing, re-reading and deleting two copies of the 1.5 MB
+        // bundle, which froze the window for seconds under a real-time scanner.
+        let Some(digest) = room_lookup_digest(crate::system_apps::get(APP_ID)) else { return };
+        let Some(account) = crate::sliding_sync::current_user_id().map(|id| id.to_string()) else { return };
         // Loading and inspecting a bundle is not consent. Probe only after this
         // account has reviewed this exact installed version's requested grants.
-        let Ok(package) = Package::load_builtin(APP_ID, &crate::app_data_dir().join("miniapps/imports")) else { return };
-        let digest = package.manifest.integrity.bundle_blake3;
-        if !super::consent::remembered(account.as_str(), &digest)
-            || !package.manifest.capabilities.iter().any(|c| c == "palpo.actions.room.get") { return; }
-        let Ok(host) = PalpoHost::new(digest) else { return };
+        // That record is a file, so a worker reads it and `consented` goes on.
+        let (tx, rx) = mpsc::sync_channel(1);
+        let (reader, digest) = (account.clone(), digest.to_owned());
+        std::thread::spawn(move || {
+            if tx.send(super::consent::remembered(&reader, &digest)).is_ok() {
+                SignalToUI::set_ui_signal();
+            }
+        });
+        self.account = Some(account);
+        self.consent = Some(rx);
+        self.room = Some(room);
+    }
+    /// The consent record `select` asked for has been read. A newer selection
+    /// drops the receiver first, so a stale answer never reaches here.
+    fn consented(&mut self, remembered: bool) {
+        self.consent = None;
+        let (account, room) = (self.account.take(), self.room.take());
+        let (Some(account), Some(room), Some(digest)) = (account, room, room_lookup_digest(crate::system_apps::get(APP_ID))) else { return };
+        // The record is this account's; another one may have signed in meanwhile.
+        if !remembered || crate::sliding_sync::current_user_id().is_none_or(|id| id.as_str() != account) { return; }
+        let Ok(host) = PalpoHost::new(digest.to_owned()) else { return };
         static GENERATION: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
         self.lease = Some(super::AUTHORITY.issue(InstanceId {
-            app: APP_ID.into(), account: account.to_string(), room: Some(room.to_string()),
+            app: APP_ID.into(), account, room: Some(room.to_string()),
             generation: GENERATION.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-        }, ["palpo.actions.room.get".to_owned()].into(), Default::default(), Instant::now() + Duration::from_secs(3600)));
+        }, [ROOM_LOOKUP.to_owned()].into(), Default::default(), Instant::now() + Duration::from_secs(3600)));
         self.host = Some(host);
         self.room = Some(room);
         self.probe();
@@ -78,7 +120,7 @@ impl ActionRoomBoard {
         let (tx, rx) = mpsc::sync_channel(1);
         self.pending = Some(rx);
         crate::sliding_sync::spawn_async_task(async move {
-            let result = super::palpo::request(host, lease.clone(), "palpo.actions.room.get".into(), serde_json::json!({"roomId":room})).await
+            let result = super::palpo::request(host, lease.clone(), ROOM_LOOKUP.into(), serde_json::json!({"roomId":room})).await
                 .and_then(|value| if value["room"].is_null() { Ok(None) } else {
                     ActionsRoomTarget::from_reply(&value["room"], &lease.identity().account).map(Some)
                 });
@@ -107,6 +149,12 @@ impl ActionRoomBoard {
 }
 impl Widget for ActionRoomBoard {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        let consent = self.consent.as_ref().and_then(|rx| match rx.try_recv() {
+            Ok(remembered) => Some(remembered),
+            Err(mpsc::TryRecvError::Disconnected) => Some(false),
+            Err(mpsc::TryRecvError::Empty) => None,
+        });
+        if let Some(remembered) = consent { self.consented(remembered); }
         let Some(lease) = self.lease.as_ref() else { return };
         if lease.check(&crate::sliding_sync::current_user_id().map(|u| u.to_string()).unwrap_or_default()).is_err() {
             self.reset(cx);
@@ -249,10 +297,9 @@ pub async fn install_local_acceptance_session(endpoint: &str, path: &std::path::
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn board_restores_history_layout_and_revokes_on_account_loss() {
+    fn board() -> (Cx, ActionRoomBoard) {
         let mut cx = Cx::new(Box::new(|_, _| {}));
-        let mut board = cx.with_vm(|vm| {
+        let board = cx.with_vm(|vm| {
             makepad_widgets::script_mod(vm);
             crate::i18n::install(vm);
             makepad_code_editor::script_mod(vm);
@@ -264,6 +311,63 @@ mod tests {
             assert!(vm.take_errors().is_empty());
             board
         });
+        (cx, board)
+    }
+    #[test]
+    fn a_room_switch_decides_from_the_sealed_catalog() {
+        // The build refuses `palpo.*` services, so the shipped app never asks
+        // for the lookup, and the compiled catalog is enough to know that.
+        let shipped = crate::system_apps::get(APP_ID).expect("the bundled management app");
+        assert_eq!(room_lookup_digest(Some(shipped)), None);
+        assert_eq!(room_lookup_digest(None), None);
+        // An app that did ask would be bound to the digest the build sealed.
+        let mut asking = shipped.clone();
+        asking.manifest.capabilities.push(ROOM_LOOKUP.into());
+        assert_eq!(room_lookup_digest(Some(&asking)), Some(shipped.manifest.integrity.bundle_blake3.as_str()));
+        // So selecting a room stops before any account, consent record or bundle.
+        let (mut cx, mut board) = board();
+        board.select(&mut cx, Some(ruma::RoomId::parse("!room:example.test").unwrap()));
+        assert!(board.room.is_none() && board.account.is_none() && board.consent.is_none());
+        assert!(board.lease.is_none() && board.host.is_none() && board.pending.is_none());
+        assert!(!board.view.visible());
+    }
+    #[test]
+    fn consent_answers_off_the_ui_thread_and_only_for_the_current_selection() {
+        let (mut cx, mut board) = board();
+        let pending = |board: &mut ActionRoomBoard| {
+            let (tx, rx) = mpsc::sync_channel(1);
+            board.room = Some(ruma::RoomId::parse("!room:example.test").unwrap());
+            board.account = Some("@owner:example.test".into());
+            board.consent = Some(rx);
+            tx
+        };
+        // Waiting for the worker changes nothing.
+        let answer = pending(&mut board);
+        board.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert!(board.consent.is_some() && board.room.is_some());
+        // Not remembered: no lease, nothing selected.
+        answer.send(false).unwrap();
+        board.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert!(board.consent.is_none() && board.room.is_none() && board.account.is_none() && board.lease.is_none());
+        // Even a remembered answer leases nothing unless the app asks for the
+        // lookup and the same account is still signed in (neither holds here).
+        let answer = pending(&mut board);
+        answer.send(true).unwrap();
+        board.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert!(board.consent.is_none() && board.room.is_none() && board.lease.is_none() && board.host.is_none());
+        // A worker that stopped counts as not remembered.
+        drop(pending(&mut board));
+        board.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        assert!(board.consent.is_none() && board.room.is_none() && board.lease.is_none());
+        // Selecting again drops the old answer before it arrives.
+        let answer = pending(&mut board);
+        board.select(&mut cx, None);
+        assert!(answer.send(true).is_err());
+        assert!(board.consent.is_none() && board.room.is_none() && board.account.is_none());
+    }
+    #[test]
+    fn board_restores_history_layout_and_revokes_on_account_loss() {
+        let (mut cx, mut board) = board();
         let target = ActionsRoomTarget::from_reply(&serde_json::json!({"v":1,"revision":1,"purpose":"my_actions",
             "account":"@owner:example.test","botMxid":"@bot:example.test","serverName":"example.test","roomId":"!actions:example.test"}), "@owner:example.test").unwrap();
         board.verified = Some(target);
