@@ -1,8 +1,9 @@
 //! Creation shortcuts anchored beside permanent navigation rows.
 //!
-//! The navigation rail's "New or Join" button opens the [`SidebarMenuKind::Add`]
-//! card: the one place to start a workspace, create a room or space, or join and
-//! explore rooms. Each row emits the same action its old entry point did.
+//! The "+" beside the desktop chat list's search field opens the
+//! [`SidebarMenuKind::Add`] card ("New or Join"): the one place to start a
+//! workspace, create a room or space, or join and explore rooms. Each row emits
+//! the same action its old entry point did.
 use makepad_widgets::*;
 use crate::shared::context_menu::{BUTTON_HEIGHT, ContextMenuClosed, expected_menu_size, menu_position_margin};
 
@@ -12,8 +13,23 @@ pub enum SidebarMenuKind {
     Chats,
     Agents,
     Tools,
-    /// The rail's "New or Join" menu.
+    /// The "New or Join" menu of the chat list's "+" button.
     Add,
+}
+
+/// The gap between a button and the menu card that drops down from it.
+const DROP_DOWN_GAP: f64 = 4.0;
+
+/// Where the "New or Join" card opens for the "+" button at `button` (its
+/// window rect): just under the button, with the card's right edge on the
+/// button's right edge, so the card hangs under the search row it belongs
+/// to. [`SidebarActionMenu::show`] still keeps the card inside the window.
+pub fn new_or_join_menu_pos(cx: &mut Cx, button: Rect) -> DVec2 {
+    let size = menu_size(cx, SidebarMenuKind::Add);
+    dvec2(
+        button.pos.x + button.size.x - size.x,
+        button.pos.y + button.size.y + DROP_DOWN_GAP,
+    )
 }
 
 /// The rows of the "New or Join" menu, top to bottom.
@@ -29,7 +45,7 @@ fn add_item_action(cx: &mut Cx, item: LiveId) {
         id!(add_room_or_space) => {
             cx.action(super::space_management::SpaceManagementAction::Open { parent: None })
         }
-        // Was the rail button's only action: the Explore Rooms page.
+        // Was the old rail "+" button's only action: the Explore Rooms page.
         id!(add_join_rooms) => {
             cx.action(super::navigation_tab_bar::NavigationBarAction::GoToAddRoom)
         }
@@ -794,7 +810,7 @@ mod render_tests {
     }
 }
 
-/// The rail's "New or Join" menu, built and drawn offscreen.
+/// The chat list's "New or Join" menu, built and drawn offscreen.
 #[cfg(test)]
 mod new_or_join_tests {
     use super::*;
@@ -803,6 +819,9 @@ mod new_or_join_tests {
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
 
     const WINDOW: DVec2 = dvec2(1280.0, 760.0);
+    /// The "+" beside the search field of a chat list column at its default
+    /// width (300 points, right of the 76-point rail, 10-point margins).
+    const PLUS: Rect = Rect {pos: dvec2(331.0, 62.0), size: dvec2(35.0, 35.0)};
     /// Every command row the widget can show, whatever menu it is.
     const ALL_ROWS: [LiveId; 16] = [
         id!(project_overview), id!(project_rooms), id!(project_members), id!(project_invite),
@@ -881,7 +900,7 @@ mod new_or_join_tests {
     #[test]
     fn new_or_join_menu_holds_new_workspace_and_the_room_actions() {
         let (mut cx, mut menu) = menu(Appearance::Light, 1.0);
-        let anchor = dvec2(84.0, 300.0);
+        let anchor = new_or_join_menu_pos(&mut cx, PLUS);
         menu.show(&mut cx, SidebarMenuKind::Add, anchor, Rect {pos: DVec2::default(), size: WINDOW});
         assert!(menu.visible);
         assert_eq!(visible_rows(&mut cx, &menu), ADD_ITEMS, "New workspace first, then the room actions, nothing else");
@@ -942,8 +961,8 @@ mod new_or_join_tests {
             let (mut cx, mut menu) = menu(appearance, text_scale);
             let theme = crate::theme::snapshot(&mut cx);
             let row_height = theme.control_height.max(24.0 * text_scale + 20.0);
-            // Beside the rail's button, and also low and far right, where it must be kept inside the window.
-            for anchor in [dvec2(84.0, 300.0), dvec2(1270.0, 750.0)] {
+            // Under the chat list's "+", and also low and far right, where it must be kept inside the window.
+            for anchor in [new_or_join_menu_pos(&mut cx, PLUS), dvec2(1270.0, 750.0)] {
                 menu.show(&mut cx, SidebarMenuKind::Add, anchor, Rect {pos: DVec2::default(), size: WINDOW});
                 let (card, drawn) = draw(&mut cx, &mut menu);
                 let expected = menu_size(&mut cx, SidebarMenuKind::Add);
@@ -951,7 +970,8 @@ mod new_or_join_tests {
                 assert!((card.size.x - 235.0 * text_scale).abs() < 1.0, "{case}: the card widens with the text: {card:?}");
                 assert!(card.pos.x >= 0.0 && card.pos.y >= 0.0 && card.pos.x + card.size.x <= WINDOW.x + 0.5 && card.pos.y + card.size.y <= WINDOW.y + 0.5, "{case}: card stays in the window: {card:?}");
                 if anchor.y < 400.0 {
-                    assert!((card.pos - anchor).length() < 1.0, "{case}: card opens at its anchor: {card:?}");
+                    // Clamped only on the left, where large text widens it past the window edge.
+                    assert!((card.pos - dvec2(anchor.x.max(0.0), anchor.y)).length() < 1.0, "{case}: card opens at its anchor {anchor:?}: {card:?}");
                 }
                 for row in ADD_ITEMS {
                     let button = menu.view.button(&mut cx, &[row]);
@@ -967,6 +987,35 @@ mod new_or_join_tests {
                         && rect.pos.x + rect.size.x <= card.pos.x + card.size.x + 1.0
                         && rect.pos.y + rect.size.y <= card.pos.y + card.size.y + 1.0,
                         "{case}: drawing stays inside the card: {rect:?} in {card:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn new_or_join_card_drops_down_from_the_plus_and_stays_in_the_window() {
+        for text_scale in [1.0, 1.5, 2.0] {
+            let (mut cx, mut menu) = menu(Appearance::Light, text_scale);
+            // The default column, a column dragged out to the window's right edge,
+            // and a small window, where large text makes the card wider than the
+            // room left of the button.
+            for (window, plus) in [
+                (WINDOW, PLUS),
+                (WINDOW, Rect {pos: dvec2(WINDOW.x - 45.0, 62.0), size: PLUS.size}),
+                (dvec2(640.0, 420.0), Rect {pos: dvec2(201.0, 62.0), size: PLUS.size}),
+            ] {
+                let case = format!("{text_scale}x, + at {:?} in {window:?}", plus.pos);
+                let pos = new_or_join_menu_pos(&mut cx, plus);
+                menu.show(&mut cx, SidebarMenuKind::Add, pos, Rect {pos: DVec2::default(), size: window});
+                let (card, _) = draw(&mut cx, &mut menu);
+                assert!(card.pos.x >= 0.0 && card.pos.y >= 0.0 && card.pos.x + card.size.x <= window.x + 0.5 && card.pos.y + card.size.y <= window.y + 0.5,
+                    "{case}: the card stays in the window: {card:?}");
+                assert!((card.pos.y - (plus.pos.y + plus.size.y + DROP_DOWN_GAP)).abs() < 1.0, "{case}: just under the +: {card:?}");
+                let right = plus.pos.x + plus.size.x;
+                if card.size.x <= right {
+                    assert!((card.pos.x + card.size.x - right).abs() < 1.0, "{case}: its right edge is the +'s: {card:?}");
+                } else {
+                    assert!(card.pos.x.abs() < 0.5, "{case}: as far left as the window allows: {card:?}");
                 }
             }
         }
