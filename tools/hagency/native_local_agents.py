@@ -14,6 +14,7 @@ import shutil
 import socket
 import subprocess
 import time
+import urllib.error
 import urllib.parse
 import urllib.request
 
@@ -163,7 +164,15 @@ class Host:
         print("captured", target, flush=True)
 
     def event(self, data):
-        self.req("/event", data=data)
+        # The remote answers /event only once the app has handled it, within 4 s.
+        # A busy app (a theme reapply on a loaded machine) misses that window,
+        # but the event stays queued and runs before any later command, so a
+        # capture after it still sees its effect. Any other error still fails.
+        try:
+            self.req("/event", data=data)
+        except urllib.error.HTTPError as error:
+            if error.code != 404 or "timeout" not in error.read().decode(errors="replace"):
+                raise
         time.sleep(1.0)
 
     def close(self):
