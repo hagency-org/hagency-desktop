@@ -232,7 +232,17 @@ script_mod! {
                         add_line := SheetLine {}
                         View {width: Fill height: Fit flow: Right spacing: 8 padding: Inset{left: 12 right: 6 top: 6 bottom: 6} align: Align{y: 0.5}
                             add_name := RinxInput {width: Fill height: 44 empty_text: ""}
-                            add_button := SheetTextButton {text: #(crate::i18n::tr("Add")) i18n_text: "Add"}
+                            add_button := SheetTextButton {text: #(crate::i18n::tr("Search")) i18n_text: "Search"}
+                        }
+                        directory := View {visible: false width: Fill height: Fit flow: Down spacing: 6 padding: Inset{left: 12 right: 12 bottom: 8}
+                            View {width: Fill height: Fit flow: Right spacing: 8 align: Align{y: 0.5}
+                                candidates := DropDown {width: Fill height: 44 margin: 0 labels: ["Select a person to add"]
+                                    draw_text +: {color: RINX_INK color_hover: RINX_INK color_focus: RINX_INK color_down: RINX_INK}
+                                    popup_menu: PopupMenu {width: 300 menu_item: PopupMenuItem {height: 36}}
+                                }
+                                add_selected := SheetTextButton {text: #(crate::i18n::tr("Add")) i18n_text: "Add"}
+                            }
+                            status := RinxHint {width: Fill flow: Flow.Right{wrap: true}}
                         }
                         add_error := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5} draw_text +: {color: RINX_DANGER_FG}}
                         add_hint := RinxHint {visible: false width: Fill flow: Flow.Right{wrap: true} padding: Inset{left: 8 right: 8 bottom: 5}}
@@ -1833,6 +1843,7 @@ impl Widget for MiniAppsPanel {
             if self.grant_confirmation.is_some() {
                 self.capture_grant_choices(cx);
                 let add_field = self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name));
+                let selected_person = self.view.drop_down(cx, ids!(grant_confirmation.scroll.people.list.add.directory.candidates)).selected(actions);
                 if self.view.button(cx,ids!(grant_confirmation.buttons.cancel)).clicked(actions) {self.close_grant_confirmation(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.buttons.primary)).clicked(actions) {self.grant_primary(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.actions.recover)).clicked(actions) {self.grant_recover(cx);}
@@ -1843,6 +1854,8 @@ impl Widget for MiniAppsPanel {
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.more.more_row.more_toggle)).clicked(actions) {self.grant_disclose(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.people_toggle_row.people_toggle)).clicked(actions) {self.grant_people_toggle(cx);}
                 else if self.view.button(cx,ids!(grant_confirmation.scroll.people.list.add.add_button)).clicked(actions) || add_field.returned(actions).is_some() {self.grant_add_person(cx);}
+                else if let Some(index) = selected_person {self.grant_select_person(cx, index);}
+                else if self.view.button(cx, ids!(grant_confirmation.scroll.people.list.add.directory.add_selected)).clicked(actions) {self.grant_add_selected_person(cx);}
                 else if add_field.changed(actions).is_some() {self.grant_add_typing(cx);}
                 else {
                     for (index, row) in sheet_ui::PEOPLE.iter().enumerate() {

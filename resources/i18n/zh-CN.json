@@ -2527,5 +2527,16 @@
   "You chose {page} on the pool’s page; it can’t be lower than the {held} held by running Agents, so it starts at {held}.": "你在资源池页面选了 {page}；不能低于正在运行的 Agent 已拿到的 {held}，所以从 {held} 开始。",
   "You chose {page} on the pool’s page; at most {max} can be given out, so it starts at {max}.": "你在资源池页面选了 {page}；最多只能分出 {max}，所以从 {max} 开始。",
   "Sharing Period Saved": "已保存共享期限",
-  "People on the list can request until {when}. The per-request limit stays {amount}.": "名单上的人可以申请到 {when}前，每次申请上限仍是 {amount}。"
+  "People on the list can request until {when}. The per-request limit stays {amount}.": "名单上的人可以申请到 {when}前，每次申请上限仍是 {amount}。",
+  "Select a person to add": "选择要添加的账号",
+  "Search by name or username": "搜索显示名称或用户名",
+  "Searching server accounts…": "正在搜索服务器上的账号…",
+  "Couldn’t load accounts. Press Search to try again.": "无法读取账号，请点「搜索」重试。",
+  "Press Search to find matching accounts.": "点「搜索」查找匹配的账号。",
+  "No additional local accounts found. Try an exact username.": "未找到其他本地账号，请尝试完整的用户名。",
+  "More accounts are available. Search by name to narrow the list.": "还有更多账号，请输入名称缩小搜索范围。",
+  "Choose a verified account to add. Already selected people are hidden.": "选择已核实的账号添加，已选账号不再重复显示。",
+  "An account on the list no longer exists. Remove it and search for the person again.": "名单中有账号已不存在，请移除后重新搜索。",
+  "Couldn’t verify people with the server. Your choices are kept. Try again when the connection is available.": "暂时无法向服务器核实账号。已保留你的选择，请在连接恢复后重试。",
+  "Type a username or display name to find people.": "输入用户名或显示名称查找好友。"
 }

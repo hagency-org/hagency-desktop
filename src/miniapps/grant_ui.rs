@@ -40,6 +40,29 @@ pub(super) struct GrantPrompt {
     add_error: String,
     /// The owner chose to add people from this month's record in this window.
     add_people: bool,
+    /// Each lookup owns its receiver. Replacing it on typing or reopening
+    /// drops late results, so only the visible search can supply a selection.
+    people_search: PeopleSearch,
+}
+
+#[derive(Default)]
+struct PeopleSearch {
+    query: String,
+    selected: Option<String>,
+    receiver: Option<Receiver<Result<crate::host::hagency::grant_people::People, String>>>,
+    result: Option<crate::host::hagency::grant_people::People>,
+    error: Option<String>,
+}
+impl PeopleSearch {
+    const VISIBLE_LIMIT: usize = 6;
+    fn candidates(&self, selected: &[String]) -> Vec<crate::host::hagency::grant_people::Person> {
+        self.result.as_ref().map(|r| r.items.iter()
+            .filter(|p| !selected.contains(&p.id)).take(Self::VISIBLE_LIMIT).cloned().collect()).unwrap_or_default()
+    }
+    fn limited(&self, selected: &[String]) -> bool {
+        self.result.as_ref().is_some_and(|r| r.limited || r.items.iter()
+            .filter(|p| !selected.contains(&p.id)).count() > Self::VISIBLE_LIMIT)
+    }
 }
 enum Phase {
     Loading,
@@ -1945,6 +1968,8 @@ fn failure_message(code: &str) -> &'static str {
             "Enter a per-request limit above 0 and at least one person who can request."
         }
         "invalid_grant_manager" => "Someone on the list isn’t an account on your server. Remove them and add them again.",
+        "grant_person_not_found" => "An account on the list no longer exists. Remove it and search for the person again.",
+        "grant_people_unavailable" => "Couldn’t verify people with the server. Your choices are kept. Try again when the connection is available.",
         "management_grant_succession_required" | "pool_grant_succession_unavailable" => {
             "This server can’t change a published month or publish ahead yet. Ask its administrator to update the server."
         }
@@ -2104,11 +2129,14 @@ impl MiniAppsPanel {
             regrant: false,
             successor: None,
             submitted: false,
-            disclosure: Disclosure::default(),
+            disclosure: Disclosure { people: flow.choose_people(), ..Default::default() },
             add_error: String::new(),
-            add_people: false,
+            add_people: flow.choose_people() && flow.requested_succession() == Some(Succession::Amendment),
+            people_search: PeopleSearch::default(),
         });
+        self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name)).set_text(cx, "");
         self.grant_job(async move { flow.open().await });
+        self.grant_add_person(cx);
         self.present_grant_confirmation(cx);
         cx.set_key_focus(
             self.view
@@ -2152,6 +2180,7 @@ impl MiniAppsPanel {
         let view = grant_view(&state, now);
         let inputs = GrantInputs::of(&state, now);
         self.apply_grant_view(cx, &view, Some(&inputs));
+        self.present_grant_people(cx);
         self.request_confirmation_redraw(cx);
     }
     /// Write one computed view into the panel. `inputs`, when given, also
@@ -2244,30 +2273,96 @@ impl MiniAppsPanel {
         prompt.disclosure.people = !prompt.disclosure.people;
         self.present_grant_confirmation(cx);
     }
-    /// Add the person typed into the native add field, one at a time. Only
-    /// people on the owner's server can be added; the reason shows beside the
-    /// field otherwise. Nothing is committed until the owner confirms.
+    /// Search the actual homeserver. The field is never directly added to
+    /// the whitelist; the owner selects a returned account instead.
     pub(super) fn grant_add_person(&mut self, cx: &mut Cx) {
         self.capture_grant_choices(cx);
         let input = self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name));
-        let typed = input.text();
+        let query = input.text().trim().to_owned();
         let Some(prompt) = &mut self.grant_confirmation else {
             return;
         };
-        if !matches!(prompt.phase, Phase::Choose) || !prompt.actionable() {
+        if !prompt.flow.active() || !matches!(prompt.phase, Phase::Choose | Phase::Loading) {
             return;
         }
+        let (tx, receiver) = mpsc::sync_channel(1);
+        prompt.people_search = PeopleSearch { query: query.clone(), receiver: Some(receiver), ..Default::default() };
+        prompt.add_error.clear();
+        let flow = prompt.flow.clone();
+        crate::sliding_sync::spawn_async_task(async move {
+            let _ = tx.try_send(flow.search_people(query).await);
+            SignalToUI::set_ui_signal();
+        });
+        self.present_grant_confirmation(cx);
+    }
+    pub(super) fn grant_select_person(&mut self, cx: &mut Cx, index: usize) {
+        self.capture_grant_choices(cx);
+        let query = self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name)).text();
+        let Some(prompt) = &mut self.grant_confirmation else { return };
+        if !matches!(prompt.phase, Phase::Choose) || !prompt.actionable()
+            || prompt.people_search.query != query.trim() || prompt.people_search.receiver.is_some() {
+            return;
+        }
+        let managers = managers_of(&prompt.draft.managers);
+        let candidates = prompt.people_search.candidates(&managers);
+        prompt.people_search.selected = index.checked_sub(1).and_then(|i| candidates.get(i)).map(|person| person.id.clone());
+        self.present_grant_people(cx);
+        self.request_confirmation_redraw(cx);
+    }
+    pub(super) fn grant_add_selected_person(&mut self, cx: &mut Cx) {
+        self.capture_grant_choices(cx);
+        let query = self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name)).text();
+        let Some(prompt) = &mut self.grant_confirmation else { return };
+        if !matches!(prompt.phase, Phase::Choose) || !prompt.actionable()
+            || prompt.people_search.query != query.trim() || prompt.people_search.receiver.is_some() {
+            return;
+        }
+        let Some(selected) = prompt.people_search.selected.take() else { return };
         let mut managers = managers_of(&prompt.draft.managers);
-        match applicant_from_input(&typed, prompt.flow.account(), &managers) {
+        let candidates = prompt.people_search.candidates(&managers);
+        let Some(person) = candidates.iter().find(|person| person.id == selected) else { return };
+        match applicant_from_input(&person.id, prompt.flow.account(), &managers) {
             Ok(id) => {
                 managers.push(id);
                 prompt.draft.managers = managers_of(&managers.join(" ")).join(" ");
                 prompt.add_error.clear();
-                input.set_text(cx, "");
             }
             Err(reason) => prompt.add_error = reason,
         }
         self.present_grant_confirmation(cx);
+    }
+    fn present_grant_people(&mut self, cx: &mut Cx) {
+        let Some(prompt) = &self.grant_confirmation else { return };
+        let picker = &prompt.people_search;
+        let candidates = picker.candidates(&managers_of(&prompt.draft.managers));
+        let tr = crate::i18n::tr;
+        let status = if picker.receiver.is_some() { tr("Searching server accounts…") }
+            else if picker.error.is_some() { tr("Couldn’t load accounts. Press Search to try again.") }
+            else if picker.result.is_none() { tr("Press Search to find matching accounts.") }
+            else if candidates.is_empty() { tr("No additional local accounts found. Try an exact username.") }
+            else if picker.limited(&managers_of(&prompt.draft.managers)) { tr("More accounts are available. Search by name to narrow the list.") }
+            else { tr("Choose a verified account to add. Already selected people are hidden.") };
+        let searching = picker.receiver.is_some();
+        let selected = picker.selected.as_ref().and_then(|id| candidates.iter().position(|p| &p.id == id)).map_or(0, |i| i + 1);
+        self.apply_grant_people(cx, &candidates, selected, status, searching);
+    }
+    fn apply_grant_people(&mut self, cx: &mut Cx, candidates: &[crate::host::hagency::grant_people::Person], selected: usize, status: &str, searching: bool) {
+        let tr = crate::i18n::tr;
+        let dropdown = self.view.drop_down(cx, ids!(grant_confirmation.scroll.people.list.add.directory.candidates));
+        dropdown.set_labels(cx, std::iter::once(tr("Select a person to add").to_owned())
+            .chain(candidates.iter().map(|p| p.label())).collect());
+        dropdown.set_selected_item(cx, selected);
+        dropdown.set_visible(cx, !candidates.is_empty());
+        let add = self.view.button(cx, ids!(grant_confirmation.scroll.people.list.add.directory.add_selected));
+        add.set_visible(cx, !candidates.is_empty());
+        add.set_enabled(cx, selected > 0 && !searching);
+        let identity = selected.checked_sub(1).and_then(|i| candidates.get(i)).map(|p| p.label());
+        self.view.label(cx, ids!(grant_confirmation.scroll.people.list.add.directory.status)).set_text(cx, identity.as_deref().unwrap_or(status));
+        self.view.view(cx, ids!(grant_confirmation.scroll.people.list.add.directory)).set_visible(cx, true);
+        self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name))
+            .set_empty_text(cx, tr("Search by name or username").to_owned());
+        self.view.button(cx, ids!(grant_confirmation.scroll.people.list.add.add_button))
+            .set_enabled(cx, !searching);
     }
     /// Take someone this window added off the list again. People already on
     /// the published list stay: their rows have no remove button.
@@ -2292,12 +2387,11 @@ impl MiniAppsPanel {
         let Some(prompt) = &mut self.grant_confirmation else {
             return;
         };
-        if prompt.add_error.is_empty() {
-            return;
-        }
         prompt.add_error.clear();
+        prompt.people_search = PeopleSearch::default();
         let view = grant_view(&prompt.state(), now_ms());
         self.apply_grant_view(cx, &view, None);
+        self.present_grant_people(cx);
         self.request_confirmation_redraw(cx);
     }
     pub(super) fn poll_grant_confirmation(&mut self, cx: &mut Cx) {
@@ -2315,6 +2409,23 @@ impl MiniAppsPanel {
                 Err(_) => None,
             });
         let mut changed = false;
+        let people = prompt.people_search.receiver.as_ref().and_then(|receiver| match receiver.try_recv() {
+            Ok(result) => Some(result),
+            Err(mpsc::TryRecvError::Disconnected) => Some(Err("grant_people_unavailable".into())),
+            Err(_) => None,
+        });
+        if let Some(result) = people {
+            prompt.people_search.receiver = None;
+            if prompt.flow.active() {
+                match result {
+                    Ok(people) => prompt.people_search.result = Some(people),
+                    Err(error) => prompt.people_search.error = Some(error),
+                }
+            } else {
+                prompt.people_search = PeopleSearch::default();
+            }
+            changed = true;
+        }
         // Adding people from the record: the name field is ready once the form is.
         let mut focus_add = false;
         if let Some(result) = result {
@@ -2377,6 +2488,12 @@ impl MiniAppsPanel {
                     prompt.original = Some(progress.summary.intent_id.clone());
                     prompt.publishing = true;
                     Phase::PublicationProgress(*progress)
+                }
+                Err(code) if matches!(code.as_str(), "grant_person_not_found" | "grant_people_unavailable") => {
+                    prompt.submit_publication = false;
+                    prompt.submitted = false;
+                    prompt.add_error = crate::i18n::tr(failure_message(&code)).into();
+                    Phase::Choose
                 }
                 Err(code) => Phase::Failed(code),
             };
@@ -2681,6 +2798,7 @@ impl MiniAppsPanel {
         let sharing = area(self, cx, ids!(grant_confirmation.scroll.sharing.sharing_row.sharing_toggle));
         let open_add = area(self, cx, ids!(grant_confirmation.scroll.people.list.open_add.open_add_button));
         let add = area(self, cx, ids!(grant_confirmation.scroll.people.list.add.add_button));
+        let add_selected = area(self, cx, ids!(grant_confirmation.scroll.people.list.add.directory.add_selected));
         let people_toggle = area(self, cx, ids!(grant_confirmation.scroll.people.list.people_toggle_row.people_toggle));
         let folded = view.people_collapsible && !view.people_open;
         let presets = [
@@ -2714,6 +2832,11 @@ impl MiniAppsPanel {
             if view.people_editable && !folded {
                 targets.push(self.view.text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name)).area());
                 targets.push(add);
+                let candidates = self.view.drop_down(cx, ids!(grant_confirmation.scroll.people.list.add.directory.candidates)).area();
+                if !prompt.people_search.candidates(&managers_of(&prompt.draft.managers)).is_empty() {
+                    targets.push(candidates);
+                    if prompt.people_search.selected.is_some() { targets.push(add_selected); }
+                }
             }
             if view.quota_visible {
                 if let Some(slider) = self
@@ -2773,6 +2896,10 @@ impl MiniAppsPanel {
                 return true;
             }
             if view.choosing {
+                if view.people_editable && !folded && cx.has_key_focus(add_selected) {
+                    self.grant_add_selected_person(cx);
+                    return true;
+                }
                 if view.sharing_visible && view.sharing_open {
                     for (id, days) in presets {
                         if cx.has_key_focus(self.view.button(cx, id).area()) {
@@ -3083,6 +3210,12 @@ impl MiniAppsPanel {
         self.view
             .text_input(cx, ids!(grant_confirmation.scroll.people.list.add.add_name))
             .set_text(cx, fixture["typed"].as_str().unwrap_or_default());
+        let candidates: Vec<_> = fixture["directory"].as_array().into_iter().flatten()
+            .filter_map(|person| Some(crate::host::hagency::grant_people::Person {
+                id: person["id"].as_str()?.to_owned(),
+                display_name: person["name"].as_str().map(str::to_owned),
+            })).collect();
+        self.apply_grant_people(cx, &candidates, fixture["selected"].as_u64().unwrap_or(0) as usize, crate::i18n::tr("Choose a verified account to add. Already selected people are hidden."), false);
         GRANT_PREVIEW.with(|cell| *cell.borrow_mut() = Some(preview));
         Ok(())
     }
@@ -3139,6 +3272,21 @@ impl MiniAppsPanel {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn directory_hides_selected_people_and_bounds_the_visible_menu() {
+        let picker = PeopleSearch { result: Some(crate::host::hagency::grant_people::People {
+            items: (0..8).map(|i| crate::host::hagency::grant_people::Person {
+                id: format!("@person{i}:test"), display_name: None,
+            }).collect(), limited: false,
+        }), ..Default::default() };
+        let selected = vec!["@person0:test".into(), "@person1:test".into()];
+        assert!(picker.limited(&[]));
+        assert!(!picker.limited(&selected));
+        let candidates = picker.candidates(&selected);
+        assert_eq!(candidates.len(), 6);
+        assert_eq!(candidates[0].id, "@person2:test");
+        assert_eq!(candidates[5].id, "@person7:test");
+    }
     #[test]
     fn keyboard_cycle_keeps_footer_reachable_both_directions() {
         assert_eq!(focus_next(Some(3), 6, false), 4);

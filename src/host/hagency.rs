@@ -42,6 +42,7 @@ mod control;
 mod budget;
 mod allocations;
 pub(crate) mod grants;
+pub(crate) mod grant_people;
 pub(crate) mod execution;
 pub(crate) mod local_zone;
 pub(crate) mod people;

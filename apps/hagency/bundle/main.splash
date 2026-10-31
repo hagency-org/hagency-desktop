@@ -5999,6 +5999,7 @@ A.pool_succeed=fn(kind,tokens,applicants){
     if tokens!=nil && !(tokens>=1 && tokens<=9007199254740991) {return}
     let rid=p.rid let cid=c.id
     let args={contributionId:cid succession:kind}
+    if H.page=="pool_who" {args.choosePeople=true}
     if tokens!=nil {args.proposedTokens=tokens}
     if applicants!=nil && applicants.len()>0 {args.applicants=applicants}
     H.pool_result=nil H.pool_offer=nil
@@ -6032,7 +6033,7 @@ A.pool_succeed_reply=fn(rid,cid,kind,r,applicants,ctx){
     // Adding people from Who Can Request stays on that page, with its own result.
     if H.page=="pool_who" {
         if !r.is_ok && applicants!=nil {note.v={tone:"attention" text:A.t("Not added: ","没有添加：")+A.pool_succession_error(r.error)}}
-        if r.is_ok && note.v!=nil && note.v.tone=="running" && applicants!=nil {
+        if r.is_ok && note.v!=nil && note.v.tone=="running" && applicants!=nil && applicants.len()>0 {
             let names={t:""} for i id in applicants {names.t=names.t+(if i>0 {A.t(", ","、")} else {""})+A.pool_person(id)}
             note.v={tone:"running" text:if applicants.len()==1 {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。对方现在就能申请。")} else {A.t("Added who can request: "+names.t+". They can request now.","已添加可以申请的人："+names.t+"。他们现在就能申请。")}}
             H.who.picks=[]

@@ -12,6 +12,20 @@ let reply=fn(index,data){H.callbacks[index]({is_ok:true data:data})}
 let connection={id:"pool_original" label:"Pool A" ownerMxid:"@owner:test" executorDeviceId:"device" state:"admitted"}
 '''
 CASES={
+'whitelist_preserves_verified_picks_in_native_confirmation': '''
+H.resource_detail={} H.page="pool_who" H.resource_id="resource_a"
+H.who={rid:"resource_a" name:"" picks:["@chris:test"]}
+A.pool_view=fn(r){return {quotaEditable:false quotaMode:"amend" publishedTokens:1000000 b:{ceiling:2000000} now:1793400000000}}
+H.pool_info={rid:"resource_a" conn:connection grantState:"ready" grant:nil now:1793400000000}
+A.pool_effective_grant=fn(c,g,now){return nil}
+A.pool_floor=fn(v){return nil}
+A.pool_call=fn(service,args,done){H.calls.push({service:service args:args})}
+A.who_submit()
+assert(H.calls.len()==1 && H.calls[0].service=="hagency.grants.review")
+assert(H.calls[0].args.contributionId=="pool_original" && H.calls[0].args.choosePeople)
+assert(H.calls[0].args.applicants.len()==1 && H.calls[0].args.applicants[0]=="@chris:test")
+assert(H.who.picks.len()==1 && H.who.picks[0]=="@chris:test")
+''',
 'million_display_is_exact_not_an_authority_conversion': '''
 assert(A.tokens(0)=="0 M" && A.tokens(1)=="0.000001 M")
 assert(A.tokens(750000)=="0.75 M" && A.tokens(1000000)=="1 M")

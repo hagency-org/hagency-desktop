@@ -151,9 +151,15 @@ script_mod! {
                                 get_color: fn() -> vec4 {return mod.widgets.RINX_ON_ACCENT.mix(self.color_hover, self.hover)}
                             }
                             avatar := mod.widgets.MobileAvatar {width: 40 height: 40}
-                            name := Label {
-                                width: Fill max_lines: 1 text_overflow: Ellipsis
-                                draw_text +: {color: mod.widgets.MOBILE_INK text_style: theme.font_regular {font_size: (12.5 * mod.widgets.RINX_TEXT_SCALE)}}
+                            View {width: Fill height: Fit flow: Down spacing: 3
+                                name := Label {
+                                    width: Fill max_lines: 1 text_overflow: Ellipsis
+                                    draw_text +: {color: mod.widgets.MOBILE_INK text_style: theme.font_regular {font_size: (12.5 * mod.widgets.RINX_TEXT_SCALE)}}
+                                }
+                                user_id := Label {
+                                    width: Fill max_lines: 1 text_overflow: Ellipsis
+                                    draw_text +: {color: mod.widgets.MOBILE_MUTED text_style: theme.font_regular {font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}
+                                }
                             }
                         }
                         mod.widgets.MobileDivider {margin: Inset{left: 70}}
@@ -285,7 +291,48 @@ pub struct MobileHub {
     #[rust] group_request: u64,
     #[rust] query: String,
     #[rust] request: u64,
+    #[rust] search_timer: Timer,
     #[rust] status: String,
+}
+
+/// A username is relative to the signed-in account's homeserver; display-name
+/// queries still go to the directory, so partial matches never need a full ID.
+fn contact_query_id(owner: &UserId, query: &str) -> Option<OwnedUserId> {
+    let query = query.trim();
+    if let Ok(id) = UserId::parse(query) { return Some(id); }
+    let local = query.strip_prefix('@').unwrap_or(query);
+    if local.is_empty() || local.len() > 255 || local.contains(':') || local.chars().any(char::is_whitespace) {
+        return None;
+    }
+    UserId::parse(format!("@{local}:{}", owner.server_name())).ok()
+}
+
+async fn search_contact_profiles(client: &matrix_sdk::Client, owner: &UserId, query: &str) -> Result<Vec<UserProfile>, String> {
+    let query = query.trim();
+    let mut profiles = Vec::new();
+    if UserId::parse(query).is_err() {
+        let results = client.search_users(query, 100).await.map_err(|e| e.to_string())?;
+        profiles.extend(results.results.into_iter().map(|u| UserProfile {
+            user_id: u.user_id, username: u.display_name, avatar_state: AvatarState::Known(u.avatar_url),
+        }));
+    }
+    // Exact local usernames also find real accounts hidden from the directory.
+    if let Some(id) = contact_query_id(owner, query)
+        && id != owner && !profiles.iter().any(|p| p.user_id == id) {
+        match client.account().fetch_user_profile_of(&id).await {
+            Ok(p) => profiles.push(UserProfile {
+                user_id: id,
+                username: p.get_static::<DisplayName>().ok().flatten(),
+                avatar_state: AvatarState::Known(p.get_static::<AvatarUrl>().ok().flatten()),
+            }),
+            Err(e) if matches!(e.client_api_error_kind(), Some(matrix_sdk::ruma::api::error::ErrorKind::NotFound)) => {},
+            Err(e) if profiles.is_empty() => return Err(e.to_string()),
+            Err(_) => {},
+        }
+    }
+    let mut seen = std::collections::BTreeSet::new();
+    profiles.retain(|p| p.user_id != owner && seen.insert(p.user_id.clone()));
+    Ok(profiles)
 }
 
 impl MobileHub {
@@ -298,7 +345,7 @@ impl MobileHub {
             self.adding_friend = true;
             self.query.clear();
             self.contacts.clear();
-            self.status = crate::i18n::tr("Search by Matrix ID or name, then press Enter.").into();
+            self.status = crate::i18n::tr("Type a username or display name to find people.").into();
             self.view.text_input(cx, ids!(search)).set_text(cx, "");
         }
         self.view.text_input(cx, ids!(search)).set_key_focus(cx);
@@ -307,6 +354,8 @@ impl MobileHub {
     }
 
     fn clear_account_state(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.search_timer);
+        self.search_timer = Timer::empty();
         self.owner = None;
         self.contacts.clear();
         self.visible_contacts.clear();
@@ -366,20 +415,9 @@ impl MobileHub {
             let result = async {
                 let mut profiles = Vec::new();
                 if search_directory && !query.trim().is_empty() {
-                    // Full Matrix IDs also work when a user is absent from the directory.
-                    if let Ok(id) = UserId::parse(query.trim()) {
-                        let p = client.account().fetch_user_profile_of(&id).await.map_err(|e| e.to_string())?;
-                        profiles.push(UserProfile {
-                            user_id: id,
-                            username: p.get_static::<DisplayName>().ok().flatten(),
-                            avatar_state: AvatarState::Known(p.get_static::<AvatarUrl>().ok().flatten()),
-                        });
-                    } else {
-                        let results = client.search_users(&query, 100).await.map_err(|e| e.to_string())?;
-                        profiles.extend(results.results.into_iter().filter(|u| u.user_id != owner).map(|u| UserProfile {
-                            user_id: u.user_id, username: u.display_name, avatar_state: AvatarState::Known(u.avatar_url),
-                        }));
-                    }
+                    profiles = tokio::time::timeout(std::time::Duration::from_secs(12),
+                        search_contact_profiles(&client, &owner, &query)).await
+                        .map_err(|_| "Search timed out. Please try again.".to_owned())??;
                 } else {
                     let mut ids = std::collections::BTreeSet::new();
                     for room in client.joined_rooms() {
@@ -407,6 +445,8 @@ impl MobileHub {
     }
 
     fn back(&mut self, cx: &mut Cx) {
+        cx.stop_timer(self.search_timer);
+        self.search_timer = Timer::empty();
         if self.selected_profile.take().is_none() {
             self.adding_friend = false;
             self.groups_open = false;
@@ -433,6 +473,13 @@ impl MobileHub {
 
 impl Widget for MobileHub {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+        if self.search_timer.is_event(event).is_some() {
+            self.search_timer = Timer::empty();
+            if self.adding_friend && self.selected_profile.is_none() && !self.query.trim().is_empty()
+                && self.owner.as_ref() == current_user_id().as_ref() {
+                self.refresh_contacts(cx, true);
+            }
+        }
         if matches!(event, Event::Signal) {
             crate::profile::user_profile_cache::process_user_profile_updates(cx);
             crate::avatar_cache::process_avatar_updates(cx);
@@ -484,9 +531,25 @@ impl Widget for MobileHub {
             let search = self.view.text_input(cx, ids!(search));
             if let Some(query) = search.changed(actions) {
                 self.query = query;
+                if self.adding_friend {
+                    // Invalidate in-flight results immediately, before the debounce fires.
+                    self.request = Self::next_request();
+                    cx.stop_timer(self.search_timer);
+                    self.search_timer = Timer::empty();
+                    self.contacts.clear();
+                    self.visible_contacts.clear();
+                    self.status = crate::i18n::tr(if self.query.trim().is_empty() {
+                        "Type a username or display name to find people."
+                    } else { "Searching server accounts…" }).into();
+                    if !self.query.trim().is_empty() { self.search_timer = cx.start_timeout(0.35); }
+                }
                 self.view.redraw(cx);
             }
-            if search.returned(actions).is_some() { self.refresh_contacts(cx, true); }
+            if search.returned(actions).is_some() && !self.query.trim().is_empty() {
+                cx.stop_timer(self.search_timer);
+                self.search_timer = Timer::empty();
+                self.refresh_contacts(cx, true);
+            }
             if self.view.button(cx, ids!(title_bar.controls.right)).clicked(actions)
                 || self.view.navigation_bar_button(cx, ids!(new_friends)).clicked(actions)
             {
@@ -581,6 +644,9 @@ impl Widget for MobileHub {
         self.view.label(cx, ids!(title_bar.title)).set_text(cx, title);
         self.view.button(cx, ids!(title_bar.controls.left)).set_visible(cx, profile_open || self.adding_friend || self.groups_open);
         self.view.view(cx, ids!(shortcuts)).set_visible(cx, !self.adding_friend);
+        self.view.text_input(cx, ids!(search)).set_empty_text(cx, crate::i18n::tr(if self.adding_friend {
+            "Search by name or username"
+        } else { "Search" }).to_owned());
         self.view.button(cx, ids!(title_bar.controls.right)).set_visible(cx, self.kind == 0 && !profile_open && !self.groups_open && !self.adding_friend);
         if let (Some(widget), Some(profile)) = (active.as_ref(), self.selected_profile.as_ref()) {
             Self::populate_profile(cx, widget, profile);
@@ -596,7 +662,7 @@ impl Widget for MobileHub {
         self.view.label(cx, ids!(status)).set_visible(cx, !self.status.is_empty());
         self.view.label(cx, ids!(group_status)).set_text(cx, &self.status);
         self.view.label(cx, ids!(group_status)).set_visible(cx, !self.status.is_empty());
-        let query = self.query.to_lowercase();
+        let query = self.query.trim().to_lowercase();
         self.visible_contacts = self.contacts.iter().enumerate().filter(|(_, p)| {
             p.displayable_name().to_lowercase().contains(&query) || p.user_id.as_str().to_lowercase().contains(&query)
         }).map(|(i, _)| i).collect();
@@ -643,6 +709,34 @@ impl Widget for MobileHub {
 #[cfg(test)]
 mod new_chat_tests {
     use super::*;
+    #[tokio::test]
+    async fn friend_search_matches_partial_names_and_exact_usernames() {
+        let server = crate::profile::search_test_server::DirectoryServer::new().await;
+        let client = server.client().await;
+        let owner = ruma::user_id!("@owner:example.test");
+        let matches = search_contact_profiles(&client, owner, "ch").await.unwrap();
+        assert_eq!(matches.iter().filter(|p| p.user_id.as_str() == "@chris:example.test").count(), 1);
+        assert!(matches.iter().any(|p| p.user_id.as_str() == "@chris:remote.test"), "friend search preserves federated matches");
+        for query in ["chris", "@chris", "@chris:example.test"] {
+            let matches = search_contact_profiles(&client, owner, query).await.unwrap();
+            assert_eq!(matches.len(), 1);
+            assert_eq!(matches[0].user_id.as_str(), "@chris:example.test");
+        }
+        let private = search_contact_profiles(&client, owner, "private").await.unwrap();
+        assert_eq!(private[0].username.as_deref(), Some("Private account"));
+        assert!(search_contact_profiles(&client, owner, "not-registered").await.unwrap().is_empty());
+    }
+    #[test]
+    fn usernames_use_the_current_homeserver_without_requiring_a_full_id() {
+        let owner = ruma::user_id!("@owner:river.ominix.io:19443");
+        for query in ["chris", "@chris", " chris "] {
+            assert_eq!(contact_query_id(owner, query).unwrap().as_str(), "@chris:river.ominix.io:19443");
+        }
+        assert_eq!(contact_query_id(owner, "@chris:other.test").unwrap().as_str(), "@chris:other.test");
+        for query in ["", "Chris Smith", "someone:malformed"] {
+            assert!(contact_query_id(owner, query).is_none());
+        }
+    }
     #[test]
     fn new_chat_opens_existing_contact_search_without_sending() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
@@ -661,6 +755,18 @@ mod new_chat_tests {
         assert!(hub.query.is_empty());
         assert_eq!(hub.view.text_input(&mut cx, ids!(search)).text(), "");
         assert_ne!(hub.request, request, "Opening search invalidates old requests without sending a search or message");
+        let request = hub.request;
+        let input = hub.view.text_input(&mut cx, ids!(search)).widget_uid();
+        let actions = cx.capture_actions(|cx| cx.widget_action(input, TextInputAction::Changed("ch".into())));
+        hub.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
+        assert_eq!(hub.query, "ch");
+        assert_ne!(hub.request, request, "Typing invalidates any previous directory response immediately");
+        assert!(!hub.search_timer.is_empty(), "A short name starts a debounced search without Enter");
+        let request = hub.request;
+        let actions = cx.capture_actions(|cx| cx.widget_action(input, TextInputAction::Changed(String::new())));
+        hub.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
+        assert_ne!(hub.request, request);
+        assert!(hub.search_timer.is_empty(), "Clearing the search cancels the pending lookup");
     }
 }
 

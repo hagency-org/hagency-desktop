@@ -57,6 +57,9 @@ struct Selector {
     /// Agent applicants a script proposes. They only pre-select the native
     /// applicants field; the owner still confirms them natively.
     applicants: Option<Vec<String>>,
+    /// Open the people picker. This is presentation only, never permission.
+    #[serde(default)]
+    choose_people: bool,
 }
 /// A complete Matrix user ID (`@name:server`), as the native form accepts.
 pub(crate) fn matrix_user(id: &str) -> bool {
@@ -90,6 +93,7 @@ impl Selector {
                 value.contribution_id.is_none() || tokens == 0 || tokens > MAX_GRANT_TOKENS
             })
             || (value.succession.is_some() && value.contribution_id.is_none())
+            || (value.choose_people && value.contribution_id.is_none())
         {
             return Err("invalid_management_arguments".into());
         }
@@ -360,6 +364,24 @@ pub(crate) struct GrantFlow {
     succession_support: Arc<AtomicU8>,
 }
 impl GrantFlow {
+    pub fn choose_people(&self) -> bool { self.selector.choose_people }
+    pub async fn search_people(&self, query: String) -> Result<super::grant_people::People, String> {
+        self.check()?;
+        let client = crate::sliding_sync::get_client().ok_or("management_session_required")?;
+        let result = super::grant_people::search(&client, self.account(), &query).await;
+        self.check()?;
+        result
+    }
+    async fn verify_people(&self, people: &[String]) -> Result<(), String> {
+        self.check()?;
+        if people.is_empty() { return Ok(()); }
+        let client = crate::sliding_sync::get_client().ok_or("management_session_required")?;
+        for person in people {
+            super::grant_people::verify(&client, self.account(), person).await?;
+            self.check()?;
+        }
+        Ok(())
+    }
     async fn form(&self) -> Result<GrantResult, String> {
         self.check()?;
         let form = self.access.publication_form(self.selector.contribution_id.clone()
@@ -423,6 +445,7 @@ impl GrantFlow {
             proposed_tokens: None,
             succession: Some(Succession::Amendment),
             applicants: None,
+            choose_people: true,
         };
         flow.check()?;
         Ok(flow)
@@ -492,6 +515,11 @@ impl GrantFlow {
             .contribution_id
             .clone()
             .ok_or("owner_grant_original_intent_required")?;
+        let form = self.access.succession_form(contribution.clone(), kind.native())
+            .await.map_err(|e| e.code)?;
+        let added: Vec<String> = choices.eligible_managers.iter()
+            .filter(|id| !form.predecessor.eligible_managers.contains(id)).cloned().collect();
+        self.verify_people(&added).await?;
         let review = self
             .access
             .prepare_successor(contribution, kind.native(), choices)
@@ -552,6 +580,7 @@ impl GrantFlow {
         self.check()?;
         choices.coordinator = self.account().to_owned();
         let choices = choices.parse()?;
+        self.verify_people(&choices.eligible_managers).await?;
         let contribution = self
             .selector
             .contribution_id
@@ -1231,6 +1260,8 @@ mod tests {
         let s = parsed(json!({"contributionId":"pool_1","proposedTokens":800000,"succession":"amendment"})).unwrap();
         assert_eq!(s.succession, Some(Succession::Amendment));
         assert_eq!(s.proposed_tokens, Some(800000));
+        assert!(!s.choose_people);
+        assert!(parsed(json!({"contributionId":"pool_1","succession":"amendment","choosePeople":true})).unwrap().choose_people);
         assert_eq!(parsed(json!({"contributionId":"pool_1","succession":"renewal"})).unwrap().succession, Some(Succession::Renewal));
         let s = parsed(json!({"contributionId":"pool_1","applicants":["@b:test","@a:test","@b:test"]})).unwrap();
         assert_eq!(s.applicants.as_deref(), Some(&["@a:test".to_owned(), "@b:test".to_owned()][..]));
@@ -1238,6 +1269,7 @@ mod tests {
         assert_eq!(s.check_applicants("@owner:other.test"), Err("invalid_management_arguments".into()));
         let many: Vec<String> = (0..65).map(|n| format!("@m{n}:test")).collect();
         for bad in [
+            json!({"intentId":"original_1","choosePeople":true}),
             json!({"intentId":"original_1","succession":"amendment"}),
             json!({"contributionId":"pool_1","succession":"revoke"}),
             json!({"contributionId":"pool_1","succession":"Amendment"}),
