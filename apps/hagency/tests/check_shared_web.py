@@ -41,6 +41,23 @@ H.command=cmd A.policy_reply(cmd,{is_ok:false error:"management_outcome_unknown"
 A.policy_reply(cmd,{is_ok:true data:row}) assert(H.command.args.commandId=="original" && ack.len()==0)
 row.webSearch=true A.policy_reply(cmd,{is_ok:true data:row}) assert(H.command==nil && H.policy_detail.webSearch && ack[0]=="original")
 ''',
+"permission_save_and_confirmation_preserve_scroll_identity":'''
+let route=A.scroll_route()
+H.busy=true assert(A.scroll_route()==route) H.busy=false
+for mode in ["edit","review","result","detail"] {H.policy_mode=mode assert(A.scroll_route()==route)}
+H.policy_engagement="another-agent" assert(A.scroll_route()!=route)
+H.policy_engagement="agent" H.policy_resource="another-pool" assert(A.scroll_route()!=route)
+H.page="wizard" H.wizard.step=1 let wizard=A.scroll_route() H.wizard.step=2 assert(A.scroll_route()!=wizard)
+''',
+"full_trust_can_be_changed_after_search_save":'''
+H.policy_mode="result" A.choose_policy(false)
+assert(H.policy_mode=="edit" && !H.policy_draft.executionPolicy.yolo)
+assert(H.policy_draft.expectedRevision==row.revision && row.webSearch==false)
+A.review_policy() assert(H.policy_mode=="review") A.submit_policy()
+assert(calls.len()==1 && calls[0].args.executionPolicy.yolo==false)
+assert(A.recipient_optional(calls[0].args,"webSearch")==nil)
+''',
+
 "owner_shortcut_resolves_exact_agent":'''
 let r={id:"req" agentId:"agent" poolId:"pool" resourceOwnerMxid:"@owner:test" assignmentId:"assigned"}
 H.page="pool_agent" H.pool_detail=r H.pool_meta={conns:[{id:"pool" resourceId:"resource"}]}
@@ -48,6 +65,15 @@ A.pool_agent_permissions(r,"") assert(calls.len()==1 && calls[0].service=="hagen
 ''',
 "manager_cannot_use_owner_shortcut":'''
 H.entry_role="manager" A.pool_agent_permissions({resourceOwnerMxid:"@owner:test" assignmentId:"assigned"},"") assert(calls.len()==0)
+''',
+"cold_shortcut_uses_absent_cursor_then_exact_pool_and_device":'''
+let r={id:"req" agentId:"agent" poolId:"pool" resourceOwnerMxid:"@owner:test" assignmentId:"assigned"}
+H.page="pool_agent" H.pool_detail=r H.pool_meta=nil H.pool_info=nil H.session.device="device"
+A.pool_agent_permissions(r,"") assert(calls.len()==1 && calls[0].args.after==nil)
+callbacks[0]({items:[{id:"pool" resourceId:"wrong-device" ownerMxid:"@owner:test" executorDeviceId:"other"}] nextAfter:"next"})
+assert(calls.len()==2 && calls[1].args.after=="next")
+callbacks[1]({items:[{id:"pool" resourceId:"resource" ownerMxid:"@owner:test" executorDeviceId:"device"}] nextAfter:nil})
+assert(calls.len()==3 && calls[2].service=="hagency.execution_policy.get" && calls[2].args.resourceId=="resource" && calls[2].args.engagementId=="agent")
 ''',
 "navigation_ignores_late_response":'''
 let r={id:"req" agentId:"agent" poolId:"pool" resourceOwnerMxid:"@owner:test" assignmentId:"assigned"}
@@ -63,6 +89,22 @@ def main():
  CASES['actual_switch_renders_and_saves']='''let tree=View{'''+section+'''} visit(tree)
 let toggle=find("policy_web_search") assert(toggle!=nil && toggle.enabled && toggle.draw_bg.selected==0)
 toggle.on_click() assert(calls.len()==1 && calls[0].args.webSearch)
+'''
+ CASES['save_feedback_does_not_insert_new_rows']='''let draw=fn(){widgets=[] let tree=View{'''+section+'''} visit(tree)}
+draw() let initial=find("policy_save_status") assert(initial!=nil && initial.height==24)
+H.busy=true draw() assert(find("policy_save_status").height==initial.height && !find("policy_web_search").enabled)
+H.busy=false H.policy_mode="result" draw()
+assert(find("policy_save_status").height==initial.height && find("policy_web_search").enabled)
+assert(find("policy_result_done")==nil && find("policy_standard").enabled)
+'''
+ pending=source[source.index('        if H.command != nil && !H.busy && A.sub_page()'):source.index('        if false && H.page=="overview"')]
+ CASES['pending_save_keeps_layout_and_uncertain_result_keeps_retry']='''let pending_view=fn(){return View{width:Fill height:Fit
+'''+pending+'''}}
+H.command={service:"hagency.execution_policy.edit" args:{commandId:"original"}}
+for page in ["execution_policy","personal_agent"] {
+ H.page=page H.busy=true widgets=[] visit(pending_view()) assert(find("retry_saved")==nil)
+ H.busy=false widgets=[] visit(pending_view()) assert(find("retry_saved")!=nil && find("retry_saved").enabled)
+}
 '''
  results=[]
  for lang in ['en','zh-CN']:

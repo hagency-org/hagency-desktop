@@ -1219,7 +1219,7 @@ A.open_policy_grants = fn(){
     A.open_tools(row.resourceId,row.engagementId,"","rules")
 }
 A.choose_policy = fn(yolo){
-    if H.busy || H.command!=nil || H.page!="execution_policy" || H.policy_detail==nil || H.policy_mode=="result" {return}
+    if H.busy || H.command!=nil || H.page!="execution_policy" || H.policy_detail==nil || (H.policy_mode!="detail" && H.policy_mode!="result") {return}
     let row=H.policy_detail
     if yolo && row.framework!="codex" {return}
     H.policy_draft={resourceId:row.resourceId engagementId:row.engagementId expectedRevision:row.revision executionPolicy:{yolo:yolo}}
@@ -1865,7 +1865,7 @@ A.pool_agent_permissions=fn(row,after){
     if H.busy || H.command!=nil || H.entry_role!="owner" || H.session==nil || row.resourceOwnerMxid!=H.session.account || row.assignmentId==nil {return}
     let rid=A.reqs_pool_rid(row.poolId)
     if rid!="" {A.open_policy(rid,row.agentId) return}
-    A.request("hagency.connections.list",{after:after},fn(data){
+    A.request("hagency.connections.list",{after:if after=="" {nil} else {after}},fn(data){
         if H.page!="pool_agent" || H.pool_detail==nil || H.pool_detail.id!=row.id || H.entry_role!="owner" {return}
         let found={rid:""}
         for c in A.pool_items(data) {if c.id==row.poolId && A.pool_mine(c) {found.rid=c.resourceId}}
@@ -3039,11 +3039,15 @@ A.resource_label_id = fn(id){
     }
     return label
 }
+// Scroll identity follows navigation; permission edits, confirmations and save results stay on the same page.
+A.scroll_route = fn(){
+    let route = H.page + if H.page == "wizard" {"/" + H.wizard.step} else if H.page == "project_wizard" {"/" + H.project_draft.step} else if H.page == "project_setup" {"/" + H.confirm} else if H.page == "agent_wizard" {"/" + H.agent_review} else if H.page == "agent_action" {"/" + H.agent_confirmation} else if H.page == "personal_agent" {"/"+H.personal_mode} else if H.page=="connection_reoffer" && H.reoffer_draft!=nil {"/"+H.reoffer_draft.review} else if H.page=="connection_history" {"/"+H.history_page} else if H.page=="stopped_task" {"/"+H.stopped_resource+"/"+H.stopped_dispatch+"/"+H.stopped_offset+"/"+H.stopped_mode} else if H.page=="stopped_tasks" {"/"+H.stopped_resource+"/"+H.stopped_workspace+"/"+H.stopped_after} else if H.page=="workspace" {"/"+H.workspace_resource+"/"+H.workspace_id+"/"+H.workspace_mode} else if H.page=="workspaces" {"/"+H.workspace_resource+"/"+H.workspace_after} else if H.page=="execution_policy" {"/"+H.policy_resource+"/"+H.policy_engagement} else if H.page=="execution_policies" {"/"+H.policy_resource+"/"+H.policy_after} else if H.page=="tool_request" {"/"+H.tool_resource+"/"+H.tool_request_id} else if H.page=="tool_approvals" || H.page=="tool_grants" {"/"+H.tool_resource+"/"+H.tool_engagement+"/"+H.tool_after+"/"+H.tool_kind} else if H.page=="approval_bindings" {"/"+H.binding_resource+"/"+H.binding_after+"/"+H.binding_filters.agent+"/"+H.binding_filters.project} else {""}
+    return route + "/" + A.route_identity()
+}
 A.redraw = fn(){
     A.nav_track()
     ui.heading.render() ui.navigation.render() ui.page_bar.render() ui.alert_layer.render() ui.notice.set_text(H.notice) ui.notice.set_visible(H.notice != "" && !H.busy && !A.notice_inline() && !A.sub_page())
-    let route = H.page + if H.page == "wizard" {"/" + H.wizard.step} else if H.page == "project_wizard" {"/" + H.project_draft.step} else if H.page == "project_setup" {"/" + H.confirm} else if H.page == "agent_wizard" {"/" + H.agent_review} else if H.page == "agent_action" {"/" + H.agent_confirmation} else if H.page == "personal_agent" {"/"+H.personal_mode} else if H.page=="connection_reoffer" && H.reoffer_draft!=nil {"/"+H.reoffer_draft.review} else if H.page=="connection_history" {"/"+H.history_page} else if H.page=="stopped_task" {"/"+H.stopped_resource+"/"+H.stopped_dispatch+"/"+H.stopped_offset+"/"+H.stopped_mode} else if H.page=="stopped_tasks" {"/"+H.stopped_resource+"/"+H.stopped_workspace+"/"+H.stopped_after} else if H.page=="workspace" {"/"+H.workspace_resource+"/"+H.workspace_id+"/"+H.workspace_mode} else if H.page=="workspaces" {"/"+H.workspace_resource+"/"+H.workspace_after} else if H.page=="execution_policy" {"/"+H.policy_resource+"/"+H.policy_engagement+"/"+H.policy_mode} else if H.page=="execution_policies" {"/"+H.policy_resource+"/"+H.policy_after} else if H.page=="tool_request" {"/"+H.tool_resource+"/"+H.tool_request_id} else if H.page=="tool_approvals" || H.page=="tool_grants" {"/"+H.tool_resource+"/"+H.tool_engagement+"/"+H.tool_after+"/"+H.tool_kind} else if H.page=="approval_bindings" {"/"+H.binding_resource+"/"+H.binding_after+"/"+H.binding_filters.agent+"/"+H.binding_filters.project} else {""}
-    let key=route + "/" + A.route_identity()
+    let key=A.scroll_route()
     if key != H.rendered_route {ui.content.remember_scroll(H.rendered_route) ui.content.reset_scroll() H.rendered_route=key}
     ui.content.body.page.render()
     if H.ux.restore && !H.busy {H.ux.restore=false ui.content.restore_scroll(key)}
@@ -8636,13 +8640,6 @@ A.pool_sync_amount=fn(){
 }
 
 A.render_page = fn(){
-    // The reading banner sits in the page's own column, like the content under it.
-    loading_row := View{visible:H.busy && !A.sub_page() && !A.reqs_page() width:Fill height:Fit align:Align{x:0.5} mod.widgets.HagencyColumn{
-        loading := mod.widgets.HagencyStatus{
-            mod.widgets.LoadingSpinner{width:20 height:20}
-            mod.widgets.HagencyCopy{text:A.t("Loading current data…","正在读取最新数据…")}
-        }
-    }}
     if H.ready && H.page=="overview" {
         if H.entry_role=="" || H.entry_choosing {
             entry_intro := mod.widgets.HagencySection{
@@ -9380,7 +9377,7 @@ A.render_page = fn(){
                 }
             }}
         }}
-        if H.command != nil && A.sub_page() {View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{top:10} mod.widgets.HagencyColumn{
+        if H.command != nil && !H.busy && A.sub_page() {View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{top:10} mod.widgets.HagencyColumn{
             mod.widgets.HagencyList{View{width:Fill height:Fit flow:Right spacing:12 padding:Inset{left:14 right:14 top:10 bottom:10} align:Align{y:0.5}
                 if H.busy {View{width:(22+7*mod.widgets.RINX_TEXT_SCALE) height:(22+7*mod.widgets.RINX_TEXT_SCALE) align:Align{x:0.5 y:0.5} mod.widgets.HagencySpinner{}}}
                 if !H.busy {mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.sync draw_icon.color:mod.widgets.RINX_WARNING_FG}}}
@@ -9392,7 +9389,7 @@ A.render_page = fn(){
                 if !H.busy {retry_saved := mod.widgets.HagencyGetButton{enabled:!H.busy text:A.t("Retry","重试") on_click: || A.retry_command()}}
             }}
         }}}
-        if H.command != nil && !A.sub_page() {
+        if H.command != nil && !H.busy && !A.sub_page() {
             mod.widgets.HagencyCard{
                 mod.widgets.HagencyCopy{text: A.t("A saved request needs its result", "有一条已保存的请求等待结果")}
                 mod.widgets.HagencyHint{text: A.t("Resume this request to see its result. It cannot create a second resource or approve twice.", "恢复此请求以查看结果，不会重复创建资源或重复审批。")}
@@ -11259,7 +11256,7 @@ A.render_page = fn(){
                 let chat=A.shared_mode(row)=="chat"
                 let codex=row.framework=="codex"
                 let project=A.tool_project_name(row)
-                let can=!H.busy && H.command==nil && H.policy_mode!="review" && H.policy_mode!="result"
+                let can=!H.busy && H.command==nil && (H.policy_mode=="detail" || H.policy_mode=="result")
                 let key="policy:"+row.engagementId
                 View{width:Fill height:Fit flow:Down spacing:10 align:Align{x:0.5} padding:Inset{top:6 bottom:8}
                     mod.widgets.HagencyAvatar{draw_bg.color:if full {mod.widgets.RINX_WARNING_BG} else {mod.widgets.RINX_INFO_BG} mod.widgets.HagencyAvatarGlyph{draw_icon.color:if full {mod.widgets.RINX_WARNING_FG} else {mod.widgets.RINX_INFO_FG}}}
@@ -11270,14 +11267,11 @@ A.render_page = fn(){
                     }
                     if project!="" {mod.widgets.HagencyHint{width:Fit text:A.t("In project chat ","所在项目（聊天）：")+project}}
                 }
-                if H.policy_mode=="result" {View{width:Fill height:Fit padding:Inset{bottom:6} mod.widgets.HagencyResult{draw_bg.color:mod.widgets.RINX_SUCCESS_BG
-                    mod.widgets.HagencyResultLine{
-                        mod.widgets.HagencyCopy{text:A.t("Saved. It applies when "+row.agent+" starts its next task.","已保存，"+A.sub_join(row.agent,"的下一个任务开始时生效。")) draw_text.color:mod.widgets.RINX_SUCCESS_FG}
-                    }
-                    mod.widgets.HagencyResultActions{
-                        policy_result_done := mod.widgets.HagencyBarDone{padding:Inset{left:12 right:12} text:A.t("OK","好") enabled:!H.busy on_click: || A.open_policy(H.policy_resource,H.policy_engagement)}
-                    }
-                }}}
+                // Keep feedback in one fixed row so saving never displaces the controls below it.
+                policy_save_status := mod.widgets.HagencyHint{width:Fill height:24 align:Align{x:0.5} max_lines:1 text_overflow:TextOverflow.Ellipsis
+                    text:if H.busy {A.t("Saving…","正在保存…")} else if H.policy_mode=="result" {A.t("Saved · applies to the next task","已保存 · 下一个任务生效")} else {A.t("Changes apply to the next task","修改将在下一个任务生效")}
+                    draw_text.color:if H.policy_mode=="result" && !H.busy {mod.widgets.RINX_SUCCESS_FG} else {mod.widgets.RINX_MUTED}
+                }
                 mod.widgets.HagencyListLabel{text:A.t("WHAT IT MAY DO","执行权限")}
                 mod.widgets.HagencyList{
                     mod.widgets.HagencyListFit{
@@ -16644,6 +16638,8 @@ shell := View{width:Fill height:Fill flow:Down spacing:12
             mod.widgets.HagencyBadge{width:32 height:32 mod.widgets.HagencyGlyph{width:18 height:18 icon_walk:Walk{width:18 height:18} draw_icon.svg:mod.rinx_icons.hagency}}
             mod.widgets.HagencySectionTitle{width:Fill flow:Right max_lines:1 text_overflow:TextOverflow.Ellipsis text:if H.entry_role!="" && !H.entry_choosing{A.entry_label(H.entry_role)}else{"Hagency"}}
             entry_switch := mod.widgets.HagencyButton{visible:H.ready && H.entry_role!="" && !H.entry_choosing enabled:!H.busy text:A.t("Switch Role","切换角色") icon_walk:Walk{width:16 height:16} draw_icon.svg:mod.rinx_icons.person on_click:||A.entry_switch()}
+            // Reserve the activity slot even while idle; loading must not push the whole page down.
+            activity_slot := View{width:20 height:20 activity := mod.widgets.LoadingSpinner{width:20 height:20 visible:H.busy}}
             refresh := mod.widgets.HagencyIconButton{enabled:A.nav_free() && !A.must_reopen() draw_icon.svg:mod.rinx_icons.refresh on_click:||{A.read_cancel() A.refresh()}}
         }
     }}
