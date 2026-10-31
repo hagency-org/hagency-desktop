@@ -62,13 +62,16 @@ impl MiniAppNumberInput {
         self.view.widget(cx,ids!(slider_wrap)).set_visible(cx,self.slider_mode);
         let slider=self.view.widget(cx,ids!(slider_wrap.amount_slider));
         if let Some(mut slider)=slider.borrow_mut::<MiniAppAmountSlider>() {
-            let max=self.slider_max();
-            slider.enabled=!self.is_read_only && max>=self.minimum.max(1.0) as u64;
+            let (low,high)=self.slider_span();
+            // One possible value leaves nothing to slide: the track stays, disabled.
+            slider.enabled=!self.is_read_only && high>low;
             let disabled=!slider.enabled;
             slider.slider.set_disabled(cx,disabled);
-            slider.value=value.unwrap_or(0).min(max) as f64 / max.max(1) as f64;
+            slider.value=slider_fraction(value.unwrap_or(0),low,high);
             let value=slider.value;
             slider.slider.set_value(cx,value);
+            // Setting the value moves the knob only once the slider draws again.
+            slider.slider.redraw(cx);
         }
         self.view.button(cx,ids!(decrease)).set_disabled(cx,self.is_read_only || value.is_none_or(|v|v<=self.minimum.max(0.0) as u64));
         self.view.button(cx,ids!(increase)).set_disabled(cx,self.is_read_only || value.is_none_or(|v|v==Self::MAX));
@@ -76,6 +79,15 @@ impl MiniAppNumberInput {
     fn slider_max(&self)->u64 {
         if self.maximum.is_finite() && self.maximum>=0.0 {return self.maximum.min(Self::MAX as f64) as u64;}
         self.slider_ceiling.max(self.number().unwrap_or(0)).max(10_000_000)
+    }
+    /// The values the track spans: its left end is the minimum (such as what
+    /// running Agents hold), its right end the maximum. Before this the track
+    /// started at 0, so a knob dragged below the minimum stayed there while the
+    /// box beside it showed the minimum.
+    fn slider_span(&self)->(u64,u64) {
+        let high=self.slider_max();
+        let low=(self.minimum.max(0.0).min(Self::MAX as f64) as u64).min(high);
+        (low,high)
     }
     pub(crate) fn set_maximum(&mut self,cx:&mut Cx,maximum:u64){
         self.maximum=maximum.min(Self::MAX) as f64;self.sync_steps(cx);
@@ -86,12 +98,17 @@ impl MiniAppNumberInput {
         self.minimum=minimum.min(Self::MAX) as f64;self.sync_steps(cx);
     }
     fn slide_to(&mut self,cx:&mut Cx,position:f64){
-        let max=self.slider_max();
-        if self.is_read_only || max==0 || !position.is_finite(){return}
-        let step=if max>=1_000_000 {100_000} else {1};
-        let value=if position>=1.0 {max} else {((position.clamp(0.0,1.0)*max as f64/step as f64).round() as u64)*step};
-        self.set_text(cx,&value.max(self.minimum.max(0.0) as u64).min(max).to_string());
-        self.notify_change(cx);
+        let (low,high)=self.slider_span();
+        if self.is_read_only || high==0 || !position.is_finite(){return}
+        let value=slider_value(position,low,high);
+        if self.number()!=Some(value) || self.text.is_empty() {
+            self.text=value.to_string();
+            self.view.text_input(cx,ids!(input)).set_text(cx,&self.display_text());
+            self.notify_change(cx);
+        }
+        // The knob lands on the value the box shows, also when the drag left
+        // that value as it was (at either end, or within one step).
+        self.sync_steps(cx);
     }
     fn notify_change(&self,cx:&mut Cx){
         // Trusted confirmation screens capture their draft on Actions. Keep
@@ -162,6 +179,29 @@ impl Widget for MiniAppNumberInput {
 
 use crate::utils::token_millions;
 
+/// Where `value` sits on a track from `low` to `high`, from 0 to 1. A value
+/// outside the track (typed below the minimum) sits at its nearest end; a
+/// track with one value keeps its knob at the right end.
+fn slider_fraction(value: u64, low: u64, high: u64) -> f64 {
+    if high <= low {
+        return 1.0;
+    }
+    (value.clamp(low, high) - low) as f64 / (high - low) as f64
+}
+/// The value at `position` (0 to 1) on a track from `low` to `high`: steps of
+/// 0.1 M once the track reaches 1 M, and exactly `low` and `high` at its ends.
+fn slider_value(position: f64, low: u64, high: u64) -> u64 {
+    if high <= low || position >= 1.0 {
+        return high;
+    }
+    if position <= 0.0 {
+        return low;
+    }
+    let step = if high >= 1_000_000 { 100_000 } else { 1 };
+    let exact = low as f64 + position * (high - low) as f64;
+    (((exact / step as f64).round() as u64) * step).clamp(low, high)
+}
+
 /// 885626 → "88.56"; whole numbers stay whole.
 fn token_wan(tokens: u64) -> String {
     let hundredths = tokens / 100;
@@ -207,6 +247,34 @@ mod token_unit_tests {
         for invalid in ["", ".5", "1.234", "1e3", "-1", "万"] {
             assert_eq!(tokens_from_wan(invalid), None, "{invalid}");
         }
+    }
+    #[test]
+    fn the_track_spans_minimum_to_maximum_so_knob_and_box_agree() {
+        // The owner's pool: the maximum can't go below 9 M, the account allows 50 M.
+        let (low, high) = (9_000_000, 50_000_000);
+        // The left end is the minimum: no stretch of track below it to drag into.
+        assert_eq!(slider_value(0.0, low, high), low);
+        assert_eq!(slider_value(-0.3, low, high), low);
+        assert_eq!(slider_value(1.0, low, high), high);
+        assert_eq!(slider_fraction(low, low, high), 0.0);
+        assert_eq!(slider_fraction(high, low, high), 1.0);
+        // A value typed in the box puts the knob where dragging to it would.
+        for typed in [9_000_000, 12_000_000, 28_800_000, 50_000_000] {
+            let at = slider_fraction(typed, low, high);
+            assert_eq!(slider_value(at, low, high), typed, "typed {typed}");
+        }
+        // Below the minimum (typed, still invalid) the knob waits at the left end.
+        assert_eq!(slider_fraction(5_000_000, low, high), 0.0);
+        // Steps of 0.1 M, never outside the track.
+        assert_eq!(slider_value(0.5, low, high), 29_500_000);
+        for position in [0.001, 0.3, 0.999] {
+            assert!((8_650_000..=8_700_000).contains(&slider_value(position, 8_650_000, 8_700_000)), "{position}");
+        }
+        // One possible value: the knob stays put at the right end.
+        assert_eq!(slider_value(0.2, 9_000_000, 9_000_000), 9_000_000);
+        assert_eq!(slider_fraction(5_000_000, 9_000_000, 9_000_000), 1.0);
+        // Small amounts keep single-token steps.
+        assert_eq!(slider_value(0.5, 1, 101), 51);
     }
     #[test]
     fn million_editor_preserves_each_token_and_safe_integer_boundary() {
