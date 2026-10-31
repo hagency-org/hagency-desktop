@@ -54,6 +54,11 @@ H.who=who
 // Round 9: this month's list, read from this computer's native grant record (hagency.grants.applicants).
 let {who_list=nil}=H
 H.who_list=who_list
+// Accounts on the owner's server for Who Can Request (hagency.people.search): the people the owner
+// shares rooms with, what a typed name finds, and whether the typed username exists.
+let {who_people=nil}=H
+if who_people==nil {who_people={rid:"" known:[] knownState:"idle" query:"" found:[] exact:nil state:"idle" epoch:0}}
+H.who_people=who_people
 let {local_list=nil,local_status=nil,local_pending="",local_confirm="",local_error="",local_discard="",local_models=nil,local_after="",local_effort_note="",bar_past=false,local_epoch=0,local_failure="",local_failure_reason="",local_failure_code="",local_kept=nil,local_rechecked=false}=H
 H.local_list=local_list H.local_status=local_status H.local_pending=local_pending H.local_confirm=local_confirm H.local_error=local_error H.local_discard=local_discard H.local_models=local_models
 H.local_after=local_after H.local_effort_note=local_effort_note H.bar_past=bar_past H.local_epoch=local_epoch H.local_failure=local_failure H.local_failure_reason=local_failure_reason H.local_failure_code=local_failure_code H.local_kept=local_kept H.local_rechecked=local_rechecked
@@ -3022,11 +3027,9 @@ let on_app_locale_changed = fn(locale){ A.redraw() }
 A.save = fn(){
     if H.session == nil { return false }
     let bytes = {version: 1 account: H.session.account wizard: H.wizard workspace:H.entry_role resourceJourney:H.ux.resourceJourney setupAccountId:H.ux.accountId projectDraft: H.project_draft agentDraft:H.agent_draft poolDraft:H.pool_draft command: H.command}.to_json()
+    // Written without reading it back: the read-back blocked the UI thread and caught nothing,
+    // since a failed write ends this call with its script error before any check runs.
     fs.write("onboarding-v1.json", bytes)
-    if !fs.exists("onboarding-v1.json") || fs.read("onboarding-v1.json") != bytes {
-        H.notice = A.t("Could not save this page. Submitted requests remain recoverable from native storage.", "无法保存此页面；已提交的请求仍可在这台电脑上恢复。")
-        return false
-    }
     return true
 }
 A.reauthenticate = fn(){
@@ -4940,6 +4943,8 @@ A.pool_status=fn(conn,grant,low,known){
 // Over the maximum, a published pool says so in the alert's own words.
 A.pool_over_status=fn(status,b){
     if status.key=="low" && b.ceiling!=nil && b.committed>b.ceiling {return {key:"over" text:A.t("Over the monthly maximum","超出每月上限") tone:"attention"}}
+    // Nothing left this month: said as plainly as the capacity card says it.
+    if status.key=="low" && b.ceiling!=nil && b.remaining!=nil && b.remaining<=0 {return {key:"full" text:A.t("All given out","已全部分出") tone:"attention"}}
     return status
 }
 A.pool_lapsed=fn(conn,grant){
@@ -4997,7 +5002,7 @@ A.pool_row=fn(row){
     s.badge=A.pool_badge_sum5(s.requests,s.alerts,s.tools,s.stopped,s.workspaces)+s.publish
     s.unknown=s.requests==-2 || s.alerts==-2 || s.tools==-2 || s.stopped==-2 || s.workspaces==-2
     // Red only for a pool in use this month; one that isn't published yet says "little left" in amber.
-    s.low=b.low && (s.status.key=="low" || s.status.key=="over")
+    s.low=b.low && (s.status.key=="low" || s.status.key=="over" || s.status.key=="full")
     s.short=b.low && !s.low
     // Filled = used + given to Agents (what's committed), grey = left; the pool page reads the same.
     // A month that isn't published has nothing committed, so its bar stays empty.
@@ -5101,8 +5106,8 @@ A.pool_requests_text=fn(n){return if n==1 {A.t("1 Agent request to review","1 �
 A.pool_info_load=fn(rid){
     let epoch=A.pool_queue_reset()
     let old=H.pool_info
-    let p={rid:rid conn:nil connState:"loading" grant:nil grantState:"loading" board:nil boardState:"loading" requests:-1 alerts:-1 tools:-1 stopped:-1 workspaces:-1 agents:-1 inuse:-1 now:nil using:nil}
-    if old!=nil && old.rid==rid {p.conn=old.conn p.connState=old.connState p.grant=old.grant p.grantState=old.grantState p.board=old.board p.boardState=old.boardState p.requests=old.requests p.alerts=old.alerts p.tools=old.tools p.stopped=old.stopped p.workspaces=old.workspaces p.agents=old.agents p.inuse=old.inuse p.now=old.now p.using=old.using}
+    let p={rid:rid conn:nil connState:"loading" grant:nil grantState:"loading" board:nil boardState:"loading" requests:-1 alerts:-1 tools:-1 stopped:-1 workspaces:-1 agents:-1 inuse:-1 now:nil using:nil floor:nil}
+    if old!=nil && old.rid==rid {p.conn=old.conn p.connState=old.connState p.grant=old.grant p.grantState=old.grantState p.board=old.board p.boardState=old.boardState p.requests=old.requests p.alerts=old.alerts p.tools=old.tools p.stopped=old.stopped p.workspaces=old.workspaces p.agents=old.agents p.inuse=old.inuse p.now=old.now p.using=old.using p.floor=A.recipient_optional(old,"floor")}
     H.pool_info=p
     if H.session==nil {p.connState="error" p.grantState="error" return}
     let rest=fn(){
@@ -5134,6 +5139,8 @@ A.pool_info_load=fn(rid){
             A.pool_enqueue(epoch,"hagency.pools.agents.list",{after:nil needsMyAction:true poolId:cid},fn(r){p.requests=A.pool_count_requests(r,cid)})
             // The Agents running on this pool and what each was given: the per-request floor.
             A.pool_enqueue(epoch,"hagency.pools.agents.list",{after:nil poolId:cid},fn(r){p.using=A.pool_using_rows(r,cid) p.inuse=A.pool_inuse_count(r,cid)})
+            // What running Agents hold, read from the confirmation window's own record: the exact floor.
+            if A.pool_published_tokens(p.grant)!=nil && A.succession_enabled() {A.pool_enqueue(epoch,"hagency.grants.floor",{contributionId:cid},fn(r){p.floor=A.pool_floor_read(r,cid)})}
             rest()
         })
     })
@@ -5222,7 +5229,10 @@ A.pool_using_rows=fn(r,cid){
 }
 A.pool_floor=fn(v){
     let p=H.pool_info
-    if p==nil || p.rid!=v.row.id || p.using==nil {return nil}
+    if p==nil || p.rid!=v.row.id {return nil}
+    let known=A.pool_floor_known(v)
+    if known!=nil {return if known.held>0 {known.held} else {nil}}
+    if p.using==nil {return nil}
     let n={t:0} for q in p.using {n.t=n.t+q.requestedTokens}
     return if n.t>0 {n.t} else {nil}
 }
@@ -5245,7 +5255,42 @@ A.pool_floor_words=fn(f){
     if f!=nil {return A.t("No less than what running Agents hold, about "+A.tokens(f)+" (the confirmation window has the exact figure)","不能低于正在运行的 Agent 已拿到的约 "+A.tokens(f)+"（确认窗口里有准确数字）")}
     return A.t("No less than what running Agents hold (the confirmation window has the exact figure)","不能低于正在运行的 Agent 已拿到的额度（确认窗口里有准确数字）")
 }
-A.pool_floor_text=fn(v){return A.pool_floor_words(A.pool_quota_floor(v))}
+A.pool_floor_text=fn(v){
+    let known=A.pool_floor_known(v)
+    if known!=nil && known.held>0 && v.quotaMode=="amend" {return A.t("No less than the "+A.tokens(known.held)+" running Agents hold","不能低于正在运行的 Agent 已拿到的 "+A.tokens(known.held))}
+    return A.pool_floor_words(A.pool_quota_floor(v))
+}
+// hagency.grants.floor: what running Agents hold, the most a new limit can be and the limit in force.
+A.pool_floor_read=fn(r,cid){
+    if !r.is_ok {return nil}
+    let {contributionId=nil,heldTokens=nil,heldAgents=nil,mostTokens=nil,perRequestTokens=nil}=r.data
+    if contributionId!=cid || heldTokens==nil {return nil}
+    return {held:heldTokens agents:if heldAgents==nil {0} else {heldAgents} most:mostTokens perRequest:perRequestTokens}
+}
+// The floor as the confirmation window knows it, once this computer read it; else nil.
+A.pool_floor_known=fn(v){
+    let p=H.pool_info
+    if p==nil || p.rid!=v.row.id {return nil}
+    return A.recipient_optional(p,"floor")
+}
+// The one amount the per-request limit can be now, when what running Agents hold is all this month can
+// give out; else nil. Then the page shows that amount with why, instead of a slider that can't move.
+A.pool_quota_fixed=fn(v){
+    if v.quotaMode!="amend" || v.publishedTokens==nil {return nil}
+    let f=A.pool_floor_known(v)
+    if f==nil || f.held<1 {return nil}
+    let top=if f.most!=nil {f.most} else {v.quotaMax}
+    if top<0 || f.held<top {return nil}
+    if v.publishedTokens<top && f.held==top {return nil}
+    return v.publishedTokens
+}
+A.pool_quota_fixed_line=fn(v){
+    let f=A.pool_floor_known(v)
+    let n=if f==nil {0} else {f.agents}
+    let who=if n==1 {A.t("1 running Agent holds","正在运行的 1 个 Agent 已拿到")} else {A.t(""+n+" running Agents hold","正在运行的 "+n+" 个 Agent 已拿到")}
+    let raise=if A.pool_can_raise(v) {A.t("Raise the monthly maximum above to change it, or change it after it resets on "+A.pool_next_month(v.now)+".","调高上面的每月上限后就能改，或等 "+A.pool_next_month(v.now)+"重置后再改。")} else {A.t("It can change after it resets on "+A.pool_next_month(v.now)+".","等 "+A.pool_next_month(v.now)+"重置后才能改。")}
+    return who+A.t(" all "+A.tokens(f.held)+" this month can give out, so it can only be "+A.tokens(v.publishedTokens)+" now. ","本月能分出的全部 "+A.tokens(f.held)+"，所以现在只能是 "+A.tokens(v.publishedTokens)+"。")+raise
+}
 // The window's refusal, after "Not saved: ", in that same sentence.
 A.pool_floor_refusal=fn(f){
     if f!=nil {return A.t("the per-request limit can’t go below what running Agents hold, about "+A.tokens(f)+" (the confirmation window has the exact figure).","每次申请上限不能低于正在运行的 Agent 已拿到的约 "+A.tokens(f)+"（确认窗口里有准确数字）。")}
@@ -5455,8 +5500,10 @@ A.pool_whole=fn(text){
 A.pool_max_reason=fn(reason,amend){
     if reason=="read_only" {return A.t("You can only view this pool here.","这里只能查看，不能修改。")}
     if reason=="account_unavailable" {return A.t("Sign in to the coding tool again to change it.","请先在「编码工具」里重新登录。")}
-    if reason=="published" {return A.t("It can’t change while the pool is shown in the catalogue.","公开介绍期间，每月上限不能修改。")}
-    if reason=="retained_commitments" {return A.t("Some of it is given out to Agents, so it can’t change yet.","还有额度已分出，暂时不能修改。")}
+    // An offered pool changes its maximum through the native amendment; given-out capacity never
+    // blocks it (only lowering below it). Without the amendment (an older Hagency), only the catalogue
+    // listing is a reason the owner can act on; anything else needs the update.
+    if amend==nil && reason=="published" {return A.t("It can’t change while the pool is shown in the catalogue.","公开介绍期间，每月上限不能修改。")}
     if amend==nil {return A.pool_lock_rule()}
     let why=A.recipient_optional(amend,"reason")
     if why=="contribution_history_not_proven" {return A.t("This pool was connected to its server from another computer, so its monthly maximum can only change on that computer.","这个资源池是在另一台电脑上连接服务器的，每月上限只能在那台电脑上改。")}
@@ -5580,7 +5627,7 @@ A.pool_save_state=fn(){
     if quota<1 {s.quotaError=A.t("Enter an amount above zero.","请输入大于零的额度。")}
     else if top>=0 && quota>top {s.quotaError=A.t("No more than the monthly maximum of ","不能超过每月上限 ")+A.tokens(top)+A.t(".","。")}
     let floor=A.pool_quota_floor(v)
-    if s.quotaError=="" && floor!=nil && quota>=1 && quota<floor && quota!=v.publishedTokens {s.quotaError=A.pool_floor_words(floor) s.quotaFloor=true}
+    if s.quotaError=="" && floor!=nil && quota>=1 && quota<floor && quota!=v.publishedTokens {s.quotaError=A.pool_floor_text(v) s.quotaFloor=true}
     // A published month: the slider proposes a change now (amend), or keeps a draft for next month.
     s.quotaDirty=(v.quotaMode=="amend" || v.quotaMode=="draft") && quota>=1 && v.publishedTokens!=nil && quota!=v.publishedTokens
     if v.quotaMode=="draft" && s.quotaDirty && s.quotaError=="" {s.draft=A.t("Saved for "+A.pool_next_month_name(v.now)+": each request up to ","已记下："+A.pool_next_month_name(v.now)+"发布时每次最多 ")+A.tokens(quota)+A.t(".","。")}
@@ -5615,6 +5662,7 @@ A.pool_max_floor_text=fn(v){
     let b=v.b
     let top=if v.maxMax>0 {A.t(" · up to "," · 最高 ")+A.tokens(v.maxMax)} else {""}
     let least=if v.maxMode=="amend" {v.maxMin} else {b.committed}
+    if v.maxMode!="locked" && v.maxMax>0 && v.b.ceiling!=nil && v.maxMax<=v.b.ceiling && least>=v.maxMax {return A.t("At the account limit of "+A.tokens(v.maxMax)+"; it can’t go higher","已到账号上限 "+A.tokens(v.maxMax)+"，不能再调高")}
     if v.maxMode=="amend" && v.raiseOnly {return A.t("For now it can only go up","现在只能调高")+top}
     if v.maxMode=="amend" && least<=1 {return A.t("It can go up or down","可以调高，也可以调低")+top}
     if least>0 && least==b.committed {return A.t("At least "+A.tokens(least)+" (used and given out)","最低 "+A.tokens(least)+"（已用和已分出）")+top}
@@ -5746,9 +5794,74 @@ A.pool_raising=fn(rid){
 A.pool_raise_line=fn(rid){
     let r=H.pool_raise
     if r==nil {return ""}
+    let asked=A.recipient_optional(r,"asked")
+    if A.recipient_optional(r,"why")=="full" && asked!=nil {return A.t("For one more request of up to "+A.tokens(asked)+", this month needs "+A.tokens(r.drawn)+" in all. At "+A.tokens(r.tokens)+" it fits: tap “Change to "+A.tokens(r.tokens)+"” below.","要再批准一个最多 "+A.tokens(asked)+" 的申请，本月共需 "+A.tokens(r.drawn)+"。调到 "+A.tokens(r.tokens)+" 就够了：点下方「改成 "+A.tokens(r.tokens)+"」。")}
     let name=A.recipient_optional(r,"name")
     if name!=nil {return A.t("To approve “"+name+"” ("+A.tokens(A.recipient_optional(r,"asked"))+"), this month needs "+A.tokens(r.drawn)+" in all. At "+A.tokens(r.tokens)+" it fits: tap “Change to "+A.tokens(r.tokens)+"” below, and once you confirm you’re back at the request.","批准「"+name+"」（"+A.tokens(A.recipient_optional(r,"asked"))+"）后本月共需 "+A.tokens(r.drawn)+"，调到 "+A.tokens(r.tokens)+" 就够了：点下方「改成 "+A.tokens(r.tokens)+"」，确认后会回到这个申请。")}
     return A.t("From the alert: used and given out is "+A.tokens(r.drawn)+". At "+A.tokens(r.tokens)+" this month has room again and the alert clears by itself: tap “Change to "+A.tokens(r.tokens)+"” below, and once you confirm you’re back at the alert.","来自告警：本月已用和已分出 "+A.tokens(r.drawn)+"，调到 "+A.tokens(r.tokens)+" 后重新有余量，告警会自动解除：点下方「改成 "+A.tokens(r.tokens)+"」，确认后会回到这条告警。")
+}
+// Whether the monthly maximum can go up from here now: it can change, and the account limit leaves room.
+A.pool_can_raise=fn(v){return v.maxMode!="locked" && v.b.ceiling!=nil && (v.maxMax<0 || v.maxMax>v.b.ceiling)}
+// A published month whose capacity is all given out: new requests get nothing until something changes.
+A.pool_full=fn(v){
+    let b=v.b
+    return v.published && b.ceiling!=nil && b.ceiling>0 && (b.committed>=b.ceiling || (b.remaining!=nil && b.remaining<=0))
+}
+A.pool_full_title=fn(v){
+    if v.now==nil {return A.t("This month’s "+A.tokens(v.b.ceiling)+" is all given out","本月的 "+A.tokens(v.b.ceiling)+" 已全部分出")}
+    let m=A.pool_civil(v.now).m
+    return A.t(A.pool_month_name(m)+"’s "+A.tokens(v.b.ceiling)+" is all given out",""+m+" 月的 "+A.tokens(v.b.ceiling)+" 已全部分出")
+}
+// Who holds it, then what that means for the people on the list.
+A.pool_full_why=fn(v){
+    let b=v.b
+    let f=A.pool_floor_known(v)
+    let used=if b.spent==nil {0} else {b.spent}
+    let held=if f!=nil && f.held>0 {if f.agents==1 {A.t("1 running Agent holds "+A.tokens(f.held)+" ("+A.tokens(used)+" used). ","正在运行的 1 个 Agent 已拿到 "+A.tokens(f.held)+"（已用 "+A.tokens(used)+"）。")} else {A.t(""+f.agents+" running Agents hold "+A.tokens(f.held)+" ("+A.tokens(used)+" used). ","正在运行的 "+f.agents+" 个 Agent 已拿到 "+A.tokens(f.held)+"（已用 "+A.tokens(used)+"）。")}} else {A.t("Used "+A.tokens(used)+" and given out "+A.tokens(A.pool_held_unused(b))+". ","已用 "+A.tokens(used)+"，已分出 "+A.tokens(A.pool_held_unused(b))+"。")}
+    return held+A.t("New requests get nothing now, and adding people to the list doesn’t add capacity.","新的申请现在拿不到额度，往名单里加人也不会增加额度。")
+}
+// Other pools of this owner that can serve people now: one with room left this month, or one
+// admitted and waiting to publish this month. At most two, from the pool list's last read.
+A.pool_full_others=fn(v){
+    let out=[]
+    if H.pool_meta==nil {return out}
+    for row in H.resources {if row.id!=v.row.id && out.len()<2 {
+        let s=A.pool_row(row)
+        let b=A.pool_budget(row)
+        if s.conn!=nil && s.conn.state=="admitted" && b.ceiling!=nil && b.ceiling>0 {
+            if A.pool_published(s.conn,s.grant) && b.remaining!=nil && b.remaining>0 {out.push({rid:row.id name:A.resource_title(row) kind:"room" tokens:b.remaining})}
+            else if s.lapsed {out.push({rid:row.id name:A.resource_title(row) kind:"publish" tokens:b.ceiling})}
+        }
+    }}
+    return out
+}
+A.pool_full_other_label=fn(o){
+    if o.kind=="publish" {return A.t("Publish ","发布 ")+o.name}
+    return A.t("Open "+o.name+" ("+A.tokens(o.tokens)+" left)","打开 "+o.name+"（剩余 "+A.tokens(o.tokens)+"）")
+}
+// What stops the maximum from going up, when it can't.
+A.pool_full_no_raise=fn(v){
+    if v.maxMode=="locked" {return v.maxReason}
+    if v.maxMax>0 && v.b.ceiling!=nil && v.maxMax<=v.b.ceiling {return A.t("The monthly maximum is at the account limit of "+A.tokens(v.maxMax)+", so it can’t go higher.","每月上限已到账号上限 "+A.tokens(v.maxMax)+"，不能再调高。")}
+    return ""
+}
+// Raise the maximum here, preselecting room for one more request at this month's per-request limit.
+A.pool_full_raise=fn(){
+    if H.busy || H.command!=nil || H.resource_detail==nil {return}
+    let v=A.pool_view(H.resource_detail)
+    if !A.pool_can_raise(v) {return}
+    H.pool_raise={rid:v.row.id drawn:0 tokens:nil name:nil asked:v.publishedTokens why:"full"}
+    A.pool_raise_apply()
+    A.redraw()
+    ui.content.scroll_to("pool_max_section")
+}
+// From Who Can Request: back to the pool, its maximum preselected the same way.
+A.who_full_raise=fn(rid){
+    if H.busy || H.command!=nil {return}
+    let v=if H.resource_detail!=nil && H.resource_detail.resource.id==rid {A.pool_view(H.resource_detail)} else {nil}
+    H.pool_raise={rid:rid drawn:0 tokens:nil name:nil asked:if v==nil {nil} else {v.publishedTokens} why:"full"}
+    H.nav.anchor="pool_max_section"
+    A.open_resource(rid)
 }
 // After the monthly maximum went up: the per-request change to offer, or 0.
 A.pool_offer_quota=fn(v){
@@ -6298,7 +6411,7 @@ A.dev_steps=fn(){
     }
     if m!=nil && m.conns!=nil && m.grants!=nil {
         s.unpublished=0 s.published=0
-        for row in H.resources {let r=A.pool_row(row) if r.lapsed {s.unpublished+=1} if r.status.key=="published" || r.status.key=="low" || r.status.key=="over" {s.published+=1}}
+        for row in H.resources {let r=A.pool_row(row) if r.lapsed {s.unpublished+=1} if r.status.key=="published" || r.status.key=="low" || r.status.key=="over" || r.status.key=="full" {s.published+=1}}
     }
     if device.key!="ready" {s.left+=1}
     if s.pools==0 {s.left+=1}
@@ -6587,7 +6700,7 @@ A.pool_sub_page=fn(){return A.has_page(["pool_device","pool_device_setup","pool_
 A.pool_sub_open=fn(page,rid){
     if H.busy {return}
     H.pool_sub_rid=rid H.page=page H.notice="" H.bar_past=false
-    if page=="pool_who" {A.who_open(rid) A.who_list_load() A.pool_who_load(nil) return}
+    if page=="pool_who" {A.who_open(rid) A.who_people_load(rid) A.who_list_load() A.pool_who_load(nil) return}
     if page=="pool_advanced" {A.pool_adv_load(rid)}
     A.redraw()
 }
@@ -6684,7 +6797,7 @@ A.pool_sub_back=fn(){
 A.pool_sub_refresh=fn(){
     if H.page=="pool_device_tasks" {A.dev_tasks_load() A.redraw() return}
     if A.dev_page() {A.pool_device_load() return}
-    if H.page=="pool_who" {A.who_list_load() A.pool_who_load(nil) return}
+    if H.page=="pool_who" {H.who_people.knownState="idle" A.who_people_load(H.pool_sub_rid) A.who_list_load() A.pool_who_load(nil) return}
     A.redraw()
 }
 A.pool_tip=fn(key){H.pool_tip=if H.pool_tip==key {""} else {key} A.redraw()}
@@ -6732,44 +6845,170 @@ A.who_mxid=fn(text){
         let rest={t:""} for i part in parts {if i>0 {rest.t=rest.t+(if i>1 {":"} else {""})+part}}
         if rest.t!=server {return nil}
     }
-    let local=parts[0]
+    let local=A.who_lower(parts[0])
     if local=="" || local.len()>64 {return nil}
-    let allowed="abcdefghijklmnopqrstuvwxyz0123456789._=-/".to_chars()
+    let allowed="abcdefghijklmnopqrstuvwxyz0123456789._=-/+".to_chars()
     for ch in local.to_chars() {let found={y:false} for c in allowed {if c==ch {found.y=true}} if !found.y {return nil}}
     return "@"+local+":"+server
 }
-A.who_name_hint=fn(){
-    let w=H.who
-    let none=H.resource_detail==nil || A.who_candidates(A.pool_view(H.resource_detail)).len()==0
-    if w.name.trim()=="" && none {return A.t("Their username on "+A.who_server()+".","对方在 "+A.who_server()+" 上的用户名。")}
-    if w.name.trim()=="" {return A.t("Their username on "+A.who_server()+"; they’re added with the people ticked above.","对方在 "+A.who_server()+" 上的用户名，会和上面勾选的人一起添加。")}
-    let id=A.who_mxid(w.name)
-    if id==nil {return ""}
-    if A.who_has(H.who.picks,id) {return A.pool_person(id)+A.t(" is already ticked above."," 已经在上面勾选了。")}
-    return A.t("Adds ","会一起添加 ")+A.pool_person(id)+A.t(" too.","。")
+// Matrix usernames are lower case; Splash has no lowercase, so map A-Z by hand.
+A.who_lower=fn(text){
+    let upper="ABCDEFGHIJKLMNOPQRSTUVWXYZ".to_chars()
+    let lower="abcdefghijklmnopqrstuvwxyz".to_chars()
+    let out="".to_chars()
+    for ch in text.to_chars() {let c={v:ch} for i u in upper {if u==ch {c.v=lower[i]}} out.push(c.v)}
+    return out.to_string()
 }
-// A valid username typed in the field and not ticked yet: it counts as picked.
+// What is searched for: the typed text without a leading @, in lower case.
+A.who_query=fn(text){let t=text.trim() let name=t.strip_prefix("@") return A.who_lower(name.trim())}
+A.who_people_rows=fn(d){
+    let {people=[]}=d
+    let out=[]
+    if people==nil || !people.is_array() {return out}
+    for p in people {let {userId=nil,displayName=nil}=p if userId!=nil && userId.is_string() {out.push({id:userId name:if displayName!=nil && displayName.is_string() {displayName} else {""}})}}
+    return out
+}
+A.who_exact=fn(d){
+    let {exact=nil}=d
+    if exact==nil || !exact.is_object() {return nil}
+    let {userId=nil,exists=nil}=exact
+    if userId==nil || !userId.is_string() {return nil}
+    return {userId:userId exists:exists}
+}
+// The people the owner shares rooms with on this server: the starting list.
+A.who_people_load=fn(rid){
+    let wp=H.who_people
+    if wp.rid==rid && (wp.knownState=="ready" || wp.knownState=="loading") {return}
+    wp.rid=rid wp.knownState="loading" wp.known=[]
+    host.request("hagency.people.search",{query:""},fn(r){
+        let wp=H.who_people
+        if wp.rid!=rid {return}
+        if r.is_ok {wp.known=A.who_people_rows(r.data) wp.knownState="ready"} else {wp.knownState="error"}
+        // Never while the owner types: a render would take the field's focus.
+        if H.page=="pool_who" && H.who.name=="" {A.redraw()}
+    })
+}
+// Search as the owner types, once typing pauses; a later keystroke drops an earlier answer.
+A.who_search=fn(text){
+    let wp=H.who_people
+    let q=A.who_query(text)
+    wp.epoch=wp.epoch+1
+    let epoch=wp.epoch
+    wp.query=q wp.found=[] wp.exact=nil
+    if q=="" {wp.state="idle" return}
+    wp.state="searching"
+    start_timeout(0.3,||{
+        if H.who_people.epoch!=epoch {return}
+        host.request("hagency.people.search",{query:q},fn(r){
+            let wp=H.who_people
+            if wp.epoch!=epoch {return}
+            if r.is_ok {wp.found=A.who_people_rows(r.data) wp.exact=A.who_exact(r.data) wp.state="ready"} else {wp.state="error"}
+            if H.page=="pool_who" {A.who_typing_show()}
+        })
+    })
+}
+// A display name for an account, when one is known.
+A.who_display=fn(mxid){
+    let wp=H.who_people
+    let out={n:""}
+    for p in wp.known {if p.id==mxid && p.name!="" {out.n=p.name}}
+    for p in wp.found {if out.n=="" && p.id==mxid && p.name!="" {out.n=p.name}}
+    return out.n
+}
+// Whether an account exists on this server: true, false, or nil while it isn't known.
+A.who_exists=fn(mxid){
+    let wp=H.who_people
+    let e=wp.exact
+    if e!=nil && e.userId==mxid {return e.exists}
+    let found={y:false}
+    for p in wp.known {if p.id==mxid {found.y=true}}
+    for p in wp.found {if p.id==mxid {found.y=true}}
+    if found.y {return true}
+    return nil
+}
+// Accounts that match what is typed, for the rows under the field: the exact username first,
+// then what the server's directory found, then the people the owner shares rooms with. At most 5,
+// without the people already ticked or on this month's list.
+A.who_hits=fn(){
+    let out=[]
+    let wp=H.who_people
+    if wp.query=="" || H.resource_detail==nil {return out}
+    let v=A.pool_view(H.resource_detail)
+    let skip=fn(id){return id==nil || (H.session!=nil && id==H.session.account) || A.who_has(H.who.picks,id) || A.who_has(A.who_on_list(v),id) || A.who_has_id(out,id)}
+    let e=wp.exact
+    if e!=nil && e.exists==true && !skip(e.userId) {out.push({id:e.userId name:A.who_display(e.userId)})}
+    for p in wp.found {if out.len()<5 && !skip(p.id) {out.push(p)}}
+    for p in wp.known {if out.len()<5 && !skip(p.id) && (A.who_contains(p.id,wp.query) || A.who_contains(A.who_lower(p.name),wp.query)) {out.push(p)}}
+    return out
+}
+A.who_has_id=fn(rows,id){let f={y:false} for p in rows {if p.id==id {f.y=true}} return f.y}
+A.who_contains=fn(text,part){return part!="" && text.search(part)>=0}
+A.who_pick_hit=fn(i){
+    let hits=A.who_hits()
+    if i>=hits.len() || H.busy || H.command!=nil {return}
+    let w=H.who
+    if !A.who_has(w.picks,hits[i].id) && w.picks.len()<64 {w.picks.push(hits[i].id)}
+    w.name=""
+    A.who_search("")
+    A.redraw()
+}
+// The line under the field: {text, error}. An account counts only once it is known to exist.
+A.who_name_state=fn(){
+    let w=H.who
+    let wp=H.who_people
+    let server=A.who_server()
+    if w.name.trim()=="" {return {text:A.t("Search by name or username on "+server+".","按名字或用户名搜索 "+server+" 上的人。") error:false}}
+    let hits=A.who_hits()
+    let id=A.who_mxid(w.name)
+    if id!=nil && A.who_has(w.picks,id) {return {text:A.pool_person(id)+A.t(" is already ticked."," 已经勾选了。") error:false}}
+    let exists=if id==nil {nil} else {A.who_exists(id)}
+    if exists==true {return {text:A.t("Adds ","会一起添加 ")+A.pool_person(id)+A.t(" too.","。") error:false}}
+    if wp.state=="searching" {return {text:A.t("Looking on "+server+"…","正在 "+server+" 上查找…") error:false}}
+    // Still typing a name that has matches: no red, just the matches.
+    if exists==false && id!=nil && hits.len()>0 {return {text:A.t("No "+A.pool_person(id)+" on "+server+"; is it someone below?",server+" 上没有 "+A.pool_person(id)+"，是下面的人吗？") error:false}}
+    if exists==false && id!=nil {return {text:A.t("There’s no "+A.pool_person(id)+" on "+server+". Check the spelling.",server+" 上没有 "+A.pool_person(id)+"。请检查拼写。") error:true}}
+    if wp.state=="error" || (id!=nil && exists==nil) {return {text:A.t("Couldn’t check that name on "+server+" right now. Try again, or add them in the confirmation window.","暂时无法在 "+server+" 上确认这个名字。请稍后再试，或在确认窗口里添加。") error:false}}
+    if hits.len()>0 {return {text:A.t("Tap someone below to add them.","点下面的人即可添加。") error:false}}
+    return {text:A.t("No one on "+server+" matches “"+w.name.trim()+"”.",server+" 上没有和「"+w.name.trim()+"」匹配的人。") error:true}
+}
+A.who_name_hint=fn(){let st=A.who_name_state() return if st.error {""} else {st.text}}
+A.who_name_bad=fn(){let st=A.who_name_state() return if st.error {st.text} else {""}}
+// A username typed in the field, known to exist and not ticked yet: it counts as picked.
 A.who_typed=fn(){
     let id=A.who_mxid(H.who.name)
-    if id==nil || A.who_has(H.who.picks,id) {return nil}
+    if id==nil || A.who_has(H.who.picks,id) || A.who_exists(id)!=true {return nil}
     return id
 }
 A.who_count=fn(){return H.who.picks.len()+(if A.who_typed()!=nil {1} else {0})}
-// While typing: the one Add button's count and its note follow the field, without a re-render.
+// While typing: the matches under the field, the line under it and the one Add button follow
+// the field without a re-render, which would take its focus.
 A.who_typing=fn(t){
     H.who.name=t
-    ui.pool_who_name_hint.set_text(A.who_name_hint()) ui.pool_who_name_hint.set_visible(A.who_name_bad()=="")
-    ui.pool_who_name_error.set_text(A.who_name_bad()) ui.pool_who_name_error.set_visible(A.who_name_bad()!="")
+    A.who_search(t)
+    A.who_typing_show()
+}
+A.who_hit_show=fn(row,title,sub,on,off,hits,i){
+    row.set_visible(i<hits.len())
+    // The username typed counts once it exists: its row shows ticked, as the line under the field says.
+    let counted=i<hits.len() && A.who_typed()==hits[i].id
+    on.set_visible(counted) off.set_visible(!counted)
+    if i<hits.len() {let h=hits[i] title.set_text(if h.name!="" {h.name} else {A.pool_person(h.id)}) sub.set_text(A.pool_person(h.id))}
+}
+A.who_typing_show=fn(){
+    let st=A.who_name_state()
+    ui.pool_who_name_hint.set_text(if st.error {""} else {st.text}) ui.pool_who_name_hint.set_visible(!st.error)
+    ui.pool_who_name_error.set_text(if st.error {st.text} else {""}) ui.pool_who_name_error.set_visible(st.error)
+    let hits=A.who_hits()
+    ui.pool_who_people.set_visible(H.who.name.trim()=="")
+    A.who_hit_show(ui.pool_who_hit0,ui.pool_who_hit0_name,ui.pool_who_hit0_id,ui.pool_who_hit0_on,ui.pool_who_hit0_off,hits,0)
+    A.who_hit_show(ui.pool_who_hit1,ui.pool_who_hit1_name,ui.pool_who_hit1_id,ui.pool_who_hit1_on,ui.pool_who_hit1_off,hits,1)
+    A.who_hit_show(ui.pool_who_hit2,ui.pool_who_hit2_name,ui.pool_who_hit2_id,ui.pool_who_hit2_on,ui.pool_who_hit2_off,hits,2)
+    A.who_hit_show(ui.pool_who_hit3,ui.pool_who_hit3_name,ui.pool_who_hit3_id,ui.pool_who_hit3_on,ui.pool_who_hit3_off,hits,3)
+    A.who_hit_show(ui.pool_who_hit4,ui.pool_who_hit4_name,ui.pool_who_hit4_id,ui.pool_who_hit4_on,ui.pool_who_hit4_off,hits,4)
     if H.resource_detail!=nil {
         let a=A.who_action(A.pool_view(H.resource_detail))
         ui.pool_who_publish.set_text(a.label) ui.pool_who_publish.set_enabled(a.ready && !H.busy && H.command==nil) ui.pool_who_note.set_text(a.note)
     }
-}
-// The username typed can't be used: said in red under the field.
-A.who_name_bad=fn(){
-    let w=H.who
-    if w.name.trim()=="" || A.who_mxid(w.name)!=nil {return ""}
-    return A.t("Use a username on "+A.who_server()+": lowercase letters, digits and . _ = - /","请输入 "+A.who_server()+" 上的用户名：小写字母、数字和 . _ = - /")
 }
 A.who_open=fn(rid){
     let w=H.who
@@ -6793,6 +7032,8 @@ A.who_candidates=fn(v){
     if H.reqs.items!=nil {for q in H.reqs.items {let {poolId=nil,managerMxid=nil}=q if poolId==cid && !A.who_skip(v,out,managerMxid) {out.push(managerMxid)}}}
     for g in H.pool_grants {let ids=A.pool_summary_managers(g.summary) if ids!=nil {for id in ids {if !A.who_skip(v,out,id) {out.push(id)}}}}
     for id in H.who.picks {if !A.who_skip(v,out,id) {out.push(id)}}
+    let wp=H.who_people
+    if wp.rid==v.row.id {for p in wp.known {if out.len()<24 && !A.who_skip(v,out,p.id) {out.push(p.id)}}}
     return out
 }
 A.who_source=fn(v,mxid){
@@ -6802,13 +7043,14 @@ A.who_source=fn(v,mxid){
     if H.reqs.items!=nil {for q in H.reqs.items {let {poolId=nil,managerMxid=nil}=q if poolId==cid && managerMxid==mxid {asked.y=true}}}
     if asked.y {return A.t("Asked for this pool","申请过这个资源池")}
     for g in H.pool_grants {if A.who_has(A.pool_summary_managers(g.summary),mxid) {return A.t("On another pool’s list","在你其他资源池的名单里")}}
-    return A.t("Added by you","你添加的")
+    if A.who_has(H.who.picks,mxid) {return A.t("Added by you","你添加的")}
+    return A.t("In a chat with you","和你在同一个聊天里")
 }
 // What the page's main button does with the people picked.
 A.who_action=fn(v){
     let n=A.who_count()
     if v.quotaEditable {return {kind:"publish" label:A.pool_publish_label(v.now) note:if n>0 {A.t(""+n+" picked in advance; confirm the list in the window on this computer.","已先选好 "+n+" 人；在这台电脑的确认窗口里确认名单。")} else {A.t("You can also add people in the confirmation window.","也可以在确认窗口里再加人。")} ready:true}}
-    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单")+(if n>0 {A.t(" ("+n+")","（"+n+" 人）")} else {""}) note:if n>0 {A.t(""+n+" picked. Once you confirm in the window on this computer, they can request.","已选 "+n+" 人。在这台电脑的确认窗口里确认后，对方就能申请。")} else if A.who_candidates(v).len()>0 {A.t("Tick people above or type a username; they can request once you confirm in the window.","勾选上面的人，或输入用户名；在确认窗口里确认后，对方就能申请。")} else {A.t("Type a username; they can request once you confirm in the window.","输入用户名；在确认窗口里确认后，对方就能申请。")} ready:n>0}}
+    if v.quotaMode=="amend" {return {kind:"amend" label:A.t("Add to This Month’s List","添加到本月名单")+(if n>0 {A.t(" ("+n+")","（"+n+" 人）")} else {""}) note:if n>0 {A.t(""+n+" picked. Once you confirm in the window on this computer, they can request.","已选 "+n+" 人。在这台电脑的确认窗口里确认后，对方就能申请。")} else if A.who_candidates(v).len()>0 {A.t("Tick people below or search for a username; they can request once you confirm in the window.","勾选下面的人，或搜索用户名；在确认窗口里确认后，对方就能申请。")} else {A.t("Search for a username; they can request once you confirm in the window.","搜索用户名；在确认窗口里确认后，对方就能申请。")} ready:n>0}}
     return {kind:"" label:"" note:"" ready:false}
 }
 A.who_submit=fn(){
@@ -12974,7 +13216,26 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 }
                             }}
                             if unpublished && (b.committed>0 || (b.spent!=nil && b.spent>0)) {pool_usage_source := mod.widgets.HagencyWrapSubtitle{text:A.t("Used and given out are what this computer recorded for this pool this month, including before it was published.","已用和已分出是这台电脑本月为这个资源池记下的用量，发布前的也算在内。")}}
-                            if b.low {pool_low_line := mod.widgets.HagencyWrapSubtitle{text:A.pool_low_line(v) draw_text.color:if unpublished {mod.widgets.RINX_WARNING_FG} else {mod.widgets.RINX_DANGER_FG}}}
+                            if b.low && !A.pool_full(v) {pool_low_line := mod.widgets.HagencyWrapSubtitle{text:A.pool_low_line(v) draw_text.color:if unpublished {mod.widgets.RINX_WARNING_FG} else {mod.widgets.RINX_DANGER_FG}}}
+                            // All of this month is given out: say who holds it, what that means for the list,
+                            // and the ways to give more (a higher maximum here, or another pool).
+                            if A.pool_full(v) {View{width:Fill height:Fit margin:Inset{right:6} RoundedView{width:Fill height:Fit flow:Down spacing:10 padding:Inset{left:12 right:12 top:10 bottom:12} show_bg:true draw_bg +: {color:mod.widgets.RINX_DANGER_BG border_radius:theme.corner_radius}
+                                let others=A.pool_full_others(v)
+                                let no_raise=A.pool_full_no_raise(v)
+                                View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.0}
+                                    mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_DANGER_FG}
+                                    View{width:Fill height:Fit flow:Down spacing:4
+                                        pool_full_title := mod.widgets.HagencyWrapTitle{text:A.pool_full_title(v) draw_text.color:mod.widgets.RINX_DANGER_FG}
+                                        pool_full_why := mod.widgets.HagencyWrapSubtitle{text:A.pool_full_why(v)}
+                                        if no_raise!="" {View{width:Fill height:Fit pool_full_no_raise := mod.widgets.HagencyWrapSubtitle{text:no_raise}}}
+                                    }
+                                }
+                                if A.pool_can_raise(v) || others.len()>0 {View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
+                                    if A.pool_can_raise(v) {View{width:Fit height:Fit pool_full_raise := mod.widgets.HagencyGetButton{text:A.t("Raise Monthly Maximum","调高每月上限") enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_full_raise()}}}
+                                    for o in others {let other=o View{width:Fit height:Fit pool_full_other := mod.widgets.HagencyGetButton{text:A.pool_full_other_label(other) enabled:!H.busy && H.command==nil && !locked on_click:||A.open_resource(other.rid)}}}
+                                }}
+                                if !A.pool_can_raise(v) && others.len()==0 {View{width:Fill height:Fit pool_full_wait := mod.widgets.HagencyWrapSubtitle{text:A.t("It resets on "+A.pool_next_month(v.now)+".","本月额度在 "+A.pool_next_month(v.now)+"重置。")}}}
+                            }}}
                             // Every term and floor in one place; each control below keeps one line.
                             if H.pool_tip=="capacity" {View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:12 right:12 top:10 bottom:10} show_bg:true draw_bg +: {color:mod.widgets.RINX_FIELD}
                                 let has_sum=b.ceiling!=nil && b.committed>0 && !unpublished
@@ -13066,22 +13327,30 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         }
                         mod.widgets.HagencyListDivider{margin:Inset{left:16}}
                         pool_quota_section := View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:16 right:16 top:12 bottom:12}
+                            // One possible amount (what running Agents hold is all this month can give out): the
+                            // amount, locked, with why and the way forward, instead of a slider that can't move.
+                            let fixed=A.pool_quota_fixed(v)
                             View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:0.5}
                                 mod.widgets.HagencyListTitle{width:Fill text:A.t("Per-request limit","每次申请上限")}
-                                pool_quota_value := mod.widgets.HagencyListValue{visible:unsaved.quota=="" text:if v.publishedTokens!=nil {A.t("Now ","现在 ")+A.tokens(v.publishedTokens)} else {""}}
+                                if fixed!=nil {View{width:Fit height:Fit flow:Right spacing:6 align:Align{y:0.5}
+                                    mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.lock draw_icon.color:mod.widgets.RINX_MUTED}
+                                    pool_quota_fixed_value := mod.widgets.HagencyListTitle{width:Fit draw_text +: {text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}} text:A.tokens(fixed)}
+                                }}
+                                pool_quota_value := mod.widgets.HagencyListValue{visible:unsaved.quota=="" text:if v.publishedTokens!=nil && fixed==nil {A.t("Now ","现在 ")+A.tokens(v.publishedTokens)} else {""}}
                                 pool_quota_unsaved := mod.widgets.HagencyListValue{visible:unsaved.quota!="" text:unsaved.quota draw_text +: {color:mod.widgets.RINX_WARNING_FG text_style:theme.font_bold{font_size:mod.widgets.RINX_META_SIZE}}}
                             }
-                            View{width:Fill height:Fit pool_quota_tokens := mod.widgets.HagencyPoolSlider{minimum:A.pool_quota_min(v) maximum:v.quotaMax text:if e!=nil {e.quota} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked || v.quotaMode=="scheduled" unit +: {margin:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {7} else {0})}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked && v.quotaMode!="scheduled"}} on_change:|text| A.pool_quota_changed(text)}}
+                            if fixed!=nil {View{width:Fill height:Fit pool_quota_fixed := mod.widgets.HagencyWrapSubtitle{text:A.pool_quota_fixed_line(v)}}}
+                            if fixed==nil {View{width:Fill height:Fit pool_quota_tokens := mod.widgets.HagencyPoolSlider{minimum:A.pool_quota_min(v) maximum:v.quotaMax text:if e!=nil {e.quota} else {""} empty_text:A.t("Not set","未设置") is_read_only:H.command!=nil || locked || v.quotaMode=="scheduled" unit +: {margin:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {7} else {0})}} slider_wrap +: {width:Fill amount_slider +: {enabled:H.command==nil && !locked && v.quotaMode!="scheduled"}} on_change:|text| A.pool_quota_changed(text)}}}
                             pool_quota_error := mod.widgets.HagencyWrapSubtitle{visible:save.quotaError!="" && !save.quotaFloor text:save.quotaError draw_text.color:mod.widgets.RINX_DANGER_FG}
                             // One line under the control: its floor, or when the value applies. The suggestion follows on
                             // its own line and says why, so it reads as advice rather than a warning.
-                            View{width:Fill height:Fit flow:Down spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {8} else {4})
+                            if fixed==nil {View{width:Fill height:Fit flow:Down spacing:(if mod.widgets.RINX_TEXT_SCALE>1.2 {8} else {4})
                                 View{width:Fill height:Fit flow:Right spacing:8 align:Align{y:(if mod.widgets.RINX_TEXT_SCALE>1.2 {0.0} else {0.5})}
                                     if v.when!="" {mod.widgets.HagencyPillDot{margin:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {9} else {0})} draw_bg.color:if save.quotaFloor {mod.widgets.RINX_DANGER_FG} else if v.quotaEditable || v.quotaMode=="amend" {mod.widgets.RINX_ACCENT} else {mod.widgets.RINX_WARNING_FG}}}
                                     View{width:Fill height:Fit padding:Inset{top:(if mod.widgets.RINX_TEXT_SCALE>1.2 {0} else {6}) bottom:(if mod.widgets.RINX_TEXT_SCALE>1.2 {0} else {6}) right:4} pool_quota_when := mod.widgets.HagencyWrapSubtitle{text:v.when draw_text.color:if save.quotaFloor {mod.widgets.RINX_DANGER_FG} else {mod.widgets.RINX_MUTED}}}
                                 }
                                 if suggest {View{width:Fit height:Fit pool_quota_suggest := mod.widgets.HagencyPreset{text:A.pool_quota_suggest_label(v) enabled:!H.busy && H.command==nil && !locked on_click:||A.pool_quota_pick(A.pool_quota_suggestion(v))}}}
-                            }
+                            }}
                             pool_quota_draft_row := View{visible:save.draft!="" width:Fill height:Fit flow:Right spacing:8 padding:Inset{left:10 right:4 top:2 bottom:2} align:Align{y:0.5} show_bg:true draw_bg +: {color:mod.widgets.RINX_SUCCESS_BG}
                                 mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_SUCCESS_FG}
                                 pool_quota_draft := mod.widgets.HagencyWrapSubtitle{width:Fill text:save.draft draw_text.color:mod.widgets.RINX_SUCCESS_FG}
@@ -13644,16 +13913,108 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                 if !(v.published && l.state=="elsewhere") {mod.widgets.HagencyListNote{text:A.pool_who_rule(v)}}
                 if can_add {View{width:Fill height:Fit flow:Down spacing:6
                     mod.widgets.HagencyListLabel{text:if action.kind=="amend" {A.t("ADD PEOPLE","添加可以申请的人")} else {A.t("PICK PEOPLE IN ADVANCE","预先选好可以申请的人")}}
+                    // People on the list get capacity only while there is some: a month all given out says so here.
+                    if v.published && A.pool_full(v) {View{width:Fill height:Fit padding:Inset{bottom:2} mod.widgets.HagencyStatus{draw_bg.color:mod.widgets.RINX_WARNING_BG
+                        View{width:Fill height:Fit flow:Down spacing:6
+                            pool_who_full := mod.widgets.HagencyCopy{text:A.pool_full_title(v)+A.t(". Adding people doesn’t add capacity: they can request once there is room again.","。加人不会增加额度：等有余量时，他们才能申请到。") draw_text.color:mod.widgets.RINX_WARNING_FG}
+                            if A.pool_can_raise(v) {View{width:Fit height:Fit pool_who_full_raise := mod.widgets.HagencyBarText{padding:Inset{left:0 right:10} text:A.t("Raise Monthly Maximum","调高每月上限") enabled:!H.busy && H.command==nil on_click:||A.who_full_raise(detail.resource.id)}}}
+                        }
+                    }}}
                     mod.widgets.HagencyList{
+                        // Search the owner's server first; matches appear under the field as it's typed.
+                        let hits=A.who_hits()
+                        let state=A.who_name_state()
+                        View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:14 right:14 top:10 bottom:10}
+                            pool_who_name := mod.widgets.HagencyInput{width:Fill text:who.name empty_text:A.t("Name or username, e.g. lisi","名字或用户名，例如 lisi") on_change:|t|{A.who_typing(t)}}
+                            pool_who_name_hint := mod.widgets.HagencyWrapSubtitle{visible:!state.error text:if state.error {""} else {state.text}}
+                            pool_who_name_error := mod.widgets.HagencyWrapSubtitle{visible:state.error text:if state.error {state.text} else {""} draw_text.color:mod.widgets.RINX_DANGER_FG}
+                        }
+                            pool_who_hit0 := View{visible:hits.len()>0 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit0_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>0 {if hits[0].name!="" {hits[0].name} else {A.pool_person(hits[0].id)}} else {""}}
+                                            pool_who_hit0_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>0 {A.pool_person(hits[0].id)} else {""}}
+                                        }
+                                        pool_who_hit0_on := View{visible:hits.len()>0 && A.who_typed()==hits[0].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit0_off := View{visible:!(hits.len()>0 && A.who_typed()==hits[0].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit0_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(0)}
+                                }
+                            }
+                            pool_who_hit1 := View{visible:hits.len()>1 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit1_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>1 {if hits[1].name!="" {hits[1].name} else {A.pool_person(hits[1].id)}} else {""}}
+                                            pool_who_hit1_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>1 {A.pool_person(hits[1].id)} else {""}}
+                                        }
+                                        pool_who_hit1_on := View{visible:hits.len()>1 && A.who_typed()==hits[1].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit1_off := View{visible:!(hits.len()>1 && A.who_typed()==hits[1].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit1_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(1)}
+                                }
+                            }
+                            pool_who_hit2 := View{visible:hits.len()>2 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit2_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>2 {if hits[2].name!="" {hits[2].name} else {A.pool_person(hits[2].id)}} else {""}}
+                                            pool_who_hit2_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>2 {A.pool_person(hits[2].id)} else {""}}
+                                        }
+                                        pool_who_hit2_on := View{visible:hits.len()>2 && A.who_typed()==hits[2].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit2_off := View{visible:!(hits.len()>2 && A.who_typed()==hits[2].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit2_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(2)}
+                                }
+                            }
+                            pool_who_hit3 := View{visible:hits.len()>3 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit3_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>3 {if hits[3].name!="" {hits[3].name} else {A.pool_person(hits[3].id)}} else {""}}
+                                            pool_who_hit3_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>3 {A.pool_person(hits[3].id)} else {""}}
+                                        }
+                                        pool_who_hit3_on := View{visible:hits.len()>3 && A.who_typed()==hits[3].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit3_off := View{visible:!(hits.len()>3 && A.who_typed()==hits[3].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit3_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(3)}
+                                }
+                            }
+                            pool_who_hit4 := View{visible:hits.len()>4 width:Fill height:Fit flow:Down
+                                mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                                mod.widgets.HagencyListFit{
+                                    mod.widgets.HagencyListFitBody{
+                                        mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_SELECTED mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:mod.widgets.RINX_MUTED}}
+                                        mod.widgets.HagencyListText{
+                                            pool_who_hit4_name := mod.widgets.HagencyWrapTitle{text:if hits.len()>4 {if hits[4].name!="" {hits[4].name} else {A.pool_person(hits[4].id)}} else {""}}
+                                            pool_who_hit4_id := mod.widgets.HagencyListSubtitle{text:if hits.len()>4 {A.pool_person(hits[4].id)} else {""}}
+                                        }
+                                        pool_who_hit4_on := View{visible:hits.len()>4 && A.who_typed()==hits[4].id width:Fit height:Fit mod.widgets.HagencyPickOn{}}
+                                        pool_who_hit4_off := View{visible:!(hits.len()>4 && A.who_typed()==hits[4].id) width:Fit height:Fit mod.widgets.HagencyPickOff{}}
+                                    }
+                                    pool_who_hit4_tap := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_pick_hit(4)}
+                                }
+                            }
+                        pool_who_people := View{visible:who.name.trim()=="" width:Fill height:Fit flow:Down
                         for index mxid in people {View{width:Fill height:Fit flow:Down
                             let picked=A.who_has(who.picks,mxid)
-                            if index>0 {mod.widgets.HagencyListDivider{}}
+                            let shown=A.who_display(mxid)
+                            mod.widgets.HagencyListDivider{margin:Inset{left:(if index>0 {57} else {16})}}
                             mod.widgets.HagencyListFit{
                                 mod.widgets.HagencyListFitBody{
                                     mod.widgets.HagencyRowIcon{draw_bg.color:if picked {mod.widgets.RINX_INFO_BG} else {mod.widgets.RINX_SELECTED} mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:if picked {mod.widgets.RINX_INFO_FG} else {mod.widgets.RINX_MUTED}}}
                                     mod.widgets.HagencyListText{
-                                        mod.widgets.HagencyWrapTitle{text:A.pool_person(mxid)}
-                                        mod.widgets.HagencyListSubtitle{text:A.who_source(v,mxid)}
+                                        mod.widgets.HagencyWrapTitle{text:if shown!="" {shown} else {A.pool_person(mxid)}}
+                                        mod.widgets.HagencyListSubtitle{text:(if shown!="" {A.pool_person(mxid)+" · "} else {""})+A.who_source(v,mxid)}
                                     }
                                     if picked {mod.widgets.HagencyPickOn{}}
                                     if !picked {mod.widgets.HagencyPickOff{}}
@@ -13661,15 +14022,17 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                                 pool_who_pick := mod.widgets.HagencyListFitTap{enabled:!H.busy && H.command==nil on_click:||A.who_toggle(mxid)}
                             }
                         }}
+                        if H.who_people.rid==detail.resource.id && H.who_people.knownState=="loading" {View{width:Fill height:Fit flow:Down
+                            mod.widgets.HagencyListDivider{margin:Inset{left:16}}
+                            mod.widgets.HagencySwitchRow{
+                                mod.widgets.HagencySkeleton{width:29 height:29}
+                                pool_who_people_reading := mod.widgets.HagencyListSubtitle{text:A.t("Finding people you chat with…","正在查找和你聊过天的人…")}
+                            }
+                        }}
                         if people.len()>0 && v.published && !listed {View{width:Fill height:Fit flow:Down
                             mod.widgets.HagencyListDivider{margin:Inset{left:16}}
                             View{width:Fill height:Fit padding:Inset{left:16 right:14 top:10 bottom:10} pool_who_maybe := mod.widgets.HagencyWrapSubtitle{text:A.t("While the list can’t be read, anyone already on it is marked in the confirmation window and isn’t added twice.","名单暂时读不到：已在名单里的人，确认窗口会标出来，不会重复添加。")}}
                         }}
-                        if people.len()>0 {mod.widgets.HagencyListDivider{margin:Inset{left:16}}}
-                        View{width:Fill height:Fit flow:Down spacing:6 padding:Inset{left:14 right:14 top:10 bottom:12}
-                            pool_who_name := mod.widgets.HagencyInput{width:Fill text:who.name empty_text:A.t("Someone else? Username, e.g. lisi","其他人？输入用户名，例如 lisi") on_change:|t|{A.who_typing(t)}}
-                            pool_who_name_hint := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()=="" text:A.who_name_hint()}
-                            pool_who_name_error := mod.widgets.HagencyWrapSubtitle{visible:A.who_name_bad()!="" text:A.who_name_bad() draw_text.color:mod.widgets.RINX_DANGER_FG}
                         }
                     }
                     let added=H.pool_result!=nil && H.pool_result.tone=="running" && who.picks.len()==0

@@ -115,6 +115,8 @@ pub const KNOWN_CAPABILITIES: &[&str] = &[
     "hagency.onboarding.review",
     "hagency.grants.review",
     "hagency.grants.applicants",
+    "hagency.grants.floor",
+    "hagency.people.search",
     "hagency.execution.assignments",
     "hagency.execution.review",
     "hagency.execution.resume",

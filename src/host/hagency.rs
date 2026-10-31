@@ -44,6 +44,7 @@ mod allocations;
 pub(crate) mod grants;
 pub(crate) mod execution;
 pub(crate) mod local_zone;
+pub(crate) mod people;
 
 pub(crate) const CONNECT_PROVIDER: &str = "hagency.providers.connect";
 
@@ -479,6 +480,8 @@ impl Host {
         }
         if service == execution::LIST { return self.execution_assignments(&lease,args).await; }
         if service == grants::APPLICANTS { return rinx_miniapp_core::bounded_reply(self.grant_applicants(&lease, args).await?); }
+        if service == grants::FLOOR { return rinx_miniapp_core::bounded_reply(self.grant_floor(&lease, args).await?); }
+        if service == people::SEARCH { return rinx_miniapp_core::bounded_reply(self.people_search(&lease, args).await?); }
         if service == execution::REVIEW || service == execution::RESUME {let _ = execution::Selection::parse(args)?;return Err("native_execution_confirmation_required".into());}
         if service == "hagency.onboarding.status" {
             let _:Empty=parse(args)?;

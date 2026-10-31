@@ -305,10 +305,12 @@ impl MiniAppsPanel {
         // When sharing ends: its own row, which opens the period choice in place.
         show(self, cx, &[id!(scroll), id!(sharing)], v.sharing_visible);
         self.view.label(cx, &at(&[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_label)])).set_text(cx, tr("Shared until"));
-        // With large text the time goes under the row's name, where it can wrap.
+        // With large text, or a time too long to sit beside the row's name on a
+        // narrow window, the time goes under the name, where it can wrap.
         let large = text_scale(cx) > 1.2;
-        text(self, cx, &[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_value)], if large { "" } else { &v.expiry });
-        text(self, cx, &[id!(scroll), id!(sharing), id!(sharing_value_below)], if large { &v.expiry } else { "" });
+        let below = large || v.expiry.chars().count() > 30;
+        text(self, cx, &[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_value)], if below { "" } else { &v.expiry });
+        text(self, cx, &[id!(scroll), id!(sharing), id!(sharing_value_below)], if below { &v.expiry } else { "" });
         show(self, cx, &[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_closed)], !v.sharing_open);
         show(self, cx, &[id!(scroll), id!(sharing), id!(sharing_row), id!(sharing_body), id!(sharing_opened)], v.sharing_open);
         show(self, cx, &[id!(scroll), id!(sharing), id!(period)], v.sharing_visible && v.sharing_open);

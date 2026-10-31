@@ -18,6 +18,9 @@ use std::sync::{
 pub(crate) const REVIEW_GRANT: &str = "hagency.grants.review";
 /// Read-only: who may request from a pool this month, from the native record.
 pub(crate) const APPLICANTS: &str = "hagency.grants.applicants";
+/// Read-only: what running Agents hold in a pool's published month, from the
+/// native amendment form: the per-request floor the window enforces.
+pub(crate) const FLOOR: &str = "hagency.grants.floor";
 /// Largest grant amount, in tokens, that stays an exact JSON integer.
 pub(crate) const MAX_GRANT_TOKENS: u64 = 9_007_199_254_740_991;
 
@@ -280,6 +283,19 @@ fn applicants_reply(
         "grantId": summary.map(|s| s.grant_id.clone()),
         "applicants": applicants,
         "changePending": change_pending,
+    })
+}
+/// The page's read of a published month's floor, in the amendment window's
+/// own figures: what running Agents hold (and how many), the per-request limit
+/// in force, and the most a new limit can be.
+fn floor_reply(contribution: &str, form: &OwnerGrantSuccessionForm) -> Value {
+    serde_json::json!({
+        "contributionId": contribution,
+        "heldTokens": form.floor.retained_tokens,
+        "heldAgents": form.floor.children,
+        "perRequestTokens": form.predecessor.allocated_tokens,
+        "mostTokens": form.context.remaining_tokens,
+        "periodEndMs": form.period_end_ms,
     })
 }
 /// What the server was last seen to hold for a recorded root grant.
@@ -716,6 +732,28 @@ impl Host {
         };
         Ok(applicants_reply(&query.contribution_id, current, state, change_pending))
     }
+    /// `hagency.grants.floor`: the floor of a published month's per-request
+    /// limit, as the amendment window reads it, so the pool's page bounds its
+    /// slider with the window's figure instead of an estimate. Read-only: the
+    /// amendment form opens no hold, intent or publication; nothing is
+    /// prepared, confirmed, published or retried.
+    pub(crate) async fn grant_floor(&self, lease: &Lease, args: Value) -> Result<Value, String> {
+        let account = self.check(lease)?;
+        lease.authorize(&account, FLOOR, None)?;
+        let query = ApplicantsQuery::parse(args)?;
+        self.manager(lease).await?;
+        let access = self.host_grant_access(lease)?;
+        let form = access
+            .succession_form(query.contribution_id.clone(), OwnerGrantSuccessionKind::Amendment)
+            .await
+            .map_err(|e| e.code)?;
+        let account = self.check(lease)?;
+        lease.authorize(&account, FLOOR, None)?;
+        if access.retired() {
+            return Err("management_scope_changed".into());
+        }
+        Ok(floor_reply(&query.contribution_id, &form))
+    }
     pub fn grant_handoff(&self, lease: Lease, args: Value) -> Result<GrantFlow, String> {
         let selector = Selector::parse(args)?;
         let account = self.check(&lease)?;
@@ -819,6 +857,65 @@ mod tests {
         let lease = rinx_miniapp_core::SessionAuthority::default().issue(
             identity,
             [APPLICANTS.to_owned()].into(),
+            Default::default(),
+            std::time::Instant::now() + std::time::Duration::from_secs(60),
+        );
+        assert!(super::super::permissions(&lease).is_empty());
+    }
+    /// The floor read names one pool and answers in the amendment window's own
+    /// figures, so the pool's page and the window agree on the floor.
+    #[test]
+    fn floor_read_is_a_closed_pool_read_with_the_windows_figures() {
+        for forged in [
+            json!({}),
+            json!({"contributionId": "pool", "succession": "amendment"}),
+            json!({"contributionId": "pool", "proposedTokens": 1}),
+            json!({"contributionId": "../pool"}),
+        ] {
+            assert_eq!(ApplicantsQuery::parse(forged.clone()).unwrap_err(), "invalid_management_arguments", "{forged}");
+        }
+        let form = ::hagency::native_owner::OwnerGrantSuccessionForm {
+            kind: OwnerGrantSuccessionKind::Amendment,
+            contribution_id: "pool_codex".into(),
+            resource_id: "resource".into(),
+            label: "codex".into(),
+            context: ::hagency::native_owner::OwnerGrantReviewContext {
+                server_origin: "https://matrix.test".into(),
+                profile_id: "profile".into(),
+                resource_revision: "revision".into(),
+                framework: "codex".into(),
+                model: "model".into(),
+                remaining_tokens: Some(9_000_000),
+                resource_total_tokens: Some(9_000_000),
+                shared_account_total_tokens: None,
+                observed_at_ms: 1,
+            },
+            predecessor: progress("root", OwnerGrantState::Recorded).summary,
+            floor: ::hagency::native_owner::OwnerGrantFloor { children: 1, retained_tokens: 9_000_000 },
+            period_key: "2026-10".into(),
+            period_start_ms: OCTOBER,
+            period_end_ms: NOVEMBER,
+            window_opens_at_ms: NOVEMBER - 7 * 86_400_000,
+            window_closes_at_ms: NOVEMBER,
+        };
+        assert_eq!(
+            floor_reply("pool_codex", &form),
+            json!({"contributionId": "pool_codex", "heldTokens": 9_000_000, "heldAgents": 1,
+                   "perRequestTokens": form.predecessor.allocated_tokens, "mostTokens": 9_000_000, "periodEndMs": NOVEMBER})
+        );
+        assert!(octosense_app_contract::hagency::SERVICES.contains(&FLOOR));
+        assert!(octosense_app_contract::KNOWN_CAPABILITIES.contains(&FLOOR));
+        assert!(octosense_app_contract::hagency::words(FLOOR).is_some());
+        let shipped: Value = serde_json::from_str(include_str!("../../../apps/hagency/bundle/manifest.json")).unwrap();
+        assert!(shipped["capabilities"].as_array().unwrap().iter().any(|cap| cap == FLOOR));
+        let lease = rinx_miniapp_core::SessionAuthority::default().issue(
+            crate::miniapps::InstanceId {
+                app: octosense_app_contract::hagency::APP_ID.into(),
+                account: "@owner:test".into(),
+                room: None,
+                generation: 1,
+            },
+            [FLOOR.to_owned()].into(),
             Default::default(),
             std::time::Instant::now() + std::time::Duration::from_secs(60),
         );
