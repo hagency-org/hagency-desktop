@@ -310,6 +310,7 @@ def main():
         ("unknown-work-review", "hagency::work_review::tests"),
         ("permission-error-classification", "hagency::permission_failure::"),
         ("permission-polling-policy", "home::permission_retry::tests"),
+        ("device-sessions", "settings::device_sessions::tests"),
         ("theme", "theme::"),
         ("theme-contrast", "semantic_token_pairs_meet_wcag_aa"),
         ("chat-information", "home::mobile_chat_info"),
