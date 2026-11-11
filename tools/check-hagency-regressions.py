@@ -117,6 +117,8 @@ def main():
         ("unknown-work-review", "hagency::work_review::tests"),
     ("device-sessions", "settings::device_sessions::tests"),
     ("space-overflow", "home::spaces_bar::overflow_tests"),
+    ("system-notifications", "system_notifications::tests"),
+    ("media-playback", "shared::attachment_download::playback_tests"),
         ("permission-error-classification", "hagency::permission_failure::"),
         ("permission-polling-policy", "home::permission_retry::tests"),
         ("theme", "theme::"),

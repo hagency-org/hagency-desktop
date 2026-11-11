@@ -307,6 +307,13 @@ script_mod! {
                 text: #(crate::i18n::tr("Include invitations in unread room filters")) i18n_text: "Include invitations in unread room filters"
                 draw_text +: {text_style: mod.widgets.SETTINGS_BOLD_TEXT_STYLE {}}
             }
+            system_notifications_toggle := ToggleFlat {
+                active: false
+                text:#(crate::i18n::tr("Background system notifications")) i18n_text:"Background system notifications"
+            }
+            system_notifications_test := Button {text:#(crate::i18n::tr("Enable permission and test notification")) i18n_text:"Enable permission and test notification"}
+            system_notifications_status := Label {width:Fill height:Fit flow:Flow.Right{wrap:true} draw_text.color:mod.widgets.RINX_MUTED}
+            mod.widgets.SettingsSectionDescription {body:#(crate::i18n::tr("Notifications contain no message text or sender. Muted rooms, your own messages, historical sync and activity while the app is focused do not notify."))}
             show_read_receipts_toggle := ToggleFlat {
                 margin: Inset{left: 0.5, top: 5, bottom: 10}
                 padding: Inset { left: 15}
@@ -615,6 +622,20 @@ impl AppSettings {
             app_state.app_prefs.show_invites_in_unread_filters = show;
             app_state.app_prefs.on_show_invites_in_unread_filters_changed(cx);
         }
+        if let Some(enabled)=self.view.check_box(cx,ids!(system_notifications_toggle)).changed(actions) {
+            app_state.app_prefs.system_notifications=enabled;
+            app_state.app_prefs.on_system_notifications_changed(cx);
+            self.view.label(cx,ids!(system_notifications_status)).set_text(cx,crate::i18n::tr(crate::system_notifications::status()));
+        }
+        if self.view.button(cx,ids!(system_notifications_test)).clicked(actions) && app_state.app_prefs.system_notifications {
+            crate::system_notifications::request_permission_and_test();
+        }
+        for action in actions {
+            if let Some(status)=action.downcast_ref::<crate::system_notifications::NotificationStatus>() && status.pin.is_current() {
+                self.view.label(cx,ids!(system_notifications_status)).set_text(cx,crate::i18n::tr(status.text));
+            }
+        }
+        self.view.button(cx,ids!(system_notifications_test)).set_enabled(cx,app_state.app_prefs.system_notifications);
         let show_receipts_toggle = self.view.check_box(cx, ids!(show_read_receipts_toggle));
         if let Some(show) = show_receipts_toggle.changed(actions) {
             if show != app_state.app_prefs.show_read_receipts {
@@ -680,6 +701,9 @@ impl AppSettings {
         send_toggle.set_active(cx, !prefs.send_on_enter, Animate::No);
 
         self.view.check_box(cx, ids!(show_invites_in_unread_filters_toggle)).set_active(cx, prefs.show_invites_in_unread_filters, Animate::No);
+        self.view.check_box(cx,ids!(system_notifications_toggle)).set_active(cx,prefs.system_notifications,Animate::No);
+        self.view.button(cx,ids!(system_notifications_test)).set_enabled(cx,prefs.system_notifications);
+        self.view.label(cx,ids!(system_notifications_status)).set_text(cx,crate::i18n::tr(crate::system_notifications::status()));
         self.view.check_box(cx, ids!(show_read_receipts_toggle))
             .set_active(cx, prefs.show_read_receipts, Animate::No);
         self.view.check_box(cx, ids!(tabbed_chats_toggle))

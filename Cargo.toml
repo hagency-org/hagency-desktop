@@ -200,10 +200,15 @@ arboard = { version = "3.4", default-features = false, features = ["image-data"]
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_WinRT", "Data_Xml_Dom", "UI_Notifications"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3"
+objc2 = { version = "=0.6.4", features = ["exception"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSRunningApplication"] }
+block2 = "=0.6.1"
+objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSError"] }
+objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSettings", "UNUserNotificationCenter"] }
 # The jit line: AppKit calls go through upstream's shared Apple bindings (the fork exposed them
 # as makepad_platform::os::apple::apple_sys and os::apple_util).
 makepad-apple-sys = { path = ".sources/makepad/libs/apple_sys" }
@@ -669,3 +674,6 @@ required-features = ["onboarding-test-support"]
 [[example]]
 name = "message_metadata_review"
 required-features = ["onboarding-test-support"]
+
+[target.'cfg(target_os = "linux")'.dependencies]
+ashpd = { version = "=0.10.3", default-features = false, features = ["async-std"] }

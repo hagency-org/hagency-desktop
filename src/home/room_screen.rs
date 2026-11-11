@@ -3527,7 +3527,9 @@ impl RoomScreen {
                     self.begin_media_transfer(cx, portal_list, info, TransferKind::Download, start_attachment_download);
                 }
                 MessageAction::OpenMarkdownAttachment(info) => {
-                    if info.kind == DownloadKind::Theme {
+                    if matches!(info.kind, DownloadKind::Audio | DownloadKind::Video) {
+                        self.begin_media_transfer(cx, portal_list, info, TransferKind::Preview, crate::shared::attachment_download::start_media_playback);
+                    } else if info.kind == DownloadKind::Theme {
                         self.begin_media_transfer(
                             cx,
                             portal_list,
@@ -6711,11 +6713,11 @@ fn populate_audio_message_content(
         .or_else(|| audio.caption().map(|c| format!("{}<br>", utils::escape_text_and_line_breaks(c))))
         .unwrap_or_default();
 
-    // TODO: add an audio to play the audio file
+    // Audio uses the verified file-backed Save and play action.
 
     message_content_widget.show_html(
         cx,
-        crate::i18n::format("<b>Audio: </b>{caption}File: <i>{filename}</i>{size}{mime}{duration}<br> → <i>Video playback not yet supported.</i>", &[("caption", (caption).to_string()), ("filename", (filename).to_string()), ("size", (size).to_string()), ("mime", (mime).to_string()), ("duration", (duration).to_string())]),
+        crate::i18n::format("<b>Audio: </b>{caption}File: <i>{filename}</i>{size}{mime}{duration}<br> → <i>Use Save and play to open the system player.</i>", &[("caption", (caption).to_string()), ("filename", (filename).to_string()), ("size", (size).to_string()), ("mime", (mime).to_string()), ("duration", (duration).to_string())]),
     );
     true
 }
@@ -6755,11 +6757,11 @@ fn populate_video_message_content(
         .or_else(|| video.caption().map(|c| format!("{}<br>", utils::escape_text_and_line_breaks(c))))
         .unwrap_or_default();
 
-    // TODO: populate a video widget here, once makepad supports that
+    // Video opens a user-owned verified file in the system player.
 
     message_content_widget.show_html(
         cx,
-        crate::i18n::format("<b>Video: </b>{caption}File: <i>{filename}</i>{size}{mime}{duration}{dimensions}<br> → <i>Video playback not yet supported.</i>", &[("caption", (caption).to_string()), ("filename", (filename).to_string()), ("size", (size).to_string()), ("mime", (mime).to_string()), ("duration", (duration).to_string()), ("dimensions", (dimensions).to_string())]),
+        crate::i18n::format("<b>Video: </b>{caption}File: <i>{filename}</i>{size}{mime}{duration}{dimensions}<br> → <i>Use Save and play to open the system player.</i>", &[("caption", (caption).to_string()), ("filename", (filename).to_string()), ("size", (size).to_string()), ("mime", (mime).to_string()), ("duration", (duration).to_string()), ("dimensions", (dimensions).to_string())]),
     );
     true
 }
@@ -7207,7 +7209,7 @@ impl SmallStateEventContent for PollState {
     ) -> (WidgetRef, ItemDrawnStatus) {
         item.label(cx, ids!(content)).set_text(
             cx,
-            self.fallback_text().unwrap_or_else(|| self.results().question).as_str(),
+            &format!("{}\n{}",self.fallback_text().unwrap_or_else(|| self.results().question),crate::i18n::tr("Poll voting is not supported in this client yet. Use another Matrix client to vote.")),
         );
         new_drawn_status.content_drawn = true;
         (item, new_drawn_status)
@@ -7812,7 +7814,7 @@ impl Widget for Message {
 
             // Handle clicks on the media-related buttons (download, share, cancel) beneath media messages.
             if let Some(info) = self.download_info.as_ref() {
-                if matches!(info.kind, DownloadKind::Markdown | DownloadKind::Theme)
+                if matches!(info.kind, DownloadKind::Markdown | DownloadKind::Theme | DownloadKind::Audio | DownloadKind::Video)
                     && self
                         .view
                         .button(cx, ids!(content.download_section.open_markdown_button))
@@ -8025,9 +8027,11 @@ impl Message {
                     cx,
                     matches!(download_state, DownloadDisplayState::Idle)
                         && self.download_info.as_ref().is_some_and(|info| {
-                            matches!(info.kind, DownloadKind::Markdown | DownloadKind::Theme)
+                            matches!(info.kind, DownloadKind::Markdown | DownloadKind::Theme | DownloadKind::Audio | DownloadKind::Video)
                         }),
                 );
+            self.view.button(cx,ids!(content.download_section.open_markdown_button)).set_text(cx,
+                crate::i18n::tr(if self.download_info.as_ref().is_some_and(|info|matches!(info.kind,DownloadKind::Audio|DownloadKind::Video)){"Save and play"}else{"Open"}));
             let download_button = self
                 .view
                 .button(cx, ids!(content.download_section.download_button));

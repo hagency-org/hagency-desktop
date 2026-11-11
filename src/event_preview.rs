@@ -153,11 +153,11 @@ pub fn text_preview_of_timeline_item(
             BeforeText::UsernameWithColon,
         )),
         TimelineItemContent::CallInvite => TextPreview::from((
-            String::from("[Call Invitation]"),
+            crate::i18n::tr("[Call invitation — calls are not supported in this client yet]").to_owned(),
             BeforeText::UsernameWithColon,
         )),
         TimelineItemContent::RtcNotification { .. } => TextPreview::from((
-            String::from("[RTC Call Notification]"),
+            crate::i18n::tr("[Call notification — calls are not supported in this client yet]").to_owned(),
             BeforeText::UsernameWithColon,
         )),
     }
@@ -222,8 +222,8 @@ pub fn plaintext_body_of_timeline_item(
         TimelineItemContent::FailedToParseState { event_type, error, state_key } => {
             format!("Failed to parse {} state; key: {}. Error: {}", event_type, state_key, error)
         }
-        TimelineItemContent::CallInvite => String::from("[Call Invitation]"),
-        TimelineItemContent::RtcNotification { .. } => String::from("[RTC Call Notification]"),
+        TimelineItemContent::CallInvite => crate::i18n::tr("[Call invitation — calls are not supported in this client yet]").to_owned(),
+        TimelineItemContent::RtcNotification { .. } => crate::i18n::tr("[Call notification — calls are not supported in this client yet]").to_owned(),
     }
 }
 

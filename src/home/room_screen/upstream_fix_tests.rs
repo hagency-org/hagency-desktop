@@ -84,3 +84,19 @@ fn attachment_actions_wrap_inside_narrow_panes_at_larger_text_sizes() {
         }
     }
 }
+
+#[test]
+fn audio_and_video_show_the_system_player_strategy_without_a_misleading_audio_warning() {
+    let (mut cx, root)=fixture();
+    let text=root.html_or_plaintext(&cx,ids!(text));
+    let audio=AudioMessageEventContent::plain("voice.opus".into(),ruma::mxc_uri!("mxc://example.org/audio").to_owned());
+    let video=VideoMessageEventContent::plain("video.mp4".into(),ruma::mxc_uri!("mxc://example.org/video").to_owned());
+    populate_audio_message_content(&mut cx,&text,&audio);
+    let html=text.html(&cx,ids!(html_view.html)).text();
+    assert!(html.contains("voice.opus"));assert!(!html.contains("Video playback"));
+    assert!(html.contains("system player")||html.contains("系统播放器"));
+    populate_video_message_content(&mut cx,&text,&video);
+    let html=text.html(&cx,ids!(html_view.html)).text();assert!(html.contains("video.mp4"));assert!(html.contains("system player")||html.contains("系统播放器"));
+    root.button(&cx,ids!(attachments.open_markdown_button)).set_text(&mut cx,crate::i18n::tr("Save and play"));
+    assert!(!root.button(&cx,ids!(attachments.open_markdown_button)).text().is_empty());
+}

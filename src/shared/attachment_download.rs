@@ -330,9 +330,26 @@ pub fn start_attachment_download(
         update_sender,
         crate::attachment_transport::MAX_FILE_BYTES,
         |filename, mxc, file, sender, epoch| {
-            show_file_save_dialog(filename, file, Some(mxc), sender, epoch);
+            show_file_save_dialog(filename, file, Some(mxc), sender, epoch, false);
         },
     );
+}
+
+/// Explicit Save As gives the system player a user-owned file, not an expiring private cache path.
+pub fn start_media_playback(info: DownloadableAttachment, sender: TimelineUpdateSenderOption) {
+    if !matches!(info.kind, DownloadKind::Audio | DownloadKind::Video) { return; }
+    download_file(info, sender, crate::attachment_transport::MAX_FILE_BYTES,
+        |filename,mxc,file,sender,epoch| show_file_save_dialog(filename,file,Some(mxc),sender,epoch,true));
+}
+fn playable_path(path: &std::path::Path) -> bool {
+    if path.as_os_str().to_string_lossy().ends_with(['/', '\\']) { return false; }
+    path.extension().and_then(|v|v.to_str()).is_some_and(|ext| matches!(ext.to_ascii_lowercase().as_str(),
+        "mp3"|"m4a"|"aac"|"wav"|"flac"|"ogg"|"oga"|"opus"|"mp4"|"m4v"|"webm"|"mkv"|"mov"|"ogv"))
+}
+fn open_saved_media(path: &std::path::Path) -> Result<(), String> {
+    if !path.is_file() || !playable_path(path) { return Err("The file was saved. Choose a supported audio or video extension before opening it in your player.".into()); }
+    let url=url::Url::from_file_path(path).map_err(|_|"The file was saved, but its path could not be opened.".to_owned())?;
+    robius_open::Uri::new(url.as_str()).open().map_err(|_|"The file was saved, but no system player could be opened. Open the saved file with a compatible player.".to_owned())
 }
 
 /// Saves an attachment already in memory directly to storage, without showing any dialog.
@@ -565,6 +582,7 @@ fn show_file_save_dialog(
     mxc: Option<OwnedMxcUri>,
     sender: TimelineUpdateSenderOption,
     epoch: u64,
+    play: bool,
 ) {
     let failure_sender = sender.clone();
     let failure_mxc = mxc.clone();
@@ -613,6 +631,16 @@ fn show_file_save_dialog(
         }
         match file.save_to(&selected) {
             Ok(()) => {
+                if play {
+                    let result = crate::persistence::SESSION_IO.try_lock().map_err(|_| "The file was saved. Account state is changing; open it manually in your player.".to_owned()).and_then(|_gate| {
+                        if !file.is_current() { return Err("The file was saved. Account state changed; open it manually in your player.".to_owned()); }
+                        open_saved_media(&selected)
+                    });
+                    match result {
+                        Ok(()) => enqueue_scoped_popup_notification(epoch, crate::i18n::tr("File saved. Opening the system player; playback depends on installed codecs."), PopupKind::Info, Some(6.0)),
+                        Err(error) => enqueue_scoped_popup_notification(epoch, crate::i18n::tr(&error), PopupKind::Error, None),
+                    }
+                }
                 enqueue_scoped_popup_notification(
                     epoch,
                     "Downloaded attachment.",
@@ -647,6 +675,7 @@ fn show_file_save_dialog(
     mxc: Option<OwnedMxcUri>,
     sender: TimelineUpdateSenderOption,
     epoch: u64,
+    _play: bool,
 ) {
     enqueue_scoped_popup_notification(
         epoch,
@@ -896,4 +925,13 @@ mod original_save_request_tests {
 
 fn enqueue_scoped_popup_notification(epoch: u64, message: impl Into<String>, kind: PopupKind, duration: Option<f64>) {
     crate::shared::popup_list::enqueue_scoped_popup_notification(epoch, message.into(), kind, duration);
+}
+
+#[cfg(test)]
+mod playback_tests {
+    use super::*;
+    #[test] fn auto_open_only_accepts_media_extensions_and_never_shell_or_playlist_files() {
+        for name in ["voice.MP3","clip.mp4","recording.opus","a file with spaces.wav"] {assert!(playable_path(std::path::Path::new(name)));}
+        for name in ["a.exe","a.lnk","a.desktop","a.app","a.html","a.m3u","a.pls","mp3","a.mp3.exe","a.mp3/"] {assert!(!playable_path(std::path::Path::new(name)),"{name}");}
+    }
 }
