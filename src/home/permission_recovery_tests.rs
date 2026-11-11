@@ -114,6 +114,11 @@ fn transient_failure_deadline_survives_rebind_hide_reopen_and_resets_on_fresh_su
     assert!(n.task.is_none());
     n.loading = true;
     n.retry.begin();
+    n.render(&mut cx);
+    assert_eq!(
+        n.view.label(&mut cx, ids!(recovery_hint)).text(),
+        crate::i18n::tr("Checking…")
+    );
     let done = response(&n, Ok(json!({"approvals":[pending()]})));
     n.accept_result(&mut cx, &done);
     assert!(n.error.is_empty());

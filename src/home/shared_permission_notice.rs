@@ -183,6 +183,8 @@ impl SharedPermissionNotice {
         );
         let hint = if self.decision_unconfirmed {
             crate::i18n::tr("The decision was not confirmed. Only status will be refreshed; the decision will not be sent again automatically.").to_owned()
+        } else if self.loading {
+            crate::i18n::tr("Checking…").to_owned()
         } else if let Some(at) = self.retry.next {
             crate::i18n::format(
                 "Automatic status retry after {seconds} seconds.",
