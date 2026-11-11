@@ -2,9 +2,10 @@
 
 use makepad_widgets::*;
 
-/// The fork queued a system notification; only its iOS, tvOS and Android
-/// backends showed one, and macOS ignored it. Upstream has no notification op.
-pub fn show_notification(_cx: &mut Cx, _title: &str, _body: &str) {}
+/// Background Agent attention uses the same opt-in, generic system notification path.
+pub fn show_notification(_cx: &mut Cx, _title: &str, _body: &str) {
+    crate::system_notifications::show_activity();
+}
 
 /// Redraw `pass` and every pass it is drawn into, up to its window.
 pub fn redraw_pass_and_parent_passes(cx: &mut Cx, pass: DrawPassId) {
