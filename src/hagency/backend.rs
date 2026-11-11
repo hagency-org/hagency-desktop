@@ -713,16 +713,24 @@ impl Service {
         ).await
     }
     pub async fn shared_permissions(&self, command: ::hagency::native_owner::ManagementCommand) -> Result<Value,String> {
+        self.shared_permissions_detailed(command).await.map_err(|error|error.code)
+    }
+    pub(crate) async fn shared_permissions_with(&self, manager:Arc<::hagency::daemon::bridge::ManagementClient>, command: ::hagency::native_owner::ManagementCommand) -> Result<Value,String> {
+        self.shared_permissions_with_detailed(manager,command).await.map_err(|error|error.code)
+    }
+    pub(crate) async fn shared_permissions_detailed(&self, command: ::hagency::native_owner::ManagementCommand) -> Result<Value,super::permission_failure::PermissionFailure> {
         use ::hagency::native_owner::{ManagementCommand,ManagementPackage,ManagementPermission};
         if !matches!(&command,ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..}) {return Err("invalid_permission_command".into());}
         let manager=self.management(ManagementPackage{digest:blake3::hash(b"hagency-native-chat-permissions-v1").to_hex().to_string(),instance:1,account_epoch:1,permissions:vec![ManagementPermission::ReadAgentWork,ManagementPermission::DecideAgentRequests]}).await?;
         // This polling handle belongs to this request, unlike the retained
         // mini-app manager passed directly to shared_permissions_with.
-        let result=self.shared_permissions_with(manager.clone(),command).await;
-        manager.retire();
-        result
+        // Retirement also runs when a status timeout or hidden widget cancels its observer.
+        struct Retire(Arc<::hagency::daemon::bridge::ManagementClient>);
+        impl Drop for Retire { fn drop(&mut self) { self.0.retire(); } }
+        let retained=Retire(manager);
+        self.shared_permissions_with_detailed(retained.0.clone(),command).await
     }
-    pub(crate) async fn shared_permissions_with(&self,manager:Arc<::hagency::daemon::bridge::ManagementClient>,command: ::hagency::native_owner::ManagementCommand)->Result<Value,String> {
+    async fn shared_permissions_with_detailed(&self,manager:Arc<::hagency::daemon::bridge::ManagementClient>,command: ::hagency::native_owner::ManagementCommand)->Result<Value,super::permission_failure::PermissionFailure> {
         use ::hagency::native_owner::ManagementCommand;
         self.check()?;
         if !matches!(&command,ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..}) {return Err("invalid_permission_command".into());}
@@ -730,8 +738,8 @@ impl Service {
             let row=match manager.central(ManagementCommand::SharedApprovalGet{id:id.clone()}).await {
                 Ok(row)=>row,
                 // Older servers have only plaintext approvals.
-                Err(e) if e.status==404=>{let result=manager.central(command).await.map_err(|e|e.code)?;self.check()?;return Ok(result);},
-                Err(e)=>return Err(e.code),
+                Err(e) if e.status==404=>{let result=manager.central(command).await.map_err(super::permission_failure::PermissionFailure::from)?;self.check()?;return Ok(result);},
+                Err(e)=>return Err(e.into()),
             };
             self.check()?;
             if row["approval"]["id"]!=*id || row["digest"]!=*digest {return Err("permission_request_changed".into());}
@@ -744,7 +752,7 @@ impl Service {
                 self.check()?;
             }
         }
-        let mut result=manager.central(command).await.map_err(|e|e.code)?;self.check()?;
+        let mut result=manager.central(command).await.map_err(super::permission_failure::PermissionFailure::from)?;self.check()?;
         if let Some(rows)=result.get_mut("approvals").and_then(Value::as_array_mut) {
             for row in rows {
                 if row["approval"]["request"].get("encrypted").is_none(){continue;}

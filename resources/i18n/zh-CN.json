@@ -3112,5 +3112,15 @@
   "Finish signing in with Pasion in your browser, then return to Hagency.": "请在浏览器中完成 Pasion 登录，然后返回 Hagency。",
   "Logout cancelled by user": "已取消退出登录",
   "Local session cleanup remains incomplete": "本地会话尚未清理完成",
-  "You do not have permission to invite people to this room.": "你没有邀请他人加入此聊天室的权限。"
+  "You do not have permission to invite people to this room.": "你没有邀请他人加入此聊天室的权限。",
+  "Sign in again to check permission status.": "请重新登录以查询权限状态。",
+  "Permission status is not available to this account. Ask the resource owner to check access.": "此账号无法查询权限状态，请联系资源所有者检查访问权限。",
+  "The local Agent service is unavailable. Open My Agents to check its setup and connection.": "本机 Agent 服务不可用，请打开「我的 Agent」检查配置和连接。",
+  "This server or local service does not support permission status. Check its version in My Agents.": "服务器或本机服务不支持权限状态查询，请在「我的 Agent」中检查版本。",
+  "Permission status is temporarily unavailable. Check your connection; status will retry automatically.": "暂时无法查询权限状态，请检查网络连接。稍后会自动重试查询。",
+  "The account or session changed. Reopen this conversation after signing in.": "账号或会话已变更，请登录后重新打开此会话。",
+  "Permission status could not be confirmed. Refresh status or check My Agents.": "无法确认权限状态，请刷新状态或在「我的 Agent」中检查。",
+  "The decision was not confirmed. Only status will be refreshed; the decision will not be sent again automatically.": "尚未确认审批决定。接下来只会刷新状态，不会自动重发审批决定。",
+  "Automatic status retry after {seconds} seconds.": "将在 {seconds} 秒后自动重试查询状态。",
+  "Automatic retries are paused. Refresh status after addressing the problem.": "已暂停自动重试，请处理问题后刷新状态。"
 }
