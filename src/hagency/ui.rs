@@ -47,7 +47,6 @@ enum Target {
     Agents,
     Bindings,
     BindingChanged,
-    ReplyPolicyChanged,
     RoomRoster,
     ScopeState,
     AgentJournal,
@@ -2560,13 +2559,6 @@ impl HagencyPanel {
             }
             Target::ListService => {self.refresh_runtime_list(cx);}
             Target::ServiceRoomChanged => {self.local(cx,Target::Runtime,LocalAction::AgentServiceStatus,None);}
-            Target::ReplyPolicyChanged => {
-                let updated = &value["binding"];
-                if let Some(binding) = self.bindings.iter_mut().find(|b| string(b, "id") == string(updated, "id")) {
-                    *binding = updated.clone();
-                }
-                self.status(cx, "Room reply behavior saved.");
-            }
             Target::BindingChanged => {
                 self.policy = Value::Null;
                 if let Some(agent_id) = self.agent(cx) {
@@ -5155,7 +5147,7 @@ mod tests {
 
     }
     #[test]
-    fn room_reply_policy_defaults_to_mentions_and_tracks_only_selected_binding() {
+    fn room_reply_policy_requires_mentions_and_hides_automatic_toggle() {
         let mut cx=Cx::new(Box::new(|_,_|{}));
         let mut panel=cx.with_vm(|vm|{makepad_widgets::script_mod(vm);crate::app::register_widgets(vm);let value=script_eval!(vm,{mod.widgets.HagencyPanel {}});HagencyPanel::script_from_value(vm,value)});
         panel.bindings = vec![
@@ -5170,13 +5162,7 @@ mod tests {
         panel.sync_navigation(&mut cx);
         assert!(panel.view.view(&mut cx,ids!(reply_policy)).visible());
         assert!(panel.view.label(&mut cx,ids!(reply_policy_status)).text().contains("every message must @"));
-        panel.apply(&mut cx,Target::ReplyPolicyChanged,&json!({"binding":{"id":"room-a","scopeKind":"project","projectId":"project","state":"active","threadAutoReply":true}}));
-        panel.sync_navigation(&mut cx);
-        assert_eq!(panel.view.drop_down(&mut cx,ids!(bindings)).selected_item(),2);
-        assert!(panel.view.label(&mut cx,ids!(reply_policy_status)).text().contains("every message must @"));
-        panel.apply(&mut cx,Target::ReplyPolicyChanged,&json!({"binding":{"id":"room-b","scopeKind":"project","projectId":"project","state":"active","threadAutoReply":false}}));
-        panel.sync_navigation(&mut cx);
-        assert!(panel.view.label(&mut cx,ids!(reply_policy_status)).text().contains("every message must @"),"another Room response cannot change this Room's behavior");
+        assert!(!panel.view.button(&mut cx,ids!(reply_policy_toggle)).visible());
         panel.busy=true;panel.sync_navigation(&mut cx);
         assert!(!panel.view.button(&mut cx,ids!(reply_policy_toggle)).visible());
     }

@@ -3101,5 +3101,6 @@
   "We just sent a verification request to {user}.\n\nWaiting for them to accept it…": "We just sent a verification request to {user}.\n\nWaiting for them to accept it…",
   "Do you wish to verify {user}?": "Do you wish to verify {user}?",
   "The verified identity of {name} was reset.": "The verified identity of {name} was reset.",
-  "The identity of {name} was reset.": "The identity of {name} was reset."
+  "The identity of {name} was reset.": "The identity of {name} was reset.",
+  "You do not have permission to invite people to this room.": "You do not have permission to invite people to this room."
 }

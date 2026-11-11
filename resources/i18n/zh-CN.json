@@ -3101,5 +3101,6 @@
   "We just sent a verification request to {user}.\n\nWaiting for them to accept it…": "已向 {user} 发送验证请求。\n\n等待对方接受…",
   "Do you wish to verify {user}?": "是否验证 {user}？",
   "The verified identity of {name} was reset.": "{name} 的已验证身份已重置。",
-  "The identity of {name} was reset.": "{name} 的身份已重置。"
+  "The identity of {name} was reset.": "{name} 的身份已重置。",
+  "You do not have permission to invite people to this room.": "你没有邀请他人加入此聊天室的权限。"
 }

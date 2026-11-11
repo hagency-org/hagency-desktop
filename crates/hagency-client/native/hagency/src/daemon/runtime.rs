@@ -1019,36 +1019,6 @@ async fn local_resources(
     Some((rows,false))
 }
 
-/// Owner's own pools from the server catalog. Token counts stay unknown
-/// here: measured consumption comes from the telemetry ledger, never from
-/// a published grant or a plan name.
-pub(crate) fn resources(pools: &[Value], requests: Option<&[Value]>, owner: &str) -> Vec<ResourceUsage> {
-    pools
-        .iter()
-        .filter(|p| p["ownerMxid"] == owner)
-        .filter_map(|p| {
-            let id = p["id"].as_str()?.to_owned();
-            let agent_count = requests.map(|rows| {
-                rows.iter()
-                    .filter(|r| r["poolId"] == id.as_str() && r["resourceOwnerMxid"] == owner && r["state"] == "admitted")
-                    .count() as u64
-            });
-            Some(ResourceUsage {
-                name: p["label"].as_str().unwrap_or(&id).to_owned(),
-                account_id: None,
-                provider: p["runtime"].as_str().unwrap_or("unknown").to_owned(),
-                model: "unknown".into(),
-                agent_count,
-                budget_tokens: p["publishedTokens"].as_i64().and_then(|t| u64::try_from(t).ok()),
-                // Usage is not attached to these rows yet: unmeasured.
-                state: ResourceState::Unmeasured.as_str().into(),
-                counts: UNKNOWN_COUNTS,
-                id,
-            })
-        })
-        .collect()
-}
-
 impl Runtime for OwnerRuntime {
     fn enrollment(&self,id:String,call:super::enrollment_rpc::Call)->BoxFuture<'_,Result<super::enrollment_rpc::Status,String>> {
         Box::pin(async move {
@@ -1229,7 +1199,6 @@ impl Runtime for OwnerRuntime {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde_json::json;
 
     #[test]
     fn failed_inventory_read_keeps_last_rows_but_cannot_be_reported_as_confirmed_empty() {
@@ -1427,26 +1396,6 @@ mod tests {
             assert!(!retryable(code), "{code}");
         }
         assert_eq!(static_code("/Users/x/.codex/auth.json secret"), "native_owner_drain_required");
-    }
-
-    #[test]
-    fn resources_are_the_owners_pools_with_unknown_usage() {
-        let pools = vec![
-            json!({"id":"p1","label":"Terra","ownerMxid":"@o:s","runtime":"codex","publishedTokens":5000,"canRequest":true}),
-            json!({"id":"p2","label":"Other","ownerMxid":"@x:s","runtime":"codex","canRequest":true}),
-            json!({"id":"p3","ownerMxid":"@o:s","runtime":"codex","canRequest":false,"blockingReason":"grant_expired"}),
-        ];
-        let requests = vec![
-            json!({"poolId":"p1","resourceOwnerMxid":"@o:s","state":"admitted"}),
-            json!({"poolId":"p1","resourceOwnerMxid":"@o:s","state":"pending_approval"}),
-            json!({"poolId":"p1","resourceOwnerMxid":"@o:s","state":"admitted"}),
-        ];
-        let rows = resources(&pools, Some(&requests), "@o:s");
-        assert_eq!(rows.len(), 2);
-        assert_eq!((rows[0].name.as_str(), rows[0].agent_count, rows[0].budget_tokens), ("Terra", Some(2), Some(5000)));
-        assert_eq!(rows[1].name, "p3");
-        assert!(rows.iter().all(|r| r.state == "unmeasured"));
-        assert!(rows.iter().all(|r| r.counts.input.is_none() && r.counts.output.is_none()));
     }
 
     #[tokio::test]

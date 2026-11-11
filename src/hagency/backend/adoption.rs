@@ -206,34 +206,6 @@ impl Service {
         if let Err(error)=self.check(){access.retire();return Err(error)}
         Ok(OwnerGrantAccess::local(access))
     }
-    pub(crate) async fn adopted_grant_access(
-        &self,
-        mut package: ManagementPackage,
-    ) -> Result<OwnerGrantAccess, String> {
-        self.verify_matrix(false).await?;
-        package.account_epoch = self
-            .0
-            .epoch
-            .checked_add(1)
-            .ok_or("matrix_account_changed")?;
-        if let Some(remote) = self.remote_client().await? {
-            return OwnerGrantAccess::remote(remote, package).await.map_err(|e| e.code);
-        }
-        let owner = self.native_owner().await?;
-        let selected = self
-            .load_adopted_initialization()
-            .await?
-            .ok_or("owner_source_adoption_required")?;
-        let access = selected
-            .grant_access(&owner, package)
-            .await
-            .map_err(|e| e.code)?;
-        if let Err(error) = self.check() {
-            access.retire();
-            return Err(error);
-        }
-        Ok(OwnerGrantAccess::local(access))
-    }
 }
 
 #[derive(Default)]
