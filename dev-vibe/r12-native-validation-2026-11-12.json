@@ -1,0 +1,250 @@
+{
+  "date": "2026-11-12",
+  "timezone": "Asia/Shanghai",
+  "pr": 73,
+  "product_code_commit": "4027b37b7bdcec131b99212798a8a136a09aff6a",
+  "platform": "macOS 27.0.1 arm64",
+  "environment": "Loopback Palpo/Pasion; two dedicated synthetic accounts; plain private Matrix room with an encrypted MP4 attachment; no model execution",
+  "build": {
+    "locked": true,
+    "launcher_integration_dependency": "Existing R01 PR #55 run_app wrapper only, temporary and restored from source; no instrumentation in final executable",
+    "signed_binary_sha256": "8759a16c7276fae57e400b75b665e084518e677575358e3fa22fc517af9acaff"
+  },
+  "media_saved_files": {
+    "r12-audio.mp3": {
+      "sha256": "e8c3d7cc5ed4bd7738f5c8496b2c8cbad30b69eb0b134ea1499eb57955f41060",
+      "bytes": 480487
+    },
+    "r12-video.mp4": {
+      "sha256": "33efbb08696c4953875119adf1b2a703befa472cb7e8c0ac5d16394f2fddb763",
+      "bytes": 2857927
+    },
+    "r12-final-video.mp4": {
+      "sha256": "33efbb08696c4953875119adf1b2a703befa472cb7e8c0ac5d16394f2fddb763",
+      "bytes": 2857927
+    }
+  },
+  "mp4_ciphertext_sha256": "a89a1f9287c7c88c8920f757c98c5f78f7e96ec6578d19fde54620ca074f7045",
+  "cases": [
+    {
+      "scenario": "mp3_native_save_and_play",
+      "result": "pass"
+    },
+    {
+      "scenario": "aes_ctr_sha256_mp4_native_save_and_play",
+      "result": "pass"
+    },
+    {
+      "scenario": "corrected_binary_mp4_recheck",
+      "result": "pass"
+    },
+    {
+      "scenario": "actual_background_message_to_os_notification_history",
+      "result": "pass"
+    },
+    {
+      "scenario": "disabled_background_message_received_without_delivery",
+      "result": "pass"
+    },
+    {
+      "scenario": "reenabled_background_delivery",
+      "result": "pass"
+    },
+    {
+      "scenario": "own_message_no_notification",
+      "result": "pass"
+    },
+    {
+      "scenario": "foreground_no_notification",
+      "result": "pass"
+    },
+    {
+      "scenario": "mute_held_through_restart_and_message_reception",
+      "result": "pass"
+    },
+    {
+      "scenario": "normal_cmd_q_and_same_signed_binary_oauth_restore",
+      "result": "pass"
+    },
+    {
+      "scenario": "enabled_setting_persistence",
+      "result": "pass"
+    },
+    {
+      "scenario": "no_historical_notification_flood_on_restart",
+      "result": "pass"
+    },
+    {
+      "scenario": "fresh_message_delivery_after_restart",
+      "result": "pass"
+    },
+    {
+      "scenario": "saved_audio_play_pause_after_restart",
+      "result": "pass"
+    },
+    {
+      "scenario": "visible_banner_during_display_sharing",
+      "result": "suppressed_by_existing_system_policy"
+    },
+    {
+      "scenario": "initial_hot_mute_attempt",
+      "result": "uncertain_not_counted"
+    },
+    {
+      "scenario": "linux_native_portal_delivery",
+      "result": "not_run"
+    },
+    {
+      "scenario": "windows_installed_toast_delivery",
+      "result": "not_run"
+    },
+    {
+      "scenario": "e2ee_room_interoperability",
+      "result": "not_run"
+    }
+  ],
+  "notification_delivery_receipt": [
+    "2026-11-12 03:30:13.783 Df usernoted[588:25dbfda] [com.apple.unc:application] Delivering <NotificationRecord app:\"org.hagency.qa.r12.final20261112\" ident:\"9372-B5A8\" req:\"hagency-new-activity\" uuid:\"72F43603\" source:\"F752FB47\" dismissAfterDefaultAction:true> to [ .alert .lockScreen .notificationCenter ]: updatedExisting: false",
+    "2026-11-12 03:30:13.785 Df NotificationCenter[793:33e6] [com.apple.unc:application] [org.hagency.qa.r12.final20261112:72F43603:9372-B5A8] added to history with groupingIdentifier <private>, readCount: 0"
+  ],
+  "notification_qualification": "Actual independent NotificationCenter process stores/adds history. Existing displayShared policy mutes banners; no banner/sound claim and no global policy changed. API acceptance alone is not counted as delivery.",
+  "tests": {
+    "full_library": {
+      "passed": 1024,
+      "failed": 0,
+      "ignored_existing": 2,
+      "exit_code": 0
+    },
+    "required_gates": {
+      "passed": 152,
+      "total": 152,
+      "selector_test_passes": 1018,
+      "exit_code": 0
+    },
+    "notification_gate": {
+      "check": "system-notifications",
+      "passed": true,
+      "tests": 5
+    },
+    "catalog": {
+      "catalog_entries": 3229,
+      "translated_call_sites": 1831,
+      "management_permissions": 172,
+      "missing": 0
+    }
+  },
+  "receipts": [
+    {
+      "path": ".run/r12-native-20261112/corrected-build.log",
+      "sha256": "c929034fdb12823cb67164501b124144e20014218dd19ee22b633f58070a2215"
+    },
+    {
+      "path": ".run/r12-native-20261112/build-source.json",
+      "sha256": "b6d53b4ae44625f96d5d0fbc8b022f0486b2c165f067e3766aae21a69390189c"
+    },
+    {
+      "path": ".run/r12-native-20261112/focus-fix-check.log",
+      "sha256": "b45607d5e92aade9afe7b7eae7de7aee68d4c1be2c143eba563ea72b7a808cd3"
+    },
+    {
+      "path": ".run/r12-native-20261112/focus-fix-tests.log",
+      "sha256": "413aa9f1b623978f834880f87b95bf22250c4e3522186d78689ab7b5463ef1b4"
+    },
+    {
+      "path": ".run/r12-native-20261112/final-full-lib.log",
+      "sha256": "cc4a0a239f0eb3f3e9200dca6d9e8abf963b947880084f317aea81ef68eb9002"
+    },
+    {
+      "path": ".run/r12-native-20261112/regressions/report.json",
+      "sha256": "3bdc29180a975caf7888de99a169a138c73139721b8a0ad12e2ef394ef10c81f"
+    },
+    {
+      "path": ".run/r12-native-20261112/regressions/native-minimal-agent-chat.log",
+      "sha256": "21d56a6ad181933b93042a07669193fbce34fe2504947a1f1929f2fa46b9321c"
+    },
+    {
+      "path": ".run/r12-native-20261112/regressions/system-notifications.log",
+      "sha256": "27f8b2b0c9fda561148741f6dbd824c05baf7943da03c76e6cbcf194de2cde5c"
+    },
+    {
+      "path": ".run/r12-native-20261112/catalog.log",
+      "sha256": "3e5f232a43001ee94d35076c6ec1b451fa3ecdddffe9fa3119e8bcdac402a1a3"
+    },
+    {
+      "path": ".run/r12-native-20261112/final-background-os.log",
+      "sha256": "226876cddd53f6f0159a5a219c5674e8230510c48d50e150f402295973af7d88"
+    },
+    {
+      "path": ".run/r12-native-20261112/final-disabled-os.log",
+      "sha256": "69494c5127b032d584ea217e79d2ad6244150728270f4ab14104240db6a1f85c"
+    },
+    {
+      "path": ".run/r12-native-20261112/final-reenabled-os.log",
+      "sha256": "3c090d203b4198cdd46a3f6b122322b575bb241aa8a0f51cbebd584b79c4c1a2"
+    },
+    {
+      "path": ".run/r12-native-20261112/final-self-os.log",
+      "sha256": "3c090d203b4198cdd46a3f6b122322b575bb241aa8a0f51cbebd584b79c4c1a2"
+    },
+    {
+      "path": ".run/r12-native-20261112/final-reopened-os.log",
+      "sha256": "34d5e2254b019c8f9b89b4c76f5c85517601a8f8b280c83adec24032d0f90256"
+    },
+    {
+      "path": ".run/r12-native-20261112/restart-before-fresh-os.log",
+      "sha256": "ccb2f238766d647bb717bc3b145255ddfefe4667130f382136514373c5206012"
+    },
+    {
+      "path": ".run/r12-native-20261112/final-muted-after-restart-os.log",
+      "sha256": "6c9d883f1ed70b3871403a953f2ebc5ff1eac8fdd1b8e28966a986d49079584d"
+    },
+    {
+      "path": ".run/r12-native-20261112/muted-restart.stderr.log",
+      "sha256": "7c66c30d118ea134c27acc8f0be0eec72c3b35dafb9402119a8c31095404dfa5"
+    },
+    {
+      "path": ".run/r12-native-20261112/restart.json",
+      "sha256": "759b951a01528504d9a0322fe516acd0966885e93442fb08e485c7f8b3f7d931"
+    },
+    {
+      "path": ".run/r12-native-20261112/mute-rule-confirmed.json",
+      "sha256": "56b940e172e69bdd48660fddc1b9d65d63965531f95806516ae58f9a8728da37"
+    },
+    {
+      "path": ".run/r12-native-20261112/music-output-playing.json",
+      "sha256": "955fdaaccae4f45e1d332791d8227eca22171cc6cb255b6b04d43fb3ec9de35a"
+    },
+    {
+      "path": ".run/r12-native-20261112/music-output-paused.json",
+      "sha256": "63c7168c0acb62f9f985163bd7f929046ef26c36d3b284e37edf3880e7e4172a"
+    },
+    {
+      "path": ".run/r12-native-20261112/video-audio-output.json",
+      "sha256": "7edd53710ba2015415fd58a285e33a5a28811260d18363ab9ea1654aff15acc2"
+    },
+    {
+      "path": ".run/r12-native-20261112/reopened-music-output.json",
+      "sha256": "059d8375b71c3dc8b60b07bd4d313cf4051e76833af63a0b9352aa157f2b4fef"
+    },
+    {
+      "path": ".run/r12-native-20261112/reopened-music-paused.json",
+      "sha256": "e3e5c6070d66f9d888b857d7247855b712077fd427cb2b60a0b527a8997a883d"
+    }
+  ],
+  "failed_or_uncertain_attempts_preserved": [
+    "Original e3 background message suppressed by stale window focus; fixed in 4027b37b and repeated successfully",
+    "Initial hot mute attempt received after rule removal; not counted; repeat with confirmed held rule passed",
+    "Direct-launch UI connector duplicate instances and LaunchServices development-source file access blocked; test-only instances stopped",
+    "Changing ad-hoc signatures triggered keychain trust wait; no ACL bypass; fresh final profile used, identical final binary restore passed",
+    "Separate observer bundle could not read original process notification source; not used as proof",
+    "Audio diagnostic invoked once without required PID; failed receipt not counted"
+  ],
+  "cleanup": "QA client quit normally, own video windows closed, temporary synthetic-account mute override removed after exit, private raw profiles/logs retained locally; no merge/release",
+  "limitations": [
+    "No Linux/Windows native delivery qualification",
+    "No every-codec claim",
+    "Attachment decryption qualified; E2EE-room interoperability not qualified",
+    "Polls/VoIP explicitly unsupported",
+    "Ready for review does not certify hosted CI or authorize merge/release"
+  ]
+}
