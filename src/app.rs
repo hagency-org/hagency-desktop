@@ -1364,6 +1364,7 @@ impl App {
 
     fn clear_session_ui(&mut self, cx: &mut Cx) {
         self.ui_session = None;
+        crate::system_notifications::clear();
         self.matrix_link_navigation.cancel();
         {
             use crate::settings::crypto_settings::CryptoSettingsWidgetRefExt;
@@ -2020,6 +2021,11 @@ impl App {
     }
 
     fn handle_lifecycle_event(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::WindowLostFocus(_) | Event::Background => crate::system_notifications::foreground(false),
+            Event::WindowGotFocus(_) | Event::Foreground => crate::system_notifications::foreground(true),
+            _ => {}
+        }
         match event {
             Event::QuitRequested(e) => {
                 log!("Received quit request: {:?}. Persisting state before allowing quit.", e.reason);
