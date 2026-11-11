@@ -107,7 +107,7 @@ fn execution_notice(value:&Value,room:&str,thread:&str,stopped:impl Fn(&str)->bo
     match row["state"].as_str()? {
         "started"=>Some("Agent is working…"),
         "pending"|"queued"|"acknowledged"|"bound"=>Some("Message queued; waiting for Agent."),
-        "unknown"=>Some("Run interrupted; no final answer confirmed. Send the message again if you still need it."),
+        "unknown"=>Some("Run outcome is unknown. External actions or charges may already exist. Review the original message and task records before starting a separate request."),
         // The Agent records a stopped run as failed; its run card tells them apart.
         "failed" if row["eventId"].as_str().is_some_and(&stopped)=>Some("Run stopped."),
         "failed"=>Some("Agent run failed."),
@@ -142,6 +142,7 @@ script_mod! {
             session := Button {width: Fill text: #(crate::i18n::tr("Always approve for this session")) i18n_text: "Always approve for this session"}
             deny := Button {width: Fill text: #(crate::i18n::tr("Deny")) i18n_text: "Deny"}
         }
+        execution_review := Button {visible:false width:Fill text:#(crate::i18n::tr("Review original task records")) i18n_text:"Review original task records"}
         recovery := View {width: Fill height: Fit flow: Down spacing: 6 visible: false
             recovery_hint := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
             last_checked := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
@@ -198,6 +199,8 @@ pub struct SharedPermissionNotice {
     #[rust] selected:usize,
     #[rust] room_allowances:RoomAllowances,
     #[rust] original_request:Option<(String,String)>,
+    /// The run's row of the last read, for the review of a run whose outcome is unknown.
+    #[rust] execution_source:Option<Value>,
     #[rust] execution_text:String,
     #[rust] execution_busy:bool,
     #[rust] waiting:bool,
@@ -329,6 +332,9 @@ impl SharedPermissionNotice {
         self.waiting=shown.waiting;
         self.sync_animation(cx);
         self.render_recovery(cx);
+        let review=self.execution_source.as_ref().is_some_and(|r|matches!(r["state"].as_str(),Some("unknown"|"reply_unknown")) && r["eventId"].as_str().is_some() && r["agentId"].as_str().is_some());
+        self.view.widget(cx,ids!(execution_review)).set_visible(cx,review);
+        self.view.button(cx,ids!(execution_review)).set_enabled(cx,self.active && !self.loading);
         let notices=&self.room_allowances;
         let has_page=notices.next.is_some() || !notices.cursor.is_empty();
         self.view.set_visible(cx,shown.visible || !notices.text.is_empty() || has_page);
@@ -361,6 +367,7 @@ impl SharedPermissionNotice {
         self.failure=None;
         if self.active {self.room_allowances.receive(value);}
         self.original_request=execution_row(value,&self.room,&self.thread).and_then(pool_request);
+        self.execution_source=execution_row(value,&self.room,&self.thread).cloned();
         self.execution_thread_filter = value["executionThreadFilter"] == true;
         self.execution_busy=execution_busy(value,&self.room,&self.thread);
         // The run the last decision belonged to has ended: a later run must
@@ -518,6 +525,12 @@ impl Widget for SharedPermissionNotice {
                 if self.view.button(cx,id).clicked(actions){self.decide(cx,decision);}
             }
             if self.view.button(cx,ids!(refresh)).clicked(actions){self.poll(cx,true);}
+            if self.view.button(cx,ids!(execution_review)).clicked(actions) && !self.loading
+                && let (Some(row),Some(client))=(self.execution_source.as_ref(),crate::sliding_sync::get_client())
+                && let (Ok(room),Some(event),Some(agent),Some(session))=(self.room.parse(),row["eventId"].as_str().and_then(|e|e.parse().ok()),row["agentId"].as_str(),crate::matrix_context::SessionPin::capture(&client))
+                && session.is_current() {
+                cx.action(crate::hagency::work_review::WorkReviewAction::Open(crate::hagency::work_review::OriginalWork{session,room,event,agent:agent.into()}));
+            }
             if self.view.button(cx,ids!(recover)).clicked(actions) && !self.loading {
                 match self.failure.as_ref().map(PermissionFailure::recovery) {
                     Some(Recovery::SignIn)=>cx.action(crate::accounts::AccountAction::Reauthenticate),
@@ -547,7 +560,7 @@ impl SharedPermissionNoticeRef {
         let Some(mut this)=self.borrow_mut()else{return};
         let account=PermissionScope::capture();
         if this.account_scope!=account || this.room!=room || this.thread!=thread {
-            this.interrupt(cx);this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_thread_filter=false;this.tracked=false;this.identity.clear();this.account_scope=account;this.room=room.into();this.thread=thread.into();this.error.clear();this.failure=None;this.retry=PermissionRetry::default();this.execution_text.clear();this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx,false);
+            this.interrupt(cx);this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_source=None;this.execution_thread_filter=false;this.tracked=false;this.identity.clear();this.account_scope=account;this.room=room.into();this.thread=thread.into();this.error.clear();this.failure=None;this.retry=PermissionRetry::default();this.execution_text.clear();this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx,false);
         }else if this.active && !this.loading {this.poll(cx,false);}
     }
 }
@@ -633,7 +646,7 @@ mod tests {
         ]});
         let never=|_:&str|false;
         assert!(execution_notice(&v,"!room","",never).unwrap().contains("unsettled calls"));
-        assert!(execution_notice(&v,"!room","$old",never).unwrap().contains("interrupted"));
+        assert!(execution_notice(&v,"!room","$old",never).unwrap().contains("unknown"));
         assert!(execution_notice(&v,"!room","$done",never).is_none());
         assert!(execution_notice(&v,"!room","$foreign",never).is_none());
         assert!(execution_notice(&v,"!foreign","",never).is_none());
@@ -656,7 +669,7 @@ mod tests {
         assert_eq!(execution_notice(&v,"!room","$thread",|_|true),Some("Agent run failed."));
         // Other states keep their own text.
         let v=json!({"executions":[{"roomId":"!room","eventId":"$message","state":"unknown"}]});
-        assert!(execution_notice(&v,"!room","",|_|true).unwrap().contains("interrupted"));
+        assert!(execution_notice(&v,"!room","",|_|true).unwrap().contains("unknown"));
     }
 
     /// The last decision belongs to its run. Once that run ends, a later run
@@ -695,6 +708,15 @@ mod tests {
         assert!(!execution_busy(&json!({"executions":[{"roomId":"!room","state":"pending","reason":"budget_blocked"}]}),"!room",""));
         // Latest delivered reply must not resurrect an older interrupted run.
         assert!(!execution_busy(&json!({"executions":[{"roomId":"!room","state":"replied"},{"roomId":"!room","state":"started"}]}),"!room",""));
+    }
+
+    #[test]
+    fn unknown_guidance_requires_original_record_review_instead_of_resending() {
+        let value=json!({"executions":[{"roomId":"!original:test","eventId":"$original","agentId":"original-agent","state":"unknown"}]});
+        let text=execution_notice(&value,"!original:test","",|_|false).unwrap();
+        assert!(text.contains("External actions or charges may already exist"));
+        assert!(text.contains("original message and task records"));assert!(!text.contains("Send the message again"));
+        assert!(!execution_busy(&value,"!original:test",""));
     }
 
     /// How many timers `f` starts: `Cx` hands out timer ids in sequence.
