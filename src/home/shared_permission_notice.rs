@@ -1,11 +1,35 @@
 //! Permission cards read through authenticated Hagency management, never chat text.
 use makepad_widgets::*;
 use serde_json::Value;
+use std::time::{Duration, Instant};
+use super::permission_retry::PermissionRetry;
 use crate::hagency::backend::Service;
+use crate::hagency::permission_failure::{PermissionFailure, Recovery};
 use ::hagency::native_owner::ManagementCommand;
 
+/// The account session a read belongs to. An answer from another one is dropped.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct PermissionScope {
+    epoch: u64,
+    revision: u64,
+}
+impl PermissionScope {
+    fn capture() -> Self {
+        Self {
+            epoch: crate::account_session::epoch(),
+            revision: crate::sliding_sync::client_revision(),
+        }
+    }
+    fn is_current(self) -> bool {
+        self == Self::capture()
+            && !crate::account_session::is_closing()
+            && !crate::sliding_sync::account_changing()
+            && !crate::logout::logout_state_machine::is_logout_in_progress()
+    }
+}
+
 #[derive(Debug)]
-struct PermissionResult {identity:String,room:String,thread:String,nonce:u64,value:Result<Value,String>}
+struct PermissionResult {scope:PermissionScope,identity:String,room:String,thread:String,nonce:u64,value:Result<Value,PermissionFailure>}
 #[derive(Default)]
 struct RoomAllowances {
     supported: bool,
@@ -119,6 +143,12 @@ script_mod! {
             session := Button {width: Fill text: #(crate::i18n::tr("Always approve for this session")) i18n_text: "Always approve for this session"}
             deny := Button {width: Fill text: #(crate::i18n::tr("Deny")) i18n_text: "Deny"}
         }
+        recovery := View {width: Fill height: Fit flow: Down spacing: 6 visible: false
+            recovery_hint := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
+            last_checked := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
+            refresh := Button {width: Fill text: #(crate::i18n::tr("Refresh status")) i18n_text: "Refresh status"}
+            recover := Button {width: Fill text: #(crate::i18n::tr("My Agents")) i18n_text: "My Agents"}
+        }
         allowance := Button {text: #(crate::i18n::tr("View original pool request")) i18n_text: "View original pool request" visible: false}
         next := Button {text: #(crate::i18n::tr("Next request")) i18n_text: "Next request" visible: false}
     }
@@ -148,6 +178,14 @@ pub struct SharedPermissionNotice {
     #[rust] room:String,
     #[rust] thread:String,
     #[rust] error:String,
+    /// Why the last read failed, kept with its transport status to choose the way out.
+    #[rust] failure:Option<PermissionFailure>,
+    /// When the next automatic read is due. Failed reads back off or pause.
+    #[rust] retry:PermissionRetry,
+    /// The account session this room was bound under.
+    #[rust] account_scope:PermissionScope,
+    /// The read in flight, stopped when the notice is hidden or bound again.
+    #[rust] task:Option<tokio::task::JoinHandle<()>>,
     #[rust] nonce:u64,
     /// A management read is in flight. It never blocks the buttons: a click
     /// during a read is sent at once.
@@ -176,9 +214,23 @@ impl SharedPermissionNotice {
     fn sync_animation(&mut self,cx:&mut Cx) {
         self.view.widget(cx,ids!(activity_spinner)).set_visible(cx,self.active && self.waiting);
     }
+    /// This room or thread has something that depends on the status.
+    fn concerned(&self)->bool {
+        self.tracked || self.request_waiting()
+    }
+    /// A request is waiting in this room or thread.
+    fn request_waiting(&self)->bool {
+        !self.rows.is_empty()
+    }
+    /// A failed read is shown only where something depends on it: this room or
+    /// thread reported Agent work during this visit, or a request is waiting.
+    fn shows_error(&self)->bool {
+        !self.error.is_empty() && self.concerned()
+    }
     fn display(&mut self)->Display {
         use crate::hagency::pending_approvals::{self as approvals,LocalDecision};
         use crate::i18n::{format,tr};
+        let shows_error=self.shows_error();
         let Some(row)=self.rows.get(self.selected) else {
             // No request: the run's state, and what was last decided here.
             let hint=match &self.last_decision {
@@ -187,9 +239,9 @@ impl SharedPermissionNotice {
                 _=>String::new(),
             };
             return Display {
-                visible:!self.execution_text.is_empty() || !self.error.is_empty(),
+                visible:!self.execution_text.is_empty() || shows_error,
                 waiting:self.execution_busy && self.error.is_empty(),
-                title:if self.error.is_empty(){tr(&self.execution_text).to_owned()}else{tr(&self.error).to_owned()},
+                title:if shows_error{tr(&self.error).to_owned()}else{tr(&self.execution_text).to_owned()},
                 hint,
                 ..Display::default()
             };
@@ -222,7 +274,7 @@ impl SharedPermissionNotice {
         if let Some(requester)=a["requesterMxid"].as_str() && a["deciderMxid"].as_str()!=Some(requester) {
             context.push(format("Requested by {requester}",&[("requester",requester.to_owned())]));
         }
-        let hint=if !self.error.is_empty() {tr(&self.error).to_owned()}
+        let hint=if shows_error {tr(&self.error).to_owned()}
             else if matches!(local,LocalDecision::Failed(..)) {tr("Could not send the decision. Try again.").to_owned()}
             else if !open {String::new()}
             else if row["encryptedPending"]==true {tr("Approval becomes available after the encrypted details arrive.").to_owned()}
@@ -242,10 +294,34 @@ impl SharedPermissionNotice {
             next:self.rows.len()>1,
         }
     }
+    /// The way out of a failed read: when the next automatic read is due, a
+    /// manual refresh, and where to go when waiting cannot fix it.
+    fn render_recovery(&mut self,cx:&mut Cx) {
+        use crate::i18n::{format,tr};
+        let recovery=self.failure.as_ref().map(PermissionFailure::recovery);
+        self.view.widget(cx,ids!(recovery)).set_visible(cx,self.shows_error());
+        self.view.button(cx,ids!(refresh)).set_enabled(cx,self.active && !self.loading);
+        let destination=matches!(recovery,Some(Recovery::SignIn|Recovery::Access|Recovery::Service|Recovery::Unsupported|Recovery::Manual));
+        self.view.widget(cx,ids!(recover)).set_visible(cx,destination);
+        self.view.button(cx,ids!(recover)).set_enabled(cx,self.active && !self.loading);
+        self.view.button(cx,ids!(recover)).set_text(cx,tr(if recovery==Some(Recovery::SignIn){"Sign in again"}else{"My Agents"}));
+        let hint=if let Some(at)=self.retry.next {
+                let seconds=at.saturating_duration_since(Instant::now()).as_secs_f64().ceil().max(1.0);
+                format("Automatic status retry after {seconds} seconds.",&[("seconds",seconds.to_string())])
+            }
+            else {tr("Automatic retries are paused. Refresh status after addressing the problem.").to_owned()};
+        self.view.label(cx,ids!(recovery_hint)).set_text(cx,&hint);
+        let checked=self.retry.last_success.map(|at|chrono::DateTime::<chrono::Utc>::from(at).format("%Y-%m-%d %H:%M:%S").to_string());
+        self.view.widget(cx,ids!(last_checked)).set_visible(cx,checked.is_some());
+        if let Some(checked)=checked {
+            self.view.label(cx,ids!(last_checked)).set_text(cx,&std::format!("{}: {}",tr("Last checked (UTC)"),checked));
+        }
+    }
     fn render(&mut self,cx:&mut Cx) {
         let shown=self.display();
         self.waiting=shown.waiting;
         self.sync_animation(cx);
+        self.render_recovery(cx);
         let notices=&self.room_allowances;
         let has_page=notices.next.is_some() || !notices.cursor.is_empty();
         self.view.set_visible(cx,shown.visible || !notices.text.is_empty() || has_page);
@@ -275,6 +351,7 @@ impl SharedPermissionNotice {
     /// says whether a message's run card shows its run stopped.
     fn read_status(&mut self,value:&Value,stopped:impl Fn(&str)->bool) {
         self.error.clear();
+        self.failure=None;
         if self.active {self.room_allowances.receive(value);}
         self.original_request=execution_row(value,&self.room,&self.thread).and_then(pool_request);
         self.execution_thread_filter = value["executionThreadFilter"] == true;
@@ -288,27 +365,111 @@ impl SharedPermissionNotice {
             || !self.rows.is_empty() || !self.room_allowances.text.is_empty();
         if self.selected>=self.rows.len(){self.selected=0;}
     }
-    fn read_failed(&mut self) {
+    /// A read failed: what depended on a fresh answer is forgotten, the reason
+    /// is kept. Whether it is shown is decided by `shows_error`.
+    fn read_failed(&mut self,error:PermissionFailure) {
         self.room_allowances=RoomAllowances::default();
         self.execution_thread_filter=false;
-        if self.tracked {
-            self.error="Could not confirm permission status; retrying.".into();
+        self.error=error.message().into();
+        self.failure=Some(error);
+    }
+    /// Start the timer for the next automatic read, if one is due.
+    fn arm_timer(&mut self,cx:&mut Cx) {
+        cx.stop_timer(self.timer);
+        self.timer=Timer::default();
+        if self.active && let Some(at)=self.retry.next {
+            self.timer=cx.start_timeout(at.saturating_duration_since(Instant::now()).as_secs_f64().max(0.05));
         }
     }
+    fn failed(&mut self,cx:&mut Cx,error:PermissionFailure) {
+        self.loading=false;
+        self.retry.failed(error.recovery(),Instant::now(),rand::random::<f64>());
+        self.read_failed(error);
+        self.render(cx);
+        self.arm_timer(cx);
+    }
+    /// Stop the timer and the read in flight. A read that was cut off is due
+    /// again at once; its late answer is dropped.
+    fn interrupt(&mut self,cx:&mut Cx) {
+        cx.stop_timer(self.timer);
+        self.timer=Timer::default();
+        self.nonce=self.nonce.wrapping_add(1);
+        if let Some(task)=self.task.take(){task.abort();}
+        if self.loading{self.retry.interrupted(Instant::now());}
+        self.loading=false;
+    }
 
-    /// Read the room's requests and the run's state again.
-    fn poll(&mut self,_cx:&mut Cx) {
-        if self.loading || !self.active || self.room.is_empty(){return;}
-        let Ok(service)=Service::for_current() else {return};
-        if service.identity()!=self.identity{return;}
-        self.loading=true;self.nonce=self.nonce.wrapping_add(1);
+    /// Read the room's requests and the run's state again. An automatic read
+    /// waits until it is due; `manual` (a button) reads now.
+    fn poll(&mut self,cx:&mut Cx,manual:bool) {
+        if self.loading || !self.active || self.room.is_empty() || !self.account_scope.is_current(){return;}
+        if !manual && !self.retry.due(Instant::now()) {
+            if self.timer.is_empty(){self.arm_timer(cx);}
+            return;
+        }
+        let service=match Service::for_current() {
+            Ok(service)=>service,
+            Err(code)=>{
+                // Nothing here depends on the service yet: wait for it without
+                // a warning and read once it is there.
+                if !manual && !self.concerned(){return;}
+                let error=if crate::sliding_sync::token_expired(){PermissionFailure::from("matrix_authorization_required")}else{code.into()};
+                self.failed(cx,error);
+                return;
+            },
+        };
+        cx.stop_timer(self.timer);
+        self.timer=Timer::default();
+        self.identity=service.identity();
+        self.loading=true;
+        self.retry.begin();
+        self.nonce=self.nonce.wrapping_add(1);
+        // The recovery rows say that a check is running.
+        if manual || self.shows_error(){self.render(cx);}
         let identity=self.identity.clone();let room=self.room.clone();let thread=self.thread.clone();let nonce=self.nonce;
+        let scope=self.account_scope;
         let room_allowance_after=self.room_allowances.request();
         let execution_thread = (self.execution_thread_filter && !thread.is_empty()).then(|| thread.clone());
-        crate::sliding_sync::spawn_async_task(async move {
-            let value=service.shared_permissions(ManagementCommand::SharedApprovals{room_id:Some(room.clone()),execution_thread,room_allowance_after}).await;
-            Cx::post_action(PermissionResult{identity,room,thread,nonce,value});
-        });
+        self.task=Some(crate::account_session::spawn(async move {
+            let value=tokio::time::timeout(Duration::from_secs(30),
+                service.shared_permissions_detailed(ManagementCommand::SharedApprovals{room_id:Some(room.clone()),execution_thread,room_allowance_after}))
+                .await.unwrap_or_else(|_|Err(PermissionFailure::from("permission_query_timeout")));
+            Cx::post_action(PermissionResult{scope,identity,room,thread,nonce,value});
+        }));
+    }
+    /// Take in the answer of the read in flight. An answer for another account
+    /// session, room, thread or read is dropped.
+    fn accept_result(&mut self,cx:&mut Cx,done:&PermissionResult) {
+        if !self.active || !self.loading || !self.account_scope.is_current() || done.scope!=self.account_scope
+            || done.identity!=self.identity || done.room!=self.room || done.thread!=self.thread || done.nonce!=self.nonce {return;}
+        self.task.take();
+        self.loading=false;
+        match &done.value {
+            // A missing or malformed list is not a fresh empty one.
+            Ok(value) if value["approvals"].is_array()=>{
+                self.retry.success(Instant::now());
+                let room=self.room.clone();
+                self.read_status(value,|event|crate::hagency::run_controls::stopped(&room,event));
+                // The cards on the messages read the same requests.
+                if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){
+                    cx.action(crate::hagency::pending_approvals::PendingApprovalsChanged);
+                }
+                self.render(cx);
+                self.arm_timer(cx);
+            },
+            Ok(_)=>self.failed(cx,"invalid_permission_status".into()),
+            Err(error)=>self.failed(cx,error.clone()),
+        }
+    }
+    fn set_active_state(&mut self,cx:&mut Cx,active:bool) {
+        if self.active!=active {
+            self.active=active;
+            if !active {self.interrupt(cx);}
+            else if self.retry.due(Instant::now()) {self.poll(cx,false);}
+            else {self.arm_timer(cx);}
+            self.sync_animation(cx);
+        }
+        if !active {self.room_allowances=RoomAllowances::default();self.render(cx);}
     }
     /// Send the decision for the request on screen, through the same store as
     /// the card on the message, so both show it.
@@ -323,41 +484,42 @@ impl SharedPermissionNotice {
         }
     }
 }
+impl Drop for SharedPermissionNotice {
+    fn drop(&mut self) {
+        if let Some(task)=self.task.take(){task.abort();}
+    }
+}
 impl Widget for SharedPermissionNotice {
     fn handle_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope) {
         use crate::hagency::pending_approvals::{PendingApprovalDecided,PendingApprovalsChanged};
-        if !Service::for_current().is_ok_and(|s|s.identity()==self.identity){self.execution_busy=false;self.waiting=false;self.sync_animation(cx);self.room_allowances=RoomAllowances::default();self.view.set_visible(cx,false);self.rows.clear();return;}
-        if self.timer.is_event(event).is_some(){self.timer=Timer::default();self.poll(cx);}
+        if !self.account_scope.is_current(){self.interrupt(cx);self.execution_busy=false;self.waiting=false;self.sync_animation(cx);self.room_allowances=RoomAllowances::default();self.view.set_visible(cx,false);self.rows.clear();return;}
+        if self.timer.is_event(event).is_some(){self.timer=Timer::default();self.poll(cx,false);}
         if let Event::Actions(actions)=event {
             for action in actions {
-                if let Some(done)=action.downcast_ref::<PermissionResult>() && self.loading && done.identity==self.identity && done.room==self.room && done.thread==self.thread && done.nonce==self.nonce {
-                    self.loading=false;
-                    match &done.value {
-                        Ok(value)=>{
-                            let room=self.room.clone();
-                            self.read_status(value,|event|crate::hagency::run_controls::stopped(&room,event));
-                            // The cards on the messages read the same requests.
-                            if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){cx.action(PendingApprovalsChanged);}
-                            self.render(cx);
-                        },
-                        Err(_)=>{self.read_failed();self.render(cx);},
-                    }
-                    if self.active{self.timer=cx.start_timeout(2.0);}
-                }
+                if let Some(done)=action.downcast_ref::<PermissionResult>() {self.accept_result(cx,done);}
                 // A decision from either card: show its outcome now, and read
                 // again soon for the Agent's next request.
                 if let Some(decided)=action.downcast_ref::<PendingApprovalDecided>()
                     && (self.rows.iter().any(|r|r["approval"]["id"]==decided.id.as_str()) || self.last_decision.as_ref().is_some_and(|(id,_)|*id==decided.id)) {
                     self.render(cx);
-                    if self.active && !self.loading {cx.stop_timer(self.timer);self.timer=cx.start_timeout(0.5);}
+                    // A failed read keeps its own schedule.
+                    if self.active && !self.loading {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
                 }
                 if action.downcast_ref::<PendingApprovalsChanged>().is_some(){self.render(cx);}
             }
             for (id,decision) in [(ids!(once),"approve_once"),(ids!(session),"approve_session"),(ids!(deny),"deny")] {
                 if self.view.button(cx,id).clicked(actions){self.decide(cx,decision);}
             }
+            if self.view.button(cx,ids!(refresh)).clicked(actions){self.poll(cx,true);}
+            if self.view.button(cx,ids!(recover)).clicked(actions) && !self.loading {
+                match self.failure.as_ref().map(PermissionFailure::recovery) {
+                    Some(Recovery::SignIn)=>cx.action(crate::accounts::AccountAction::Reauthenticate),
+                    Some(Recovery::Access|Recovery::Service|Recovery::Unsupported|Recovery::Manual)=>cx.action(crate::hagency::ui::HagencyAction::OpenAgents),
+                    _=>{},
+                }
+            }
             if self.view.button(cx,ids!(allowance_page)).clicked(actions) && self.active && !self.loading {
-                self.room_allowances.turn_page();self.render(cx);self.poll(cx);
+                self.room_allowances.turn_page();self.render(cx);self.poll(cx,true);
             }
             if self.view.button(cx,ids!(allowance)).clicked(actions) && self.active && self.error.is_empty() && self.rows.is_empty()
                 && let Some((request_id,role))=&self.original_request
@@ -373,13 +535,13 @@ impl Widget for SharedPermissionNotice {
     fn draw_walk(&mut self,cx:&mut Cx2d,scope:&mut Scope,walk:Walk)->DrawStep{self.view.draw_walk(cx,scope,walk)}
 }
 impl SharedPermissionNoticeRef {
-    pub fn set_active(&self,cx:&mut Cx,active:bool){if let Some(mut this)=self.borrow_mut(){if this.active!=active{this.active=active;this.sync_animation(cx);}if !active{this.room_allowances=RoomAllowances::default();this.render(cx);cx.stop_timer(this.timer);this.timer=Timer::default();}}}
+    pub fn set_active(&self,cx:&mut Cx,active:bool){if let Some(mut this)=self.borrow_mut(){this.set_active_state(cx,active);}}
     pub fn set_room(&self,cx:&mut Cx,room:&str,thread:&str){
         let Some(mut this)=self.borrow_mut()else{return};
-        let identity=Service::for_current().map(|s|s.identity()).unwrap_or_default();
-        if this.identity!=identity || this.room!=room || this.thread!=thread {
-            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_thread_filter=false;this.tracked=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
-        }else if this.active && !this.loading && this.timer.is_empty(){this.poll(cx);}
+        let account=PermissionScope::capture();
+        if this.account_scope!=account || this.room!=room || this.thread!=thread {
+            this.interrupt(cx);this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_thread_filter=false;this.tracked=false;this.identity.clear();this.account_scope=account;this.room=room.into();this.thread=thread.into();this.error.clear();this.failure=None;this.retry=PermissionRetry::default();this.execution_text.clear();this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx,false);
+        }else if this.active && !this.loading {this.poll(cx,false);}
     }
 }
 
@@ -392,10 +554,10 @@ mod tests {
         let mut n=widget.borrow_mut().unwrap();
         n.room="!room".into();
         n.read_status(&json!({"executions":[{"roomId":"!other","state":"started"}]}), |_|false);
-        n.read_failed();
+        n.read_failed("permission_query_timeout".into());
         assert!(!n.display().visible);
         n.read_status(&json!({"executions":[{"roomId":"!room","state":"started"}]}), |_|false);
-        n.read_failed();
+        n.read_failed("permission_query_timeout".into());
         assert!(!n.error.is_empty() && n.display().visible);
         n.read_status(&json!({"approvals":[]}), |_|false);
         assert!(n.error.is_empty());
@@ -529,7 +691,7 @@ mod tests {
     }
 
     /// How many timers `f` starts: `Cx` hands out timer ids in sequence.
-    fn timers_started(cx:&mut Cx,f:impl FnOnce(&mut Cx))->u64 {
+    pub(super) fn timers_started(cx:&mut Cx,f:impl FnOnce(&mut Cx))->u64 {
         let probe=|cx:&mut Cx|{let t=cx.start_timeout(60.0);cx.stop_timer(t);t.0};
         let before=probe(cx);f(cx);probe(cx)-before-1
     }
@@ -640,3 +802,7 @@ mod tests {
         forget_identity();
     }
 }
+
+#[cfg(test)]
+#[path = "permission_recovery_tests.rs"]
+mod recovery_tests;

@@ -3252,5 +3252,14 @@
   "Could not change your nickname: {error}": "无法修改昵称：{error}",
   "Runs on a shared resource pool.": "由共享资源池运行。",
   "Invited": "已邀请",
-  "Only some of the members are shown.": "仅显示部分成员。"
+  "Only some of the members are shown.": "仅显示部分成员。",
+  "Sign in again to check permission status.": "请重新登录以查询权限状态。",
+  "Permission status is not available to this account. Ask the resource owner to check access.": "此账号无法查询权限状态，请联系资源所有者检查访问权限。",
+  "The local Agent service is unavailable. Open My Agents to check its setup and connection.": "本机 Agent 服务不可用，请打开「我的 Agent」检查配置和连接。",
+  "This server or local service does not support permission status. Check its version in My Agents.": "服务器或本机服务不支持权限状态查询，请在「我的 Agent」中检查版本。",
+  "Permission status is temporarily unavailable. Check your connection; status will retry automatically.": "暂时无法查询权限状态，请检查网络连接。稍后会自动重试查询。",
+  "The account or session changed. Reopen this conversation after signing in.": "账号或会话已变更，请登录后重新打开此会话。",
+  "Permission status could not be confirmed. Refresh status or check My Agents.": "无法确认权限状态，请刷新状态或在「我的 Agent」中检查。",
+  "Automatic status retry after {seconds} seconds.": "将在 {seconds} 秒后自动重试查询状态。",
+  "Automatic retries are paused. Refresh status after addressing the problem.": "已暂停自动重试，请处理问题后刷新状态。"
 }

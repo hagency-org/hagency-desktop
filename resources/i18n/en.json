@@ -3252,5 +3252,14 @@
   "Could not change your nickname: {error}": "Could not change your nickname: {error}",
   "Runs on a shared resource pool.": "Runs on a shared resource pool.",
   "Invited": "Invited",
-  "Only some of the members are shown.": "Only some of the members are shown."
+  "Only some of the members are shown.": "Only some of the members are shown.",
+  "Sign in again to check permission status.": "Sign in again to check permission status.",
+  "Permission status is not available to this account. Ask the resource owner to check access.": "Permission status is not available to this account. Ask the resource owner to check access.",
+  "The local Agent service is unavailable. Open My Agents to check its setup and connection.": "The local Agent service is unavailable. Open My Agents to check its setup and connection.",
+  "This server or local service does not support permission status. Check its version in My Agents.": "This server or local service does not support permission status. Check its version in My Agents.",
+  "Permission status is temporarily unavailable. Check your connection; status will retry automatically.": "Permission status is temporarily unavailable. Check your connection; status will retry automatically.",
+  "The account or session changed. Reopen this conversation after signing in.": "The account or session changed. Reopen this conversation after signing in.",
+  "Permission status could not be confirmed. Refresh status or check My Agents.": "Permission status could not be confirmed. Refresh status or check My Agents.",
+  "Automatic status retry after {seconds} seconds.": "Automatic status retry after {seconds} seconds.",
+  "Automatic retries are paused. Refresh status after addressing the problem.": "Automatic retries are paused. Refresh status after addressing the problem."
 }
