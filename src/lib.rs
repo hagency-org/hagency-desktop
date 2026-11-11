@@ -42,6 +42,7 @@ pub mod app;
 pub mod macos_dev_output;
 pub mod dock_serde;
 pub mod jit_compat;
+pub(crate) mod system_notifications;
 pub mod accounts;
 mod account_session;
 mod session_auth;

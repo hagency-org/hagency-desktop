@@ -4209,6 +4209,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         subscriber_task_handles.push(crate::account_session::spawn(crate::moments::dm_sharing::dm_sharing_loop()));
         subscriber_task_handles.push(handle_room_notification_subscriber(client.clone()));
         subscriber_task_handles.push(watch_room_membership(&client));
+        subscriber_task_handles.push(crate::system_notifications::attach(client.clone()));
 
         Cx::post_action(LoginAction::Status {
             title: "Connecting".into(),

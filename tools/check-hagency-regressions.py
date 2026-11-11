@@ -311,6 +311,8 @@ def main():
         ("permission-error-classification", "hagency::permission_failure::"),
         ("permission-polling-policy", "home::permission_retry::tests"),
         ("device-sessions", "settings::device_sessions::tests"),
+        ("system-notifications", "system_notifications::tests"),
+        ("media-playback", "shared::attachment_download::playback_tests"),
         ("theme", "theme::"),
         ("theme-contrast", "semantic_token_pairs_meet_wcag_aa"),
         ("chat-information", "home::mobile_chat_info"),
