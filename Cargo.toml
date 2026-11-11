@@ -205,6 +205,7 @@ windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security"
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3"
 objc2 = { version = "=0.6.4", features = ["exception"] }
+objc2-app-kit = { version = "=0.3.2", default-features = false, features = ["std", "NSRunningApplication"] }
 block2 = "=0.6.1"
 objc2-foundation = { version = "=0.3.2", default-features = false, features = ["std", "NSArray", "NSBundle", "NSString", "NSError"] }
 objc2-user-notifications = { version = "=0.3.2", default-features = false, features = ["std", "block2", "UNNotificationContent", "UNNotificationRequest", "UNNotificationTrigger", "UNNotificationSettings", "UNUserNotificationCenter"] }
