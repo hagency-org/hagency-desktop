@@ -206,7 +206,9 @@ fn production_admission_bounds_queued_running_files_and_total_bytes() {
     assert!(!state.admits(1));
     state.used_bytes = 0;
     assert!(state.admits(MAX_STAGED_BYTES));
-    assert!(!state.admits(MAX_STAGED_BYTES + 1));
+    if let Some(oversize) = MAX_STAGED_BYTES.checked_add(1) {
+        assert!(!state.admits(oversize));
+    }
 }
 
 #[test]
