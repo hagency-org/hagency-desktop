@@ -42,6 +42,9 @@ pub struct AppPreferences {
     /// Whether to show other users' read receipts beneath timeline events.
     #[serde(default = "default_true", deserialize_with = "deserialize_or_true")]
     pub show_read_receipts: bool,
+    /// Opt-in generic desktop notifications; restoring preferences never prompts for OS permission.
+    #[serde(default, deserialize_with = "crate::utils::deserialize_or_default")]
+    pub system_notifications: bool,
     /// Include room invitations in the Unreads and Mentions room filters.
     #[serde(default = "default_true", deserialize_with = "deserialize_or_true")]
     pub show_invites_in_unread_filters: bool,
@@ -75,6 +78,7 @@ impl Default for AppPreferences {
             read_receipts_privacy: ReadReceiptsPrivacy::default(),
             mark_as_read_behavior: MarkAsReadBehavior::default(),
             show_read_receipts: true,
+            system_notifications: false,
             show_invites_in_unread_filters: true,
             #[cfg(feature = "agent_chat")]
             agent_chat_enabled: false,
@@ -85,6 +89,10 @@ impl Default for AppPreferences {
 }
 
 impl AppPreferences {
+    pub fn on_system_notifications_changed(&self, cx: &mut Cx) {
+        cx.global::<AppPreferencesGlobal>().0.system_notifications = self.system_notifications;
+        crate::system_notifications::set_enabled(self.system_notifications);
+    }
     pub fn on_desktop_sidebar_collapsed_changed(&self, cx: &mut Cx) {
         cx.global::<AppPreferencesGlobal>().0.desktop_sidebar_collapsed = self.desktop_sidebar_collapsed;
         cx.action(AppPreferencesAction::DesktopSidebarCollapsedChanged(self.desktop_sidebar_collapsed));
@@ -244,6 +252,7 @@ impl AppPreferences {
         self.on_read_receipts_privacy_changed(cx);
         self.on_mark_as_read_behavior_changed(cx);
         self.on_show_read_receipts_changed(cx);
+        self.on_system_notifications_changed(cx);
         self.on_show_invites_in_unread_filters_changed(cx);
         #[cfg(feature = "agent_chat")]
         self.on_agent_chat_enabled_changed(cx);

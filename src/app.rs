@@ -1319,6 +1319,7 @@ impl App {
     }
 
     fn clear_session_ui(&mut self, cx: &mut Cx) {
+        crate::system_notifications::clear();
         self.ui.device_sessions(cx, ids!(device_sessions)).clear(cx);
         self.ui.work_review(cx,ids!(work_review_modal.content)).clear(cx);
         self.ui.modal(cx,ids!(work_review_modal)).close(cx);
@@ -1929,6 +1930,11 @@ impl App {
     }
 
     fn handle_lifecycle_event(&mut self, cx: &mut Cx, event: &Event) {
+        match event {
+            Event::WindowLostFocus(_) | Event::Background => crate::system_notifications::foreground(false),
+            Event::WindowGotFocus(_) | Event::Foreground => crate::system_notifications::foreground(true),
+            _ => {}
+        }
         match event {
             Event::QuitRequested(e) => {
                 log!("Received quit request: {:?}. Persisting state before allowing quit.", e.reason);

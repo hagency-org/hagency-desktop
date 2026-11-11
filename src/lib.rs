@@ -40,6 +40,7 @@ pub fn view_from_live_ptr(
 pub mod app;
 pub mod dock_serde;
 pub mod jit_compat;
+pub(crate) mod system_notifications;
 pub mod accounts;
 mod account_session;
 mod session_auth;
