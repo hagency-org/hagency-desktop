@@ -9,7 +9,7 @@ use serde_json::{Value, json};
 use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, AtomicI64, Ordering},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use tokio::sync::Mutex;
@@ -610,17 +610,48 @@ fn invalidate(session: &mut RemoteSession) {
     session.refresh_token = None;
     session.token.clear();
 }
-fn deadline(value: &Value) -> Result<Instant, &'static str> {
-    let now = SystemTime::now()
+/// Local minus server clock in milliseconds, from the latest response `Date` header. `validUntilMs` is
+/// server time and the window is thirty seconds, so a local clock off by more than that rejected every
+/// fresh proof as `sign_in_required`. Zero while the two agree within the header's resolution.
+static SERVER_CLOCK_SKEW_MS: AtomicI64 = AtomicI64::new(0);
+
+fn local_now_ms() -> Result<u64, &'static str> {
+    Ok(SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_err(|_| "invalid_local_clock")?
-        .as_millis() as u64;
+        .as_millis() as u64)
+}
+fn observe_server_date(response: &reqwest::Response) {
+    let server = response
+        .headers()
+        .get(reqwest::header::DATE)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| httpdate::parse_http_date(v).ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok());
+    if let (Some(server), Ok(local)) = (server, local_now_ms()) {
+        SERVER_CLOCK_SKEW_MS.store(clock_skew_ms(local, server.as_millis() as u64), Ordering::Relaxed);
+    }
+}
+/// A `Date` header has one-second resolution and arrives after some latency; smaller differences are noise.
+fn clock_skew_ms(local_ms: u64, server_date_ms: u64) -> i64 {
+    let skew = local_ms as i64 - server_date_ms as i64;
+    if skew.abs() <= 2_000 { 0 } else { skew }
+}
+/// Milliseconds left in a server-issued window, measured on the server's clock. With a known skew the
+/// estimate of server time is moved one second later, because a truncated `Date` reads early.
+fn remaining_ms(until_ms: u64, local_ms: u64, skew_ms: i64) -> Option<u64> {
+    let correction = if skew_ms == 0 { 0 } else { 1_000 };
+    let server_now = (local_ms as i64).saturating_sub(skew_ms).saturating_add(correction);
+    (until_ms as i64)
+        .checked_sub(server_now)
+        .filter(|ms| *ms > 0 && *ms <= 31_000)
+        .map(|ms| ms as u64)
+}
+fn deadline(value: &Value) -> Result<Instant, &'static str> {
     let until = value["validUntilMs"]
         .as_u64()
         .ok_or("invalid_server_response")?;
-    let remaining = until
-        .checked_sub(now)
-        .filter(|ms| *ms > 0 && *ms <= 31_000)
+    let remaining = remaining_ms(until, local_now_ms()?, SERVER_CLOCK_SKEW_MS.load(Ordering::Relaxed))
         .ok_or("sign_in_required")?;
     Ok(Instant::now() + Duration::from_millis(remaining))
 }
@@ -858,6 +889,7 @@ pub(super) fn http() -> Result<Client, &'static str> {
     CLIENT.clone()
 }
 async fn read_response(mut response: reqwest::Response) -> Result<Value, &'static str> {
+    observe_server_date(&response);
     let mut raw = Vec::new();
     while let Some(chunk) = response.chunk().await.map_err(|_| "server_unavailable")? {
         if raw.len() + chunk.len() > 128 * 1024 {
@@ -2060,6 +2092,41 @@ impl super::Console {
         operation: OwnerOperation,
     ) -> Result<OwnerReply, OwnerError> {
         self.0.server_login.owner_api(cookie, operation).await
+    }
+}
+
+#[cfg(test)]
+mod clock_skew_tests {
+    use super::*;
+    const NOW: u64 = 1_794_426_872_000;
+    #[test]
+    fn agreeing_clocks_keep_the_exact_window() {
+        assert_eq!(clock_skew_ms(NOW, NOW - 1_500), 0);
+        assert_eq!(remaining_ms(NOW + 30_000, NOW, 0), Some(30_000));
+        assert_eq!(remaining_ms(NOW + 31_001, NOW, 0), None);
+        assert_eq!(remaining_ms(NOW, NOW, 0), None);
+    }
+    #[test]
+    fn a_local_clock_behind_the_server_still_accepts_a_fresh_window() {
+        // Observed: this Mac 45 s behind the server. The window was 75 s away on the local clock.
+        let server = NOW + 45_000;
+        assert_eq!(remaining_ms(server + 30_000, NOW, 0), None);
+        let skew = clock_skew_ms(NOW, server);
+        assert_eq!(skew, -45_000);
+        assert_eq!(remaining_ms(server + 30_000, NOW, skew), Some(29_000));
+    }
+    #[test]
+    fn a_local_clock_ahead_of_the_server_still_accepts_a_fresh_window() {
+        let server = NOW - 120_000;
+        assert_eq!(remaining_ms(server + 30_000, NOW, 0), None);
+        assert_eq!(remaining_ms(server + 30_000, NOW, clock_skew_ms(NOW, server)), Some(29_000));
+    }
+    #[test]
+    fn skew_does_not_admit_an_expired_or_overlong_window() {
+        let server = NOW + 45_000;
+        let skew = clock_skew_ms(NOW, server);
+        assert_eq!(remaining_ms(server - 1, NOW, skew), None);
+        assert_eq!(remaining_ms(server + 60_000, NOW, skew), None);
     }
 }
 
