@@ -160,9 +160,15 @@ script_mod! {
         bounce_at_end: false,
         // Nothing here listens for scroll position changes.
         emit_scroll_actions: false,
-        scroll_bar: ScrollBar {  // hide the scroll bar
-            bar_size: 0.0,
-            min_handle_size: 0.0
+        scroll_bar: ScrollBar {
+            // Keep overflow discoverable on the navy rail, including at rest.
+            bar_size: 6.0,
+            min_handle_size: 28.0
+            draw_bg +: {
+                color: #ffffff70
+                color_hover: #ffffffb0
+                color_drag: (mod.widgets.RBX_NAV_FG)
+            }
         }
 
         spaces_bar_entry := mod.widgets.SpacesBarEntry {}
@@ -840,5 +846,57 @@ impl SpacesBar {
         self.regenerate_invited_spaces(cx);
         self.view.portal_list(cx, ids!(spaces_list)).set_first_id_and_scroll(0, 0.0);
         self.redraw(cx);
+    }
+}
+
+#[cfg(test)]
+mod overflow_tests {
+    use super::*;
+    use makepad_widgets::makepad_draw::cx_draw::CxDraw;
+    fn draw(cx: &mut Cx, ui: &WidgetRef, size: DVec2) {
+        cx.redraw_all();
+        let pass = DrawPass::new(cx); pass.set_size(cx,size);
+        let mut list = DrawList2d::new(cx);
+        let overlay = cx.with_vm(|vm| Overlay::script_new(vm));
+        let event=DrawEvent::default();let mut draw=CxDraw::new(cx,&event);let mut cx2d=Cx2d::new(&mut draw);
+        cx2d.begin_pass(&pass,None);list.begin_always(&mut cx2d);overlay.begin(&mut cx2d);
+        cx2d.begin_root_turtle(size,Layout::flow_down());
+        ui.draw_walk_all(&mut cx2d,&mut Scope::empty(),Walk::fixed(size.x,size.y));
+        cx2d.end_pass_sized_turtle();overlay.end(&mut cx2d);list.end(&mut cx2d);cx2d.end_pass(&pass);
+    }
+    #[test]
+    fn overflow_handle_and_keyboard_navigation_survive_both_orientations_and_small_viewports() {
+        for mode in [ViewModeOverride::ForceWide,ViewModeOverride::ForceNarrow] {
+            for count in [0,1,20] {
+                for zoom in [1.0,1.25,1.5] {
+                    let mut cx=Cx::new(Box::new(|_,_|{}));
+                    let window=WindowHandle::new(&mut cx);window.cancel_initial_create(&mut cx);
+                    let ui=cx.with_vm(|vm|{
+                        crate::theme::tests::install(vm,Default::default());crate::app::register_widgets(vm);
+                        vm.bx.captured_errors=Some(Vec::new());
+                        let value=script_eval!(vm,{use mod.prelude.widgets.* mod.widgets.SpacesBar {width:Fill height:Fill}});
+                        let ui=WidgetRef::script_from_value(vm,value);ui.register_as_ui_root(vm);
+                        let errors=vm.take_errors();assert!(errors.is_empty(),"{errors:?}");ui
+                    });
+                    let bar=ui.as_spaces_bar();
+                    {let mut b=bar.borrow_mut().unwrap();b.apply_view_mode(mode);
+                     b.displayed_invited_spaces=(0..count).map(|i|InvitedSpaceInfo{space_name_id:RoomNameId::new(RoomDisplayName::Named(format!("Space {i}")),format!("!space{i}:example.org").try_into().unwrap()),space_avatar:Default::default()}).collect();}
+                    let size=if mode==ViewModeOverride::ForceWide {dvec2(76.0/zoom,240.0/zoom)}else{dvec2(320.0/zoom,70.0)};
+                    draw(&mut cx,&ui,size);
+                    let list=bar.borrow().unwrap().view.portal_list(&mut cx,ids!(spaces_list));
+                    {let l=list.borrow().unwrap();assert_eq!(l.scroll_bar.bar_size,6.0);assert!(l.scroll_bar.min_handle_size>=28.0);if count==20 {assert!(l.is_scrollable(),"{mode:?} {zoom}");}}
+                    if count==20 {
+                        let area=list.borrow().unwrap().area();cx.set_key_focus(area);
+                        cx.dispatch_studio_msg(studio::StudioToApp::KeyUp(KeyEvent{key_code:KeyCode::End,..Default::default()}),WindowId(0,0),size);
+                        ui.handle_event(&mut cx,&Event::KeyDown(KeyEvent{key_code:KeyCode::End,..Default::default()}),&mut Scope::empty());
+                        assert!(list.first_id()>=19);
+                        draw(&mut cx,&ui,size);
+                        assert!(!list.borrow().unwrap().scroll_bar.area().is_empty());
+                        ui.handle_event(&mut cx,&Event::KeyDown(KeyEvent{key_code:KeyCode::Home,..Default::default()}),&mut Scope::empty());
+                        assert_eq!(list.first_id(),0);
+                    }
+                }
+            }
+        }
     }
 }

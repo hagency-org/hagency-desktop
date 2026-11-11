@@ -116,6 +116,7 @@ def main():
         ("activity", "shared_permission_notice"),
         ("unknown-work-review", "hagency::work_review::tests"),
     ("device-sessions", "settings::device_sessions::tests"),
+    ("space-overflow", "home::spaces_bar::overflow_tests"),
         ("permission-error-classification", "hagency::permission_failure::"),
         ("permission-polling-policy", "home::permission_retry::tests"),
         ("theme", "theme::"),
