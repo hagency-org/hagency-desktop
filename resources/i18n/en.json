@@ -3112,5 +3112,15 @@
   "Finish signing in with Pasion in your browser, then return to Hagency.": "Finish signing in with Pasion in your browser, then return to Hagency.",
   "Logout cancelled by user": "Logout cancelled by user",
   "Local session cleanup remains incomplete": "Local session cleanup remains incomplete",
-  "You do not have permission to invite people to this room.": "You do not have permission to invite people to this room."
+  "You do not have permission to invite people to this room.": "You do not have permission to invite people to this room.",
+  "Sign in again to check permission status.": "Sign in again to check permission status.",
+  "Permission status is not available to this account. Ask the resource owner to check access.": "Permission status is not available to this account. Ask the resource owner to check access.",
+  "The local Agent service is unavailable. Open My Agents to check its setup and connection.": "The local Agent service is unavailable. Open My Agents to check its setup and connection.",
+  "This server or local service does not support permission status. Check its version in My Agents.": "This server or local service does not support permission status. Check its version in My Agents.",
+  "Permission status is temporarily unavailable. Check your connection; status will retry automatically.": "Permission status is temporarily unavailable. Check your connection; status will retry automatically.",
+  "The account or session changed. Reopen this conversation after signing in.": "The account or session changed. Reopen this conversation after signing in.",
+  "Permission status could not be confirmed. Refresh status or check My Agents.": "Permission status could not be confirmed. Refresh status or check My Agents.",
+  "The decision was not confirmed. Only status will be refreshed; the decision will not be sent again automatically.": "The decision was not confirmed. Only status will be refreshed; the decision will not be sent again automatically.",
+  "Automatic status retry after {seconds} seconds.": "Automatic status retry after {seconds} seconds.",
+  "Automatic retries are paused. Refresh status after addressing the problem.": "Automatic retries are paused. Refresh status after addressing the problem."
 }
