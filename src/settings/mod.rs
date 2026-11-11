@@ -1,6 +1,7 @@
 use makepad_widgets::ScriptVm;
 
 pub mod settings_screen;
+pub mod device_sessions;
 pub mod account_settings;
 pub(crate) mod crypto_settings;
 pub mod app_settings;
@@ -18,6 +19,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     app_settings::script_mod(vm);
     privacy_settings::script_mod(vm);
     about_settings::script_mod(vm);
+    device_sessions::script_mod(vm);
     settings_screen::script_mod(vm);
 }
 

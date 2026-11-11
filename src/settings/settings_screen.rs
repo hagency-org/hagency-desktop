@@ -1,3 +1,4 @@
+use crate::settings::device_sessions::DeviceSessionsWidgetExt;
 
 use makepad_widgets::*;
 
@@ -116,8 +117,7 @@ script_mod! {
 
             header_divider := LineH { padding: 0, margin: Inset{top: (mod.widgets.SPACE_SM), bottom: (mod.widgets.SPACE_SM)} }
 
-            // Category tabs. robrix2 also has Devices and Labs; upstream has no
-            // content for either, so they are not offered here.
+            // Account, device security and application preferences.
             settings_category_tabs := View {
                 width: Fill, height: Fit
                 flow: Flow.Right{wrap: true}
@@ -126,6 +126,7 @@ script_mod! {
                 margin: Inset{left: (mod.widgets.SPACE_XS), right: (mod.widgets.SPACE_XS), bottom: (mod.widgets.SPACE_SM)}
 
                 category_account_button := mod.widgets.SettingsCategoryTab { text: #(crate::i18n::tr("Account")) i18n_text: "Account" }
+                category_devices_button := mod.widgets.SettingsCategoryTab { text: #(crate::i18n::tr("Devices and sessions")) i18n_text: "Devices and sessions" }
                 category_preferences_button := mod.widgets.SettingsCategoryTab { text: #(crate::i18n::tr("Preferences")) i18n_text: "Preferences" }
                 category_privacy_button := mod.widgets.SettingsCategoryTab { text: #(crate::i18n::tr("Privacy")) i18n_text: "Privacy" }
                 category_about_button := mod.widgets.SettingsCategoryTab { text: #(crate::i18n::tr("About")) i18n_text: "About" }
@@ -146,6 +147,10 @@ script_mod! {
                     View { width: Fill, height: 20 }
                 }
 
+                devices_settings_page := ScrollYView {
+                    width: Fill height: Fill flow: Down
+                    device_sessions := DeviceSessions {}
+                }
                 preferences_settings_page := ScrollYView {
                     width: Fill, height: Fill
                     flow: Down
@@ -186,6 +191,7 @@ script_mod! {
 enum SettingsCategory {
     #[default]
     Account,
+    Devices,
     Preferences,
     Privacy,
     About,
@@ -216,6 +222,9 @@ impl Widget for SettingsScreen {
         if let Event::Actions(actions) = event {
             if self.view.button(cx, ids!(category_account_button)).clicked(actions) {
                 self.set_selected_category(cx, SettingsCategory::Account);
+            } else if self.view.button(cx, ids!(category_devices_button)).clicked(actions) {
+                self.set_selected_category(cx, SettingsCategory::Devices);
+                self.view.device_sessions(cx, ids!(device_sessions)).refresh(cx);
             } else if self.view.button(cx, ids!(category_preferences_button)).clicked(actions) {
                 self.set_selected_category(cx, SettingsCategory::Preferences);
             } else if self.view.button(cx, ids!(category_privacy_button)).clicked(actions) {
@@ -353,6 +362,7 @@ impl SettingsScreen {
     fn sync_selected_category(&mut self, cx: &mut Cx) {
         let page = match self.selected_category {
             SettingsCategory::Account => id!(account_settings_page),
+            SettingsCategory::Devices => id!(devices_settings_page),
             SettingsCategory::Preferences => id!(preferences_settings_page),
             SettingsCategory::Privacy => id!(privacy_settings_page),
             SettingsCategory::About => id!(about_settings_page),
@@ -361,6 +371,7 @@ impl SettingsScreen {
 
         let tabs = [
             (SettingsCategory::Account, ids!(category_account_button)),
+            (SettingsCategory::Devices, ids!(category_devices_button)),
             (SettingsCategory::Preferences, ids!(category_preferences_button)),
             (SettingsCategory::Privacy, ids!(category_privacy_button)),
             (SettingsCategory::About, ids!(category_about_button)),

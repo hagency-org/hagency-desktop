@@ -2,6 +2,7 @@
 //!
 //! See `handle_startup()` for the first code that runs on app startup.
 
+use crate::settings::device_sessions::DeviceSessionsWidgetRefExt;
 use crate::hagency::work_review::{WorkReviewAction,WorkReviewWidgetRefExt};
 use crate::home::reaction_picker::{ReactionPickerAction, ReactionPickerWidgetRefExt};
 use crate::moderation_modal::{ModerationModalAction, ModerationModalWidgetRefExt};
@@ -1318,6 +1319,7 @@ impl App {
     }
 
     fn clear_session_ui(&mut self, cx: &mut Cx) {
+        self.ui.device_sessions(cx, ids!(device_sessions)).clear(cx);
         self.ui.work_review(cx,ids!(work_review_modal.content)).clear(cx);
         self.ui.modal(cx,ids!(work_review_modal)).close(cx);
         self.matrix_link_navigation.cancel();
