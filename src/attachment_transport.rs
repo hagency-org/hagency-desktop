@@ -276,9 +276,13 @@ struct Service {
 }
 impl Service {
     fn start(cache: std::path::PathBuf) -> Arc<Self> {
-        Self::start_budget(cache, crate::transfer_budget::temporary_budget())
+        Self::start_budgets(cache, crate::transfer_budget::temporary_budget(), crate::transfer_budget::pipeline_budget())
     }
+    #[cfg(test)]
     fn start_budget(cache: std::path::PathBuf, disk: Arc<ByteBudget>) -> Arc<Self> {
+        Self::start_budgets(cache, disk, Arc::default())
+    }
+    fn start_budgets(cache: std::path::PathBuf, disk: Arc<ByteBudget>, pipelines: Arc<ByteBudget>) -> Arc<Self> {
         let service = Arc::new(Self {
             queue: Mutex::default(),
             wake: Condvar::new(),
@@ -286,7 +290,7 @@ impl Service {
             creates: Arc::default(),
             cache,
             disk,
-            pipelines: Arc::default(),
+            pipelines,
             records: Mutex::default(),
             active: AtomicUsize::new(0),
             backing_off: AtomicUsize::new(0),

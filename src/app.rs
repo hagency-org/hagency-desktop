@@ -350,6 +350,7 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        crate::shared::attachment_download::handle_share_actions(actions);
         crate::memory_budget::process_completed_decodes(cx, actions);
         for action in actions {
             if let Some(crate::sliding_sync::TimelineCacheEvicted(kind, channel)) = action.downcast_ref() {
@@ -1970,7 +1971,7 @@ impl App {
                 crate::sliding_sync::set_sync_service_desired_running(true, "app foreground");
             }
             Event::Shutdown => {
-                crate::attachment_transport::shutdown();
+                crate::temp_storage::shutdown_temp_storage();
                 #[cfg(not(any(target_os = "ios", target_os = "android")))]
                 if !crate::persistence::credential_state::shutdown() { makepad_widgets::warning!("Credential worker shutdown remains unconfirmed"); }
                 robius_speech::cancel_all();
