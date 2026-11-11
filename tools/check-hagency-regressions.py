@@ -97,6 +97,7 @@ def main():
         ("whitelist-accounts", "host::hagency::grant_people"),
         ("friend-search", "home::mobile::new_chat_tests"),
         ("space-management", "home::space_management::tests"),
+        ("room-creation-journal", "home::creation_journal::tests"),
         ("publication-ui", "grant_ui::"),
         ("resource-ceiling-ui", "resource_edit_ui::tests"),
         ("agent-chat", "agent_chat"),
