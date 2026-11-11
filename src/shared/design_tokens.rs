@@ -313,6 +313,13 @@ script_mod! {
     mod.widgets.RBX_FONT_BOLD = theme.font_bold {}
 
     mod.widgets.RBX_TEXT_PAGE_TITLE    = mod.widgets.RBX_FONT_BOLD    { font_size: mod.widgets.RINX_TITLE_SIZE, line_spacing: 1.25 }
+    // Pair with a localized input placeholder that includes the required meaning.
+    mod.widgets.RequiredFieldLabel = View {
+        width: Fill height: Fit flow: Right spacing: 4 align: Align{y: 0.5}
+        caption := Label {width: Fit height: Fit padding: 0 margin: Inset{} draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_regular{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}}
+        marker := Label {text: "*" width: Fit height: Fit padding: 0 margin: Inset{} draw_text +: {color: mod.widgets.RINX_DANGER_FG text_style: theme.font_regular{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}}
+    }
+
     // Section / group title inside a page.
     mod.widgets.RBX_TEXT_SECTION_TITLE = mod.widgets.RBX_FONT_BOLD    { font_size: 13.0 * mod.widgets.RINX_TEXT_SCALE, line_spacing: 1.25 }
     // Card title.
