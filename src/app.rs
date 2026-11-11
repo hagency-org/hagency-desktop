@@ -2,6 +2,7 @@
 //!
 //! See `handle_startup()` for the first code that runs on app startup.
 
+use crate::settings::device_sessions::DeviceSessionsWidgetRefExt;
 use crate::home::reaction_picker::{ReactionPickerAction, ReactionPickerWidgetRefExt};
 use crate::moderation_modal::{ModerationModalAction, ModerationModalWidgetRefExt};
 #[cfg(feature = "agent_chat")]
@@ -1363,6 +1364,7 @@ impl App {
 
     fn clear_session_ui(&mut self, cx: &mut Cx) {
         self.ui_session = None;
+        self.ui.device_sessions(cx, ids!(device_sessions)).clear(cx);
         self.matrix_link_navigation.cancel();
         {
             use crate::settings::crypto_settings::CryptoSettingsWidgetRefExt;

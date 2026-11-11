@@ -306,6 +306,7 @@ def main():
         ("link-preview", "link_preview"),
         ("linkify", "linkify"),
         ("activity", "shared_permission_notice"),
+        ("device-sessions", "settings::device_sessions::tests"),
         ("theme", "theme::"),
         ("theme-contrast", "semantic_token_pairs_meet_wcag_aa"),
         ("chat-information", "home::mobile_chat_info"),
