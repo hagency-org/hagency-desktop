@@ -68,7 +68,7 @@ robius-directories = { git = "https://github.com/project-robius/robius" }
 robius-file-picker = { path = "vendor/robius-file-picker" }
 robius-location    = { git = "https://github.com/project-robius/robius" }
 robius-open        = { git = "https://github.com/project-robius/robius" }
-robius-share       = { git = "https://github.com/project-robius/robius" }
+robius-share       = { path = "vendor/robius-share" }
 robius-speech      = { git = "https://github.com/project-robius/robius", rev = "166991b1b18188ee2d8441f7118721cee2a0c6eb" } # the speech_to_text branch was deleted; this is its last commit (robius PR #25)
 robius-use-makepad = "0.1.1" ## auto-configures all `robius-*` crates to work with Makepad.
 
@@ -200,7 +200,7 @@ arboard = { version = "3.4", default-features = false, features = ["image-data"]
 rfd = { version = "0.17.2", default-features = false, features = ["xdg-portal"] }
 
 [target.'cfg(windows)'.dependencies]
-windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Storage_FileSystem"] }
+windows = { version = "0.61.3", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 dispatch2 = "0.3"

@@ -119,6 +119,9 @@ def main():
         ("agent-invitations", "hagency::backend::binding_recovery_tests"),
         ("modal-navigation", "app::back_navigation_tests"),
         ("upload-preview", "shared::file_upload_modal::tests"),
+        ("private-share-storage", "temp_storage::tests"),
+        ("private-share-presentation", "shared::attachment_download::"),
+        ("temporary-quota", "transfer_budget::tests"),
         ("attachment-downloads", "attachment_transport::tests"),
         ("media-previews", "media_transport::tests"),
         ("sdk-media-cache", "media_cache_reader::tests"),
@@ -144,6 +147,7 @@ def main():
         ("article-editor", "article_app::"),
     ]:
         run(name, ["cargo", "test", "--locked", "--lib", "--features", "onboarding-test-support", pattern], rust_tests=True)
+    run("native-share-bridge", ["cargo", "test", "--locked", "-p", "robius-share", "--lib"], rust_tests=True)
     if sys.platform == "darwin":
         run("apple-chat-fonts", ["cargo", "test", "--locked", "--lib", "--features", "onboarding-test-support", "apple_fonts", "--", "--test-threads=1"], rust_tests=True)
         run("apple-system-fonts", ["cargo", "test", "--locked", "--manifest-path", "crates/article-makepad/Cargo.toml", "--lib", "apple_fonts", "--", "--test-threads=1"], rust_tests=True)

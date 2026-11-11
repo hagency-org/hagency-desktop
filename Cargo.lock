@@ -10797,7 +10797,6 @@ dependencies = [
 [[package]]
 name = "robius-share"
 version = "0.3.1"
-source = "git+https://github.com/project-robius/robius#cca3cc3dc99d8fcb6c69a127cd28d47ba8f3e3eb"
 dependencies = [
  "android-build",
  "cfg-if",
