@@ -16961,15 +16961,24 @@ mod.widgets.HagencyPickOff = RoundedView{width:24 height:24 show_bg:true draw_bg
 mod.widgets.HagencyPickOn = RoundedView{width:24 height:24 align:Align{x:0.5 y:0.5} show_bg:true draw_bg +: {color:mod.widgets.RINX_ACCENT border_radius:12.0}
     Icon{width:14 height:14 icon_walk:Walk{width:14 height:14} draw_icon.svg:mod.rinx_icons.check draw_icon.color:mod.widgets.RINX_ON_ACCENT}
 }
-mod.widgets.HagencyAlert = RoundedView{width:270 height:Fit flow:Down show_bg:true draw_bg +: {color:if mod.widgets.RINX_DARK {mod.widgets.RINX_FIELD} else {mod.widgets.RINX_SURFACE} border_radius:14.0}}
+// Sdf2d doubles radii: 7 gives a 14pt card corner, shared by its bottom actions.
+mod.widgets.HagencyAlert = RoundedView{width:270 height:Fit flow:Down spacing:0 padding:0 show_bg:true draw_bg +: {color:if mod.widgets.RINX_DARK {mod.widgets.RINX_FIELD} else {mod.widgets.RINX_SURFACE} border_radius:7.0}}
 mod.widgets.HagencyScrim = RoundedView{width:Fill height:Fill flow:Down align:Align{x:0.5 y:0.5} cursor:MouseCursor.Default show_bg:true draw_bg +: {color:if mod.widgets.RINX_DARK {#00000073} else {#00000040} border_radius:0.0 border_size:0.0}}
 mod.widgets.HagencyAlertTitle = mod.widgets.RinxLabel{width:Fill padding:Inset{left:16 right:16 top:10} align:Align{x:0.5} draw_text +: {text_style:theme.font_bold{font_size:(12.75*mod.widgets.RINX_TEXT_SCALE)}}}
 mod.widgets.HagencyAlertMessage = mod.widgets.RinxHint{width:Fill padding:Inset{left:16 right:16 top:2 bottom:10} align:Align{x:0.5}}
 mod.widgets.HagencyAlertButton = mod.widgets.RinxKeyButton{width:Fill height:44 margin:0 align:Align{x:0.5 y:0.5}
-    draw_text +: {color:mod.widgets.RINX_ACCENT color_hover:mod.widgets.RINX_ACCENT color_down:mod.widgets.RINX_ACCENT}
-    draw_bg +: {border_size:0.0 border_radius:0.0 color:#0000 color_focus:#0000 color_hover:mod.widgets.RINX_HOVER color_down:mod.widgets.RINX_PRESSED color_disabled:#0000 color_2_disabled:#0000}}
+    draw_text +: {color:mod.widgets.RINX_ACCENT color_focus:mod.widgets.RINX_ACCENT color_hover:mod.widgets.RINX_ACCENT color_down:mod.widgets.RINX_ACCENT}
+    // Own the flat face: inherited gradient, bevel and material layers must not paint the rows.
+    draw_bg +: {border_size:0.0 border_radius:0.0 border_radius_bl:0.0 border_radius_br:0.0 color:#0000 color_focus:#0000 color_hover:mod.widgets.RINX_HOVER color_down:mod.widgets.RINX_PRESSED color_disabled:#0000 color_2:#0000 color_2_hover:#0000 color_2_down:#0000 color_2_focus:#0000 color_2_disabled:#0000
+        pixel:fn(){
+            let sdf=Sdf2d.viewport(self.pos*self.rect_size)
+            sdf.box_all(0.0,0.0,self.rect_size.x,self.rect_size.y,0.0,0.0,self.border_radius_br,self.border_radius_bl)
+            sdf.fill(self.color.mix(self.color_hover,self.hover).mix(self.color_down,self.down).mix(self.color_disabled,self.disabled))
+            return sdf.result
+        }
+    }}
 mod.widgets.HagencyAlertBold = mod.widgets.HagencyAlertButton{draw_text +: {text_style:theme.font_bold{font_size:mod.widgets.RINX_BODY_SIZE}}}
-mod.widgets.HagencyAlertDanger = mod.widgets.HagencyAlertButton{draw_text +: {color:mod.widgets.RINX_DANGER_FG color_hover:mod.widgets.RINX_DANGER_FG color_down:mod.widgets.RINX_DANGER_FG}}
+mod.widgets.HagencyAlertDanger = mod.widgets.HagencyAlertButton{draw_text +: {color:mod.widgets.RINX_DANGER_FG color_focus:mod.widgets.RINX_DANGER_FG color_hover:mod.widgets.RINX_DANGER_FG color_down:mod.widgets.RINX_DANGER_FG}}
 mod.widgets.HagencySkeleton = RoundedView{show_bg:true draw_bg +: {color:mod.widgets.RINX_FIELD border_radius:6.0}}
 mod.widgets.HagencyVDivider = SolidView{width:1 height:44 draw_bg.color:mod.widgets.RINX_BORDER}
 mod.widgets.HagencyWideButton = mod.widgets.RinxKeyPrimaryButton{width:Fill height:50 align:Align{x:0.5 y:0.5} draw_bg +: {border_size:0.0 border_radius:25.0}}
@@ -17255,12 +17264,12 @@ alert_layer := View{width:Fill height:Fill flow:Down align:Align{y:1.0} new_batc
             if kind!="pool" {View{width:Fill height:Fit flow:Down
                 local_discard_confirm := mod.widgets.HagencyAlertDanger{text:A.t("Discard Changes","放弃修改") on_click: || A.local_discard_changes()}
                 mod.widgets.HagencyDivider{}
-                local_discard_keep := mod.widgets.HagencyAlertBold{text:A.t("Keep Editing","继续编辑") on_click: || {H.local_discard="" H.local_after="" A.redraw()}}
+                local_discard_keep := mod.widgets.HagencyAlertBold{draw_bg +: {border_radius_bl:7.0 border_radius_br:7.0} text:A.t("Keep Editing","继续编辑") on_click: || {H.local_discard="" H.local_after="" A.redraw()}}
             }}
             if kind=="pool" {View{width:Fill height:44 flow:Right
-                local_discard_keep := mod.widgets.HagencyAlertBold{text:A.t("Keep Editing","继续编辑") on_click: || {H.local_discard="" H.local_after="" A.redraw()}}
+                local_discard_keep := mod.widgets.HagencyAlertBold{draw_bg +: {border_radius_bl:7.0} text:A.t("Keep Editing","继续编辑") on_click: || {H.local_discard="" H.local_after="" A.redraw()}}
                 mod.widgets.HagencyVDivider{}
-                local_discard_confirm := mod.widgets.HagencyAlertDanger{text:A.t("Discard","放弃修改") on_click: || A.local_discard_changes()}
+                local_discard_confirm := mod.widgets.HagencyAlertDanger{draw_bg +: {border_radius_br:7.0} text:A.t("Discard","放弃修改") on_click: || A.local_discard_changes()}
             }}
         }}
         if kind=="encrypt" {View{width:Fill height:Fit flow:Down
@@ -17269,9 +17278,9 @@ alert_layer := View{width:Fill height:Fill flow:Down align:Align{y:1.0} new_batc
             mod.widgets.HagencyAlertMessage{text:A.t("This can’t be turned off later.","开启后无法关闭。")}
             mod.widgets.HagencyDivider{}
             View{width:Fill height:44 flow:Right
-                local_encrypt_cancel := mod.widgets.HagencyAlertButton{text:A.t("Cancel","取消") on_click: || {H.local_confirm="" A.redraw()}}
+                local_encrypt_cancel := mod.widgets.HagencyAlertButton{draw_bg +: {border_radius_bl:7.0} text:A.t("Cancel","取消") on_click: || {H.local_confirm="" A.redraw()}}
                 mod.widgets.HagencyVDivider{}
-                local_encrypt_confirm := mod.widgets.HagencyAlertBold{text:A.t("Turn On","开启") enabled:H.local_pending=="" on_click: || A.local_encrypt()}
+                local_encrypt_confirm := mod.widgets.HagencyAlertBold{draw_bg +: {border_radius_br:7.0} text:A.t("Turn On","开启") enabled:H.local_pending=="" on_click: || A.local_encrypt()}
             }
         }}
         if kind=="failure" {View{width:Fill height:Fit flow:Down
