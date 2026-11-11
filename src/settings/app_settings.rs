@@ -625,6 +625,7 @@ impl AppSettings {
         if let Some(enabled)=self.view.check_box(cx,ids!(system_notifications_toggle)).changed(actions) {
             app_state.app_prefs.system_notifications=enabled;
             app_state.app_prefs.on_system_notifications_changed(cx);
+            self.view.label(cx,ids!(system_notifications_status)).set_text(cx,crate::i18n::tr(crate::system_notifications::status()));
         }
         if self.view.button(cx,ids!(system_notifications_test)).clicked(actions) && app_state.app_prefs.system_notifications {
             crate::system_notifications::request_permission_and_test();
