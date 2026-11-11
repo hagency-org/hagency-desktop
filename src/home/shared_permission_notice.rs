@@ -305,7 +305,8 @@ impl SharedPermissionNotice {
         self.view.widget(cx,ids!(recover)).set_visible(cx,destination);
         self.view.button(cx,ids!(recover)).set_enabled(cx,self.active && !self.loading);
         self.view.button(cx,ids!(recover)).set_text(cx,tr(if recovery==Some(Recovery::SignIn){"Sign in again"}else{"My Agents"}));
-        let hint=if let Some(at)=self.retry.next {
+        let hint=if self.loading {tr("Checking…").to_owned()}
+            else if let Some(at)=self.retry.next {
                 let seconds=at.saturating_duration_since(Instant::now()).as_secs_f64().ceil().max(1.0);
                 format("Automatic status retry after {seconds} seconds.",&[("seconds",seconds.to_string())])
             }
