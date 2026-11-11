@@ -58,6 +58,20 @@ pub(crate) fn set_enabled(value: bool) {
 pub(crate) fn foreground(value: bool) {
     FOREGROUND.store(value, Ordering::SeqCst);
 }
+/// Window focus hints can remain true after a background launch or synthetic
+/// accessibility focus. On macOS use the thread-safe, OS-owned app activity.
+fn foreground_now() -> bool {
+    #[cfg(target_os = "macos")]
+    {
+        objc2::rc::autoreleasepool(|_| {
+            objc2_app_kit::NSRunningApplication::currentApplication().isActive()
+        })
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        FOREGROUND.load(Ordering::SeqCst)
+    }
+}
 pub(crate) fn clear() {
     set_enabled(false);
     *STATUS.lock().unwrap() = "Notifications are off until you enable them. Use the test button to check system permission.";
@@ -87,7 +101,7 @@ fn event(pin: &SessionPin, id: &str, ts: u64, own: bool, notify: bool, start: u6
     if !pin.is_current()
         || !eligible(
             ENABLED.load(Ordering::SeqCst),
-            FOREGROUND.load(Ordering::SeqCst),
+            foreground_now(),
             own,
             notify,
             ts,
@@ -455,5 +469,20 @@ mod tests {
             Path::new("/Applications/Hagency.app"),
             Path::new("/Applications/Hagency.app/Contents/MacOS/rinx")
         ));
+    }
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_stale_window_focus_hint_does_not_suppress_a_real_background_process() {
+        // Cargo's unbundled test process is not an activated GUI application.
+        // This reproduces the live failure without granting or posting notifications.
+        assert!(!objc2_app_kit::NSRunningApplication::currentApplication().isActive());
+        let previous = FOREGROUND.swap(true, Ordering::SeqCst);
+        let observed = foreground_now();
+        FOREGROUND.store(previous, Ordering::SeqCst);
+        assert!(
+            !observed,
+            "a window hint must not override OS application activity"
+        );
+        assert!(eligible(true, observed, false, true, 100, 100, 200));
     }
 }
