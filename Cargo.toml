@@ -36,7 +36,7 @@ article-core = { path = "crates/article-core", features = ["l0"] }
 rinx-answer-export = { path = "crates/answer-export" }
 rinx-miniapp-core = { path = "crates/miniapp-core" }
 rinx-miniapp-catalog = { path = "crates/miniapp-catalog" }
-uuid = { version = "1", features = ["v4"] }
+uuid = { version = "1", features = ["v4", "serde"] }
 ## The assistant (ADR 0007): the scoped service contract a host injects. The
 ## local-runtime and remote connectors are optional (`octos-local`,
 ## `octos-remote`), so a hosted build links no runtime of its own.
