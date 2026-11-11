@@ -15,3 +15,9 @@ Duplication reviewed against Desktop open/history through #72 (including unrelat
 The macOS test is scheduled five seconds ahead with guidance to switch apps, because foreground presentation normally requires a delegate. The code preserves an embedding host's delegate. Disabling notifications/logout removes this module's pending request. Normal background activity is immediate.
 
 A full-suite failure exposed that Makepad can assign bundle metadata even to an unbundled test binary. The original identifier-only preflight was insufficient and an unsolicited cleanup call aborted at UserNotifications. The corrected preflight requires an actual .app/Contents/MacOS executable and Info.plist; cleanup never initializes a center unless this process submitted a request. A guarded Objective-C exception boundary reports an unavailable center and latches a failed initializer instead of retrying it. The aborted receipt is preserved; it is not counted as passing.
+
+## Live macOS follow-up
+
+A real two-account run reproduced a missed background-message notification: the session was current, notifications enabled, the event fresh and the SDK push action `notify`, but a stale window-focus hint remained true while Chrome was the actual active application. macOS now reads `NSRunningApplication.currentApplication.isActive`, an atomic/thread-safe application activity property, instead of trusting the window hint. A background-process regression sets a stale true hint and verifies it cannot suppress an eligible message. Preference changes also refresh their status label immediately.
+
+Live evidence and final qualification are recorded separately under `.run/r12-native-20261112`; temporary diagnostics contain boolean gates only, never message text, user IDs or tokens. The original ordinary-launch dependency is the existing R01 #55 wrapper, not another R12 implementation change.
