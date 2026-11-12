@@ -3189,5 +3189,6 @@
   "No matching commands": "没有匹配的命令",
   "Loading user members…": "正在加载成员…",
   "Loading rooms…": "正在加载聊天室…",
-  "Loading commands…": "正在加载命令…"
+  "Loading commands…": "正在加载命令…",
+  "Notify the entire room": "通知聊天室所有人"
 }
