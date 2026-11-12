@@ -38,7 +38,10 @@ fn local_error(error: hagency_agent_local::Error) -> OwnerError {
         Invalid(_) => self::error(400, "invalid_local_policy"),
         Unauthorized => self::error(403, "owner_scope_required"),
         ForeignDatabase => self::error(409, "foreign_local_database"),
-        _ => self::error(503, "local_state_unavailable"),
+        other => {
+            tracing::warn!(error = ?other, "local Agent state unavailable");
+            self::error(503, "local_state_unavailable")
+        }
     }
 }
 fn key(value: &str) -> Result<(), OwnerError> {
@@ -916,11 +919,17 @@ async fn call(req: &mut Request, depot: &Depot) -> Result<Value, OwnerError> {
             recheck(depot).map_err(|_| error(401, "sign_in_required"))?;
             return tokio::task::spawn_blocking(move || {
                 let path = ledger_path(&root, &reply.origin, &reply.issuer, &reply.subject, &reply.owner)
-                    .map_err(|_| error(503, "local_state_unavailable"))?;
+                    .map_err(|e| {
+                        tracing::warn!(error = ?e, "local Agent ledger path unavailable");
+                        error(503, "local_state_unavailable")
+                    })?;
                 let identity = profile_identity(&reply.origin, &reply.issuer, &reply.subject, &reply.owner)
                     .map_err(|_| error(403, "owner_scope_required"))?;
                 let mut ledger = Ledger::open_scoped(&path, &reply.owner, &identity).map_err(local_error)?;
-                hagency_store::private::open(&path, false).map_err(|_| error(503, "local_state_unavailable"))?;
+                hagency_store::private::open(&path, false).map_err(|e| {
+                    tracing::warn!(error = ?e, "local Agent ledger file is not private");
+                    error(503, "local_state_unavailable")
+                })?;
                 if let Some((revision, policy)) = change {
                     ledger.set_agent_policy(&reply.owner, &agent, revision, &policy).map_err(local_error)?;
                 }
