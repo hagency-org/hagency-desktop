@@ -4,7 +4,7 @@ use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
 use matrix_sdk::{
     notification_settings::RoomNotificationMode,
-    ruma::{OwnedUserId, OwnedRoomId},
+    ruma::{events::room::member::MembershipState, OwnedUserId, OwnedRoomId},
     RoomMemberships,
 };
 
@@ -208,6 +208,8 @@ struct ChatInfoData {
     topic: String,
     members: Vec<UserProfile>,
     banned_members: HashSet<OwnedUserId>,
+    /// Members who were invited but have not joined yet.
+    invited: HashSet<OwnedUserId>,
     mode: Option<RoomNotificationMode>,
 }
 
@@ -226,6 +228,17 @@ fn add_member_owners(owners: &mut HashMap<OwnedUserId, OwnedUserId>, conflicts: 
         if owners.get(&agent).is_some_and(|old| old != &owner) {
             owners.remove(&agent);conflicts.insert(agent);
         } else {owners.insert(agent,owner);}
+    }
+}
+/// "N members", plus how many invitations are still waiting.
+fn member_count(data: &ChatInfoData) -> String {
+    let invited = data.members.iter().filter(|p| data.invited.contains(&p.user_id)).count();
+    let banned = data.members.iter().filter(|p| data.banned_members.contains(&p.user_id)).count();
+    let joined = crate::i18n::format("{0} members", &[("0", data.members.len().saturating_sub(invited + banned).to_string())]);
+    if invited == 0 {
+        joined
+    } else {
+        format!("{joined} · {}", crate::i18n::format("{0} invited", &[("0", invited.to_string())]))
     }
 }
 fn group_members(members: &mut Vec<UserProfile>, owners: &HashMap<OwnedUserId, OwnedUserId>) -> HashSet<OwnedUserId> {
@@ -493,11 +506,16 @@ impl MobileChatInfo {
                     .get_room(room.room_id())
                     .ok_or(crate::i18n::tr("This chat is no longer available."))?;
                 let members = room
-                    .members(RoomMemberships::JOIN | RoomMemberships::BAN)
+                    .members(RoomMemberships::JOIN | RoomMemberships::BAN | RoomMemberships::INVITE)
                     .await
                     .map_err(|e| e.to_string())?;
                 let banned_members = members.iter().filter(|m| *m.membership() == ruma::events::room::member::MembershipState::Ban)
                     .map(|m| m.user_id().to_owned()).collect();
+                let invited = members
+                    .iter()
+                    .filter(|member| *member.membership() == MembershipState::Invite)
+                    .map(|member| member.user_id().to_owned())
+                    .collect();
                 let mut members: Vec<_> = members
                     .into_iter()
                     .map(|member| UserProfile {
@@ -516,6 +534,7 @@ impl MobileChatInfo {
                     topic: room.topic().unwrap_or_default(),
                     members,
                     banned_members,
+                    invited,
                     mode: room.user_defined_notification_mode().await,
                 })
             }
@@ -940,7 +959,7 @@ impl Widget for MobileChatInfo {
         self.view.label(cx, ids!(members_empty)).set_visible(cx, members && self.data.as_ref().is_some_and(|d|d.members.is_empty()));
         let summary_room = self.data.as_ref().map(|data|&data.room).or(self.room.as_ref());
         self.view.label(cx, ids!(summary_name)).set_text(cx, &summary_room.map_or_else(|| crate::i18n::tr("Chat information").to_owned(), |room|room.display().into_owned()));
-        let count = self.data.as_ref().map_or_else(|| crate::i18n::tr("Loading members…").to_owned(), |data| crate::i18n::format("{0} members", &[("0",data.members.len().saturating_sub(data.banned_members.len()).to_string())]));
+        let count = self.data.as_ref().map_or_else(|| crate::i18n::tr("Loading members…").to_owned(), member_count);
         self.view.label(cx, ids!(summary_count)).set_text(cx, &count);
         // Applying a style asks for a redraw, and this runs on every draw:
         // restyling the tabs each time kept the open panel drawing for ever.
@@ -1003,6 +1022,11 @@ impl Widget for MobileChatInfo {
                                 |framework| format!("{framework} · {}", profile.user_id),
                             );
                         let detail = if data.banned_members.contains(&profile.user_id) {crate::i18n::format("Banned · {user}", &[("user", detail)])} else {detail};
+                        let detail = if data.invited.contains(&profile.user_id) {
+                            format!("{} · {detail}", crate::i18n::tr("Invited, not joined yet"))
+                        } else {
+                            detail
+                        };
                         widget.label(cx, ids!(user_id)).set_text(cx, &detail);
                         let avatar = widget.avatar(cx, ids!(avatar));
                         let loaded =
@@ -1064,7 +1088,7 @@ impl MobileChatInfoRef {
         panel.room=Some(RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Team room".into()),room.clone()));
         panel.tab=InfoTab::Members;
         if scenario=="members" {
-            panel.data=Some(ChatInfoData {can_invite:true,room:panel.room.clone().unwrap(),topic:String::new(),members:Vec::new(),banned_members:HashSet::new(),mode:None});
+            panel.data=Some(ChatInfoData {can_invite:true,room:panel.room.clone().unwrap(),topic:String::new(),members:Vec::new(),banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
             panel.select_tab(cx,InfoTab::Members);
             panel.view.redraw(cx);
             return;
@@ -1122,6 +1146,15 @@ mod information_target_tests {
         UserProfile {user_id:OwnedUserId::try_from(id).unwrap(),username:Some(name.into()),avatar_state:AvatarState::Known(None)}
     }
     #[test]
+    fn member_count_names_pending_invitations() {
+        let room=RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap());
+        let members=vec![member("@a:s","A"),member("@b:s","B"),member("@c:s","C")];
+        let mut data=ChatInfoData {can_invite:true,room,topic:String::new(),members,banned_members:HashSet::new(),invited:HashSet::new(),mode:None};
+        assert_eq!(member_count(&data),"3 members");
+        data.invited.insert(OwnedUserId::try_from("@c:s").unwrap());
+        assert_eq!(member_count(&data),"2 members · 1 invited");
+    }
+    #[test]
     fn agents_follow_only_their_present_human_owner_without_losing_members() {
         let mut members=vec![member("@alice:s","Alice"),member("@bob:s","Bob"),member("@a:s","Z agent"),member("@b:s","A agent"),member("@orphan:s","Orphan"),member("@external:s","External"),member("@_hagency_service:s","Hagency service")];
         let mut owners=HashMap::new();let mut conflicts=HashSet::new();
@@ -1144,7 +1177,7 @@ mod information_target_tests {
             let value=script_eval!(vm,{mod.widgets.MobileChatInfo {}});
             MobileChatInfo::script_from_value(vm,value)
         });
-        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap()),topic:String::new(),members,banned_members:HashSet::new(),mode:None});
+        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap()),topic:String::new(),members,banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
         info.indented_members=indented;
         info.select_tab(&mut cx,InfoTab::Members);draw_information(&mut info,&mut cx);
         let list=info.view.portal_list(&mut cx,ids!(list));
@@ -1280,7 +1313,7 @@ mod information_target_tests {
             let info=MobileChatInfo::script_from_value(vm,value);assert!(vm.take_errors().is_empty());info
         });
         let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),matrix_sdk::ruma::room_id!("!a:server").to_owned());
-        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:"A topic".into(),members:vec![],banned_members:HashSet::new(),mode:None,can_invite:true});
+        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:"A topic".into(),members:vec![],banned_members:HashSet::new(),invited:HashSet::new(),mode:None,can_invite:true});
         info.agent_command=Some(("exact-original-input".into(),"original-key".into()));
         draw_information(&mut info,&mut cx);
         assert_eq!(info.view.label(&mut cx,ids!(summary_name)).text(),"Room A");
@@ -1394,6 +1427,7 @@ mod information_target_tests {
                 room: RoomNameId::empty(room_a),
                 topic: String::new(),
                 members: vec![], banned_members: HashSet::new(),
+                invited: HashSet::new(),
                 mode: None,
             }),
         };
