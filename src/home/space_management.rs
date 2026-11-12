@@ -519,6 +519,20 @@ pub struct SpaceManagementChanged {
     pub owner: OwnedUserId,
     pub parent: Option<OwnedRoomId>,
 }
+/// The create button's label. While the chosen space is read the button cannot act yet; calling that
+/// "Creating…" made a click look accepted when nothing was created.
+fn create_label(loading: bool, busy: bool, room: bool) -> &'static str {
+    if loading {
+        "Reading the space…"
+    } else if busy {
+        "Creating…"
+    } else if room {
+        "Create room"
+    } else {
+        "Create space"
+    }
+}
+
 #[derive(Debug)]
 struct Loaded {
     owner: OwnedUserId,
@@ -800,6 +814,9 @@ pub struct SpaceManagementPanel {
     active: bool,
     #[rust]
     busy: bool,
+    /// `busy` because the chosen space is being read, not because something is being created.
+    #[rust]
+    loading: bool,
     #[rust]
     manage: bool,
     #[rust]
@@ -974,7 +991,7 @@ impl SpaceManagementPanel {
             && folder_valid
             && (!room || self.choice().is_some_and(|c| c.can_link) && self.data.projects_known)
             && self.created.is_none());
-        self.view.button(cx, ids!(create)).set_text(cx, crate::i18n::tr(if self.busy {"Creating…"} else if room {"Create room"} else {"Create space"}));
+        self.view.button(cx, ids!(create)).set_text(cx, crate::i18n::tr(create_label(self.loading, self.busy, room)));
         for id in [id!(wizard_next),id!(wizard_back),id!(finish_setup),id!(create_child)] {
             self.view.button(cx, &[id]).set_enabled(cx, !self.busy);
         }
@@ -1020,6 +1037,7 @@ impl SpaceManagementPanel {
         let request = self.request;
         let parent = self.parent.clone();
         self.busy = true;
+        self.loading = true;
         self.sync(cx);
         spawn_async_task(async move {
             let result = snapshot(&client, parent.as_ref())
@@ -1049,6 +1067,7 @@ impl SpaceManagementPanel {
         let request = self.request;
         let parent = self.parent.clone();
         self.busy = true;
+        self.loading = false;
         self.status(cx, StatusTone::Info, "Saving…");
         self.sync(cx);
         spawn_async_task(async move {
@@ -1111,6 +1130,7 @@ impl Widget for SpaceManagementPanel {
                 && self.current(&loaded.owner, loaded.request)
             {
                 self.busy = false;
+                self.loading = false;
                 match &loaded.result {
                     Ok(data) => {
                         self.data = data.clone();
@@ -1931,6 +1951,14 @@ mod tests {
         assert!(request.initial_state.is_empty());
         assert_eq!(request.visibility, Visibility::Private);
     }
+    #[test]
+    fn reading_the_chosen_space_is_not_shown_as_creating() {
+        assert_eq!(create_label(true, true, true), "Reading the space…");
+        assert_eq!(create_label(false, true, true), "Creating…");
+        assert_eq!(create_label(false, false, true), "Create room");
+        assert_eq!(create_label(false, false, false), "Create space");
+    }
+
     #[test]
     fn private_room_encryption_and_invalid_names() {
         let mut config = CreateRoomConfig {
