@@ -213,7 +213,11 @@ impl Widget for InviteModal {
                 list.set_item_range(cx, 0, self.offered.len().max(1));
                 while let Some(index) = list.next_visible_item(cx) {
                     if self.offered.is_empty() {
-                        list.item(cx, index, id!(Empty)).draw_all(cx, scope);
+                        // The list hands out rows past its range to fill the
+                        // viewport; show the hint only once.
+                        if index == 0 {
+                            list.item(cx, index, id!(Empty)).draw_all(cx, scope);
+                        }
                         continue;
                     }
                     let Some((id, name)) = self.offered.get(index) else {continue;};
