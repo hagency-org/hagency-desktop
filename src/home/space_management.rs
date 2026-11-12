@@ -50,7 +50,9 @@ impl CreateRoomConfig {
         );
         let mut request = Request::new();
         request.name = Some(name.into());
-        request.topic = Some(self.topic.trim().into());
+        // An empty description is no topic, not an empty m.room.topic event in every new room.
+        let topic = self.topic.trim();
+        request.topic = (!topic.is_empty()).then(|| topic.into());
         request.visibility = if self.public {
             Visibility::Public
         } else {
@@ -1957,6 +1959,19 @@ mod tests {
         assert_eq!(create_label(false, true, true), "Creating…");
         assert_eq!(create_label(false, false, true), "Create room");
         assert_eq!(create_label(false, false, false), "Create space");
+    }
+    #[test]
+    fn an_empty_description_sends_no_topic() {
+        let config = |topic: &str| CreateRoomConfig {
+            name: "Room".into(),
+            topic: topic.into(),
+            public: false,
+            encrypted: true,
+            space: false,
+            parent: None,
+        };
+        assert_eq!(config("   ").request().unwrap().topic, None);
+        assert_eq!(config(" Plans ").request().unwrap().topic.as_deref(), Some("Plans"));
     }
 
     #[test]
