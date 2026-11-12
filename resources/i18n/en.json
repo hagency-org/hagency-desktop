@@ -3180,5 +3180,14 @@
   "The shared project folder was not confirmed; each Agent may keep its own folder.": "The shared project folder was not confirmed; each Agent may keep its own folder.",
   "Could not check whether this room is encrypted. Your message was not sent. Try again.": "Could not check whether this room is encrypted. Your message was not sent. Try again.",
   "Invited, not joined yet": "Invited, not joined yet",
-  "{0} invited": "{0} invited"
+  "{0} invited": "{0} invited",
+  "Mention a user in this room": "Mention a user in this room",
+  "Link to a room or space": "Link to a room or space",
+  "Special Commands": "Special Commands",
+  "No matching users": "No matching users",
+  "No matching rooms or spaces": "No matching rooms or spaces",
+  "No matching commands": "No matching commands",
+  "Loading user members…": "Loading user members…",
+  "Loading rooms…": "Loading rooms…",
+  "Loading commands…": "Loading commands…"
 }

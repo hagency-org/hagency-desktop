@@ -3180,5 +3180,14 @@
   "The shared project folder was not confirmed; each Agent may keep its own folder.": "共享项目文件夹未获确认，各 Agent 可能仍使用自己的文件夹。",
   "Could not check whether this room is encrypted. Your message was not sent. Try again.": "无法确认此聊天室是否已加密，消息未发送，请重试。",
   "Invited, not joined yet": "已邀请，尚未加入",
-  "{0} invited": "{0} 人待加入"
+  "{0} invited": "{0} 人待加入",
+  "Mention a user in this room": "提及此聊天室的成员",
+  "Link to a room or space": "链接聊天室或空间",
+  "Special Commands": "特殊命令",
+  "No matching users": "没有匹配的成员",
+  "No matching rooms or spaces": "没有匹配的聊天室或空间",
+  "No matching commands": "没有匹配的命令",
+  "Loading user members…": "正在加载成员…",
+  "Loading rooms…": "正在加载聊天室…",
+  "Loading commands…": "正在加载命令…"
 }

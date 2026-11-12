@@ -1780,3 +1780,23 @@ pub fn unwrapped_text_width(cx: &mut Cx, draw_text: &makepad_widgets::DrawText, 
     draw_text.layout(cx, 0.0, 0.0, None, false, makepad_widgets::Align::default(), text).size_in_lpxs.width as f64
         * draw_text.font_scale as f64
 }
+
+/// A Hagency infrastructure account (the server's `_hagency_service` and similar), which people
+/// should neither mention nor invite. Agents (`_hagency_agt_…`) are not infrastructure.
+pub fn is_hagency_infrastructure(user: &matrix_sdk::ruma::UserId) -> bool {
+    let localpart = user.localpart();
+    localpart.starts_with("_hagency_") && !localpart.starts_with("_hagency_agt_")
+}
+
+#[cfg(test)]
+mod infrastructure_account_tests {
+    use super::is_hagency_infrastructure;
+    use matrix_sdk::ruma::user_id;
+
+    #[test]
+    fn the_service_account_is_infrastructure_and_agents_and_people_are_not() {
+        assert!(is_hagency_infrastructure(user_id!("@_hagency_service:river.example")));
+        assert!(!is_hagency_infrastructure(user_id!("@_hagency_agt_01abc:river.example")));
+        assert!(!is_hagency_infrastructure(user_id!("@alex:river.example")));
+    }
+}

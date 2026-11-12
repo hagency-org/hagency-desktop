@@ -512,7 +512,11 @@ impl InviteModal {
                 };
                 for member in members {
                     let id = member.user_id().to_owned();
-                    if Some(&id) == me.as_ref() || present.contains(&id) || people.iter().any(|(p, _)| p == &id) {
+                    if Some(&id) == me.as_ref()
+                        || present.contains(&id)
+                        || crate::utils::is_hagency_infrastructure(&id)
+                        || people.iter().any(|(p, _)| p == &id)
+                    {
                         continue;
                     }
                     people.push((id, member.display_name().map(str::to_owned)));
