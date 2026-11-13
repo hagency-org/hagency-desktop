@@ -41,13 +41,14 @@ class WizardInviteReview(InviteReview):
             self.completion(kind)
             self.open()
             self.capture(name + '-invite-open')
-            self.click('confirm_button')
+            assert not self.enabled(), 'Invite is disabled until someone is selected'
+            self.press_return()
             assert self.status() == (
                 '请输入名称或 Matrix ID。' if self.language == 'zh-CN'
                 else 'Enter a name or Matrix ID.'), 'Invitation must receive pointer events over the wizard'
             self.fill('user_id_input', '@invalid')
             assert self.widget('user_id_input')['val'] == '@invalid', 'Invitation must accept typing'
-            self.click('confirm_button')
+            self.press_return()
             assert ('无效' in self.status() if self.language == 'zh-CN' else 'Invalid' in self.status())
             self.capture(name + '-input-validation')
             self.click('cancel_button')
