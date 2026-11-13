@@ -3199,5 +3199,17 @@
   "Loading rooms…": "正在加载聊天室…",
   "Loading commands…": "正在加载命令…",
   "Notify the entire room": "通知聊天室所有人",
-  "Reading the space…": "正在读取空间…"
+  "Reading the space…": "正在读取空间…",
+  "Spec": "Spec",
+  "Plan": "计划",
+  "Execute": "执行",
+  "Test": "测试",
+  "Review": "评审",
+  "Release": "发布",
+  "GitFab · {task} · {stage}, round {round}, attempt {attempt}": "GitFab · {task} · {stage}阶段 · 第 {round} 轮第 {attempt} 次",
+  "GitFab · {task} · {stage}, round {round} · Git platform": "GitFab · {task} · {stage}阶段 · 第 {round} 轮 · Git 平台",
+  "GitFab · {task} · waiting for Spec version {revision} to be confirmed": "GitFab · {task} · 等待确认 Spec 第 {revision} 版",
+  "GitFab · {task} · manual intervention at {stage}, round {round} ({reason})": "GitFab · {task} · {stage}阶段第 {round} 轮转人工介入（{reason}）",
+  "GitFab · {task} · completed": "GitFab · {task} · 已完成",
+  "GitFab · {task} · ended ({reason})": "GitFab · {task} · 已结束（{reason}）"
 }

@@ -436,6 +436,7 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_run_card_2 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 octos_action_card := mod.widgets.OctosActionCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                gitfab_stage_card := mod.widgets.GitfabStageCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_reply := mod.widgets.AgentReply {width: Fill}
                 agent_usage := mod.widgets.AgentUsage {width: Fill{max: mod.widgets.RINX_READING_WIDTH} show_toggle: false}
                 link_preview_view := mod.widgets.LinkPreview {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
@@ -488,6 +489,7 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {}
                 agent_run_card_2 := mod.widgets.AgentRunCard {}
                 octos_action_card := mod.widgets.OctosActionCard {}
+                gitfab_stage_card := mod.widgets.GitfabStageCard {}
                 agent_reply := mod.widgets.AgentReply {}
                 agent_usage := mod.widgets.AgentUsage {show_toggle: false}
             link_preview_view := mod.widgets.LinkPreview {font_size: mod.widgets.MOBILE_MESSAGE_FONT_SIZE}
@@ -680,6 +682,7 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_run_card_2 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 octos_action_card := mod.widgets.OctosActionCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                gitfab_stage_card := mod.widgets.GitfabStageCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_reply := mod.widgets.AgentReply {width: Fill}
                 agent_usage := mod.widgets.AgentUsage {width: Fill{max: mod.widgets.RINX_READING_WIDTH} show_toggle: false}
                 link_preview_view := mod.widgets.LinkPreview {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
@@ -6201,6 +6204,10 @@ fn populate_message_view(
     if !used_cached_item {
         use crate::agent_chat::octos_card::OctosActionCardWidgetRefExt;
         item.octos_action_card(cx, ids!(content.octos_action_card)).populate(cx, timeline_kind.room_id(), event_tl_item);
+        {
+            use crate::agent_chat::gitfab_card::GitfabStageCardWidgetRefExt;
+            item.gitfab_stage_card(cx, ids!(content.gitfab_stage_card)).populate(cx, event_tl_item);
+        }
         populate_agent_chat_approval_card(
             cx,
             &item,
