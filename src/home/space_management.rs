@@ -663,11 +663,12 @@ script_mod! {
                 }
                 creation_details := View {visible: false width: Fill height: Fit flow: Down spacing: 16
                     Section {
-                        Text {text: #(crate::i18n::tr("Name")) i18n_text: "Name"}
-                        name := Input {empty_text: #(crate::i18n::tr("Give it a name")) i18n_empty_text: "Give it a name"}
+                        RequiredFieldLabel {caption +: {text: #(crate::i18n::tr("Name")) i18n_text: "Name"}}
+                        name := Input {empty_text: #(crate::i18n::tr("Give it a name (required)")) i18n_empty_text: "Give it a name (required)"}
+                        name_error := Hint {visible: false draw_text.color: mod.widgets.RINX_DANGER_FG}
                         Text {text: #(crate::i18n::tr("Description · optional")) i18n_text: "Description · optional"}
                         topic := Input {empty_text: #(crate::i18n::tr("What is this place for?")) i18n_empty_text: "What is this place for?"}
-                        name_error := Hint {visible: false draw_text.color: mod.widgets.RINX_DANGER_FG}
+                        topic_error := Hint {visible: false draw_text.color: mod.widgets.RINX_DANGER_FG}
                     }
                     privacy := Section {spacing: 6
                         public_row := View {width: Fill height: Fit align: Align{y: 0.5} spacing: 12
@@ -765,6 +766,8 @@ pub struct SpaceManagementPanel {
     created_space: bool,
     #[rust]
     wizard_step: usize,
+    #[rust]
+    name_edited: bool,
     #[rust]
     setup_pending: bool,
     #[rust]
@@ -904,9 +907,11 @@ impl SpaceManagementPanel {
         let topic = self.view.text_input(cx, ids!(topic)).text();
         let name_valid = !name.trim().is_empty() && name.trim().chars().count() <= 255;
         let topic_valid = topic.chars().count() <= 4096;
-        let invalid = name.trim().chars().count() > 255 || !topic_valid;
+        let invalid = (self.name_edited && name.trim().is_empty()) || name.trim().chars().count() > 255;
         self.view.label(cx, ids!(name_error)).set_visible(cx, invalid);
-        self.view.label(cx, ids!(name_error)).set_text(cx, crate::i18n::tr(if !topic_valid {"The description is too long."} else {"Use a name of 255 characters or fewer."}));
+        self.view.label(cx, ids!(name_error)).set_text(cx, crate::i18n::tr(if name.trim().is_empty() {"Enter a name."} else {"Use a name of 255 characters or fewer."}));
+        self.view.label(cx, ids!(topic_error)).set_visible(cx, !topic_valid);
+        self.view.label(cx, ids!(topic_error)).set_text(cx, crate::i18n::tr("The description is too long."));
         self.view.button(cx, ids!(create)).set_enabled(cx, !self.busy && name_valid && topic_valid
             && (!room || self.choice().is_some_and(|c| c.can_link) && self.data.projects_known)
             && self.created.is_none());
@@ -1132,6 +1137,9 @@ impl Widget for SpaceManagementPanel {
             }
         }
         if self.view.button(cx, ids!(wizard_next)).clicked(actions) {
+            if self.view.text_input(cx, ids!(name)).text().trim().is_empty() {
+                self.name_edited = false;
+            }
             self.wizard_step = 1;
             self.view.view(cx, ids!(create_form)).set_scroll_pos(cx, dvec2(0.0, 0.0));
             self.sync(cx);
@@ -1157,6 +1165,7 @@ impl Widget for SpaceManagementPanel {
             self.wizard_step = 1;
             self.setup_pending = false;
             self.view.drop_down(cx, ids!(kind)).set_selected_item(cx, 2);
+            self.name_edited = false;
             self.view.text_input(cx, ids!(name)).set_text(cx, "");
             self.load(cx);
             return;
@@ -1197,6 +1206,9 @@ impl Widget for SpaceManagementPanel {
         }
         if self.view.check_box(cx, ids!(encrypted)).changed(actions) == Some(true) {
             self.view.check_box(cx, ids!(public)).set_active(cx, false, Animate::Yes);
+        }
+        if self.view.text_input(cx, ids!(name)).changed(actions).is_some() {
+            self.name_edited = true;
         }
         if self.view.text_input(cx, ids!(name)).changed(actions).is_some()
             || self.view.text_input(cx, ids!(topic)).changed(actions).is_some() {
@@ -1570,6 +1582,7 @@ impl SpaceManagementPanelRef {
                 inner.manage = parent.is_some();
                 inner.created = None;
                 inner.wizard_step = 0;
+                inner.name_edited = false;
                 inner.setup_pending = false;
                 inner.setup_config = None;
                 inner.setup_project = None;
@@ -1698,6 +1711,91 @@ mod tests {
         let rows=serde_json::json!({"rooms":[{"projectId":"p","roomId":"!r:test","active":true},{"projectId":"p","roomId":"!r:test","active":false}]});
         assert!(registered_rooms(&rows,"p").is_err());
     }
+    #[test]
+    fn required_name_explains_empty_and_whitespace_after_editing() {
+        let (mut cx, mut panel) = panel();
+        panel.wizard_step = 1;
+        for kind in 0..3 {
+            panel.view.drop_down(&mut cx, ids!(kind)).set_selected_item(&mut cx, kind);
+            panel.name_edited = false;
+            panel.view.text_input(&mut cx, ids!(name)).set_text(&mut cx, "");
+            panel.sync(&mut cx);
+            assert!(!panel.view.label(&mut cx, ids!(name_error)).visible());
+            for name in ["Team", "", "   "] {
+                panel.view.text_input(&mut cx, ids!(name)).set_text(&mut cx, name);
+                panel.name_edited = true;
+                panel.sync(&mut cx);
+                let empty = name.trim().is_empty();
+                assert_eq!(panel.view.label(&mut cx, ids!(name_error)).visible(), empty);
+                if empty {
+                    assert_eq!(panel.view.label(&mut cx, ids!(name_error)).text(), "Enter a name.");
+                    assert!(!panel.view.button(&mut cx, ids!(create)).borrow().unwrap().enabled());
+                }
+            }
+        }
+        assert_eq!(panel.view.text_input(&mut cx, ids!(name)).empty_text(), "Give it a name (required)");
+        assert_eq!(crate::i18n::text_for(crate::i18n::Language::English, "Give it a name (required)"), "Give it a name (required)");
+        assert_eq!(crate::i18n::text_for(crate::i18n::Language::Chinese, "Give it a name (required)"), "输入名称（必填），例如：产品讨论");
+        assert_eq!(crate::i18n::text_for(crate::i18n::Language::Chinese, "Enter a name."), "请输入名称。");
+    }
+
+    #[test]
+    fn required_name_and_description_errors_follow_their_own_inputs() {
+        let (mut cx, mut panel) = panel();
+        let mut fields = Vec::new();
+        panel.view.view(&mut cx, ids!(creation_details)).children(&mut |_, section| {
+            section.children(&mut |id, _| fields.push(id));
+        });
+        for (input, error) in [(id!(name), id!(name_error)), (id!(topic), id!(topic_error))] {
+            let index = fields.iter().position(|id| *id == input).unwrap();
+            assert_eq!(fields[index + 1], error, "each hint belongs directly below its input");
+        }
+        panel.name_edited = true;
+        for (name, topic, name_error, topic_error) in [
+            ("".to_owned(), "".to_owned(), Some("Enter a name."), false),
+            ("x".repeat(256), "".to_owned(), Some("Use a name of 255 characters or fewer."), false),
+            ("Team".to_owned(), "x".repeat(4097), None, true),
+            ("".to_owned(), "x".repeat(4097), Some("Enter a name."), true),
+        ] {
+            panel.view.text_input(&mut cx, ids!(name)).set_text(&mut cx, &name);
+            panel.view.text_input(&mut cx, ids!(topic)).set_text(&mut cx, &topic);
+            panel.sync(&mut cx);
+            assert_eq!(panel.view.label(&mut cx, ids!(name_error)).visible(), name_error.is_some());
+            if let Some(message) = name_error {
+                assert_eq!(panel.view.label(&mut cx, ids!(name_error)).text(), message);
+            }
+            assert_eq!(panel.view.label(&mut cx, ids!(topic_error)).visible(), topic_error);
+            assert_eq!(panel.view.label(&mut cx, ids!(topic_error)).text(), "The description is too long.");
+        }
+    }
+
+    #[test]
+    fn required_name_hint_resets_when_returning_to_details_with_an_empty_name() {
+        let (mut cx, mut panel) = panel();
+        panel.active = true;
+        for name in ["", "   ", "Team"] {
+            panel.wizard_step = 1;
+            panel.name_edited = true;
+            panel.view.text_input(&mut cx, ids!(name)).set_text(&mut cx, name);
+            panel.sync(&mut cx);
+            assert_eq!(panel.view.label(&mut cx, ids!(name_error)).visible(), name.trim().is_empty());
+            let uid = panel.view.button(&mut cx, ids!(wizard_back)).widget_uid();
+            let actions = cx.capture_actions(|cx| cx.widget_action(uid, ButtonAction::Clicked(KeyModifiers::default())));
+            panel.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
+            assert_eq!(panel.wizard_step, 0);
+            let choice = panel.view.navigation_bar_button(&mut cx, ids!(agent_kind)).widget_uid();
+            let actions = cx.capture_actions(|cx| cx.widget_action(choice, crate::shared::navigation_bar_button::NavigationBarButtonAction::Clicked));
+            panel.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
+            assert_eq!(panel.view.drop_down(&mut cx, ids!(kind)).selected_item(), 1);
+            let uid = panel.view.button(&mut cx, ids!(wizard_next)).widget_uid();
+            let actions = cx.capture_actions(|cx| cx.widget_action(uid, ButtonAction::Clicked(KeyModifiers::default())));
+            panel.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
+            assert_eq!(panel.wizard_step, 1);
+            assert!(!panel.view.label(&mut cx, ids!(name_error)).visible());
+            assert_eq!(panel.name_edited, !name.trim().is_empty());
+        }
+    }
+
     #[test]
     fn creation_wizard_explains_three_paths_and_requires_a_known_writable_space() {
         let (mut cx, mut panel) = panel();
