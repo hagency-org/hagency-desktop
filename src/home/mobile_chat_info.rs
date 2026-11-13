@@ -1416,7 +1416,7 @@ mod information_target_tests {
         let owner=matrix_sdk::ruma::user_id!("@owner:server").to_owned();
         let room=matrix_sdk::ruma::room_id!("!target:server").to_owned();
         info.owner=Some(owner.clone());info.origin="https://server/".into();info.epoch=4;info.room=Some(RoomNameId::empty(room.clone()));info.agent_request=8;
-        info.data=Some(ChatInfoData {room:RoomNameId::empty(room.clone()),topic:String::new(),members:vec![member("@owner:server","Owner"),member("@reviewer:server","Reviewer")],mode:None});
+        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(room.clone()),topic:String::new(),members:vec![member("@owner:server","Owner"),member("@reviewer:server","Reviewer")],banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
         let agents=serde_json::json!([
             {"id":"a-review","displayName":"Reviewer","state":"active","puppetMxid":"@reviewer:server"},
             {"id":"a-impl","displayName":"Implementer","state":"active","puppetMxid":"@implementer:server"}
