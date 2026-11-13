@@ -2680,6 +2680,7 @@
   "Agent joined this room. In group chats, @ the Agent to ask it to reply.": "Agent 已加入此聊天室。在群聊中，请 @ Agent 让它回答。",
   "Invitation sent. Waiting for them to join.": "邀请已发送，等待对方加入。",
   "Invite to {0}": "邀请加入 {0}",
+  "Invitation sent. Waiting for them to join. This device could not share the room's earlier encrypted messages (it may not be verified), so they may not see messages from before they join.": "邀请已发送，等待对方加入。本设备未能把聊天室之前的加密消息共享给对方（可能是本设备尚未验证），对方可能看不到加入前的消息。",
   "This Agent is not available in your account. Its owner must add it to this room using Add agent.": "此 Agent 不属于你的账号。请其主人通过“添加 Agent”将它加入此聊天室。",
   "This Agent is not available to add. Check that it belongs to you and its resource authorization is still valid in Agent → My Agents.": "此 Agent 目前无法添加。请到 Agent → 我的 Agent，确认它属于当前账号，并检查资源授权是否仍有效。",
   "Only available Agents are listed. If a pool Agent is missing, check its resource authorization in Agent → My Agents.": "这里只显示可添加的 Agent。若资源池 Agent 未出现，请到 Agent → 我的 Agent 检查它的资源授权。",

@@ -7543,6 +7543,8 @@ pub enum InviteResultAction {
     Sent {
         room_id: OwnedRoomId,
         user_id: OwnedUserId,
+        /// Set when the room's encrypted history could not be shared with the invitee.
+        history_not_shared: Option<String>,
     },
     /// The invite failed to be sent.
     ///
