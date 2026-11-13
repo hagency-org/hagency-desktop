@@ -1726,7 +1726,7 @@ impl Widget for RoomScreen {
                     // Only handle if this is for the current room.
                     if self.room_name_id.as_ref().is_some_and(|rn| rn.room_id() == room_id) {
                         enqueue_popup_notification(
-                            "Sent invite successfully.",
+                            crate::i18n::tr("Sent invite successfully."),
                             PopupKind::Success,
                             Some(4.0),
                         );

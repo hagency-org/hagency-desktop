@@ -250,6 +250,7 @@
   "Failed to generate link: {0}": "Failed to generate link: {0}",
   "Failed to knock on room.\n\nError: {error}.": "Failed to knock on room.\n\nError: {error}.",
   "Failed to leave space \"{space_name_id}\".\n\nError: {e}": "Failed to leave space \"{space_name_id}\".\n\nError: {e}",
+  "Sent invite successfully.": "Sent invite successfully.",
   "Failed to send invite.\n\nError: {error}": "Failed to send invite.\n\nError: {error}",
   "Favorite": "Favorite",
   "Fetching {room_or_alias_id}...": "Fetching {room_or_alias_id}...",

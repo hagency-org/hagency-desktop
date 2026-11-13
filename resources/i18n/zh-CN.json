@@ -252,6 +252,7 @@
   "Failed to generate link: {0}": "无法生成链接：{0}",
   "Failed to knock on room.\n\nError: {error}.": "无法申请加入聊天室。\n\n错误：{error}。",
   "Failed to leave space \"{space_name_id}\".\n\nError: {e}": "无法退出空间“{space_name_id}”。\n\n错误：{e}",
+  "Sent invite successfully.": "邀请已发送。",
   "Failed to send invite.\n\nError: {error}": "邀请发送失败。\n\n错误：{error}",
   "Favorite": "收藏",
   "Fetching {room_or_alias_id}...": "正在获取 {room_or_alias_id}…",
