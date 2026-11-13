@@ -633,11 +633,17 @@ impl MobileChatInfo {
             },
             Ok(value) => {
                 self.agent_project=value["projectId"].as_str().unwrap_or("").into();
-                self.agents=value["agents"].as_array().map(|rows|rows.iter().filter(|a|a["state"] == "active").cloned().collect()).unwrap_or_default();
+                // An Agent whose account is already in this Room has nothing left to add.
+                let present: HashSet<String> = self.data.as_ref()
+                    .map(|d| d.members.iter().map(|p| p.user_id.to_string()).collect()).unwrap_or_default();
+                let active: Vec<serde_json::Value> = value["agents"].as_array().map(|rows|rows.iter().filter(|a|a["state"] == "active").cloned().collect()).unwrap_or_default();
+                let already_here = active.iter().filter(|a| a["puppetMxid"].as_str().is_some_and(|m| present.contains(m))).count();
+                self.agents=active.into_iter().filter(|a| !a["puppetMxid"].as_str().is_some_and(|m| present.contains(m))).collect();
                 let labels=std::iter::once(crate::i18n::tr("Choose my Agent").to_owned()).chain(self.agents.iter().map(|a|a["displayName"].as_str().filter(|name|!name.is_empty()).unwrap_or("Agent").to_owned())).collect();
                 self.view.drop_down(cx,ids!(my_agents)).set_labels(cx,labels);
                 self.view.drop_down(cx,ids!(my_agents)).set_selected_item(cx,0);
-                if self.agents.is_empty() {"No active Agents owned by you are available."}
+                if self.agents.is_empty() && already_here > 0 {"All of your active Agents are already in this Room."}
+                else if self.agents.is_empty() {"No active Agents owned by you are available."}
                 else {"Choose an Agent you own to bind to this Room."}
             },
             Err(code) => {error=Some(code.as_str());agent_binding_error(code)},
@@ -1398,6 +1404,38 @@ mod information_target_tests {
         result.request=7;assert!(!info.agent_response_matches(&result));result.request=8;
         result.owner=matrix_sdk::ruma::user_id!("@other:server").to_owned();assert!(!info.agent_response_matches(&result));
         info.clear();assert!(!info.agent_response_matches(&result));
+    }
+    #[test]
+    fn the_agent_picker_leaves_out_agents_already_in_the_room() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);vm.bx.captured_errors=Some(Vec::new());crate::app::register_widgets(vm);
+            let value=script_eval!(vm,{mod.widgets.MobileChatInfo {}});
+            let info=MobileChatInfo::script_from_value(vm,value);assert!(vm.take_errors().is_empty());info
+        });
+        let owner=matrix_sdk::ruma::user_id!("@owner:server").to_owned();
+        let room=matrix_sdk::ruma::room_id!("!target:server").to_owned();
+        info.owner=Some(owner.clone());info.origin="https://server/".into();info.epoch=4;info.room=Some(RoomNameId::empty(room.clone()));info.agent_request=8;
+        info.data=Some(ChatInfoData {room:RoomNameId::empty(room.clone()),topic:String::new(),members:vec![member("@owner:server","Owner"),member("@reviewer:server","Reviewer")],mode:None});
+        let agents=serde_json::json!([
+            {"id":"a-review","displayName":"Reviewer","state":"active","puppetMxid":"@reviewer:server"},
+            {"id":"a-impl","displayName":"Implementer","state":"active","puppetMxid":"@implementer:server"}
+        ]);
+        let mut result=RoomAgentsLoaded {owner,origin:"https://server/".into(),epoch:4,room_id:room,request:8,binding:false,
+            result:Ok(serde_json::json!({"roomId":"!target:server","projectId":"project","agents":agents}))};
+        info.agent_busy=true;
+        info.finish_agent_request(&mut cx,&result);
+        let ids:Vec<_>=info.agents.iter().map(|a|a["id"].as_str().unwrap()).collect();
+        assert_eq!(ids,vec!["a-impl"],"the Reviewer is already a member");
+        info.data.as_mut().unwrap().members.push(member("@implementer:server","Implementer"));
+        info.agent_busy=true;
+        info.finish_agent_request(&mut cx,&result);
+        assert!(info.agents.is_empty());
+        assert!(info.view.label(&mut cx,ids!(agent_status)).text().contains("already in this Room"), "{}", info.view.label(&mut cx,ids!(agent_status)).text());
+        result.result=Ok(serde_json::json!({"roomId":"!target:server","projectId":"project","agents":[]}));
+        info.agent_busy=true;
+        info.finish_agent_request(&mut cx,&result);
+        assert!(info.view.label(&mut cx,ids!(agent_status)).text().contains("No active Agents"));
     }
     #[test]
     fn late_members_cannot_cross_room_server_or_account_epoch() {
