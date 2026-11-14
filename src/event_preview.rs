@@ -42,6 +42,22 @@ mod usage_preview_tests {
         assert!(human.contains("**时间点很重要：**截至"));
         assert_eq!(rich.body(), body);
     }
+    #[test]
+    fn custom_message_previews_show_their_fallback_body_never_debug_text() {
+        let sender = matrix_sdk::ruma::user_id!("@_hagency_agt_01abc:test");
+        let card: MessageType = serde_json::from_value(serde_json::json!({
+            "msgtype": "im.hagency.agent_run",
+            "body": "本次任务已完成。<b>",
+            "im.hagency.agent_run": {"version": 1, "state": "completed"}
+        })).unwrap();
+        assert!(matches!(card, MessageType::_Custom(_)));
+        let preview = text_preview_of_message(&card, sender, "Agent").format_with("Agent", true);
+        assert!(preview.contains("本次任务已完成。&lt;b&gt;"), "{preview}");
+        assert!(!preview.contains("CustomMessageContent"), "{preview}");
+        let blank: MessageType = serde_json::from_value(serde_json::json!({"msgtype": "im.example.blank", "body": "  "})).unwrap();
+        let preview = text_preview_of_message(&blank, sender, "Agent").format_with("Agent", true);
+        assert!(preview.contains("[Custom message]") && !preview.contains("CustomMessageContent"), "{preview}");
+    }
 }
 
 /// What should be displayed before the text preview of an event.
@@ -324,17 +340,15 @@ fn text_preview_of_message(
                 .map(|app| format!("[Mini app] {}", htmlize::escape_text(app.title())))
                 .unwrap_or_else(|_| "[Mini app] Unsupported card".into())
         }
-        MessageType::_Custom(custom) => {
-            // Agent-chat approval events are custom msgtypes, so without this they
-            // would fall through to the Rust debug formatting below and leak
-            // `CustomMessageContent { msgtype: ... }` into the rooms list. The
-            // bridge already writes a human-readable `body`; show that instead.
-            #[cfg(feature = "agent_chat")]
-            let agent_chat_body = crate::agent_chat::approval::is_approval_msgtype(msg.msgtype())
-                .then(|| htmlize::escape_text(msg.body()).to_string());
-            #[cfg(not(feature = "agent_chat"))]
-            let agent_chat_body: Option<String> = None;
-            agent_chat_body.unwrap_or_else(|| format!("[Custom message]: {:?}", custom))
+        MessageType::_Custom(_) => {
+            // Custom msgtypes (Agent run cards, Agent questions, approval
+            // events) carry a human-readable `body` as their Matrix fallback.
+            // Show it; the SDK's debug formatting must never reach the rooms
+            // list or a thread summary.
+            match msg.body().trim() {
+                "" => String::from("[Custom message]"),
+                body => htmlize::escape_text(body).to_string(),
+            }
         }
         other => format!(
             "[Unknown message type]: {}",
