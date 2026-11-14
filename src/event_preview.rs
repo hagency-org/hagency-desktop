@@ -43,20 +43,36 @@ mod usage_preview_tests {
         assert_eq!(rich.body(), body);
     }
     #[test]
-    fn custom_message_previews_show_their_fallback_body_never_debug_text() {
+    fn custom_message_previews_never_show_debug_text_or_a_card_state() {
         let sender = matrix_sdk::ruma::user_id!("@_hagency_agt_01abc:test");
-        let card: MessageType = serde_json::from_value(serde_json::json!({
-            "msgtype": "im.hagency.agent_run",
-            "body": "本次任务已完成。<b>",
-            "im.hagency.agent_run": {"version": 1, "state": "completed"}
-        })).unwrap();
-        assert!(matches!(card, MessageType::_Custom(_)));
-        let preview = text_preview_of_message(&card, sender, "Agent").format_with("Agent", true);
-        assert!(preview.contains("本次任务已完成。&lt;b&gt;"), "{preview}");
-        assert!(!preview.contains("CustomMessageContent"), "{preview}");
-        let blank: MessageType = serde_json::from_value(serde_json::json!({"msgtype": "im.example.blank", "body": "  "})).unwrap();
-        let preview = text_preview_of_message(&blank, sender, "Agent").format_with("Agent", true);
-        assert!(preview.contains("[Custom message]") && !preview.contains("CustomMessageContent"), "{preview}");
+        let preview = |content: serde_json::Value| {
+            let message: MessageType = serde_json::from_value(content).unwrap();
+            assert!(matches!(message, MessageType::_Custom(_)));
+            text_preview_of_message(&message, sender, "Agent").format_with("Agent", true)
+        };
+        // A run card is first sent as running and edited later; its preview names
+        // the card instead of a state that would go stale.
+        let run_type = ::hagency::agent_run_controls::MSGTYPE;
+        let run = preview(serde_json::json!({
+            "msgtype": run_type,
+            "body": "Agent 正在处理，可追加指令或停止本次任务。",
+            run_type: {"version": 1, "state": "running"}
+        }));
+        assert!(run.contains(tr("Agent run record")) && !run.contains("正在处理"), "{run}");
+        let question_type = ::hagency::agent_questions::MSGTYPE;
+        let question = preview(serde_json::json!({
+            "msgtype": question_type,
+            "body": "❓ Question from the Agent / Agent 提问\n\nPick one",
+            question_type: {}
+        }));
+        assert!(question.contains(tr("Question from the Agent")) && !question.contains("❓"), "{question}");
+        let other = preview(serde_json::json!({"msgtype": "im.example.note", "body": "Plain <b>fallback</b>"}));
+        assert!(other.contains("Plain &lt;b&gt;fallback&lt;/b&gt;"), "{other}");
+        let blank = preview(serde_json::json!({"msgtype": "im.example.blank", "body": "  "}));
+        assert!(blank.contains("[Custom message]"), "{blank}");
+        for text in [run, question, other, blank] {
+            assert!(!text.contains("CustomMessageContent"), "{text}");
+        }
     }
 }
 
@@ -340,16 +356,20 @@ fn text_preview_of_message(
                 .map(|app| format!("[Mini app] {}", htmlize::escape_text(app.title())))
                 .unwrap_or_else(|_| "[Mini app] Unsupported card".into())
         }
-        MessageType::_Custom(_) => {
-            // Custom msgtypes (Agent run cards, Agent questions, approval
-            // events) carry a human-readable `body` as their Matrix fallback.
-            // Show it; the SDK's debug formatting must never reach the rooms
-            // list or a thread summary.
-            match msg.body().trim() {
+        MessageType::_Custom(_) => match msg.msgtype() {
+            // Run and question cards change state through edits, while a thread
+            // summary keeps the event as first sent: a state from their body
+            // would go stale ("running" after the run ended). Name the card.
+            ::hagency::agent_run_controls::MSGTYPE => tr("Agent run record").to_owned(),
+            ::hagency::agent_questions::MSGTYPE => tr("Question from the Agent").to_owned(),
+            // Other custom msgtypes (approval events, …) carry a human-readable
+            // `body` as their Matrix fallback. The SDK's debug formatting must
+            // never reach the rooms list or a thread summary.
+            _ => match msg.body().trim() {
                 "" => String::from("[Custom message]"),
                 body => htmlize::escape_text(body).to_string(),
-            }
-        }
+            },
+        },
         other => format!(
             "[Unknown message type]: {}",
             htmlize::escape_text(other.body()),
