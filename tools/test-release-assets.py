@@ -83,6 +83,26 @@ class ReleaseAssets(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, 'Mixed source versions'):
             release.verify('macos-arm64-windows')
 
+    def test_only_the_app_binary_is_packaged(self):
+        release.check_one_binary_target()
+        manifest = self.root/'Cargo.toml'
+        manifest.write_text(manifest.read_text().replace('[package]\n', '[package]\nname="rinx"\n')
+                            + '[[bin]]\nname="rinx"\npath="src/main.rs"\n')
+        release.check_one_binary_target()
+        manifest.write_text(manifest.read_text() + '[[bin]]\nname="fixture"\npath="examples/fixture.rs"\n'
+                            'required-features=["test-support"]\n')
+        with self.assertRaisesRegex(SystemExit, "fixture"):
+            release.check_one_binary_target()
+        manifest.write_text(manifest.read_text().rsplit('[[bin]]\nname="fixture"', 1)[0])
+        (self.root/'src'/'bin').mkdir(parents=True)
+        (self.root/'src'/'bin'/'probe.rs').write_text('fn main() {}\n')
+        with self.assertRaisesRegex(SystemExit, "probe"):
+            release.check_one_binary_target()
+
+    def test_the_real_manifest_packages_only_the_app(self):
+        release.ROOT = Path(__file__).resolve().parents[1]
+        release.check_one_binary_target()
+
     def test_unrecorded_installer_is_rejected(self):
         path = self.out/'build-macos-arm64.json'
         report = json.loads(path.read_text())

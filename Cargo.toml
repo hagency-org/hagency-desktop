@@ -174,12 +174,9 @@ hagency-owner-dashboard = { path = "crates/owner-dashboard", features = ["fixtur
 # Native writer fixtures must never acquire the user's installation authority.
 hagency = { path = "crates/hagency-client/native/hagency", features = ["test-support"] }
 
-# The JIT runner resolves binary targets, not Cargo examples. This exposes the
-# existing offline visual fixture as a binary only for test-support builds.
-[[bin]]
-name = "hagency_visual_jit"
-path = "examples/hagency_visual.rs"
-required-features = ["onboarding-test-support"]
+# No second `[[bin]]` target here: cargo-packager packages every binary target,
+# `required-features` or not, so a test-only binary breaks every installer
+# (tools/release-assets.py checks this before the release builds start).
 
 [[example]]
 name = "article_editor_review"

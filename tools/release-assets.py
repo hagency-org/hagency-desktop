@@ -50,6 +50,25 @@ def makepad_commit(manifest):
     return re.search(r'^makepad-app-module\s*=\s*\{[^\n]*\brev\s*=\s*"([^"]+)"', manifest, re.M)[1]
 
 
+def check_one_binary_target():
+    """cargo-packager 0.10.1 adds every binary target of the package to the
+    installer, `required-features` or not, and stops when one was not built.
+    A test-only binary therefore fails every installer after the full build."""
+    manifest = (ROOT/'Cargo.toml').read_text() + '\n['
+    def tables(header):
+        return re.findall(r'^' + re.escape(header) + r'[ \t]*\n(.*?)(?=^\[)', manifest, re.M | re.S)
+    def name(table):
+        found = re.search(r'^name\s*=\s*"([^"]+)"', table, re.M)
+        return found[1] if found else table.strip()
+    app = next((name(table) for table in tables('[package]')), None)
+    extra = [name(table) for table in tables('[[bin]]') if name(table) != app]
+    if (ROOT/'src'/'bin').is_dir():
+        extra += sorted(p.stem for p in (ROOT/'src'/'bin').iterdir())
+    if extra:
+        raise SystemExit(f'Binary targets besides the app would be packaged: {extra}. '
+                         'Make test programs examples or move them to another package.')
+
+
 def metadata():
     manifest = (ROOT/'Cargo.toml').read_text()
     return dict(version=re.search(r'^version\s*=\s*"([^"]+)"', manifest, re.M)[1],
@@ -111,6 +130,7 @@ def main():
     parser.add_argument('--arch')
     args = parser.parse_args()
     if args.command == 'plan':
+        check_one_binary_target()
         data = dict(matrix=json.dumps({'include':targets(args.scope)}, separators=(',',':')),
                     scope=args.scope, **metadata())
         with open(os.environ['GITHUB_OUTPUT'], 'a') as out:
