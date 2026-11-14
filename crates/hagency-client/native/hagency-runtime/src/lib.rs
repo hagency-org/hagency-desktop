@@ -8,5 +8,7 @@ pub mod octos;
 pub mod owned;
 pub mod questions;
 pub mod task_mcp;
+pub mod room_memory;
+pub mod room_memory_timeline;
 pub mod room_tools;
 pub mod live_text;

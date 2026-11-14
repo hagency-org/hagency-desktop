@@ -27,8 +27,11 @@ use sha2::{Digest, Sha256};
 mod history;
 mod documents;
 mod files;
+// TODO(R4): this file is over budget; split the Agent device (send, history, files, memory) into e2ee/ modules in a refactor session.
+mod memory;
 pub(in crate::console) use documents::RoomFile;
 pub(in crate::console) use history::HistoryBatch;
+pub(in crate::console) use memory::MemoryRoom;
 use std::{
     collections::HashMap,
     path::Path,
@@ -71,6 +74,8 @@ pub(in crate::console) struct AgentDevice {
     pub(in crate::console) run_records: std::path::PathBuf,
     revoked: Arc<AtomicBool>,
     sync: tokio::task::AbortHandle,
+    /// Encrypted-room memory scans by room, valid while the newest event id holds.
+    memory_scans: std::sync::Mutex<HashMap<String, hagency_runtime::room_memory_timeline::TimelineScan>>,
 }
 impl Drop for AgentDevice {
     fn drop(&mut self) {
@@ -458,6 +463,7 @@ impl AgentDevice {
             run_records: root.join("run-cards.json"),
             revoked,
             sync,
+            memory_scans: Default::default(),
         })
     }
 
