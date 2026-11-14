@@ -129,7 +129,7 @@ const JUMP_SEARCH_NOT_FOUND_DELAY: f64 = 2.0;
 const MAX_BACKWARDS_PAGINATIONS_WITHOUT_PROGRESS: usize = 5;
 
 
-static UNNAMED_ROOM: &str = "Unnamed Room";
+pub(crate) static UNNAMED_ROOM: &str = "Unnamed Room";
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -3727,6 +3727,8 @@ impl RoomScreen {
         pane: &UserProfileSlidingPaneRef,
         info: UserProfilePaneInfo,
     ) {
+        // TODO(R4): over budget; desktop profiles open in the right-hand region (see `profile_route`).
+        if crate::profile::profile_route::open_in_side(cx, info.clone()) { return; }
         pane.set_info(cx, info);
         pane.show(cx);
         self.redraw(cx);
