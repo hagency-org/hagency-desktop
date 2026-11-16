@@ -59,11 +59,18 @@ jobs:
       # host; their evidence cannot be supplied by a disposable CI runner.
       - run: cargo test --locked --workspace --all-targets --no-fail-fast -- --skip native_codex_real_app_server --skip native_two_agent_qualification_records_its_evidence
       - run: cargo test --locked -p hagency --features shared-budget-execution,resource-adoption --lib
-      # These functional checks retain the production two-second inspection
-      # deadline. Concurrent debug fixture/schema construction can exhaust it.
-      - name: Check bounded empty-device inventory in isolation
+      - name: Check current-profile initialization in isolation
         run: |
-          cargo test --locked -p hagency-store --features shared-budget-execution,resource-adoption --lib domain::owner_resources::adoption::empty_device::tests:: -- --test-threads=1
+          set -euo pipefail
+          test_filter='domain::owner_resources::adoption::current::tests::'
+          test_list="$RUNNER_TEMP/hagency-current-profile-tests.txt"
+          cargo test --locked -p hagency-store --features shared-budget-execution,resource-adoption --lib "$test_filter" -- --list > "$test_list"
+          cat "$test_list"
+          if ! grep -Eq "^${test_filter}.+: test$" "$test_list"; then
+            echo '::error::The current-profile test selector matched no tests.'
+            exit 1
+          fi
+          cargo test --locked -p hagency-store --features shared-budget-execution,resource-adoption --lib "$test_filter" -- --test-threads=1
   native:
     name: Native build and unit tests
     runs-on: macos-15
