@@ -144,8 +144,7 @@ impl ManagedAgentReserveCommand {
             && self.period_key[..4].bytes().all(|c| c.is_ascii_digit())
             && self.period_key[5..].parse::<u8>().is_ok_and(|n| (1..=12).contains(&n));
         if self.operation != "agent.reserve" || self.expires_at_ms <= self.issued_at_ms || !valid_period
-            || (!self.room_id.is_empty() && (!self.room_id.starts_with('!') || !self.room_id.contains(':')
-                || self.room_id.len() > 255 || self.room_id.chars().any(|c| c.is_control() || c.is_whitespace())))
+            || (!self.room_id.is_empty() && !hagency_core::identifiers::valid_room_id(&self.room_id))
             || d.name.trim().is_empty() || d.name.len() > 160 || d.name.chars().any(char::is_control)
             || d.description.len() > 2000 || d.description.chars().any(|c| c.is_control() && c != '\n')
             || d.capability.is_empty() || d.capability.len() > 80
