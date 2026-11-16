@@ -668,6 +668,14 @@ script_mod! {
                 parent := DropDown {
                     width: Fill height: (44 * mod.widgets.RINX_TEXT_SCALE) margin: Inset{} padding: Inset{left: 12 right: 36} align: Align{y: 0.5}
                     labels: ["No parent space"]
+                    popup_menu_position: PopupMenuPosition.BelowInput
+                    popup_menu: RobrixSettingsPopupMenu {
+                        width: 420
+                        menu_item: RobrixSettingsPopupMenuItem {
+                            height: 36
+                            draw_text.text_style.font_size: (12 * mod.widgets.RINX_TEXT_SCALE)
+                        }
+                    }
                     draw_text +: {color: mod.widgets.RINX_INK color_hover: mod.widgets.RINX_INK color_focus: mod.widgets.RINX_INK color_down: mod.widgets.RINX_INK text_style.font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}
                     draw_bg +: {
                         color: mod.widgets.RINX_FIELD color_hover: mod.widgets.RINX_HOVER border_color: mod.widgets.RINX_ACCENT arrow_color: mod.widgets.RINX_MUTED
