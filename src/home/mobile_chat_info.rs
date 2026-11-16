@@ -4,7 +4,7 @@ use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
 use matrix_sdk::{
     notification_settings::RoomNotificationMode,
-    ruma::{OwnedUserId, OwnedRoomId},
+    ruma::{events::room::member::MembershipState, OwnedUserId, OwnedRoomId},
     RoomMemberships,
 };
 
@@ -208,6 +208,8 @@ struct ChatInfoData {
     topic: String,
     members: Vec<UserProfile>,
     banned_members: HashSet<OwnedUserId>,
+    /// Members who were invited but have not joined yet.
+    invited: HashSet<OwnedUserId>,
     mode: Option<RoomNotificationMode>,
 }
 
@@ -226,6 +228,17 @@ fn add_member_owners(owners: &mut HashMap<OwnedUserId, OwnedUserId>, conflicts: 
         if owners.get(&agent).is_some_and(|old| old != &owner) {
             owners.remove(&agent);conflicts.insert(agent);
         } else {owners.insert(agent,owner);}
+    }
+}
+/// "N members", plus how many invitations are still waiting.
+fn member_count(data: &ChatInfoData) -> String {
+    let invited = data.members.iter().filter(|p| data.invited.contains(&p.user_id)).count();
+    let banned = data.members.iter().filter(|p| data.banned_members.contains(&p.user_id)).count();
+    let joined = crate::i18n::format("{0} members", &[("0", data.members.len().saturating_sub(invited + banned).to_string())]);
+    if invited == 0 {
+        joined
+    } else {
+        format!("{joined} · {}", crate::i18n::format("{0} invited", &[("0", invited.to_string())]))
     }
 }
 fn group_members(members: &mut Vec<UserProfile>, owners: &HashMap<OwnedUserId, OwnedUserId>) -> HashSet<OwnedUserId> {
@@ -493,11 +506,16 @@ impl MobileChatInfo {
                     .get_room(room.room_id())
                     .ok_or(crate::i18n::tr("This chat is no longer available."))?;
                 let members = room
-                    .members(RoomMemberships::JOIN | RoomMemberships::BAN)
+                    .members(RoomMemberships::JOIN | RoomMemberships::BAN | RoomMemberships::INVITE)
                     .await
                     .map_err(|e| e.to_string())?;
                 let banned_members = members.iter().filter(|m| *m.membership() == ruma::events::room::member::MembershipState::Ban)
                     .map(|m| m.user_id().to_owned()).collect();
+                let invited = members
+                    .iter()
+                    .filter(|member| *member.membership() == MembershipState::Invite)
+                    .map(|member| member.user_id().to_owned())
+                    .collect();
                 let mut members: Vec<_> = members
                     .into_iter()
                     .map(|member| UserProfile {
@@ -516,6 +534,7 @@ impl MobileChatInfo {
                     topic: room.topic().unwrap_or_default(),
                     members,
                     banned_members,
+                    invited,
                     mode: room.user_defined_notification_mode().await,
                 })
             }
@@ -614,11 +633,17 @@ impl MobileChatInfo {
             },
             Ok(value) => {
                 self.agent_project=value["projectId"].as_str().unwrap_or("").into();
-                self.agents=value["agents"].as_array().map(|rows|rows.iter().filter(|a|a["state"] == "active").cloned().collect()).unwrap_or_default();
+                // An Agent whose account is already in this Room has nothing left to add.
+                let present: HashSet<String> = self.data.as_ref()
+                    .map(|d| d.members.iter().map(|p| p.user_id.to_string()).collect()).unwrap_or_default();
+                let active: Vec<serde_json::Value> = value["agents"].as_array().map(|rows|rows.iter().filter(|a|a["state"] == "active").cloned().collect()).unwrap_or_default();
+                let already_here = active.iter().filter(|a| a["puppetMxid"].as_str().is_some_and(|m| present.contains(m))).count();
+                self.agents=active.into_iter().filter(|a| !a["puppetMxid"].as_str().is_some_and(|m| present.contains(m))).collect();
                 let labels=std::iter::once(crate::i18n::tr("Choose my Agent").to_owned()).chain(self.agents.iter().map(|a|a["displayName"].as_str().filter(|name|!name.is_empty()).unwrap_or("Agent").to_owned())).collect();
                 self.view.drop_down(cx,ids!(my_agents)).set_labels(cx,labels);
                 self.view.drop_down(cx,ids!(my_agents)).set_selected_item(cx,0);
-                if self.agents.is_empty() {"No active Agents owned by you are available."}
+                if self.agents.is_empty() && already_here > 0 {"All of your active Agents are already in this Room."}
+                else if self.agents.is_empty() {"No active Agents owned by you are available."}
                 else {"Choose an Agent you own to bind to this Room."}
             },
             Err(code) => {error=Some(code.as_str());agent_binding_error(code)},
@@ -940,7 +965,7 @@ impl Widget for MobileChatInfo {
         self.view.label(cx, ids!(members_empty)).set_visible(cx, members && self.data.as_ref().is_some_and(|d|d.members.is_empty()));
         let summary_room = self.data.as_ref().map(|data|&data.room).or(self.room.as_ref());
         self.view.label(cx, ids!(summary_name)).set_text(cx, &summary_room.map_or_else(|| crate::i18n::tr("Chat information").to_owned(), |room|room.display().into_owned()));
-        let count = self.data.as_ref().map_or_else(|| crate::i18n::tr("Loading members…").to_owned(), |data| crate::i18n::format("{0} members", &[("0",data.members.len().saturating_sub(data.banned_members.len()).to_string())]));
+        let count = self.data.as_ref().map_or_else(|| crate::i18n::tr("Loading members…").to_owned(), member_count);
         self.view.label(cx, ids!(summary_count)).set_text(cx, &count);
         // Applying a style asks for a redraw, and this runs on every draw:
         // restyling the tabs each time kept the open panel drawing for ever.
@@ -1003,6 +1028,11 @@ impl Widget for MobileChatInfo {
                                 |framework| format!("{framework} · {}", profile.user_id),
                             );
                         let detail = if data.banned_members.contains(&profile.user_id) {crate::i18n::format("Banned · {user}", &[("user", detail)])} else {detail};
+                        let detail = if data.invited.contains(&profile.user_id) {
+                            format!("{} · {detail}", crate::i18n::tr("Invited, not joined yet"))
+                        } else {
+                            detail
+                        };
                         widget.label(cx, ids!(user_id)).set_text(cx, &detail);
                         let avatar = widget.avatar(cx, ids!(avatar));
                         let loaded =
@@ -1064,7 +1094,7 @@ impl MobileChatInfoRef {
         panel.room=Some(RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Team room".into()),room.clone()));
         panel.tab=InfoTab::Members;
         if scenario=="members" {
-            panel.data=Some(ChatInfoData {can_invite:true,room:panel.room.clone().unwrap(),topic:String::new(),members:Vec::new(),banned_members:HashSet::new(),mode:None});
+            panel.data=Some(ChatInfoData {can_invite:true,room:panel.room.clone().unwrap(),topic:String::new(),members:Vec::new(),banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
             panel.select_tab(cx,InfoTab::Members);
             panel.view.redraw(cx);
             return;
@@ -1122,6 +1152,15 @@ mod information_target_tests {
         UserProfile {user_id:OwnedUserId::try_from(id).unwrap(),username:Some(name.into()),avatar_state:AvatarState::Known(None)}
     }
     #[test]
+    fn member_count_names_pending_invitations() {
+        let room=RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap());
+        let members=vec![member("@a:s","A"),member("@b:s","B"),member("@c:s","C")];
+        let mut data=ChatInfoData {can_invite:true,room,topic:String::new(),members,banned_members:HashSet::new(),invited:HashSet::new(),mode:None};
+        assert_eq!(member_count(&data),"3 members");
+        data.invited.insert(OwnedUserId::try_from("@c:s").unwrap());
+        assert_eq!(member_count(&data),"2 members · 1 invited");
+    }
+    #[test]
     fn agents_follow_only_their_present_human_owner_without_losing_members() {
         let mut members=vec![member("@alice:s","Alice"),member("@bob:s","Bob"),member("@a:s","Z agent"),member("@b:s","A agent"),member("@orphan:s","Orphan"),member("@external:s","External"),member("@_hagency_service:s","Hagency service")];
         let mut owners=HashMap::new();let mut conflicts=HashSet::new();
@@ -1144,7 +1183,7 @@ mod information_target_tests {
             let value=script_eval!(vm,{mod.widgets.MobileChatInfo {}});
             MobileChatInfo::script_from_value(vm,value)
         });
-        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap()),topic:String::new(),members,banned_members:HashSet::new(),mode:None});
+        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap()),topic:String::new(),members,banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
         info.indented_members=indented;
         info.select_tab(&mut cx,InfoTab::Members);draw_information(&mut info,&mut cx);
         let list=info.view.portal_list(&mut cx,ids!(list));
@@ -1280,7 +1319,7 @@ mod information_target_tests {
             let info=MobileChatInfo::script_from_value(vm,value);assert!(vm.take_errors().is_empty());info
         });
         let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),matrix_sdk::ruma::room_id!("!a:server").to_owned());
-        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:"A topic".into(),members:vec![],banned_members:HashSet::new(),mode:None,can_invite:true});
+        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:"A topic".into(),members:vec![],banned_members:HashSet::new(),invited:HashSet::new(),mode:None,can_invite:true});
         info.agent_command=Some(("exact-original-input".into(),"original-key".into()));
         draw_information(&mut info,&mut cx);
         assert_eq!(info.view.label(&mut cx,ids!(summary_name)).text(),"Room A");
@@ -1367,6 +1406,38 @@ mod information_target_tests {
         info.clear();assert!(!info.agent_response_matches(&result));
     }
     #[test]
+    fn the_agent_picker_leaves_out_agents_already_in_the_room() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);vm.bx.captured_errors=Some(Vec::new());crate::app::register_widgets(vm);
+            let value=script_eval!(vm,{mod.widgets.MobileChatInfo {}});
+            let info=MobileChatInfo::script_from_value(vm,value);assert!(vm.take_errors().is_empty());info
+        });
+        let owner=matrix_sdk::ruma::user_id!("@owner:server").to_owned();
+        let room=matrix_sdk::ruma::room_id!("!target:server").to_owned();
+        info.owner=Some(owner.clone());info.origin="https://server/".into();info.epoch=4;info.room=Some(RoomNameId::empty(room.clone()));info.agent_request=8;
+        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(room.clone()),topic:String::new(),members:vec![member("@owner:server","Owner"),member("@reviewer:server","Reviewer")],banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
+        let agents=serde_json::json!([
+            {"id":"a-review","displayName":"Reviewer","state":"active","puppetMxid":"@reviewer:server"},
+            {"id":"a-impl","displayName":"Implementer","state":"active","puppetMxid":"@implementer:server"}
+        ]);
+        let mut result=RoomAgentsLoaded {owner,origin:"https://server/".into(),epoch:4,room_id:room,request:8,binding:false,
+            result:Ok(serde_json::json!({"roomId":"!target:server","projectId":"project","agents":agents}))};
+        info.agent_busy=true;
+        info.finish_agent_request(&mut cx,&result);
+        let ids:Vec<_>=info.agents.iter().map(|a|a["id"].as_str().unwrap()).collect();
+        assert_eq!(ids,vec!["a-impl"],"the Reviewer is already a member");
+        info.data.as_mut().unwrap().members.push(member("@implementer:server","Implementer"));
+        info.agent_busy=true;
+        info.finish_agent_request(&mut cx,&result);
+        assert!(info.agents.is_empty());
+        assert!(info.view.label(&mut cx,ids!(agent_status)).text().contains("already in this Room"), "{}", info.view.label(&mut cx,ids!(agent_status)).text());
+        result.result=Ok(serde_json::json!({"roomId":"!target:server","projectId":"project","agents":[]}));
+        info.agent_busy=true;
+        info.finish_agent_request(&mut cx,&result);
+        assert!(info.view.label(&mut cx,ids!(agent_status)).text().contains("No active Agents"));
+    }
+    #[test]
     fn late_members_cannot_cross_room_server_or_account_epoch() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let mut info = cx.with_vm(|vm| {
@@ -1394,6 +1465,7 @@ mod information_target_tests {
                 room: RoomNameId::empty(room_a),
                 topic: String::new(),
                 members: vec![], banned_members: HashSet::new(),
+                invited: HashSet::new(),
                 mode: None,
             }),
         };

@@ -107,8 +107,17 @@ pub struct SharedPermissionNotice {
     #[rust] seen:Vec<String>,
     /// The last request this client decided here, and how.
     #[rust] last_decision:Option<(String,String)>,
+    /// The room has shown Agent work or a permission request since it was selected.
+    #[rust] tracked:bool,
 }
 impl SharedPermissionNotice {
+    /// A failed status read is shown only where Agent work was seen; a room without
+    /// Agents (a direct chat) keeps retrying quietly instead of showing an error.
+    fn on_failure(&mut self) {
+        if self.tracked || !self.rows.is_empty() || !self.execution_text.is_empty() {
+            self.error="Could not confirm permission status; retrying.".into();
+        }
+    }
     /// Shows the spinner while the Agent works or a decision is on its way.
     /// The spinner updates its retained draw call without re-running the draw
     /// of the timeline that contains it.
@@ -241,15 +250,17 @@ impl Widget for SharedPermissionNotice {
                     match &done.value {
                         Ok(value)=>{
                             self.error.clear();
+                            self.tracked|=execution_row(value,&self.room,&self.thread).is_some();
                             self.execution_busy=execution_busy(value,&self.room,&self.thread);
                             self.execution_text=execution_notice(value,&self.room,&self.thread).unwrap_or_default().into();
                             self.rows=value["approvals"].as_array().cloned().unwrap_or_default().into_iter().filter(|r|r["approval"]["roomId"]==self.room && (self.thread.is_empty() || r["approval"]["threadRoot"]==self.thread)).take(16).collect();
                             if self.selected>=self.rows.len(){self.selected=0;}
+                            self.tracked|=!self.rows.is_empty();
                             // The cards on the messages read the same requests.
                             if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){cx.action(PendingApprovalsChanged);}
                             self.render(cx);
                         },
-                        Err(_)=>{self.error="Could not confirm permission status; retrying.".into();self.render(cx);},
+                        Err(_)=>{self.on_failure();self.render(cx);},
                     }
                     if self.active{self.timer=cx.start_timeout(2.0);}
                 }
@@ -277,7 +288,7 @@ impl SharedPermissionNoticeRef {
         let Some(mut this)=self.borrow_mut()else{return};
         let identity=Service::for_current().map(|s|s.identity()).unwrap_or_default();
         if this.identity!=identity || this.room!=room || this.thread!=thread {
-            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
+            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.tracked=false;this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
         }else if this.active && !this.loading && this.timer.is_empty(){this.poll(cx);}
     }
 }
@@ -389,6 +400,13 @@ mod tests {
             // not start a clock that redraws every visible message on each tick.
             assert_eq!(started,0,"{step}: the notice must not start its own redraw clock");
         }
+        // A direct chat with no Agent work: a failed status read stays hidden.
+        inner.error.clear();inner.rows.clear();inner.execution_text.clear();inner.tracked=false;inner.active=true;
+        inner.on_failure();inner.render(&mut cx);
+        assert!(inner.error.is_empty() && !inner.view.visible(),"no Agent work: no error card");
+        // Once Agent work was seen in the room, the same failure is reported.
+        inner.tracked=true;inner.on_failure();inner.render(&mut cx);
+        assert!(!inner.error.is_empty() && inner.view.visible(),"Agent work seen: error card");
     }
 
     /// The person who sent the message approves an Agent's tool calls one after

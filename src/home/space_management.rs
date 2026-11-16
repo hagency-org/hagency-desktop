@@ -50,7 +50,9 @@ impl CreateRoomConfig {
         );
         let mut request = Request::new();
         request.name = Some(name.into());
-        request.topic = Some(self.topic.trim().into());
+        // An empty description is no topic, not an empty m.room.topic event in every new room.
+        let topic = self.topic.trim();
+        request.topic = (!topic.is_empty()).then(|| topic.into());
         request.visibility = if self.public {
             Visibility::Public
         } else {
@@ -519,6 +521,20 @@ pub struct SpaceManagementChanged {
     pub owner: OwnedUserId,
     pub parent: Option<OwnedRoomId>,
 }
+/// The create button's label. While the chosen space is read the button cannot act yet; calling that
+/// "Creating…" made a click look accepted when nothing was created.
+fn create_label(loading: bool, busy: bool, room: bool) -> &'static str {
+    if loading {
+        "Reading the space…"
+    } else if busy {
+        "Creating…"
+    } else if room {
+        "Create room"
+    } else {
+        "Create space"
+    }
+}
+
 #[derive(Debug)]
 struct Loaded {
     owner: OwnedUserId,
@@ -652,6 +668,14 @@ script_mod! {
                 parent := DropDown {
                     width: Fill height: (44 * mod.widgets.RINX_TEXT_SCALE) margin: Inset{} padding: Inset{left: 12 right: 36} align: Align{y: 0.5}
                     labels: ["No parent space"]
+                    popup_menu_position: PopupMenuPosition.BelowInput
+                    popup_menu: RobrixSettingsPopupMenu {
+                        width: 420
+                        menu_item: RobrixSettingsPopupMenuItem {
+                            height: 36
+                            draw_text.text_style.font_size: (12 * mod.widgets.RINX_TEXT_SCALE)
+                        }
+                    }
                     draw_text +: {color: mod.widgets.RINX_INK color_hover: mod.widgets.RINX_INK color_focus: mod.widgets.RINX_INK color_down: mod.widgets.RINX_INK text_style.font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}
                     draw_bg +: {
                         color: mod.widgets.RINX_FIELD color_hover: mod.widgets.RINX_HOVER border_color: mod.widgets.RINX_ACCENT arrow_color: mod.widgets.RINX_MUTED
@@ -800,6 +824,9 @@ pub struct SpaceManagementPanel {
     active: bool,
     #[rust]
     busy: bool,
+    /// `busy` because the chosen space is being read, not because something is being created.
+    #[rust]
+    loading: bool,
     #[rust]
     manage: bool,
     #[rust]
@@ -974,7 +1001,7 @@ impl SpaceManagementPanel {
             && folder_valid
             && (!room || self.choice().is_some_and(|c| c.can_link) && self.data.projects_known)
             && self.created.is_none());
-        self.view.button(cx, ids!(create)).set_text(cx, crate::i18n::tr(if self.busy {"Creating…"} else if room {"Create room"} else {"Create space"}));
+        self.view.button(cx, ids!(create)).set_text(cx, crate::i18n::tr(create_label(self.loading, self.busy, room)));
         for id in [id!(wizard_next),id!(wizard_back),id!(finish_setup),id!(create_child)] {
             self.view.button(cx, &[id]).set_enabled(cx, !self.busy);
         }
@@ -1020,6 +1047,7 @@ impl SpaceManagementPanel {
         let request = self.request;
         let parent = self.parent.clone();
         self.busy = true;
+        self.loading = true;
         self.sync(cx);
         spawn_async_task(async move {
             let result = snapshot(&client, parent.as_ref())
@@ -1049,6 +1077,7 @@ impl SpaceManagementPanel {
         let request = self.request;
         let parent = self.parent.clone();
         self.busy = true;
+        self.loading = false;
         self.status(cx, StatusTone::Info, "Saving…");
         self.sync(cx);
         spawn_async_task(async move {
@@ -1111,6 +1140,7 @@ impl Widget for SpaceManagementPanel {
                 && self.current(&loaded.owner, loaded.request)
             {
                 self.busy = false;
+                self.loading = false;
                 match &loaded.result {
                     Ok(data) => {
                         self.data = data.clone();
@@ -1931,6 +1961,27 @@ mod tests {
         assert!(request.initial_state.is_empty());
         assert_eq!(request.visibility, Visibility::Private);
     }
+    #[test]
+    fn reading_the_chosen_space_is_not_shown_as_creating() {
+        assert_eq!(create_label(true, true, true), "Reading the space…");
+        assert_eq!(create_label(false, true, true), "Creating…");
+        assert_eq!(create_label(false, false, true), "Create room");
+        assert_eq!(create_label(false, false, false), "Create space");
+    }
+    #[test]
+    fn an_empty_description_sends_no_topic() {
+        let config = |topic: &str| CreateRoomConfig {
+            name: "Room".into(),
+            topic: topic.into(),
+            public: false,
+            encrypted: true,
+            space: false,
+            parent: None,
+        };
+        assert_eq!(config("   ").request().unwrap().topic, None);
+        assert_eq!(config(" Plans ").request().unwrap().topic.as_deref(), Some("Plans"));
+    }
+
     #[test]
     fn private_room_encryption_and_invalid_names() {
         let mut config = CreateRoomConfig {
