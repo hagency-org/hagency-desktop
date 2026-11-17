@@ -1626,6 +1626,12 @@ impl MiniAppsPanel {
         let action = match (args.get("destination").and_then(Value::as_str), args.len()) {
             (Some("matrix_workspaces"), 1) => crate::hagency::ui::HagencyAction::OpenProjects,
             (Some("local_agents"), 1) => crate::hagency::ui::HagencyAction::OpenAgents,
+            // The script's "Create agent" buttons and the first-run route open
+            // the native Create agent dialog.
+            (Some("new_local_agent"), 1) => {
+                cx.action(crate::hagency::create_agent::CreateAgentAction::Open);
+                return Ok(());
+            }
             // Navigation only: the panel opens the Agent only if this owner has it.
             (Some("local_agent"), 2) => {
                 let agent_id = args.get("agentId").and_then(Value::as_str)
@@ -2193,6 +2199,14 @@ impl MiniAppsPanelRef {
                     modal.open(cx);
                 }
                 MiniAppsAction::OpenAgent => {
+                    // First run: the Agent rail item also opens the native Create
+                    // agent dialog in one click, above the Agents page that opens
+                    // below it. The dialog is not a consent to the mini-app's
+                    // permissions; its review (if not yet given) still shows.
+                    crate::hagency::agent_presence::refresh();
+                    if agent_entry(crate::hagency::agent_presence::needs_first_agent()) == AgentEntry::CreateDialog {
+                        cx.action(crate::hagency::create_agent::CreateAgentAction::Open);
+                    }
                     // A panel that is not running (its recovery page shows)
                     // is started again by coming back to it.
                     let already_open = inner.open && !inner.showing_catalog && !inner.showing_hub
@@ -2302,5 +2316,22 @@ mod tests {
         panel.show_import(&mut cx);
         assert!(!panel.navigate_back(&mut cx));
         assert!(panel.showing_catalog, "Catalog import returns to the catalog");
+    }
+}
+
+/// Where the Agent rail item leads.
+#[derive(Debug, PartialEq, Eq)]
+enum AgentEntry { CreateDialog, MiniApp }
+fn agent_entry(first_run: bool) -> AgentEntry {
+    if first_run { AgentEntry::CreateDialog } else { AgentEntry::MiniApp }
+}
+#[cfg(test)]
+mod agent_entry_tests {
+    use super::*;
+    #[test]
+    fn first_run_opens_create_agent_without_granting_permissions() {
+        assert_eq!(agent_entry(true), AgentEntry::CreateDialog);
+        assert_eq!(agent_entry(true), AgentEntry::CreateDialog, "the Agents page opens below the dialog either way");
+        assert_eq!(agent_entry(false), AgentEntry::MiniApp, "with an Agent: the review shows as usual");
     }
 }

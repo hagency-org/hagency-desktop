@@ -128,6 +128,7 @@ mod embedded_content {
                 approval_inbox_modal := Modal {can_dismiss: false content := ApprovalInbox {}}
                 agent_access_modal := Modal {can_dismiss: false content := AgentAccessPanel {}}
                 space_management_modal := Modal {can_dismiss: false content := SpaceManagementPanel {}}
+                new_room_modal := Modal {can_dismiss: false content := NewRoomDialog {}}
                 hagency_management_modal := Modal {can_dismiss: false content := View {
                     width: Fill height: Fill flow: Down
                     close := RinxBackButton {}
@@ -178,6 +179,9 @@ mod embedded_content {
                     can_dismiss: false
                     content := RoomHistoryPanel {}
                 }
+
+                // Last, so it opens above the mini-app panel whose buttons open it.
+                create_agent_modal := Modal {can_dismiss: false content := CreateAgentDialog {}}
 
                 PopupList {}
 
@@ -255,6 +259,8 @@ pub struct App {
     #[rust] hosted_windows: Vec<(HostedWindow, WidgetRef)>,
     /// The top-level app state, shared across various parts of the app.
     #[rust] app_state: AppState,
+    /// The window title last set (window_title); recomputed so a renamed account shows.
+    #[rust] window_title: std::cell::RefCell<String>,
     /// Polls pending Agent permission requests while signed in, so the owner
     /// is told within the request's two-minute window wherever they are.
     #[rust] approvals_timer: Timer,
@@ -356,6 +362,7 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        // TODO(R4): app.rs is over budget; session-chrome hooks (title, login visibility) belong in their own module.
         crate::memory_budget::process_completed_decodes(cx, actions);
         for action in actions {
             if let Some(crate::sliding_sync::TimelineCacheEvicted(kind, channel)) = action.downcast_ref() {
@@ -594,6 +601,12 @@ impl MatchEvent for App {
                 // which will open the login_status_modal to show the failure message.
             }
 
+            if let Some(action) = action.downcast_ref::<crate::hagency::create_agent::CreateAgentAction>() {
+                use crate::hagency::create_agent::CreateAgentDialogWidgetRefExt;
+                let modal = self.ui.modal(cx, ids!(create_agent_modal));
+                self.ui.create_agent_dialog(cx, ids!(create_agent_modal.content)).action(cx, modal, action);
+                continue;
+            }
             #[cfg(feature = "agent_chat")]
             if let Some(action) = action.downcast_ref::<ApprovalInboxAction>() {
                 let modal = self.ui.modal(cx, ids!(approval_inbox_modal));
@@ -604,6 +617,11 @@ impl MatchEvent for App {
                 let modal = self.ui.modal(cx, ids!(agent_access_modal));
                 self.ui.agent_access_panel(cx, ids!(agent_access_modal.content)).action(cx, modal, action, &self.app_state.agent_access);
                 if matches!(action, AgentAccessAction::Changed) {self.persist_runtime_state(cx, "agent access");cx.redraw_all();}
+            }
+            if let Some(action) = action.downcast_ref::<crate::home::new_room_dialog::NewRoomAction>() {
+                use crate::home::new_room_dialog::NewRoomDialogWidgetRefExt;
+                let modal = self.ui.modal(cx, ids!(new_room_modal));
+                self.ui.new_room_dialog(cx, ids!(new_room_modal.content)).action(cx, modal, action);
             }
             if let Some(action) = action.downcast_ref::<SpaceManagementAction>() {
                 let modal = self.ui.modal(cx, ids!(space_management_modal));
@@ -1349,11 +1367,19 @@ impl App {
             let modal = self.ui.modal(cx, ids!(approval_inbox_modal));
             self.ui.approval_inbox(cx, ids!(approval_inbox_modal.content)).action(cx, modal, &ApprovalInboxAction::Close, &self.app_state);
         }
+        {
+            use crate::hagency::create_agent::{CreateAgentAction, CreateAgentDialogWidgetRefExt};
+            let modal = self.ui.modal(cx, ids!(create_agent_modal));
+            self.ui.create_agent_dialog(cx, ids!(create_agent_modal.content)).action(cx, modal, &CreateAgentAction::Close);
+        }
         let modal = self.ui.modal(cx, ids!(agent_access_modal));
         self.ui.agent_access_panel(cx, ids!(agent_access_modal.content)).action(cx, modal, &AgentAccessAction::Close, &self.app_state.agent_access);
         crate::agent_access::publish(None, &Default::default());
         let modal = self.ui.modal(cx, ids!(space_management_modal));
         self.ui.space_management_panel(cx, ids!(space_management_modal.content)).action(cx, modal, &SpaceManagementAction::Close);
+        // The New room form holds the old account's draft and request id.
+        let modal = self.ui.modal(cx, ids!(new_room_modal));
+        crate::home::new_room_dialog::NewRoomDialogWidgetRefExt::new_room_dialog(&self.ui, cx, ids!(new_room_modal.content)).action(cx, modal, &crate::home::new_room_dialog::NewRoomAction::Close);
         crate::assistant::set_current_room(None);
         for window in [HostedWindow::Moments, HostedWindow::Article, HostedWindow::WebBrowser, HostedWindow::MiniApps] {
             self.close_hosted_window(cx, window, true);
@@ -1470,6 +1496,7 @@ pub fn register_widgets(vm: &mut ScriptVm) {
     crate::room::script_mod(vm);
     crate::join_leave_room_modal::script_mod(vm);
     crate::block_user_modal::script_mod(vm);
+    crate::hagency::create_agent::script_mod(vm);
     crate::moderation_modal::script_mod(vm);
     crate::verification_modal::script_mod(vm);
     crate::profile::script_mod(vm);
@@ -1598,6 +1625,12 @@ impl AppMain for App {
             return;
         }
         if back_unhandled || matches!(event, Event::KeyDown(k) if k.key_code == KeyCode::Escape) {
+            if self.ui.modal(cx, ids!(create_agent_modal)).is_open() {
+                // Back and Escape close the Create agent dialog like Cancel (a late result is ignored).
+                event.back_pressed();
+                cx.action(crate::hagency::create_agent::CreateAgentAction::Close);
+                return;
+            }
             let management = self.ui.modal(cx, ids!(hagency_management_modal));
             if management.is_open() {
                 event.back_pressed();
@@ -1652,6 +1685,11 @@ impl AppMain for App {
         // Outside-click dismissal happens inside Modal, without a Hide action.
         self.sync_native_browser_overlays(cx);
         owner_dashboard::accessibility::after_event(&self.ui, cx, event);
+        // After the children: a profile change updates the cache there, and the
+        // cache's later Signal carries the new name.
+        if matches!(event, Event::Actions(_) | Event::Signal) {
+            crate::window_title::refresh(cx, &self.ui.window(cx, ids!(main_window)), self.app_state.logged_in, &mut self.window_title.borrow_mut());
+        }
         // The backend may restore the next account only after every child has
         // consumed ClearAppState, including hidden settings/room widgets.
         if let Event::Actions(actions) = event {
@@ -2136,6 +2174,8 @@ impl App {
 
     fn update_login_visibility(&self, cx: &mut Cx) {
         let show_login = !self.app_state.logged_in;
+        // Sign-in, sign-out and account switch all pass here: recompute the window title.
+        self.window_title.borrow_mut().clear();
         if show_login {
             self.close_web_browser(cx);
         }
@@ -2326,6 +2366,7 @@ impl AppState {
         crate::hagency::pending_approvals::forget_identity();
         crate::hagency::pending_admissions::forget_identity();
         crate::hagency::pending_questions::forget_identity();
+        crate::hagency::agent_presence::reset();
         *self = Self::default();
     }
 }
