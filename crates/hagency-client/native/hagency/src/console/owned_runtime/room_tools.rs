@@ -11,6 +11,8 @@ use crate::console::native::{
 use hagency_agent_local::room_tools::{PendingRoomCall, RoomReply};
 use hagency_runtime::room_tools::RoomOperation;
 use serde_json::{Value, json};
+mod memory;
+mod skills;
 fn failure(status: u16, code: &str) -> NativeError {
     NativeError {
         status,
@@ -212,10 +214,21 @@ impl Host {
                 ),
                 _ => text.clone(),
             };
+            let memory_block = memory::block(&*state.source).await;
+            let skill_index = skills::index(&*state.source).await;
+            let memory_block = match (memory_block, skill_index) {
+                (Some(memory), Some(index)) => Some(format!("{memory}\n\n{index}")),
+                (memory, index) => memory.or(index),
+            };
             // Native warm and cold sessions own their conversation history.
             // Leave earlier room pages for explicit reads instead of appending
             // the same recent transcript to every new user turn.
-            Ok::<_, &'static str>(state.history.followup_prompt(request))
+            let oversized = request.len() >= 48 * 1024;
+            let prompt = state.history.followup_prompt(request);
+            Ok::<_, &'static str>(match memory_block {
+                Some(block) if !oversized => format!("{block}\n\n{prompt}"),
+                _ => prompt,
+            })
         })
         .await;
         match prepared {
@@ -240,6 +253,8 @@ impl Host {
                 }
             }
             RoomOperation::File(operation) => state.files.handle(operation, &state.history).await,
+            RoomOperation::Memory(operation) => memory::handle(&*state.source, operation).await,
+            RoomOperation::Skill(operation) => skills::handle(&*state.source, operation).await,
         };
         let is_error = serde_json::from_str::<Value>(&text)
             .ok()

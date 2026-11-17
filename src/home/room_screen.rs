@@ -7,6 +7,8 @@ use crate::home::identity_reset_banner::{IdentityReset, IdentityResetBannerWidge
 use super::shared_permission_notice::SharedPermissionNoticeWidgetRefExt;
 use crate::theme::Snapshot as ThemeSnapshot;
 use super::agent_runtime_notice::AgentRuntimeNoticeWidgetRefExt;
+use super::room_memory::card::MemoryProposalCardWidgetRefExt;
+use super::room_skills::card::SkillProposalCardWidgetRefExt;
 use crate::miniapps::action_room::ActionRoomBoardWidgetExt;
 use std::{
     borrow::Cow,
@@ -436,6 +438,8 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_run_card_2 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 octos_action_card := mod.widgets.OctosActionCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                memory_proposal_card := mod.widgets.MemoryProposalCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                skill_proposal_card := mod.widgets.SkillProposalCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_reply := mod.widgets.AgentReply {width: Fill}
                 agent_usage := mod.widgets.AgentUsage {width: Fill{max: mod.widgets.RINX_READING_WIDTH} show_toggle: false}
                 link_preview_view := mod.widgets.LinkPreview {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
@@ -488,6 +492,8 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {}
                 agent_run_card_2 := mod.widgets.AgentRunCard {}
                 octos_action_card := mod.widgets.OctosActionCard {}
+                memory_proposal_card := mod.widgets.MemoryProposalCard {}
+                skill_proposal_card := mod.widgets.SkillProposalCard {}
                 agent_reply := mod.widgets.AgentReply {}
                 agent_usage := mod.widgets.AgentUsage {show_toggle: false}
             link_preview_view := mod.widgets.LinkPreview {font_size: mod.widgets.MOBILE_MESSAGE_FONT_SIZE}
@@ -680,6 +686,8 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_run_card_2 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 octos_action_card := mod.widgets.OctosActionCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                memory_proposal_card := mod.widgets.MemoryProposalCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                skill_proposal_card := mod.widgets.SkillProposalCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_reply := mod.widgets.AgentReply {width: Fill}
                 agent_usage := mod.widgets.AgentUsage {width: Fill{max: mod.widgets.RINX_READING_WIDTH} show_toggle: false}
                 link_preview_view := mod.widgets.LinkPreview {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
@@ -5490,6 +5498,11 @@ fn populate_message_view(
                             body,
                             formatted.as_ref(),
                         );
+                        // A memory proposal sent as text gives way to its intro too (the card shows it).
+                        let (body, formatted) = match proposal_card_intro(event_tl_item, timeline_kind.room_id()) {
+                            Some(intro) => (Cow::Owned(intro), None),
+                            None => (body, formatted),
+                        };
                         new_drawn_status.content_drawn = populate_text_message_content(
                             cx,
                             &html_or_plaintext_ref,
@@ -5547,6 +5560,12 @@ fn populate_message_view(
                             body,
                             formatted.as_ref(),
                         );
+                        // A memory proposal shows as a card; its notice body gives way to one intro line.
+                        let memory_intro = proposal_card_intro(event_tl_item, timeline_kind.room_id());
+                        let (body, formatted) = match memory_intro.as_deref() {
+                            Some(intro) => (Cow::Borrowed(intro), None),
+                            None => (body, formatted),
+                        };
                         new_drawn_status.content_drawn = populate_text_message_content(
                             cx,
                             &html_or_plaintext_ref,
@@ -6045,10 +6064,16 @@ fn populate_message_view(
         },
         _ => None,
     };
+    // A memory or skill proposal shows only its card and intro line in `content.message`:
+    // the Agent reply renderer would draw the fallback body (raw Agent id) below the card.
     #[cfg(feature = "agent_chat")]
-    let agent_reply = agent_text.is_some()
-        && event_tl_item.event_id().is_some()
-        && AgentMessagePresentation::for_sender(event_tl_item.sender()).is_some();
+    let agent_text = agent_text.filter(|_| proposal_card_intro(event_tl_item, timeline_kind.room_id()).is_none());
+    #[cfg(feature = "agent_chat")]
+    let agent_reply = renders_as_agent_reply(
+        agent_text.is_some(),
+        event_tl_item.event_id().is_some(),
+        AgentMessagePresentation::for_sender(event_tl_item.sender()).is_some(),
+    );
     #[cfg(not(feature = "agent_chat"))]
     let agent_reply = false;
     item.widget(cx, ids!(content.message)).set_visible(cx, web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply);
@@ -6216,6 +6241,11 @@ fn populate_message_view(
     }
     if !used_cached_item {
         populate_agent_run_cards(cx, &item, event_tl_item, timeline_kind);
+        // TODO(R4): this file is over budget; split message-card population into its own module.
+        item.memory_proposal_card(cx, ids!(content.memory_proposal_card))
+            .show(cx, timeline_kind.room_id(), super::room_memory::proposal_of(event_tl_item, timeline_kind.room_id()));
+        item.skill_proposal_card(cx, ids!(content.skill_proposal_card))
+            .show(cx, timeline_kind.room_id(), super::room_skills::proposal_of(event_tl_item, timeline_kind.room_id()));
     }
 
     // If `used_cached_item` is false, we should always redraw the profile, even if profile_drawn is true.
@@ -7507,6 +7537,31 @@ fn populate_small_state_event(
 
 
 /// Returns the display name of the sender of the given `event_tl_item`, if available.
+/// Whether an Agent's text/notice draws in the Agent reply renderer (`agent_text` is
+/// already `None` for a proposal, whose card replaces the body).
+fn renders_as_agent_reply(agent_text: bool, has_event_id: bool, agent_sender: bool) -> bool {
+    agent_text && has_event_id && agent_sender
+}
+#[cfg(test)]
+mod proposal_body_tests {
+    /// Regression (live 2026-11-15): a memory proposal drew its card AND the Agent reply
+    /// body "Memory proposal from agt_…: … Reason: …" under it.
+    #[test]
+    fn a_proposal_never_reaches_the_agent_reply_body() {
+        let proposal = true;
+        let agent_text = (!proposal).then_some(());
+        assert!(!super::renders_as_agent_reply(agent_text.is_some(), true, true));
+        assert!(super::renders_as_agent_reply(true, true, true), "an ordinary Agent reply still renders there");
+    }
+}
+
+/// The one line that replaces a memory or skill proposal's body above its card.
+fn proposal_card_intro(event: &EventTimelineItem, room: &matrix_sdk::ruma::RoomId) -> Option<String> {
+    super::room_memory::proposal_intro_of(event, room).or_else(|| {
+        super::room_skills::proposal_of(event, room).map(|_| super::room_skills::proposal_intro(&super::room_memory::sender_name(event)))
+    })
+}
+
 fn get_profile_display_name(event_tl_item: &EventTimelineItem) -> Option<String> {
     if let TimelineDetails::Ready(profile) = event_tl_item.sender_profile() {
         profile.display_name.clone()
@@ -8031,6 +8086,7 @@ impl Widget for Message {
                 ids!(content.agent_question_card_1).as_slice(),
                 ids!(content.agent_question_card_2).as_slice(),
                 ids!(content.octos_action_card).as_slice(),
+                ids!(content.memory_proposal_card).as_slice(),
                 ids!(content.agent_reply).as_slice(),
                 ids!(content.agent_usage).as_slice(),
                 ids!(content.download_section).as_slice(),
@@ -8090,7 +8146,8 @@ impl Message {
             || self.view.widget(cx, ids!(content.agent_question_card)).area().clipped_rect(cx).contains(abs)
             || self.view.widget(cx, ids!(content.agent_question_card_1)).area().clipped_rect(cx).contains(abs)
             || self.view.widget(cx, ids!(content.agent_question_card_2)).area().clipped_rect(cx).contains(abs)
-            || self.view.widget(cx, ids!(content.octos_action_card)).area().clipped_rect(cx).contains(abs);
+            || self.view.widget(cx, ids!(content.octos_action_card)).area().clipped_rect(cx).contains(abs)
+            || self.view.widget(cx, ids!(content.memory_proposal_card)).area().clipped_rect(cx).contains(abs);
         #[cfg(not(feature = "agent_chat"))]
         let in_approval_card = false;
         in_approval_card

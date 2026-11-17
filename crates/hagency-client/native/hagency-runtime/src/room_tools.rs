@@ -94,18 +94,34 @@ impl RoomFileOperation {
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub struct RoomTools {
     files: bool,
+    memory: bool,
+    skills: bool,
 }
 impl RoomTools {
     pub fn history() -> Self {
-        Self { files: false }
+        Self { files: false, memory: false, skills: false }
     }
     pub fn history_and_files() -> Self {
-        Self { files: true }
+        Self { files: true, memory: false, skills: false }
+    }
+    /// Add room memory's read and propose tools; hosts opt in per runtime.
+    pub fn with_memory(self) -> Self {
+        Self { memory: true, ..self }
+    }
+    /// Add the read-only team skills tool; hosts opt in per runtime.
+    pub fn with_skills(self) -> Self {
+        Self { skills: true, ..self }
     }
     pub fn definitions(self) -> Vec<Value> {
         let mut definitions = vec![history_definition()];
         if self.files {
             definitions.extend(file_definitions());
+        }
+        if self.memory {
+            definitions.extend(crate::room_memory::definitions());
+        }
+        if self.skills {
+            definitions.extend(crate::room_skills::definitions());
         }
         definitions
     }
@@ -120,6 +136,10 @@ impl RoomTools {
                     .map_err(|_| Error::Malformed)?;
             operation.validate()?;
             Ok(RoomOperation::File(operation))
+        } else if self.memory && crate::room_memory::is_memory_tool(name) {
+            crate::room_memory::parse(name, arguments).map(RoomOperation::Memory)
+        } else if self.skills && crate::room_skills::is_skill_tool(name) {
+            crate::room_skills::parse(name, arguments).map(RoomOperation::Skill)
         } else {
             Err(Error::Unsupported)
         }
@@ -129,12 +149,16 @@ impl RoomTools {
 pub enum RoomOperation {
     History { cursor: Option<String> },
     File(RoomFileOperation),
+    Memory(crate::room_memory::MemoryOperation),
+    Skill(crate::room_skills::SkillOperation),
 }
 impl RoomOperation {
     pub fn name(&self) -> &'static str {
         match self {
             Self::History { .. } => ROOM_HISTORY_TOOL,
             Self::File(operation) => operation.name(),
+            Self::Memory(operation) => operation.name(),
+            Self::Skill(operation) => operation.name(),
         }
     }
 }
