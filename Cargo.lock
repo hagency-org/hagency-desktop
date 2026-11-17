@@ -5001,7 +5001,6 @@ dependencies = [
  "matrix-sdk-store-encryption",
  "palpo-hagency-contract",
  "rusqlite",
- "rustix",
  "secret-service",
  "security-framework 3.7.0",
  "serde",
@@ -10669,7 +10668,6 @@ dependencies = [
 name = "rinx-miniapp-core"
 version = "0.1.0"
 dependencies = [
- "serde",
  "serde_json",
 ]
 
