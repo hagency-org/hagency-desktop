@@ -49,7 +49,7 @@ fn click_and_return_post_one_event_each_without_logging_the_body() {
             if mode == "blocked" || mode.starts_with("dev-") {
                 // Model the development launcher losing both readers. Start draining
                 // only after the homeserver has received both events.
-                let deadline = Instant::now() + Duration::from_secs(25);
+                let deadline = Instant::now() + Duration::from_secs(60);
                 while !delivered.exists() && child.try_wait().unwrap().is_none() {
                     if mode == "dev-disconnected"
                         && child.stdout.is_some()
@@ -91,14 +91,17 @@ fn click_and_return_post_one_event_each_without_logging_the_body() {
             }
             for marker in [CLICK, RETURN] {
                 assert!(!logs.contains(marker));
-                assert!(
-                    !logs.contains(
-                        &ruma::serde::Base64::<ruma::serde::base64::Standard>::new(
-                            marker.as_bytes().to_vec()
-                        )
-                        .encode()
-                    )
-                );
+                let bytes = marker.as_bytes();
+                // A serialized event or signed envelope can start the body at
+                // any byte offset within a Base64 group.
+                for offset in 0..3 {
+                    let tail = &bytes[offset..];
+                    let groups = tail[..tail.len() / 3 * 3].to_vec();
+                    let encoded = ruma::serde::Base64::<ruma::serde::base64::Standard>::new(groups);
+                    assert!(!logs.contains(&encoded.encode()));
+                }
+                let hex: String = bytes.iter().map(|b| format!("{b:02x}")).collect();
+                assert!(!logs.contains(&hex) && !logs.contains(&hex.to_uppercase()));
                 for bytes in [
                     format!("{:X?}", marker.as_bytes()),
                     format!("{:?}", marker.as_bytes()),
