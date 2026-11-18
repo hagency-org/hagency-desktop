@@ -79,6 +79,7 @@ impl Fixture {
         let origin = format!("http://{}/", listener.local_addr().unwrap());
         let service = Service(Arc::new(Inner {
             encrypted_approvals: None,
+            shared_approvals_unconfigured: Default::default(),
             origin: origin.clone(),
             owner: "@owner:test".into(),
             epoch: 1,
