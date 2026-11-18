@@ -1,0 +1,72 @@
+name: Hagency Desktop Linux checks
+
+# The library workspace's tests on Linux, beside the macOS jobs of main.yml.
+# The same commands, see tools/linux-checks.sh. No macOS machine is used.
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      parts:
+        description: 'library: the library workspace. all: also the app checks and the regression gate, which are not in the default set'
+        type: choice
+        options: [library, all]
+        default: library
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Fixtures inject SecretStore; CI must never access a runner's native vault.
+  HAGENCY_NATIVE_CREDENTIAL_IO: deny
+  # No step reads this. Naming the secret makes GitHub mask the name of the
+  # project's own Linux machine wherever it would appear in this public log.
+  MASKED_IN_LOGS: ${{ secrets.CI_MASK_MACHINE_NAME_C }}
+
+jobs:
+  linux:
+    name: Linux (${{ matrix.part }})
+    # The repository variable HAGENCY_LINUX_RUNNER chooses the machine. With
+    # "own", pushes, manual runs and pull requests from this repository go to
+    # the project's own Linux machines, which carry the hagency-linux label;
+    # with any other value, or none, to a GitHub machine. A pull request from
+    # a fork stays on a GitHub machine: a fork never chooses what runs on the
+    # project's hardware. The own machines have the system packages and
+    # rustup installed, and a job there cannot use sudo.
+    runs-on: ${{ vars.HAGENCY_LINUX_RUNNER == 'own' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","hagency-linux"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        part: ${{ fromJSON(inputs.parts == 'all' && '["lib-hagency","lib-store","lib-runtime","lib-rest","lib-features","app","gate"]' || '["lib-hagency","lib-store","lib-runtime","lib-rest","lib-features"]') }}
+    steps:
+      - uses: actions/checkout@v7
+      - name: JIT-line makepad checkout
+        shell: bash
+        run: if [ -f .jit/sources.sh ]; then bash .jit/sources.sh; fi
+      - name: Install system dependencies
+        if: runner.environment == 'github-hosted'
+        run: |
+          # The manual-page index is rebuilt after every install and can take
+          # minutes on these machines.
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
+            libssl-dev libsqlite3-dev pkg-config llvm clang libclang-dev cmake \
+            libxcursor-dev libx11-dev libasound2-dev libpulse-dev \
+            libwayland-dev libxkbcommon-dev libdrm-dev \
+            libfontconfig1-dev libfreetype-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Run the part
+        run: bash tools/linux-checks.sh ${{ matrix.part }}
