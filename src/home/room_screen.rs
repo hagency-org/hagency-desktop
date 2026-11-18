@@ -6064,6 +6064,9 @@ fn populate_message_view(
         && agent_presentation.is_some();
     #[cfg(not(feature = "agent_chat"))]
     let agent_reply = false;
+    // Alternative card renderers can source their body from another event.
+    #[cfg(feature = "tsp")]
+    let tsp_body_visible = web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply;
     item.widget(cx, ids!(content.message)).set_visible(cx, web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply);
     item.forward_card(cx, ids!(content.forward_card)).set_bundle(cx, forward_bundle);
     new_drawn_status.content_drawn &= item.mini_app_card(cx, ids!(content.mini_app_card)).set_app(
@@ -6337,35 +6340,12 @@ fn populate_message_view(
     }
 
     #[cfg(feature = "tsp")] {
-        use matrix_sdk::ruma::serde::Base64;
-        use crate::tsp::{self, tsp_sign_indicator::{TspSignState, TspSignIndicatorWidgetRefExt}};
-
-        if let Some(mut tsp_sig) = event_tl_item.latest_json()
-            .and_then(|raw| raw.get_field::<serde_json::Value>("content").ok())
-            .flatten()
-            .and_then(|content_obj| content_obj.get("org.robius.tsp_signature").cloned())
-            .and_then(|tsp_sig_value| serde_json::from_value::<Base64>(tsp_sig_value).ok())
-            .map(|b64| b64.into_inner())
-        {
-            log!("Found event {:?} with TSP signature.", event_tl_item.event_id());
-            let tsp_sign_state = if let Some(sender_vid) = tsp::tsp_state_ref().lock().unwrap()
-                .get_verified_vid_for(event_tl_item.sender())
-            {
-                log!("Found verified VID for sender {}: \"{}\"", event_tl_item.sender(), sender_vid.identifier());
-                match tsp_sdk::crypto::verify(&*sender_vid, &mut tsp_sig) {
-                    Ok(_) => TspSignState::Verified,
-                    Err(_) => TspSignState::WrongSignature,
-                }
-            } else {
-                TspSignState::Unknown
-            };
-
-            log!("TSP signature state for event {:?} is {:?}", event_tl_item.event_id(), tsp_sign_state);
-            item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator))
-                .show_with_state(cx, tsp_sign_state);
+        use crate::tsp::{message_signature::timeline_signature, tsp_sign_indicator::TspSignIndicatorWidgetRefExt};
+        let indicator = item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator));
+        if let Some(state) = tsp_body_visible.then(|| timeline_signature(event_tl_item, msg_like_content)).flatten() {
+            indicator.show_with_state(cx, state);
         } else {
-            // Hide the TSP indicator (in case we reused the message widget at this item index).
-            item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator)).hide(cx);
+            indicator.hide(cx);
         }
     }
 

@@ -15,6 +15,7 @@ use crate::{persistence::{self, tsp_wallets_dir, SavedTspState}, shared::popup_l
 
 pub mod create_did_modal;
 pub mod create_wallet_modal;
+pub(crate) mod message_signature;
 pub mod sign_anycast_checkbox;
 pub mod tsp_settings_screen;
 pub mod tsp_sign_indicator;

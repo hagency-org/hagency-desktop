@@ -99,6 +99,8 @@ jobs:
             crates/owner-dashboard -> target
             crates/hagency-client -> target
       - run: brew install cmake
+      - name: Verify TSP timeline signatures
+        run: cargo test --locked --profile fast --lib --features tsp tsp::message_signature::tests
       - run: cargo test --locked --manifest-path crates/miniapp-core/Cargo.toml
       - run: cargo test --locked --manifest-path crates/miniapp-catalog/Cargo.toml
       - run: cargo test --locked --manifest-path crates/system-apps/Cargo.toml
