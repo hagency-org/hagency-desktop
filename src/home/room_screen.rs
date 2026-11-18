@@ -6352,13 +6352,10 @@ fn populate_message_view(
                 .get_verified_vid_for(event_tl_item.sender())
             {
                 log!("Found verified VID for sender {}: \"{}\"", event_tl_item.sender(), sender_vid.identifier());
-                tsp_sdk::crypto::verify(&*sender_vid, &mut tsp_sig).map_or(
-                    TspSignState::WrongSignature,
-                    |(msg, msg_type)| {
-                        log!("TSP signature verified successfully!\n    Msg type: {msg_type:?}\n    Message: {:?} ({msg:X?})", std::str::from_utf8(msg));
-                        TspSignState::Verified
-                    }
-                )
+                match tsp_sdk::crypto::verify(&*sender_vid, &mut tsp_sig) {
+                    Ok(_) => TspSignState::Verified,
+                    Err(_) => TspSignState::WrongSignature,
+                }
             } else {
                 TspSignState::Unknown
             };

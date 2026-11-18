@@ -811,7 +811,7 @@ async fn async_tsp_worker(
         }
 
         TspRequest::RespondToDidAssociationRequest { details, wallet_db, accepted } => {
-            log!("Received TspRequest::RespondToDidAssociationRequest(details: {details:?}, accepted: {accepted})");
+            log!("Received TspRequest::RespondToDidAssociationRequest(accepted: {accepted})");
             Handle::current().spawn(async move {
                 let result = respond_to_did_association_request(&details, &wallet_db, accepted).await;
                 // If all was successful, add this new association to the TSP state.
@@ -1083,28 +1083,26 @@ async fn receive_messages_for_vid(
 
             Some(msg_result) = message_stream.next() => { match msg_result {
                 Ok(message) => match message {
-                    ReceivedTspMessage::GenericMessage { sender, receiver, nonconfidential_data, message, .. } => {
-                        log!("Received generic TSP message from {sender} to {receiver:?}: {:?}, nonconfidential_data: {:?}", message, nonconfidential_data);
+                    ReceivedTspMessage::GenericMessage { message, .. } => {
                         let Ok(tsp_message) = serde_json::from_slice::<TspMessage>(&message) else {
                             log!("Received a message that couldn't be deserialized into a TspMessage.");
                             continue;
                         };
                         match tsp_message {
                             TspMessage::VerificationRequest(details) => {
-                                log!("Received TSP verification request: {:?}", details);
+                                log!("Received TSP verification request.");
                                 Cx::post_action(TspIdentityAction::ReceivedDidAssociationRequest {
                                     details,
                                     wallet_db: wallet_db.clone().into(),
                                 });
                             }
                             TspMessage::VerificationResponse {details, accepted} => {
-                                log!("Received {} verification response: {:?}", accepted, details);
+                                log!("Received TSP verification response (accepted: {accepted}).");
                                 let mut tsp_state = tsp_state_ref().lock().unwrap();
-                                if let Some(matching_request) = tsp_state.pending_verification_requests.iter()
+                                if let Some(idx) = tsp_state.pending_verification_requests.iter()
                                     .position(|vreq| vreq == &details)
-                                    .map(|idx| tsp_state.pending_verification_requests.swap_remove(idx))
                                 {
-                                    log!("Found matching verification request: {:?}", matching_request);
+                                    tsp_state.pending_verification_requests.swap_remove(idx);
                                     tsp_state.associations.insert(
                                         details.responding_user_id.clone(),
                                         details.responding_vid.clone(),
@@ -1121,8 +1119,8 @@ async fn receive_messages_for_vid(
                             }
                         }
                     }
-                    _other => {
-                        log!("Received other TSP message: {:?}", _other);
+                    _ => {
+                        log!("Received other TSP message.");
                     }
                 }
                 Err(e) => {

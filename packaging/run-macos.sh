@@ -46,6 +46,8 @@ cleanup() {
     for child in "$open_pid" "$stdout_pid" "$stderr_pid"; do
         if [[ -n $child ]]; then
             kill "$child" 2>/dev/null || true
+            # A suspended relay must resume to act on SIGTERM.
+            kill -CONT "$child" 2>/dev/null || true
             wait "$child" 2>/dev/null || true
         fi
     done
@@ -185,8 +187,10 @@ if [[ ! $app_status =~ ^[0-9]+$ || $app_status -gt 255 ]]; then
 fi
 completed=1
 app_pid=
-wait "$stdout_pid" || true
-stdout_pid=
-wait "$stderr_pid" || true
-stderr_pid=
+# Give healthy relays time to flush. If Cargo's output is stalled or a relay
+# is suspended, cleanup will terminate it without holding the app's exit status.
+for ((attempt=0; attempt<20; attempt++)); do
+    if ! kill -0 "$stdout_pid" 2>/dev/null && ! kill -0 "$stderr_pid" 2>/dev/null; then break; fi
+    sleep 0.05 || true
+done
 exit "$app_status"

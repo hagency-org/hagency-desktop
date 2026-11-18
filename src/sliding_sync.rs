@@ -662,6 +662,32 @@ fn robrix_timeline_event_filter(
     crate::mini_app::is_timeline_event(event) || crate::forwarding::is_timeline_event(event) || default_event_filter(event, rules)
 }
 
+pub enum ComposerSendOutcome {
+    Queued,
+    Failed,
+}
+
+/// Wakes the UI even if the request is discarded before its worker runs.
+pub struct ComposerSendCompletion(Option<tokio::sync::oneshot::Sender<ComposerSendOutcome>>);
+
+impl ComposerSendCompletion {
+    pub(crate) fn channel() -> (Self, tokio::sync::oneshot::Receiver<ComposerSendOutcome>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Self(Some(tx)), rx)
+    }
+
+    pub(crate) fn finish(mut self, outcome: ComposerSendOutcome) {
+        if let Some(tx) = self.0.take() { let _ = tx.send(outcome); }
+    }
+}
+
+impl Drop for ComposerSendCompletion {
+    fn drop(&mut self) {
+        drop(self.0.take());
+        SignalToUI::set_ui_signal();
+    }
+}
+
 /// The set of requests for async work that can be made to the worker thread.
 #[allow(clippy::large_enum_variant)]
 pub enum MatrixRequest {
@@ -919,6 +945,8 @@ pub enum MatrixRequest {
     },
     /// Request to send a message to the given room.
     SendMessage {
+        /// Composer handoff ends when the SDK accepts the message or reports a failure.
+        completion: Option<ComposerSendCompletion>,
         routing: Option<serde_json::Map<String, serde_json::Value>>,
         timeline_kind: TimelineKind,
         message: RoomMessageEventContent,
@@ -1076,8 +1104,10 @@ pub enum MatrixRequest {
 pub fn submit_async_request(req: MatrixRequest) {
     if account_changing() && !matches!(req, MatrixRequest::ChangeAccount(_) | MatrixRequest::Reauthenticate | MatrixRequest::ClearWorkerSession(_) | MatrixRequest::CancelSsoLogin) { return; }
     if let Some(sender) = REQUEST_SENDER.lock().unwrap().as_ref() {
-        sender.send((crate::account_session::epoch(), req))
-            .expect("BUG: matrix worker task receiver has died!");
+        if sender.send((crate::account_session::epoch(), req)).is_err() {
+            error!("Matrix worker is unavailable.");
+            SignalToUI::set_ui_signal();
+        }
     }
 }
 
@@ -2696,6 +2726,7 @@ async fn matrix_worker_task(
             }
 
             MatrixRequest::SendMessage {
+                completion,
                 routing,
                 timeline_kind,
                 message,
@@ -2710,7 +2741,14 @@ async fn matrix_worker_task(
 
                 // Spawn a new async task that will send the actual message.
                 let _send_message_task = crate::account_session::spawn(async move {
-                    log!("Sending message to {timeline_kind}: {message:?}...");
+                    let report_failure = |message, replied_to, completion: Option<ComposerSendCompletion>| {
+                        if let Some(completion) = completion {
+                            completion.finish(ComposerSendOutcome::Failed);
+                        } else {
+                            let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                        }
+                    };
+                    log!("Sending message to {timeline_kind}...");
                     #[cfg(feature = "tsp")]
                     let mut routing = routing;
                     let message = {
@@ -2742,7 +2780,7 @@ async fn matrix_worker_task(
                                                     PopupKind::Error,
                                                     None,
                                                 );
-                                                let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                                                report_failure(message, replied_to, completion);
                                                 SignalToUI::set_ui_signal();
                                                 return;
                                             }
@@ -2755,7 +2793,7 @@ async fn matrix_worker_task(
                                             PopupKind::Error,
                                             None,
                                         );
-                                        let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                                        report_failure(message, replied_to, completion);
                                         SignalToUI::set_ui_signal();
                                         return;
                                     }
@@ -2768,7 +2806,7 @@ async fn matrix_worker_task(
                     if let Err(error) = crate::room_encryption::confirmed_state(timeline.room()).await {
                         error!("Could not check the encryption of {timeline_kind} before sending: {error:?}");
                         enqueue_popup_notification(crate::i18n::tr(crate::room_encryption::UNCONFIRMED).to_string(), PopupKind::Error, None);
-                        let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                        report_failure(message, replied_to, completion);
                         SignalToUI::set_ui_signal();
                         return;
                     }
@@ -2776,7 +2814,7 @@ async fn matrix_worker_task(
                     #[cfg(feature = "agent_chat")]
                     if let Err(error) = crate::agent_chat::encrypted_send::ensure_ready(timeline.room(), &message).await {
                         enqueue_popup_notification(crate::i18n::tr(error).to_string(), PopupKind::Error, None);
-                        let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                        report_failure(message, replied_to, completion);
                         SignalToUI::set_ui_signal();
                         return;
                     }
@@ -2793,7 +2831,7 @@ async fn matrix_worker_task(
                             Err(_e) => {
                                 error!("Failed to build reply content to send to {timeline_kind}: {_e:?}");
                                 enqueue_popup_notification(format!("Failed to send reply: {_e}"), PopupKind::Error, None);
-                                let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                                report_failure(message, replied_to, completion);
                                 SignalToUI::set_ui_signal();
                                 return;
                             }
@@ -2802,11 +2840,14 @@ async fn matrix_worker_task(
                         message.clone().into()
                     };
                     match timeline.send_with_extra_content(content, routing).await {
-                        Ok(_send_handle) => log!("Sent {r_or_m} to {timeline_kind}."),
+                        Ok(_send_handle) => {
+                            if let Some(completion) = completion { completion.finish(ComposerSendOutcome::Queued); }
+                            log!("Queued {r_or_m} for {timeline_kind}.");
+                        }
                         Err(_e) => {
                             error!("Failed to send {r_or_m} to {timeline_kind}: {_e:?}");
                             enqueue_popup_notification(format!("Failed to send {r_or_m}: {_e}"), PopupKind::Error, None);
-                            let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                            report_failure(message, replied_to, completion);
                         }
                     }
                     SignalToUI::set_ui_signal();
@@ -6994,3 +7035,6 @@ pub(crate) fn notify_invalid_matrix_session(client: &matrix_sdk::Client, epoch: 
 }
 
 include!("timeline_retention.rs");
+
+#[cfg(test)]
+mod composer_send_tests;

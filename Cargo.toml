@@ -188,6 +188,9 @@ harness = false
 required-features = ["onboarding-test-support"]
 
 ## For OAuth/SSO login on iOS, via `ASWebAuthenticationSession`. Ugh....
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tracing-appender = "0.2.5"
+
 [target.'cfg(target_os = "ios")'.dependencies]
 robius-web-auth-session = { git = "https://github.com/project-robius/robius" }
 

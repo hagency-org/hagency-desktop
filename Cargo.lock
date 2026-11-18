@@ -10599,6 +10599,7 @@ dependencies = [
  "thiserror 2.0.20",
  "tokio",
  "toml 1.1.5+spec-1.1.0",
+ "tracing-appender",
  "tracing-subscriber",
  "tsp_sdk",
  "unicode-segmentation 1.13.3",
