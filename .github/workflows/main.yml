@@ -43,6 +43,20 @@ jobs:
         working-directory: crates/hagency-client
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The project's own Mac keeps cargo's build output between jobs; the
+          # next step cleans the rest of its checkout.
+          clean: ${{ runner.environment == 'github-hosted' }}
+      - name: Keep the build output of the job before this one
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        # The toolchain step below switches incremental builds off unless the
+        # variable is set already. With kept output they pay: of a crate that
+        # changed, the compiler redoes only the parts that changed.
+        run: |
+          bash tools/ci-keep-build-output.sh
+          echo "CARGO_INCREMENTAL=1" >> "$GITHUB_ENV"
       - name: JIT-line makepad checkout
         shell: bash
         working-directory: ${{ github.workspace }}
@@ -100,6 +114,20 @@ jobs:
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The project's own Mac keeps cargo's build output between jobs; the
+          # next step cleans the rest of its checkout.
+          clean: ${{ runner.environment == 'github-hosted' }}
+      - name: Keep the build output of the job before this one
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        # The toolchain step below switches incremental builds off unless the
+        # variable is set already. With kept output they pay: of a crate that
+        # changed, the compiler redoes only the parts that changed.
+        run: |
+          bash tools/ci-keep-build-output.sh
+          echo "CARGO_INCREMENTAL=1" >> "$GITHUB_ENV"
       - name: JIT-line makepad checkout
         shell: bash
         working-directory: ${{ github.workspace }}
