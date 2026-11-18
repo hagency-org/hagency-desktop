@@ -478,6 +478,18 @@ impl MobileChatInfo {
         // children that a partial View redraw would update.
         cx.redraw_all();
     }
+    fn update_room(&mut self, cx: &mut Cx, room: RoomNameId, opening: bool) {
+        if !self.pin_is_current()
+            || self.room.as_ref().is_none_or(|current| current.room_id() != room.room_id())
+        {
+            self.load(cx, room);
+        } else if opening {
+            // The hidden pane can miss membership events. Keep its invitation
+            // state, but fetch the roster before showing member actions again.
+            self.data = None;
+            self.fetch_info(cx, room);
+        }
+    }
     fn load(&mut self, cx: &mut Cx, room: RoomNameId) {
         self.clear();
         self.fetch_info(cx, room);
@@ -1131,15 +1143,15 @@ impl MobileChatInfoRef {
         self.borrow()
             .and_then(|inner| inner.room.as_ref().map(|room| room.room_id().clone()))
     }
-    pub fn ensure_room(&self, cx: &mut Cx, room: RoomNameId) {
-        if let Some(mut inner) = self.borrow_mut()
-            && (!inner.pin_is_current()
-                || inner
-                    .room
-                    .as_ref()
-                    .is_none_or(|current| current.room_id() != room.room_id()))
-        {
-            inner.load(cx, room);
+    pub fn update_room(&self, cx: &mut Cx, room: RoomNameId, opening: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.update_room(cx, room, opening);
+        }
+    }
+
+    pub fn close_picker(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.close_agent_picker(cx);
         }
     }
     pub fn show(&self, cx: &mut Cx, room: RoomNameId) {
@@ -1367,17 +1379,40 @@ mod information_target_tests {
             info.handle_event(&mut cx, &verified(SessionPin::capture(&current).unwrap()), &mut Scope::empty());
             assert!(!info.failed && info.load_deadline.is_some());
             *panel.borrow_mut() = Some(info);
-            tokio::time::timeout(INFO_TIMEOUT, async {
-                loop {
-                    cx.handle_action_receiver();
-                    if panel.borrow().as_ref().unwrap().load_deadline.is_none() { break; }
-                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-                }
-            }).await.expect("the current room must receive a terminal response");
-            let panel = panel.borrow();
-            let info = panel.as_ref().unwrap();
-            assert!(!info.failed, "{}", info.status);
-            assert_eq!(info.data.as_ref().unwrap().room.room_id(), room.room_id());
+            async fn wait_for_info(cx: &mut Cx, panel: &RefCell<Option<MobileChatInfo>>) {
+                tokio::time::timeout(INFO_TIMEOUT, async {
+                    loop {
+                        cx.handle_action_receiver();
+                        if panel.borrow().as_ref().unwrap().load_deadline.is_none() { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                }).await.expect("the current room must receive a terminal response");
+            }
+            wait_for_info(&mut cx, &panel).await;
+            {
+                let mut loaded = panel.borrow_mut();
+                let info = loaded.as_mut().unwrap();
+                assert!(!info.failed, "{}", info.status);
+                assert_eq!(info.data.as_ref().unwrap().room.room_id(), room.room_id());
+                let selected = info.room.clone().unwrap();
+                info.data.as_mut().unwrap().members.push(member("@stale:example.org", "Stale"));
+                let previous = info.request;
+                let command = ("agent".to_owned(), "original-key".to_owned());
+                info.agent_command = Some(command.clone());
+                info.update_room(&mut cx, selected.clone(), false);
+                assert_eq!(info.request, previous);
+                assert!(info.data.as_ref().unwrap().members.iter().any(|m| m.user_id.as_str() == "@stale:example.org"));
+                info.update_room(&mut cx, selected.clone(), true);
+                assert!(info.data.is_none() && info.load_deadline.is_some());
+                assert_ne!(info.request, previous);
+                assert_eq!(info.agent_command, Some(command));
+                let refresh = info.request;
+                info.update_room(&mut cx, selected, false);
+                assert_eq!(info.request, refresh);
+            }
+            wait_for_info(&mut cx, &panel).await;
+            assert!(panel.borrow().as_ref().unwrap().data.as_ref().unwrap().members
+                .iter().all(|m| m.user_id.as_str() != "@stale:example.org"));
             install_link_client(None);
         });
     }

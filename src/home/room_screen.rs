@@ -4229,14 +4229,23 @@ impl RoomScreen {
                 });
             }
         }
-        self.view.view(cx, ids!(desktop_chat_info_panel)).set_visible(cx, show && inline);
-        self.view.view(cx, ids!(compact_chat_info_panel)).set_visible(cx, show && !inline);
+        for (panel_id, info_id, visible) in [
+            (ids!(desktop_chat_info_panel), ids!(desktop_chat_info), show && inline),
+            (ids!(compact_chat_info_panel), ids!(compact_chat_info), show && !inline),
+        ] {
+            let panel = self.view.view(cx, panel_id);
+            let was_visible = panel.visible();
+            let info = self.view.mobile_chat_info(cx, info_id);
+            if was_visible && !visible {
+                info.close_picker(cx);
+            }
+            panel.set_visible(cx, visible);
+            if visible && let Some(room) = self.room_name_id.clone() {
+                info.update_room(cx, room, !was_visible);
+            }
+        }
         let card = self.view.view(cx, ids!(compact_chat_info_card));
         if let Some(mut card) = card.borrow_mut() { card.walk.width = Size::Fixed(available.clamp(0.0, 280.0)); }
-        if show && let Some(room) = self.room_name_id.clone() {
-            let info = if inline {ids!(desktop_chat_info)} else {ids!(compact_chat_info)};
-            self.view.mobile_chat_info(cx, info).ensure_room(cx, room);
-        }
     }
 
     /// Fills in the desktop single-pane title bar, if this instance has one enabled.
@@ -8598,7 +8607,11 @@ mod desktop_information_columns_tests {
         assert!(input.pos.x >= center.pos.x && input.pos.x + input.size.x <= info.pos.x + 0.1);
         draw(&mut cx, &mut screen, 600.0);
         assert_eq!(screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx).size.x, 320.0);
+        let picker = screen.view.modal(&mut cx, ids!(desktop_chat_info.agent_picker_modal));
+        picker.open(&mut cx);
+        assert!(picker.is_open());
         draw(&mut cx, &mut screen, 500.0);
+        assert!(!picker.is_open(), "a hidden pane must release its picker");
         assert!(!screen.view.view(&mut cx, ids!(desktop_chat_info_panel)).visible());
         assert!(!screen.view.view(&mut cx, ids!(compact_chat_info_panel)).visible());
         let center = screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx);
