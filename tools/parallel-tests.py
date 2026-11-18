@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Run `cargo test` selections with several test programs running side by side.
 
-    python3 tools/parallel-tests.py [--jobs N] [--split NAME] [--chunk N] [--log DIR] --
+    python3 tools/parallel-tests.py [--jobs N] [--split NAME] [--first TEST] [--chunk N] [--log DIR] --
         <cargo test arguments> [--- <cargo test arguments of a second selection> ...]
 
 The arguments after the first `--` are those of `cargo test`, including a
@@ -27,6 +27,13 @@ here do: the first test of a process that touches the installation's writer
 root decides, for the whole process, whether a test root can still be chosen
 (`hagency_platform::legacy_writer::test_support`). A slice that happens to
 begin with a test that only looks then fails every later test that needs one.
+
+`--first TEST` names a test that a split program runs before all its others
+because its name sorts first: tests of one process run in the order of their
+names. Every slice of a program that has this test gets it too, so each
+process begins the way the whole program does. The `hagency` library has such
+a test, which selects the writer root; that is what lets it be split. The run
+stops when the named test is not the first of its program.
 
 Why: the suites are serial inside a process because its tests share that
 process's stores and deadlines. One job therefore used one core for most of
@@ -292,6 +299,8 @@ def main():
                         help="test processes at a time")
     parser.add_argument("--split", action="append", default=[], metavar="NAME",
                         help="a test target whose tests may run in several processes (see the notes above)")
+    parser.add_argument("--first", action="append", default=[], metavar="TEST",
+                        help="a test that every slice of a split program runs first (see the notes above)")
     parser.add_argument("--chunk", type=int, default=int(os.environ.get("PARALLEL_TEST_CHUNK") or 40),
                         help="most tests one process of a split program is given (default 40)")
     parser.add_argument("--timeout", type=int, default=45 * 60, help="seconds one process may run")
@@ -303,6 +312,7 @@ def main():
         parser.error("no cargo test arguments")
     jobs = options.jobs or default_jobs()
     split = {name for value in options.split for name in value.split(",") if name}
+    first = {name for value in options.first for name in value.split(",") if name}
     folder = os.getcwd()
 
     chosen_sets = []
@@ -330,6 +340,7 @@ def main():
     units = []
     listed_total = 0
     program_total = 0
+    repeated = 0
     order = 0
     for chosen in chosen_sets:
         for program in chosen["programs"]:
@@ -349,10 +360,17 @@ def main():
             if program["name"] not in split:
                 units.append({**base, "names": None, "expected": len(wanted), "weight": len(wanted)})
                 continue
-            slices = [wanted[i : i + options.chunk] for i in range(0, len(wanted), options.chunk)]
+            # The program's own first test goes into every slice, whatever the selection says.
+            lead = [n for n in names if n in first]
+            if lead and (len(lead) > 1 or names[0] != lead[0]):
+                sys.exit(f"parallel-tests: {program['name']}: {lead[0]} must be the one test that runs first, but "
+                         f"{names[0]} sorts before it. Rename it, or the test that now sorts first.")
+            rest = [n for n in wanted if n not in lead]
+            slices = [rest[i : i + options.chunk] for i in range(0, len(rest), options.chunk)] or [[]]
+            repeated += len(lead) * len(slices) - len([n for n in wanted if n in lead])
             for part, piece in enumerate(slices):
-                units.append({**base, "names": piece, "expected": len(piece), "weight": len(wanted), "part": part,
-                              "parts": len(slices)})
+                units.append({**base, "names": lead + piece, "expected": len(lead) + len(piece),
+                              "weight": len(wanted), "part": part, "parts": len(slices)})
 
     # The programs with most tests first, so that the long ones do not start last.
     work = queue.Queue()
@@ -361,7 +379,8 @@ def main():
 
     sliced = sorted({u["program"]["name"] for u in units if u["parts"] > 1})
     print(f"parallel-tests: {program_total} test programs, {listed_total} tests, {len(units)} processes, "
-          f"{jobs} at a time" + (f"; in slices of at most {options.chunk} tests: {', '.join(sliced)}" if sliced else ""),
+          f"{jobs} at a time" + (f"; in slices of at most {options.chunk} tests: {', '.join(sliced)}" if sliced else "")
+          + (f"; {repeated} more runs of a program's first test, one per slice" if repeated else ""),
           flush=True)
     if not units:
         print("::warning::parallel-tests: this selection matches no test", flush=True)

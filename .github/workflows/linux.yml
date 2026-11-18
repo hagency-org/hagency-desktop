@@ -14,6 +14,10 @@ on:
         type: choice
         options: [library, all]
         default: library
+      test_jobs:
+        description: 'Test processes at a time. Empty: one fewer than the cores'
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -69,4 +73,6 @@ jobs:
         with:
           toolchain: 1.98.0
       - name: Run the part
+        env:
+          PARALLEL_TEST_JOBS: ${{ inputs.test_jobs }}
         run: bash tools/linux-checks.sh ${{ matrix.part }}

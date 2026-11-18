@@ -18,6 +18,22 @@ pub mod test_support {
         hagency_platform::legacy_writer::test_support::initialize_process_root().map(|_| ())
     }
 }
+/// The first test of every test process of this library. The tests of one
+/// process run in the order of their names, and this module's name sorts
+/// before every other. The first test that touches the installation's writer
+/// root decides it for the whole process
+/// (`hagency_platform::legacy_writer::test_support`): this one selects the
+/// process's own temporary root, as the fixtures of the other tests do, so
+/// that a test which only reads the root finds it whichever tests share its
+/// process. `tools/parallel-tests.py --first` puts this test into every slice
+/// of the program and stops when another test sorts before it.
+#[cfg(test)]
+mod _process_writer_root {
+    #[test]
+    fn is_selected_before_any_other_test() {
+        hagency_platform::legacy_writer::test_support::initialize_process_root().unwrap();
+    }
+}
 mod alerts;
 pub mod bootstrap;
 pub mod bot_commands;

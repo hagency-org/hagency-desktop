@@ -52,9 +52,12 @@ runtime_probe() {
 library() {
     export RUST_TEST_THREADS=1 RUST_MIN_STACK=16777216
 }
-# cargo test with the same arguments, several test programs at a time. Only
-# the unit tests of hagency-matrix run as several processes (see the tool).
-tests=(python3 "$root/tools/parallel-tests.py" --split hagency_matrix --)
+# cargo test with the same arguments, several test programs at a time. The
+# unit tests of hagency-matrix and of hagency run as several processes each;
+# every process of hagency's begins with the test that selects the writer
+# root (see the tool).
+tests=(python3 "$root/tools/parallel-tests.py" --split hagency_matrix,hagency
+    --first _process_writer_root::is_selected_before_any_other_test --)
 
 case "$part" in
 lib-hagency)
