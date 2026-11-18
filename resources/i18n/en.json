@@ -1522,6 +1522,7 @@
   "Creating Agent…": "Creating Agent…",
   "Creation completed. Refresh Projects to see its Rooms.": "Creation completed. Refresh Projects to see its Rooms.",
   "Denied Matrix user IDs, comma separated": "Denied Matrix user IDs, comma separated",
+  "With Deny selected, the device blocks tool requests such as commands and file changes before they reach your approval queue.": "With Deny selected, the device blocks tool requests such as commands and file changes before they reach your approval queue.",
   "Deny high-risk tools": "Deny high-risk tools",
   "Not saved for this scope: high-risk tools follow Entire Agent until you save here.": "Not saved for this scope: high-risk tools follow Entire Agent until you save here.",
   "Not saved for this scope: Full trust on Entire Agent covers only your own messages here, and anyone else's high-risk tools are denied.": "Not saved for this scope: Full trust on Entire Agent covers only your own messages here, and anyone else's high-risk tools are denied.",
