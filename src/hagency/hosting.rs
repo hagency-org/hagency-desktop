@@ -95,10 +95,7 @@ pub fn sign_in_root(locations: &Locations, data_dir: &Path, origin: &str, owner:
 fn sign_in_root_with(locations: &Locations, data_dir: &Path, origin: &str, owner: &str, delegated: bool) -> Result<PathBuf, String> {
     #[cfg(unix)]
     if delegated {
-        return match locations.roots.lookup(origin, owner).map_err(root_code)? {
-            Some(root) => Ok(root),
-            None => locations.roots.prepare_canonical_root(origin, owner).map_err(root_code),
-        };
+        return locations.roots.management_root(origin, owner).map_err(root_code);
     }
     let _ = delegated;
     select_root(locations, data_dir, origin, owner)
@@ -994,7 +991,7 @@ mod tests {
     }
 
     #[test]
-    fn management_only_sign_in_refuses_unsafe_canonical_parents_without_repair() {
+    fn management_only_sign_in_refuses_writable_canonical_parents_without_repair() {
         for owners in [false, true] {
             let temp = Temp::new();
             let locations = temp.locations();
@@ -1005,9 +1002,9 @@ mod tests {
             private(&path);
             let sentinel = path.join("foreign-data");
             std::fs::write(&sentinel, b"unchanged").unwrap();
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
             assert!(sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).is_err());
-            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o755);
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o777);
             assert_eq!(std::fs::read(sentinel).unwrap(), b"unchanged");
             assert!(!canonical(&locations).exists());
             assert!(!locations.roots.base().join(::hagency::owner_roots::RECORDS).exists());
