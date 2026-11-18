@@ -58,8 +58,9 @@ does natively.
   temporary folder.
 - The container runs as the owner's uid and gid, never as root, with every
   capability dropped, `no-new-privileges`, and at most 1024 processes.
-- Credentials are passed as `--env NAME`. Their values are only in the client's
-  environment, never on its command line.
+- Credentials are passed as `--env NAME`, so their values are never on a
+  command line. The engine keeps them in the container's configuration while
+  the container exists; see Consequences.
   `CLAUDE_CODE_SUBPROCESS_ENV_SCRUB=1` keeps them away from tool commands.
 - The client runs with an empty settings folder of its own in the daemon home,
   outside every run's folders, and a fixed `PATH`. No `DOCKER_*` or
@@ -89,6 +90,14 @@ of resuming one made under the other.
   virtual machine. Docker Desktop's machine shares `/Users`, so an escape from
   the container into that machine would reach the owner's files. A seccomp
   profile that allows only what bubblewrap needs is the follow-up.
+- **The engine holds the run's credential while the container exists.** The
+  client sends the values it was given by name to the engine, which keeps them
+  in the container's configuration. Anyone who can use the engine (on a Mac,
+  the owner's own account) can read them with `docker inspect` until the run
+  ends and the container is removed. No engine socket is mounted into the
+  container. Docker Desktop's optional TCP endpoint without TLS (off by
+  default) would be reachable from it through `host.docker.internal`, so an
+  owner who uses containers must leave that endpoint off.
 - **The container reaches the host's network.** `host.docker.internal` leads
   to services that listen on the Mac's loopback, as any process on the Mac
   would.
@@ -112,6 +121,12 @@ of resuming one made under the other.
 - The switch's setup step with a real engine (ignored test).
 - Setting file tests in the `hagency` crate, Hosting screen model and widget
   tests, and the app's hosting merge test.
+- A live run through the owner daemon with Docker Desktop. The owner turned the
+  switch on in Hosting, and a member's pooled Claude Agent then ran in its own
+  container: the runtime reported Linux, and the room's history tool answered
+  through the container's stdio. The container held only the run's scope,
+  under the settings above, and was removed when each run ended. After the
+  switch was turned off, the next run used the macOS sandbox again.
 
 ## Not covered
 
