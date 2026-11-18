@@ -29,8 +29,8 @@ pub use format::Clock;
 pub use i18n::Locale;
 pub use widget::{OwnerDashboard, OwnerDashboardRef, OwnerDashboardWidgetExt, OwnerDashboardWidgetRefExt};
 pub use model::{
-    CommandKind, CommandResult, CommandTicket, ConnectionStatus, ContainerProblem, DashboardAction, DashboardState,
-    HostOptions, PoolContainers, SetupNeed, SetupProgress, SetupView, Tab, ViewState,
+    CommandKind, CommandResult, CommandTicket, ConnectionStatus, ContainerChoices, ContainerProblem, DashboardAction,
+    DashboardState, HostOptions, PoolContainers, SetupNeed, SetupProgress, SetupView, Tab, ViewState,
 };
 
 /// Registers dashboard tokens, controls and the `OwnerDashboard` widget.

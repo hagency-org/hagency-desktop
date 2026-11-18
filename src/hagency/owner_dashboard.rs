@@ -6,8 +6,8 @@
 use crate::hagency::hosting::{self, Execution, JobKind, Progress, SetupReason};
 use makepad_widgets::*;
 use owner_dashboard::{
-    CommandKind, CommandResult, ConnectionStatus, DashboardAction, HostOptions, Locale, OwnerDashboardRef,
-    OwnerDashboardWidgetExt, PoolContainers, SetupNeed, SetupProgress, SetupView,
+    CommandKind, CommandResult, ConnectionStatus, ContainerChoices, DashboardAction, HostOptions, Locale,
+    OwnerDashboardRef, OwnerDashboardWidgetExt, SetupNeed, SetupProgress, SetupView,
     i18n::{Msg, phrase, tr},
     model::{Glyph, Status, Tone},
     transport::{ConnectorEvent, DaemonConnector, DaemonEndpoint, Job, OwnerScope},
@@ -99,8 +99,8 @@ struct Page {
     busy: bool,
     /// The installed service runs another program (an earlier Hosting app).
     foreign_service: bool,
-    /// Where rented Claude Agents run on this computer.
-    containers: PoolContainers,
+    /// Which pools' Claude Agents run in containers on this computer.
+    containers: Option<ContainerChoices>,
 }
 
 fn page(view: &hosting::View, last_need: SetupNeed) -> Page {
@@ -132,7 +132,7 @@ fn page(view: &hosting::View, last_need: SetupNeed) -> Page {
     let hosted = setup.is_none() && matches!(view.execution, Some(Ok(Execution::Daemon { .. })));
     let in_app = matches!(view.execution, Some(Ok(Execution::InProcess)));
     let foreign_service = view.service == Some(hosting::Service::OtherProgram);
-    let containers = view.containers.unwrap_or_default();
+    let containers = view.containers.clone();
     Page { setup, hosted, in_app, busy, foreign_service, containers }
 }
 
@@ -257,7 +257,7 @@ impl OwnerDashboardHost {
             keep_running,
             busy: page.busy,
             foreign_service: page.foreign_service,
-            containers: page.containers,
+            containers: page.containers.clone(),
         });
         self.dashboard(cx).set_options(cx, options);
     }
@@ -326,9 +326,9 @@ impl OwnerDashboardHost {
                 cx.action(HostingAction::KeepRunning(keep));
                 None
             }
-            DashboardAction::PoolContainers(on) => {
+            DashboardAction::PoolContainers { pool, on } => {
                 // Refused while a change runs; the switch follows the state.
-                if !self.fixture { hosting::set_containers(on); }
+                if !self.fixture { hosting::set_containers(pool, on); }
                 self.applied = None;
                 self.synchronize(cx);
                 None
@@ -492,7 +492,7 @@ mod tests {
         let in_app = page(&state(Some(Ok(Execution::InProcess)), None, 1), SetupNeed::NotSetUp);
         assert!(in_app.in_app && !in_app.hosted && in_app.setup.is_none());
         // Before the first read nothing is decided.
-        assert_eq!(page(&state(None, None, 0), SetupNeed::NotSetUp), Page { setup: None, hosted: false, in_app: false, busy: false, foreign_service: false, containers: PoolContainers::Off });
+        assert_eq!(page(&state(None, None, 0), SetupNeed::NotSetUp), Page { setup: None, hosted: false, in_app: false, busy: false, foreign_service: false, containers: None });
         // A running setup keeps its page after the enrollment flips execution.
         let confirming = page(&state(daemon(), Some((JobKind::Setup, Progress::Confirming)), 2), SetupNeed::Replace);
         assert_eq!(need(confirming.clone()), Some((SetupNeed::Replace, SetupProgress::Confirming)));

@@ -2,8 +2,8 @@
 
 - Date: 2026-11-18
 - Status: Accepted; implemented for pooled Claude Agents behind an opt-in
-  Hosting switch. Checked on macOS with Docker Desktop. Linux hosts, Codex and
-  Octos pools, and local Agents are not covered.
+  switch for each pool in Hosting. Checked on macOS with Docker Desktop. Linux
+  hosts, Codex and Octos pools, and local Agents are not covered.
 - Scope: Hagency Desktop and its embedded Hagency Client. No server change.
 
 ## Context
@@ -21,27 +21,41 @@ the run a fixed set of programs instead of the owner's.
 
 ## Decision
 
-An owner can choose, per computer, to run pooled Claude Agents in a container.
+An owner can choose, for each pool, to run its Claude Agents in a container.
 The macOS sandbox stays the default. Local Agents, pooled Codex and pooled
 Octos are unchanged.
 
-**The switch.** Hosting shows "Run rented Claude Agents in containers". When
-the owner turns it on, Desktop, in this order:
+**The switch.** In Hosting, the page of each Claude resource (a pool's
+resource on this computer) shows "Run this resource's Agents in containers".
+Codex and Octos resources show no switch. When the owner turns it on, Desktop,
+in this order:
 
 1. finds a Docker-compatible client in the usual install places;
 2. reads its current context's endpoint, accepting only a local `unix://`
    socket;
 3. builds the image if the engine does not have it;
-4. saves the choice.
+4. adds the resource to the saved choice.
 
 If a step fails, the switch says what to do: install a container app, start
-it, or try again after a failed build.
+it, or try again after a failed build. Desktop makes one change at a time.
 
 The choice is `pool-containers.json` in the owner daemon's home:
-`{cli, endpoint, image}`, where `image` is an image ID. The daemon reads it at
-each pooled Claude launch, so a change applies from the next run. With no file,
-runs use the macOS sandbox. A file that cannot run refuses the launch
-(`shared_claude_container_invalid`); it is never ignored.
+`{cli, endpoint, image, pools}`. `image` is an image ID, and `pools` lists the
+resource IDs whose Agents run in containers. The client, endpoint and image are
+this computer's runtime: turning any resource on finds them again, and they
+then serve every resource listed. The daemon reads the file at each pooled
+Claude launch, so a change applies from the next run, and it uses a container
+only when the launch's resource is listed. Other resources keep the macOS
+sandbox, and with no file every resource does. Turning the last resource off
+removes the file. A lock file next to it keeps two Desktop windows from
+dropping each other's changes.
+
+A file that cannot run is never ignored. If it cannot be read, it cannot say
+which resources chose containers, so every pooled Claude launch is refused
+(`shared_claude_container_invalid`), and every Claude resource's switch says
+its Agents cannot start. Turning any of them off removes the file, which
+returns every resource to the sandbox. A listed resource whose client is gone
+is refused the same way, while the others still start in the sandbox.
 
 **The image.** The Dockerfile is part of the app: Debian with Node 22 (pinned
 by digest), Claude Code 2.1.323, and the tools a coding run expects. The tag is
@@ -101,6 +115,9 @@ of resuming one made under the other.
 - **The container reaches the host's network.** `host.docker.internal` leads
   to services that listen on the Mac's loopback, as any process on the Mac
   would.
+- **The choice is kept on the computer.** It lives in this computer's daemon
+  home, so a pool handed over to another computer runs there in the sandbox
+  until its owner turns containers on there.
 - **The first switch-on takes minutes and needs the network**, to download
   the base image and Claude Code. Later switch-ons find the image at once.
 - **Claude Code's version is the image's.** A new version is a new Dockerfile
@@ -118,15 +135,23 @@ of resuming one made under the other.
   credential and not the CLI's process, cannot write the image, and works in
   the run's folder. The containers are gone after a normal end, after the
   client is killed, and after another host's sweep.
-- The switch's setup step with a real engine (ignored test).
-- Setting file tests in the `hagency` crate, Hosting screen model and widget
-  tests, and the app's hosting merge test.
-- A live run through the owner daemon with Docker Desktop. The owner turned the
-  switch on in Hosting, and a member's pooled Claude Agent then ran in its own
-  container: the runtime reported Linux, and the room's history tool answered
-  through the container's stdio. The container held only the run's scope,
-  under the settings above, and was removed when each run ended. After the
-  switch was turned off, the next run used the macOS sandbox again.
+- The switch with a real engine (ignored test): two resources turned on one
+  after the other, a third left in the sandbox, then each turned off.
+- Setting file tests in the `hagency` crate: each resource's choice, one
+  runtime for all, the last one off removing the file, and files that cannot
+  run. Hosting screen model and widget tests: the switch only on a Claude
+  resource's page, its states and texts. The app's hosting merge test.
+- A live run through the owner daemon with Docker Desktop, made with the first
+  version of the switch, which applied to every pooled Claude resource on the
+  computer. The owner turned the switch on in Hosting, and a member's pooled
+  Claude Agent then ran in its own container: the runtime reported Linux, and
+  the room's history tool answered through the container's stdio. The
+  container held only the run's scope, under the settings above, and was
+  removed when each run ended. After the switch was turned off, the next run
+  used the macOS sandbox again.
+- This version's switch against the real owner daemon, read only: the page of
+  that Claude resource shows it, off, and the Codex and Octos resources' pages
+  show none.
 
 ## Not covered
 

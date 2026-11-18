@@ -179,9 +179,9 @@ impl Launch {
             #[cfg(test)]
             fixture_mode: None,
         };
-        // A setting that cannot run stops the launch: the owner chose not to
-        // run pool Agents on this computer directly.
-        let container = crate::pool_containers::hosted_isolation()
+        // A setting that cannot run stops the launch: the owner may have
+        // chosen not to run this pool's Agents on this computer directly.
+        let container = crate::pool_containers::hosted_isolation(&resource.id)
             .map_err(|_| failure(409, "shared_claude_container_invalid"))?;
         Ok(Self::Claude(ClaudeLaunch {
             selection: Arc::new(selected),

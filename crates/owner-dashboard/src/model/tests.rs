@@ -63,23 +63,35 @@ fn setup_replaces_the_dashboard_and_only_offers_what_applies() {
 }
 
 #[test]
-fn the_container_switch_says_what_happens_and_what_to_do_next() {
+fn a_claude_resource_has_its_own_container_switch_that_says_what_happens_next() {
     let mut state = running();
-    let mut card = |containers| {
-        state.set_options(Some(HostOptions { containers, ..Default::default() }));
-        state.present(clock()).options.unwrap()
+    state.select_resource(Some("res_sonnet".into()));
+    let switch = |state: &DashboardState| state.present(clock()).detail.unwrap().containers;
+    // Only for a hosted owner on a computer that can run containers.
+    assert!(switch(&state).is_none(), "hosts without options show none");
+    state.set_options(Some(HostOptions { keep_running: true, ..Default::default() }));
+    assert!(switch(&state).is_none(), "a computer that cannot run them shows none");
+    let mut with = |pools: &[(&str, PoolContainers)], unreadable: bool| {
+        let pools = pools.iter().map(|(pool, choice)| (pool.to_string(), *choice)).collect();
+        state.set_options(Some(HostOptions { containers: Some(ContainerChoices { pools, unreadable }), ..Default::default() }));
+        switch(&state).unwrap()
     };
-    let off = card(PoolContainers::Off);
-    assert!(!off.containers && !off.containers_busy);
-    assert_eq!(off.containers_title, "Run rented Claude Agents in containers");
-    assert!(off.containers_body.contains("sandbox"));
-    let turning = card(PoolContainers::TurningOn);
-    assert!(turning.containers && turning.containers_busy);
-    assert!(turning.containers_body.contains("few minutes"));
-    let on = card(PoolContainers::On);
-    assert!(on.containers && !on.containers_busy && on.containers_body.contains("next run"));
-    let gone = card(PoolContainers::Unavailable);
-    assert!(gone.containers && gone.containers_body.contains("cannot start"));
+    let off = with(&[], false);
+    assert!(!off.on && !off.busy);
+    assert_eq!(off.title, "Run this resource's Agents in containers");
+    assert!(off.body.contains("sandbox"));
+    assert!(!with(&[("res_terra", PoolContainers::On)], false).on, "another resource's choice is its own");
+    let turning = with(&[("res_sonnet", PoolContainers::TurningOn)], false);
+    assert!(turning.on && turning.busy);
+    assert!(turning.body.contains("few minutes"));
+    let on = with(&[("res_sonnet", PoolContainers::On)], false);
+    assert!(on.on && !on.busy && on.body.contains("next run"));
+    let gone = with(&[("res_sonnet", PoolContainers::Unavailable)], false);
+    assert!(gone.on && gone.body.contains("cannot start"));
+    // Choices that cannot be read stop every Claude resource until one is
+    // turned off.
+    let unreadable = with(&[], true);
+    assert!(unreadable.on && unreadable.body.contains("cannot start"));
     // A failure leaves the switch off and names the next step.
     for (problem, step) in [
         (ContainerProblem::NoRuntime, "Install and start"),
@@ -87,12 +99,18 @@ fn the_container_switch_says_what_happens_and_what_to_do_next() {
         (ContainerProblem::BuildFailed, "reach the internet"),
         (ContainerProblem::Other, "keep running in the sandbox"),
     ] {
-        let failed = card(PoolContainers::Failed(problem));
-        assert!(!failed.containers && !failed.containers_busy);
-        assert!(failed.containers_body.contains(step), "{problem:?}: {}", failed.containers_body);
+        let failed = with(&[("res_sonnet", PoolContainers::Failed(problem))], false);
+        assert!(!failed.on && !failed.busy);
+        assert!(failed.body.contains(step), "{problem:?}: {}", failed.body);
     }
+    // Codex, Octos and departed resources have none.
+    for other in ["res_terra", "res_astra", "res_gone"] {
+        state.select_resource(Some(other.into()));
+        assert!(switch(&state).is_none(), "{other}");
+    }
+    state.select_resource(Some("res_sonnet".into()));
     state.locale = Locale::ZhHans;
-    assert_eq!(state.present(clock()).options.unwrap().containers_title, "在容器中运行出租的 Claude Agent");
+    assert_eq!(switch(&state).unwrap().title, "在容器中运行此资源的 Agent");
 }
 
 #[test]
