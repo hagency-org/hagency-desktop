@@ -88,12 +88,34 @@ fn windows_acl_interrupted_archive_copy_keeps_original_until_private_copy_is_dur
     assert!(!copying.exists());
     assert_eq!(std::fs::read(state.join(pending)).unwrap(), original);
     hagency_store::private::open(&state.join(pending), false).unwrap();
+
+    // A different replacement of the same length cannot consume the first archive.
+    let replacement = vec![b'x'; original.len()];
+    hagency_store::private::write_new(&source, &replacement).unwrap();
+    icacls(&source, &["/grant", "*S-1-1-0:(M)"]);
+    assert!(
+        held.repair_file("session", Some(pending), |_| Ok(false))
+            .unwrap()
+    );
+    assert_eq!(std::fs::read(state.join(pending)).unwrap(), replacement);
+    let previous = std::fs::read_dir(&state)
+        .unwrap()
+        .map(Result::unwrap)
+        .find(|item| {
+            item.file_name()
+                .to_string_lossy()
+                .starts_with("session.unavailable-pending-")
+        })
+        .unwrap();
+    assert_eq!(std::fs::read(previous.path()).unwrap(), original);
+    hagency_store::private::open(&previous.path(), false).unwrap();
 }
 
 #[derive(Clone, Copy)]
 enum Interruption {
     None,
     PendingArchive,
+    BeforeOriginalRemoval,
     LockedDatabase,
 }
 
@@ -102,6 +124,14 @@ async fn windows_acl_resumes_interrupted_archive_and_restores_verified_subset() 
     const NAME: &str = "login::homeserver::oauth_tests::windows_permissions::windows_acl_resumes_interrupted_archive_and_restores_verified_subset";
     if !credentials::tests::isolated_case(NAME, "HAGENCY_ACL_STAGE_CHILD") {
         login_with_changed_permissions(true, Interruption::PendingArchive).await;
+    }
+}
+
+#[tokio::test]
+async fn windows_acl_reuses_durable_archive_after_interrupted_source_removal() {
+    const NAME: &str = "login::homeserver::oauth_tests::windows_permissions::windows_acl_reuses_durable_archive_after_interrupted_source_removal";
+    if !credentials::tests::isolated_case(NAME, "HAGENCY_ACL_REMOVAL_CHILD") {
+        login_with_changed_permissions(true, Interruption::BeforeOriginalRemoval).await;
     }
 }
 
@@ -202,11 +232,13 @@ async fn login_with_changed_permissions(matching: bool, interruption: Interrupti
     assert!(hagency_store::private::open(&list, false).is_err());
     match interruption {
         Interruption::None => (),
-        Interruption::PendingArchive => {
+        Interruption::PendingArchive | Interruption::BeforeOriginalRemoval => {
             // On disk immediately after preserving the original, before publishing the subset.
             let pending = list.with_file_name("retained_db.json.unavailable-pending");
             hagency_store::private::write_new(&pending, &original).unwrap();
-            std::fs::remove_file(&list).unwrap();
+            if matches!(interruption, Interruption::PendingArchive) {
+                std::fs::remove_file(&list).unwrap();
+            }
         }
         Interruption::LockedDatabase => {
             use std::os::windows::fs::OpenOptionsExt;
@@ -284,15 +316,19 @@ async fn login_with_changed_permissions(matching: bool, interruption: Interrupti
         hagency_store::private::open(&list, false).unwrap();
     }
     {
-        let archive = std::fs::read_dir(state)
+        let mut archives = std::fs::read_dir(state)
             .unwrap()
             .map(Result::unwrap)
-            .find(|e| {
+            .filter(|e| {
                 e.file_name()
                     .to_string_lossy()
                     .starts_with("retained_db.json.unavailable-")
-            })
-            .unwrap();
+            });
+        let archive = archives.next().unwrap();
+        assert!(
+            archives.next().is_none(),
+            "one original must produce one complete archive"
+        );
         assert_eq!(std::fs::read(archive.path()).unwrap(), original);
         hagency_store::private::open(&archive.path(), false).unwrap();
     }
@@ -344,7 +380,9 @@ async fn windows_acl_normal_signin_restores_original_device_and_history() {
     crate::accounts::retain_database(crate::app_data_dir(), &user, original.clone())
         .await
         .unwrap();
-    let saved = credentials::test_load(service.clone(), path.clone()).await.unwrap();
+    let saved = credentials::test_load(service.clone(), path.clone())
+        .await
+        .unwrap();
     credentials::tests::leave_session_save_intent(&service, &path, saved);
     drop(active);
     crate::account_session::close().await;

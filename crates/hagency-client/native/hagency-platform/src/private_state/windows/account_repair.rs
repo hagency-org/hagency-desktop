@@ -182,22 +182,52 @@ impl AccountRepairPath {
     fn archive_file(&self, source: &mut File, destination: &str) -> Result<(), Error> {
         use std::io::Seek;
         use windows_sys::Win32::Storage::FileSystem::{FILE_DISPOSITION_INFO, FileDispositionInfo};
-        let copying = format!("{destination}.copying");
-        let path = self.child(copying.as_ref())?;
-        let mut output = match create_file(&path) {
-            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-                open(&path, GENERIC_READ | GENERIC_WRITE, 0)?
+        let destination_path = self.child(destination.as_ref())?;
+        let reusable = match open(
+            &destination_path,
+            GENERIC_READ | GENERIC_WRITE,
+            FILE_SHARE_READ,
+        ) {
+            Ok(mut pending) => {
+                plain(&pending, false)?;
+                check_handle(&pending, false)?;
+                if same_contents(source, &mut pending)? {
+                    // Keep the verified bytes pinned through sync and removal of the original.
+                    pending.sync_all()?;
+                    Some(pending)
+                } else {
+                    drop(pending);
+                    // An independent source now occupies the live name. Keep both originals.
+                    let mut suffix = [0u8; 16];
+                    getrandom::fill(&mut suffix).map_err(|_| Error::PlatformUnavailable)?;
+                    self.rename_private_file(
+                        destination,
+                        &format!("{destination}-{}", super::super::hex(&suffix)),
+                    )?;
+                    None
+                }
             }
-            result => result?,
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => None,
+            Err(e) => return Err(e),
         };
-        plain(&output, false)?;
-        check_handle(&output, false)?;
-        output.set_len(0)?;
-        source.rewind()?;
-        std::io::copy(source, &mut output)?;
-        output.sync_all()?;
-        drop(output);
-        self.rename_private_file(&copying, destination)?;
+        if reusable.is_none() {
+            let copying = format!("{destination}.copying");
+            let path = self.child(copying.as_ref())?;
+            let mut output = match create_file(&path) {
+                Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                    open(&path, GENERIC_READ | GENERIC_WRITE, 0)?
+                }
+                result => result?,
+            };
+            plain(&output, false)?;
+            check_handle(&output, false)?;
+            output.set_len(0)?;
+            source.rewind()?;
+            std::io::copy(source, &mut output)?;
+            output.sync_all()?;
+            drop(output);
+            self.rename_private_file(&copying, destination)?;
+        }
         let directory =
             cap_std::fs::Dir::open_ambient_dir(&self.path, cap_std::ambient_authority())?;
         crate::private_state::sync_directory(&directory)?;
@@ -249,6 +279,27 @@ impl AccountRepairPath {
         }
         Ok(!valid)
     }
+}
+
+/// Both handles exclude writers and renames during this comparison.
+fn same_contents(source: &mut File, pending: &mut File) -> Result<bool, Error> {
+    use std::io::{Read, Seek};
+    let mut remaining = source.metadata()?.len();
+    if pending.metadata()?.len() != remaining {
+        return Ok(false);
+    }
+    source.rewind()?;
+    let (mut left, mut right) = ([0u8; 8192], [0u8; 8192]);
+    while remaining > 0 {
+        let n = remaining.min(left.len() as u64) as usize;
+        source.read_exact(&mut left[..n])?;
+        pending.read_exact(&mut right[..n])?;
+        if left[..n] != right[..n] {
+            return Ok(false);
+        }
+        remaining -= n as u64;
+    }
+    Ok(true)
 }
 
 fn rename_original(file: &File, destination: &Path) -> Result<(), Error> {

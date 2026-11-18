@@ -91,14 +91,18 @@ impl Service {
             let journal_path = state.join(format!(".{name}.vault-journal"));
             if !held.needs_document_repair(name).map_err(|e| at(&path, e))?
                 && !staging.try_exists().map_err(|e| at(&staging, e))?
-                && !journal_path.try_exists().map_err(|e| at(&journal_path, e))?
+                && !journal_path
+                    .try_exists()
+                    .map_err(|e| at(&journal_path, e))?
             {
                 continue;
             }
             let document = Document::open(&path, MAX_SESSION).map_err(|e| at(&path, e))?;
             // Another process can finish or create a transaction before we acquire its lock.
             let resume_archive = staging.try_exists().map_err(|e| at(&staging, e))?;
-            let has_journal = journal_path.try_exists().map_err(|e| at(&journal_path, e))?;
+            let has_journal = journal_path
+                .try_exists()
+                .map_err(|e| at(&journal_path, e))?;
             if resume_archive {
                 // The process may have stopped before publishing the verified subset.
                 // Seal the staging handle before reading or publishing any verified subset.
@@ -123,11 +127,8 @@ impl Service {
                         }
                     }
                 }
-                // A transaction owns its canonical name until replay succeeds.
-                // If both survived a crash, keep the private archive for the next pass.
-                if !has_journal {
-                    finish_archive(&held, &state, name, &pending_archive)?;
-                }
+                // Leave the staging name in place until we have rechecked any live
+                // source. An interrupted deletion can then reuse the durable copy.
                 archived = true;
             }
             if has_journal {
@@ -217,10 +218,10 @@ impl Service {
                     )
                 })
                 .map_err(|e| at(&path, e))?;
-            if preserved {
-                if let Some(bytes) = verified_subset {
-                    hagency_store::private::replace(&path, &bytes).map_err(|e| at(&path, e))?;
-                }
+            if let Some(bytes) = verified_subset {
+                hagency_store::private::replace(&path, &bytes).map_err(|e| at(&path, e))?;
+            }
+            if preserved || resume_archive {
                 finish_archive(&held, &state, name, &pending_archive)?;
                 archived = true;
             }
