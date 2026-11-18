@@ -477,6 +477,8 @@ struct PendingComposerSend {
 }
 
 struct ComposerDraft {
+    #[cfg(feature = "tsp")]
+    sign_with_tsp: bool,
     input: MentionableTextInputState,
     replying_to: Option<(EventTimelineItem, EmbeddedEvent)>,
 }
@@ -1302,9 +1304,13 @@ impl RoomInputBar {
         input: &MentionableTextInputRef,
     ) -> ComposerSendCompletion {
         let (completion, result) = ComposerSendCompletion::channel();
+        #[cfg(feature = "tsp")]
+        let sign_with_tsp = self.is_tsp_signing_enabled(cx);
         self.pending_sends.push_back(PendingComposerSend {
             completion: result,
             draft: ComposerDraft {
+                #[cfg(feature = "tsp")]
+                sign_with_tsp,
                 input: input.save_state(),
                 replying_to: self.replying_to.take(),
             },
@@ -1352,6 +1358,8 @@ impl RoomInputBar {
         }
         if let Some(draft) = self.unsent_drafts.pop_front() {
             input.restore_state(cx, draft.input);
+            #[cfg(feature = "tsp")]
+            self.view.check_box(cx, ids!(tsp_sign_checkbox)).set_active(cx, draft.sign_with_tsp, Animate::No);
             if let Some(reply) = draft.replying_to {
                 self.show_replying_to(cx, reply, kind, true);
             }
@@ -2066,7 +2074,13 @@ mod composer_send_tests {
         input.set_text(&mut cx, "first");
         let first = composer.track_composer_send(&mut cx, &input);
         input.set_text(&mut cx, "/me second");
+        #[cfg(feature = "tsp")]
+        let signing = composer.view.check_box(&mut cx, ids!(tsp_sign_checkbox));
+        #[cfg(feature = "tsp")]
+        signing.set_active(&mut cx, true, Animate::No);
         let second = composer.track_composer_send(&mut cx, &input);
+        #[cfg(feature = "tsp")]
+        signing.set_active(&mut cx, false, Animate::No);
         input.set_text(&mut cx, "");
         drop(composer);
 
@@ -2088,6 +2102,8 @@ mod composer_send_tests {
         composer.restore_next_draft(&mut cx, &room);
         assert_eq!(input.text(), "/me second");
 
+        #[cfg(feature = "tsp")]
+        assert!(composer.is_tsp_signing_enabled(&mut cx));
         let interrupted = composer.track_composer_send(&mut cx, &input);
         input.set_text(&mut cx, "new draft");
         drop(interrupted);
