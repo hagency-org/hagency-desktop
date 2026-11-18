@@ -1,4 +1,6 @@
 {
+  "Signed in. Some older chats could not be restored. Their local data has been preserved.": "已登录。部分旧聊天记录无法恢复，原有本地数据已保留。",
+  "Could not secure local sign-in storage at {path}. {reason}": "无法为 {path} 设置安全的本地登录存储权限。{reason}",
   "Your quota, period and access list are submitted. Administrator approval makes this pool available without another confirmation.": "额度、周期和可申请名单已提交，管理员批准后即可使用，无需再次确认。",
   "Submitted for Approval": "已发布，等待批准",
   "Tool": "工具",

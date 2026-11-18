@@ -1,4 +1,7 @@
 //! Real loopback HTTP protocol fixture. No provider/model or personal secrets.
+#[cfg(windows)]
+#[path = "oauth_tests/windows_permissions.rs"]
+mod windows_permissions;
 use super::*;
 use serde_json::{json, Value};
 use std::{

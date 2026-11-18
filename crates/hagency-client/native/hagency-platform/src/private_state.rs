@@ -3,6 +3,8 @@
 mod windows_directory;
 #[cfg(windows)]
 pub use windows_directory::WindowsDirectorySync;
+#[cfg(windows)]
+pub use windows::account_repair::AccountRepairPath;
 
 /// OS-private state failure, independent of any ledger or authorization layer.
 #[derive(Debug, thiserror::Error)]

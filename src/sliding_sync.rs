@@ -364,6 +364,8 @@ pub(crate) async fn finish_oauth_login(
 ) -> Result<(Client, Option<String>)> {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let mut history_unavailable = false;
+    #[cfg(windows)]
+    let mut permissions_archived = false;
     let save_error = crate::i18n::tr(
         "Your identity was verified, but this device could not save your sign-in. Check local storage and try signing in again.",
     );
@@ -377,6 +379,11 @@ pub(crate) async fn finish_oauth_login(
         let user = client
             .user_id()
             .ok_or_else(|| anyhow!("OAuth has no Matrix identity"))?;
+        #[cfg(windows)]
+        {
+            permissions_archived = persistence::credential_state::recover_verified_account(&client, epoch).await?;
+            history_unavailable |= permissions_archived;
+        }
         let path = persistence::session_file_path(user);
         if path.try_exists()? {
             match persistence::credential_state::existing_database(path).await {
@@ -461,8 +468,13 @@ pub(crate) async fn finish_oauth_login(
     OAUTH_REAUTH.lock().unwrap().take();
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     if history_unavailable {
+        let message = crate::i18n::tr("Signed in. Older chats on this device have been preserved, but their local key is missing. You can continue using Hagency.");
+        #[cfg(windows)]
+        let message = if permissions_archived {
+            crate::i18n::tr("Signed in. Some older chats could not be restored. Their local data has been preserved.")
+        } else { message };
         crate::shared::popup_list::enqueue_scoped_popup_notification(
-            epoch, crate::i18n::tr("Signed in. Older chats on this device have been preserved, but their local key is missing. You can continue using Hagency.").into(),
+            epoch, message.into(),
             PopupKind::Info, Some(10.0),
         );
     }
@@ -6520,6 +6532,11 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
         let saved = match persistence::credential_state::existing_database(persistence::session_file_path(owner)).await {
             Ok(saved) => Some(saved),
             Err(error) if missing_local_credential(&error) => None,
+            // The optional saved device may be inaccessible until explicit authorization.
+            // The fresh OAuth path below still checks the expected Matrix account.
+            #[cfg(windows)]
+            Err(error) if error.downcast_ref::<hagency_store::credential_vault::Error>()
+                == Some(&hagency_store::credential_vault::Error::Storage) => None,
             Err(error) => return Err(error),
         };
         if let Some(saved) = saved && let Some(id) = saved.identity.oauth_client_id.as_ref() {

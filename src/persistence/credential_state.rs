@@ -6,6 +6,10 @@ mod database_inspect;
 mod revoke_transport;
 mod owners;
 mod retained;
+#[cfg(windows)]
+mod windows_permissions;
+#[cfg(windows)]
+pub(crate) use windows_permissions::{PermissionRepairLocation, recover_verified_account};
 pub(crate) use retained::{retain, retained_paths, retained_session};
 
 use super::{ClientSessionPersisted, FullSessionPersisted, PersistedUserSession, SlidingSyncVersion};

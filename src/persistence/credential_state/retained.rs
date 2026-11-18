@@ -75,7 +75,7 @@ pub(super) struct Retained {
     pub(super) databases: Vec<RetainedEntry>,
 }
 impl Service {
-    fn retained_entries(
+    pub(super) fn retained_entries(
         &self,
         bytes: &[u8],
         account_hash: &str,
