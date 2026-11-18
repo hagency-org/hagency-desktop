@@ -63,6 +63,61 @@ fn enabled(n: &SharedPermissionNotice, cx: &mut Cx) -> bool {
 }
 
 #[test]
+fn unconfigured_management_stops_polling_and_only_shows_for_an_approval() {
+    use crate::hagency::permission_failure::MANAGEMENT_NOT_CONFIGURED;
+    for has_request in [false, true] {
+        let (mut cx, widget, _turn) = fixture();
+        {
+            let mut n = widget.borrow_mut().unwrap();
+            if has_request {
+                n.rows = vec![pending()];
+            }
+            let done = response(
+                &n,
+                Err(PermissionFailure {
+                    status: Some(503),
+                    code: MANAGEMENT_NOT_CONFIGURED.into(),
+                }),
+            );
+            n.accept_result(&mut cx, &done);
+            let show = has_request;
+            assert_eq!(n.view.visible(), show);
+            assert_eq!(n.view.widget(&mut cx, ids!(recovery)).visible(), show);
+            if show {
+                let message = if has_request { ids!(hint) } else { ids!(title) };
+                assert_eq!(
+                    n.view.label(&mut cx, message).text(),
+                    crate::i18n::tr("This server is not configured for Agent management.")
+                );
+                assert!(
+                    n.view
+                        .button(&mut cx, ids!(refresh))
+                        .borrow()
+                        .unwrap()
+                        .enabled()
+                );
+            }
+            if has_request {
+                assert!(!enabled(&n, &mut cx));
+            } else {
+                assert!(!n.view.widget(&mut cx, ids!(actions)).visible());
+            }
+            assert!(n.retry.next.is_none());
+            assert!(n.timer.is_empty());
+        }
+        assert_eq!(
+            tests::timers_started(&mut cx, |cx| {
+                widget.set_active(cx, false);
+                widget.set_active(cx, true);
+                widget.set_room(cx, "!room", "$thread");
+            }),
+            0
+        );
+        assert!(!widget.borrow().unwrap().loading);
+    }
+}
+
+#[test]
 fn failed_status_disables_stale_approvals_and_permanent_errors_never_arm_polling() {
     for status in [401, 403, 404, 405, 501] {
         let (mut cx, widget, _turn) = fixture();

@@ -5,7 +5,6 @@ use std::time::{Duration, Instant};
 use super::permission_retry::PermissionRetry;
 use crate::hagency::backend::Service;
 use crate::hagency::permission_failure::{PermissionFailure, Recovery};
-use ::hagency::native_owner::ManagementCommand;
 
 /// The account session a read belongs to. An answer from another one is dropped.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -218,14 +217,21 @@ impl SharedPermissionNotice {
     fn concerned(&self)->bool {
         self.tracked || self.request_waiting()
     }
-    /// A request is waiting in this room or thread.
+    /// A request is waiting in this room or thread: one read here, or one the
+    /// account-wide list knows.
     fn request_waiting(&self)->bool {
         !self.rows.is_empty()
+            || !self.identity.is_empty()
+                && crate::hagency::pending_approvals::has_pending_in_scope(&self.identity,&self.room,&self.thread)
     }
     /// A failed read is shown only where something depends on it: this room or
     /// thread reported Agent work during this visit, or a request is waiting.
+    /// A server without Agent management is mentioned only for a waiting request.
     fn shows_error(&self)->bool {
-        !self.error.is_empty() && self.concerned()
+        !self.error.is_empty() && match self.failure.as_ref().map(PermissionFailure::recovery) {
+            Some(Recovery::ManagementNotConfigured)=>self.request_waiting(),
+            _=>self.concerned(),
+        }
     }
     fn display(&mut self)->Display {
         use crate::hagency::pending_approvals::{self as approvals,LocalDecision};
@@ -433,7 +439,7 @@ impl SharedPermissionNotice {
         let execution_thread = (self.execution_thread_filter && !thread.is_empty()).then(|| thread.clone());
         self.task=Some(crate::account_session::spawn(async move {
             let value=tokio::time::timeout(Duration::from_secs(30),
-                service.shared_permissions_detailed(ManagementCommand::SharedApprovals{room_id:Some(room.clone()),execution_thread,room_allowance_after}))
+                service.read_shared_approvals(Some(room.clone()),execution_thread,room_allowance_after,manual))
                 .await.unwrap_or_else(|_|Err(PermissionFailure::from("permission_query_timeout")));
             Cx::post_action(PermissionResult{scope,identity,room,thread,nonce,value});
         }));
