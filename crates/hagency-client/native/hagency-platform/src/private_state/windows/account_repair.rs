@@ -134,6 +134,14 @@ impl AccountRepairPath {
         Ok(true)
     }
 
+    /// Read-only custody for authenticated pre-authorization metadata. No ACL changes.
+    pub fn open_owned_file(&self, name: &str) -> Result<File, Error> {
+        let file = open(&self.child(name.as_ref())?, GENERIC_READ, FILE_SHARE_READ)?;
+        plain(&file, false)?;
+        check_current_owner(&file)?;
+        Ok(file)
+    }
+
     pub fn needs_file_repair(&self, name: &str) -> Result<bool, Error> {
         self.inspect_file(name, false)
     }
@@ -160,9 +168,59 @@ impl AccountRepairPath {
         }
     }
 
+    /// Finalize a protected staging file on its original handle, without replacement.
+    pub fn rename_private_file(&self, name: &str, destination: &str) -> Result<(), Error> {
+        let file = open(&self.child(name.as_ref())?, GENERIC_READ | DELETE, 0)?;
+        plain(&file, false)?;
+        check_handle(&file, false)?;
+        rename_original(&file, &self.child(destination.as_ref())?)
+    }
+
+    /// Copy into an owner-only file before removing the original. A stopped copy
+    /// leaves the original in place with its original trust level. Only a flushed,
+    /// complete copy can acquire the pending archive name.
+    fn archive_file(&self, source: &mut File, destination: &str) -> Result<(), Error> {
+        use std::io::Seek;
+        use windows_sys::Win32::Storage::FileSystem::{FILE_DISPOSITION_INFO, FileDispositionInfo};
+        let copying = format!("{destination}.copying");
+        let path = self.child(copying.as_ref())?;
+        let mut output = match create_file(&path) {
+            Err(Error::Io(e)) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                open(&path, GENERIC_READ | GENERIC_WRITE, 0)?
+            }
+            result => result?,
+        };
+        plain(&output, false)?;
+        check_handle(&output, false)?;
+        output.set_len(0)?;
+        source.rewind()?;
+        std::io::copy(source, &mut output)?;
+        output.sync_all()?;
+        drop(output);
+        self.rename_private_file(&copying, destination)?;
+        let directory =
+            cap_std::fs::Dir::open_ambient_dir(&self.path, cap_std::ambient_authority())?;
+        crate::private_state::sync_directory(&directory)?;
+        let disposition = FILE_DISPOSITION_INFO {
+            DeleteFile: true.into(),
+        };
+        // SAFETY: source is still the exclusively held, verified original with
+        // DELETE access. The kernel removes this file when that handle closes.
+        if unsafe {
+            SetFileInformationByHandle(
+                source.as_raw_handle(),
+                FileDispositionInfo,
+                (&disposition as *const FILE_DISPOSITION_INFO).cast(),
+                size_of_val(&disposition) as u32,
+            )
+        } == 0
+        {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        Ok(())
+    }
+
     /// Run the caller's validation while writers and renames are excluded.
-    /// An invalid document is renamed by handle *before* changing its ACL, so
-    /// interruption cannot turn unverified bytes into a trusted live session.
     pub fn repair_file(
         &self,
         name: &str,
@@ -185,10 +243,8 @@ impl AccountRepairPath {
         };
         let valid = validate(&mut file)?;
         if !valid {
-            let path = self.child(archive.ok_or(Error::Private)?.as_ref())?;
-            rename_original(&file, &path)?;
-        }
-        if !already_private {
+            self.archive_file(&mut file, archive.ok_or(Error::Private)?)?;
+        } else if !already_private {
             restrict(&file, false)?;
         }
         Ok(!valid)

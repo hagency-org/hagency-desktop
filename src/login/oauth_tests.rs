@@ -99,7 +99,7 @@ impl Fixture {
                     .as_millis() as u64
                     + 30_000;
                 let response = if route.contains("/versions ") {
-                    json!({"versions":["v1.15"],"unstable_features":{}})
+                    json!({"versions":["v1.15"],"unstable_features":{"org.matrix.simplified_msc3575":true}})
                 } else if route.contains("/hagency/api/v1/discovery ") {
                     json!({"product":"hagency-server","version":"0.1.0","protocolVersion":3,
                         "homeserver":format!("{root}/"),"issuer":format!("{root}/auth/"),
@@ -610,31 +610,34 @@ async fn authorize(
     device: Arc<Mutex<Option<String>>>,
     code: &'static str,
 ) -> anyhow::Result<()> {
-    oauth_browser_login(client, false, move |authorization| async move {
-        let url = Url::parse(&authorization)?;
-        let params: std::collections::HashMap<_, _> = url
-            .query_pairs()
-            .map(|(a, b)| (a.into_owned(), b.into_owned()))
-            .collect();
-        *device.lock().unwrap() = Some(
-            params["scope"]
-                .split_whitespace()
-                .find_map(|s| s.split_once("device:").map(|(_, d)| d.to_owned()))
-                .unwrap(),
-        );
-        let mut redirect = Url::parse(&params["redirect_uri"])?;
-        redirect
-            .query_pairs_mut()
-            .append_pair("code", code)
-            .append_pair("state", &params["state"]);
-        crate::http::client_builder()
-            .build()?
-            .get(redirect)
-            .send()
-            .await?;
-        Ok(())
-    })
-    .await
+    oauth_browser_login(client, false, move |url| complete_authorization(url, device, code)).await
+}
+
+async fn complete_authorization(
+    authorization: String, device: Arc<Mutex<Option<String>>>, code: &'static str,
+) -> anyhow::Result<()> {
+    let url = Url::parse(&authorization)?;
+    let params: std::collections::HashMap<_, _> = url
+        .query_pairs()
+        .map(|(a, b)| (a.into_owned(), b.into_owned()))
+        .collect();
+    *device.lock().unwrap() = Some(
+        params["scope"]
+            .split_whitespace()
+            .find_map(|s| s.split_once("device:").map(|(_, d)| d.to_owned()))
+            .unwrap(),
+    );
+    let mut redirect = Url::parse(&params["redirect_uri"])?;
+    redirect
+        .query_pairs_mut()
+        .append_pair("code", code)
+        .append_pair("state", &params["state"]);
+    crate::http::client_builder()
+        .build()?
+        .get(redirect)
+        .send()
+        .await?;
+    Ok(())
 }
 
 #[cfg(not(any(target_os = "ios", target_os = "android")))]
