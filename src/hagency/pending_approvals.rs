@@ -22,6 +22,7 @@
 //! "local"`. Their decisions go to the Agent's own decision route, where the
 //! daemon re-checks the owner, the exact request and its expiry. Nothing is
 //! posted to the room: only the owner's app shows them.
+use super::permission_failure::{MANAGEMENT_NOT_CONFIGURED, MANAGEMENT_NOT_CONFIGURED_MESSAGE};
 use crate::shared::popup_list::{PopupKind, enqueue_popup_notification};
 use ::hagency::native_owner::ManagementCommand;
 use makepad_widgets::*;
@@ -229,10 +230,16 @@ pub fn poll() {
             Cx::post_action(LocalApprovalsUpdate { identity, result });
         });
     }
+    // A server without Agent management is not asked again in this session;
+    // the local requests above do not depend on it.
+    if service.shared_approvals_unconfigured() {
+        return;
+    }
     crate::sliding_sync::spawn_async_task(async move {
         let result = service
-            .shared_permissions(ManagementCommand::SharedApprovals { room_id: None, execution_thread: None, room_allowance_after: None })
-            .await;
+            .read_shared_approvals(None, None, None, false)
+            .await
+            .map_err(|error| error.code);
         Cx::post_action(PendingApprovalsUpdate { identity, result });
     });
 }
@@ -487,6 +494,22 @@ pub fn decide(row: &Value, decision: &str) -> bool {
     true
 }
 
+/// A request read from the management server waits in this room or thread.
+/// The owner's local Agents' requests do not count: they do not depend on it.
+pub(crate) fn has_pending_in_scope(identity: &str, room: &str, thread: &str) -> bool {
+    let now = now_ms();
+    STATE.lock().is_ok_and(|state| {
+        state.identity == identity
+            && state.rows.iter().any(|request| {
+                !request.is_local()
+                    && request.room_id() == room
+                    && (thread.is_empty() || request.thread_root() == thread)
+                    && !matches!(request.local, LocalDecision::Sent(_))
+                    && request.expires_at_ms().is_none_or(|expires| expires > now)
+            })
+    })
+}
+
 /// What this client did with the request `id`.
 pub fn local_decision(id: &str) -> LocalDecision {
     STATE.lock().map_or(LocalDecision::None, |s| s.local(id))
@@ -663,6 +686,7 @@ fn short_json(value: &Value) -> String {
 }
 fn decide_error(code: &str) -> &'static str {
     match code {
+        MANAGEMENT_NOT_CONFIGURED => crate::i18n::tr(MANAGEMENT_NOT_CONFIGURED_MESSAGE),
         "approval_request_changed" | "permission_request_changed" => "the request changed; reopen it / 请求已变化，请重新打开",
         "approval_already_decided" => "someone already decided / 已有人决定",
         "approval_expired" => "the request expired / 请求已过期",
@@ -742,8 +766,14 @@ mod tests {
         assert!(for_event(&a, "$root", false).is_none(), "a thread timeline only matches the triggering reply");
         assert_eq!(for_event(&a, "$root", true).map(|p| p.id().to_owned()).as_deref(), Some("sap_a"));
         assert!(for_event(&b, "$reply", true).is_none());
+        assert!(has_pending_in_scope("me", "!a:x", ""));
+        assert!(has_pending_in_scope("me", "!a:x", "$root"));
+        assert!(!has_pending_in_scope("me", "!a:x", "$other"));
+        assert!(!has_pending_in_scope("other-account", "!a:x", "$root"));
+        assert!(!has_pending_in_scope("me", "!other:x", "$root"));
         apply_decided(&PendingApprovalDecided { id: "sap_a".into(), decision: "deny".into(), result: Ok(()) });
         assert_eq!((count_for_room(&a), total()), (0, 0), "a sent decision no longer counts as pending");
+        assert!(!has_pending_in_scope("me", "!a:x", "$root"));
         assert_eq!(for_event(&a, "$reply", false).unwrap().local, LocalDecision::Sent("deny".into()));
         forget_identity();
     }
