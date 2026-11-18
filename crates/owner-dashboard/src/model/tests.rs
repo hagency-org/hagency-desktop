@@ -103,8 +103,14 @@ fn a_claude_resource_has_its_own_container_switch_that_says_what_happens_next() 
         assert!(!failed.on && !failed.busy);
         assert!(failed.body.contains(step), "{problem:?}: {}", failed.body);
     }
-    // Codex, Octos and departed resources have none.
-    for other in ["res_terra", "res_astra", "res_gone"] {
+    // Codex, Octos and departed resources have none, and neither has a
+    // personal Agent's usage row, even when that Agent runs Claude.
+    let snapshot = state.snapshot.as_mut().unwrap();
+    let mut personal = snapshot.resources.iter().find(|r| r.id == "res_sonnet").unwrap().clone();
+    personal.id = crate::dto::personal_resource_id("agent_one");
+    personal.name = "Personal Agent".into();
+    snapshot.resources.push(personal);
+    for other in ["res_terra", "res_astra", "res_gone", "personal-agent:agent_one"] {
         state.select_resource(Some(other.into()));
         assert!(switch(&state).is_none(), "{other}");
     }

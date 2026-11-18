@@ -939,7 +939,9 @@ pub struct ContainerSwitch {
 
 fn container_switch(state: &DashboardState, resource: &ResourceUsage, locale: Locale) -> Option<ContainerSwitch> {
     let choices = state.options.as_ref()?.containers.as_ref()?;
-    if !resource.provider.eq_ignore_ascii_case("claude") {
+    // The choice is made for a hosted pool. A personal Agent's usage row is
+    // not one: its runs never take the pooled launch that reads the choice.
+    if resource.is_personal() || !resource.provider.eq_ignore_ascii_case("claude") {
         return None;
     }
     let containers = choices.of(&resource.id);

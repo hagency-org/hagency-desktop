@@ -348,7 +348,7 @@ pub(super) async fn run<T: Transport>(
         .clone();
     let binding = hagency_metering::dashboard::ledger::ExecutionBinding {
         execution_id: turn.clone(),
-        resource_id: format!("personal-agent:{}", config.agent_id),
+        resource_id: hagency_metering::dashboard::personal_resource_id(&config.agent_id),
         account_id: None,
         allocation_id: None,
         agent_id: Some(config.agent_id.clone()),

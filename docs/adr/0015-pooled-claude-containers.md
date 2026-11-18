@@ -27,8 +27,9 @@ Octos are unchanged.
 
 **The switch.** In Hosting, the page of each Claude resource (a pool's
 resource on this computer) shows "Run this resource's Agents in containers".
-Codex and Octos resources show no switch. When the owner turns it on, Desktop,
-in this order:
+Codex and Octos resources show no switch, and neither do personal Agents'
+usage rows, which are not pools. When the owner turns it on, Desktop, in this
+order:
 
 1. finds a Docker-compatible client in the usual install places;
 2. reads its current context's endpoint, accepting only a local `unix://`
@@ -140,7 +141,8 @@ of resuming one made under the other.
 - Setting file tests in the `hagency` crate: each resource's choice, one
   runtime for all, the last one off removing the file, and files that cannot
   run. Hosting screen model and widget tests: the switch only on a Claude
-  resource's page, its states and texts. The app's hosting merge test.
+  pool's page and never on a personal Agent's row, its states and texts. The
+  app's hosting merge test.
 - A live run through the owner daemon with Docker Desktop, made with the first
   version of the switch, which applied to every pooled Claude resource on the
   computer. The owner turned the switch on in Hosting, and a member's pooled
@@ -149,9 +151,13 @@ of resuming one made under the other.
   container held only the run's scope, under the settings above, and was
   removed when each run ended. After the switch was turned off, the next run
   used the macOS sandbox again.
-- This version's switch against the real owner daemon, read only: the page of
-  that Claude resource shows it, off, and the Codex and Octos resources' pages
-  show none.
+- A live run of this version through the owner daemon with Docker Desktop. The
+  owner turned the switch on for that Claude resource in Hosting, and the
+  saved choice listed only that resource. A member's Agent from that pool then
+  ran in its own container (the runtime reported Linux), and the container was
+  removed when the run ended. A new Desktop window showed the switch on. After
+  the owner turned it off, the file was gone and the next run used the macOS
+  sandbox (Darwin). The Codex and Octos resources' pages showed no switch.
 
 ## Not covered
 
