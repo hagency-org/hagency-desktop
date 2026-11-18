@@ -68,8 +68,9 @@ jobs:
         if: runner.environment == 'self-hosted'
         shell: bash
         env:
-          # One part's output is a few GB; five checkouts share one disk.
-          CI_BUILD_OUTPUT_LIMIT_GB: 30
+          # Five checkouts share one disk there. Measured after a build of
+          # everything: 42 GB for lib-hagency, 3 to 14 GB for the others.
+          CI_BUILD_OUTPUT_LIMIT_GB: 60
           CI_BUILD_OUTPUT_FREE_GB: 25
         run: |
           bash tools/ci-keep-build-output.sh
