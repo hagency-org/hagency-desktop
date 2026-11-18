@@ -53,18 +53,43 @@ jobs:
       - name: JIT-line makepad checkout
         shell: bash
         run: if [ -f .jit/sources.sh ]; then bash .jit/sources.sh; fi
+      # The package files, about 50 MB, are kept from one job to the next. On
+      # some of these machines the package mirror delivers them at 70 kB/s,
+      # which made a job wait 11 to 14 minutes. apt checks a kept file against
+      # the package index and downloads only what is missing or has changed.
+      # A new key every week takes the changed files into the cache.
+      - name: Week, for the key of the kept package files
+        if: runner.environment == 'github-hosted'
+        id: week
+        run: echo "value=$(date -u +%G-%V)" >> "$GITHUB_OUTPUT"
+      - name: Package files kept from an earlier job
+        if: runner.environment == 'github-hosted'
+        uses: actions/cache@v6
+        with:
+          path: ~/apt-archives
+          key: apt-archives-${{ runner.os }}-${{ runner.arch }}-${{ steps.week.outputs.value }}
+          restore-keys: apt-archives-${{ runner.os }}-${{ runner.arch }}-
       - name: Install system dependencies
         if: runner.environment == 'github-hosted'
         run: |
           # The manual-page index is rebuilt after every install and can take
           # minutes on these machines.
           sudo rm -f /var/lib/man-db/auto-update
+          archives="$HOME/apt-archives/"
+          mkdir -p "$archives/partial"
           sudo apt-get -o Acquire::Retries=3 update
-          sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
+          sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 -o Dir::Cache::archives="$archives" \
+            install -y --no-install-recommends \
             libssl-dev libsqlite3-dev pkg-config llvm clang libclang-dev cmake \
             libxcursor-dev libx11-dev libasound2-dev libpulse-dev \
             libwayland-dev libxkbcommon-dev libdrm-dev \
             libfontconfig1-dev libfreetype-dev
+          # Drop files of versions the index no longer has, and hand the
+          # folder to the job's own user, who saves it.
+          sudo apt-get -o Dir::Cache::archives="$archives" autoclean -y
+          sudo chown -R "$(id -u):$(id -g)" "$archives"
+          rm -rf "$archives/partial" "$archives/lock"
+          ls "$archives" | wc -l
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
