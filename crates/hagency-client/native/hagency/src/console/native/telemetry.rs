@@ -17,6 +17,7 @@
 mod hook;
 mod store;
 mod personal;
+#[cfg(any(unix, test))]
 mod provider;
 #[cfg(test)]
 mod tests;

@@ -1,4 +1,6 @@
-use super::{Call, Failure, Lease, Operation, Package, decode, encode, error, journal::Journal};
+#[cfg(unix)]
+use super::Failure;
+use super::{Call, Lease, Operation, Package, decode, encode, error, journal::Journal};
 use crate::native_owner::*;
 #[cfg(feature = "resource-adoption")]
 use crate::operator_graphs::reader;

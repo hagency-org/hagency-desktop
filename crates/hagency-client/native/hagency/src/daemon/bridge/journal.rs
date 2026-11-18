@@ -1,12 +1,17 @@
 //! Durable admission before effects. Pending after a crash is unknown, never
 //! replayed as a second mutation. Native journals retain original command IDs.
-use super::{Failure, error};
+#[cfg(any(unix, test))]
+use super::Failure;
+use super::error;
 use crate::native_owner::NativeError;
 use rusqlite::{Connection, OptionalExtension, params};
+#[cfg(any(unix, test))]
 use serde_json::Value;
-use std::{collections::{HashMap, HashSet}, path::Path, sync::Mutex};
+#[cfg(any(unix, test))]
+use std::collections::{HashMap, HashSet};
+use std::{path::Path, sync::Mutex};
 
-pub struct Journal(Mutex<Connection>, Mutex<HashSet<String>>, Mutex<HashMap<String, Result<Value, Failure>>>);
+pub struct Journal(Mutex<Connection>, #[cfg(any(unix, test))] Mutex<HashSet<String>>, #[cfg(any(unix, test))] Mutex<HashMap<String, Result<Value, Failure>>>);
 const RETRY_WINDOW_MS: u64 = 24 * 60 * 60 * 1000;
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
@@ -16,6 +21,7 @@ pub struct PendingCommand {
     pub retry_until_ms: u64,
 }
 
+#[cfg(any(unix, test))]
 pub enum Admission {
     New,
     Pending,
@@ -57,8 +63,12 @@ impl Journal {
             }}
         }
         tx.commit().map_err(|_|error(503,"daemon_bridge_journal_unavailable"))?;
-        Ok(Self(Mutex::new(db), Mutex::new(HashSet::new()), Mutex::new(HashMap::new())))
+        #[cfg(any(unix, test))]
+        return Ok(Self(Mutex::new(db), Mutex::new(HashSet::new()), Mutex::new(HashMap::new())));
+        #[cfg(not(any(unix, test)))]
+        Ok(Self(Mutex::new(db)))
     }
+    #[cfg(any(unix, test))]
     pub fn admit(&self, id: &str, fingerprint: &str) -> Result<Admission, NativeError> {
         // If persistence failed after completion, retry only the receipt write.
         // The native operation must never be invoked a second time.
@@ -105,11 +115,13 @@ impl Journal {
     }
     /// Legacy rows have no before-effect pin contract. New rows with no pin
     /// prove this resume did not enter native execution yet.
+    #[cfg(any(unix, test))]
     pub fn native_pin(&self, id: &str) -> Result<Option<Option<String>>, NativeError> {
         self.0.lock().map_err(|_| error(503, "daemon_bridge_journal_unavailable"))?
             .query_row("SELECT recovery_version,native_id FROM calls WHERE id=?1", [id], |r| Ok((r.get::<_,u32>(0)? != 0).then(||r.get::<_,Option<String>>(1)).transpose()?))
             .map_err(|_| error(503, "daemon_bridge_journal_unavailable"))
     }
+    #[cfg(any(unix, test))]
     pub fn pin_native(&self, id: &str, native: &str) -> Result<(), NativeError> {
         let n = self.0.lock().map_err(|_| error(503, "daemon_bridge_journal_unavailable"))?
             .execute("UPDATE calls SET native_id=?1 WHERE id=?2 AND recovery_version=1 AND (native_id IS NULL OR native_id=?1)", params![native,id])
@@ -117,6 +129,7 @@ impl Journal {
         if n != 1 { return Err(error(409, "daemon_command_recovery_required")); }
         Ok(())
     }
+    #[cfg(any(unix, test))]
     pub fn finish(&self, id: &str, result: &Result<Value, Failure>) -> Result<(), NativeError> {
         self.2.lock().map_err(|_| error(503, "daemon_bridge_journal_unavailable"))?.insert(id.into(), result.clone());
         let raw = serde_json::to_string(result)

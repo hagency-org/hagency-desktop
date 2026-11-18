@@ -360,6 +360,7 @@ impl NativeManagement {
     /// Keep a read-only provider selection bound to the already authorized
     /// management context without exposing package or profile internals.
     #[cfg(feature="resource-adoption")]
+    #[cfg(any(unix, test))]
     pub(super) fn check_observation_device(
         &self, context:&service::HostContext, device:&crate::console::AuthorizedDevice,
     )->Result<(),NativeError> {

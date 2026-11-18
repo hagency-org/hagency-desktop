@@ -8,6 +8,7 @@ mod journal;
 mod methods;
 mod project_setup;
 mod reviews;
+#[cfg(any(unix, test))]
 mod server;
 pub use project_setup::ProjectSetupTransport;
 #[cfg(feature = "resource-adoption")]
@@ -27,6 +28,7 @@ pub use reviews::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+#[cfg(unix)]
 pub(crate) use server::Bridge;
 
 macro_rules! operations {
@@ -125,6 +127,7 @@ impl Package {
             })
             .transpose()
     }
+    #[cfg(any(unix, test))]
     fn receipt_scope(&self) -> Result<String, crate::native_owner::NativeError> {
         let mut permissions = self.permissions.clone();
         permissions.sort();
@@ -132,6 +135,7 @@ impl Package {
         serde_json::to_string(&(&self.digest, permissions))
             .map_err(|_| error(400, "invalid_management_package"))
     }
+    #[cfg(any(unix, test))]
     fn native(&self) -> crate::native_owner::ManagementPackage {
         crate::native_owner::ManagementPackage {
             digest: self.digest.clone(),
@@ -140,6 +144,7 @@ impl Package {
             permissions: self.permissions.clone(),
         }
     }
+    #[cfg(any(unix, test))]
     fn valid(&self) -> bool {
         self.digest.len() == 64
             && self.digest.bytes().all(|c| c.is_ascii_hexdigit())
@@ -218,6 +223,7 @@ impl From<crate::native_owner::NativeError> for Failure {
         }
     }
 }
+#[cfg(any(unix, test))]
 impl Failure {
     fn native(self) -> crate::native_owner::NativeError {
         crate::native_owner::NativeError {
@@ -226,6 +232,7 @@ impl Failure {
         }
     }
 }
+#[cfg(any(unix, test))]
 pub(crate) fn terminal_receipt(result:&Result<Value,Failure>)->bool {
     match result {Ok(_)=>true,Err(error)=>error.terminal}
 }
