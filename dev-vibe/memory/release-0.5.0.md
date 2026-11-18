@@ -2,6 +2,28 @@
 
 更新：2026-11-18。
 
+## 2026-11-18 rc.11 发布
+
+用户要求把两个登录修复（PR #139、#141）一并放进 rc.11；由 Claude 执行。
+
+- [v0.5.0-rc.11](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.11) 于 2026-11-18 06:38:44 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `bc42284ea2199d24f096452012f5b19321b94914` 构建：rc.10 之后合入了房间角色 PR #142、Windows 凭据目录检查和登录错误提示 PR #141、已保存密钥缺失时完成登录 PR #139、自有 macOS CI 机器 PR #143，以及版本和发布说明 PR #144。Makepad 与 rc.10 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 44238330452](https://github.com/hagency-org/hagency-desktop/actions/runs/44238330452) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,762,543 字节）和 `hagency-desktop-windows-amd64.exe`（122,121,464 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：检查通过。随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，没有资源错误。Windows 安装包没有在实机上运行。
+- 合入 #139、#141 之前，在两者与 main 合并后的代码上做了 JIT 类型检查和登录、凭据相关测试；并在一台 Mac 上不经浏览器完成了一次真实登录：新账号注册并登录，重启后恢复，移走已保存的密钥后重启提示 `credential_missing`，再次登录成功并保留了原来的会话文件和聊天数据库。
+- 这次发布没有部署服务端。
+
+## 2026-11-18 rc.10 发布
+
+用户要求现在出版本；由 Claude 执行。
+
+- [v0.5.0-rc.10](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.10) 于 2026-11-18 05:19:39 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `3693d969342db6b8faf0f17ce6b38e6a9e0791f6` 构建：版本和发布说明 PR #140 合入 main 后的提交，包含本地 Agent 的定时器和自发消息（PR #132、#135、#137）、把新建的本地 Agent 加入空间房间（PR #136）、睡眠或断网后本地 Agent 服务自动恢复（PR #130）、Octos 资源池（PR #122、#126）。Makepad 与 rc.9 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 44224852825](https://github.com/hagency-org/hagency-desktop/actions/runs/44224852825) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过。两个 macOS 任务等了三十多分钟才分到 runner：组织的 macOS 名额被其他 PR 的检查占用。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,616,622 字节）和 `hagency-desktop-windows-amd64.exe`（122,074,852 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过；`SHA256SUMS-windows-amd64.txt` 仍是 CRLF 行尾。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：检查通过。随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，包目录为 `../Resources`，包内标志已绘制，没有资源错误。
+- 房间角色修复（PR #142）不在 rc.10 中，在 rc.11 中。
+- 这次发布没有部署服务端。
+
 ## 2026-11-15 rc.9 发布
 
 用户要求推送明文消息修复并发布新的 RC；由 Claude 执行。
