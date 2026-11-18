@@ -27,6 +27,7 @@ pub mod main_desktop_ui;
 pub mod room_screen;
 pub mod agent_runtime_notice;
 pub mod shared_permission_notice;
+mod permission_retry;
 pub mod room_read_receipt;
 pub mod send_status_indicator;
 pub mod rooms_list;
