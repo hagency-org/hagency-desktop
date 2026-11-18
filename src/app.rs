@@ -296,35 +296,39 @@ fn native_trace_writer(
         .finish(output)
 }
 
+pub(crate) fn init_tracing() {
+    // only init logging/tracing once.
+    //
+    // We silence a few overly noisy SDK logs:
+    // * `matrix_sdk::latest_events` emits a per-room info log whenever it skips computing a `LatestEventValue`.
+    // * the timeline warns about "No avatar changes to update" on every user's display name change.
+    // Note that this can still be overridden by setting RUST_LOG, e.g. `RUST_LOG=matrix_sdk::latest_events=info`
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
+            "info,matrix_sdk::latest_events=warn,matrix_sdk_ui::timeline::tasks=error",
+        ));
+    let subscriber = tracing_subscriber::fmt().with_env_filter(filter);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // The global subscriber outlives individual standalone or embedded App widgets.
+        static LOGGER: std::sync::OnceLock<Option<tracing_appender::non_blocking::WorkerGuard>> =
+            std::sync::OnceLock::new();
+        LOGGER.get_or_init(|| {
+            let (writer, guard) = native_trace_writer(std::io::stdout());
+            subscriber.with_writer(writer).try_init().ok().map(|()| guard)
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = subscriber.try_init();
+}
+
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         if self.started { return; }
         self.started = true;
         self.approvals_timer = cx.start_interval(crate::hagency::pending_approvals::POLL_SECONDS);
         crate::hagency::owner_dashboard::register_host_accessibility(cx);
-        // only init logging/tracing once.
-        //
-        // We silence a few overly noisy SDK logs:
-        // * `matrix_sdk::latest_events` emits a per-room info log whenever it skips computing a `LatestEventValue`.
-        // * the timeline warns about "No avatar changes to update" on every user's display name change.
-        // Note that this can still be overridden by setting RUST_LOG, e.g. `RUST_LOG=matrix_sdk::latest_events=info`
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
-                "info,matrix_sdk::latest_events=warn,matrix_sdk_ui::timeline::tasks=error",
-            ));
-        let subscriber = tracing_subscriber::fmt().with_env_filter(filter);
-        #[cfg(not(target_arch = "wasm32"))]
-        {
-            // The global subscriber outlives individual standalone or embedded App widgets.
-            static LOGGER: std::sync::OnceLock<Option<tracing_appender::non_blocking::WorkerGuard>> =
-                std::sync::OnceLock::new();
-            LOGGER.get_or_init(|| {
-                let (writer, guard) = native_trace_writer(std::io::stdout());
-                subscriber.with_writer(writer).try_init().ok().map(|()| guard)
-            });
-        }
-        #[cfg(target_arch = "wasm32")]
-        let _ = subscriber.try_init();
+        init_tracing();
 
         // On iOS (and potentially other devices), there is a very low limit
         // (albeit a soft limit) on max file descriptors, as little as 256.

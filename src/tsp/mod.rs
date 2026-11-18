@@ -811,7 +811,7 @@ async fn async_tsp_worker(
         }
 
         TspRequest::RespondToDidAssociationRequest { details, wallet_db, accepted } => {
-            log!("Received TspRequest::RespondToDidAssociationRequest(details: {details:?}, accepted: {accepted})");
+            log!("Received TspRequest::RespondToDidAssociationRequest(accepted: {accepted})");
             Handle::current().spawn(async move {
                 let result = respond_to_did_association_request(&details, &wallet_db, accepted).await;
                 // If all was successful, add this new association to the TSP state.

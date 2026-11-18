@@ -667,6 +667,27 @@ pub enum ComposerSendOutcome {
     Failed,
 }
 
+/// Wakes the UI even if the request is discarded before its worker runs.
+pub struct ComposerSendCompletion(Option<tokio::sync::oneshot::Sender<ComposerSendOutcome>>);
+
+impl ComposerSendCompletion {
+    pub(crate) fn channel() -> (Self, tokio::sync::oneshot::Receiver<ComposerSendOutcome>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Self(Some(tx)), rx)
+    }
+
+    pub(crate) fn finish(mut self, outcome: ComposerSendOutcome) {
+        if let Some(tx) = self.0.take() { let _ = tx.send(outcome); }
+    }
+}
+
+impl Drop for ComposerSendCompletion {
+    fn drop(&mut self) {
+        drop(self.0.take());
+        SignalToUI::set_ui_signal();
+    }
+}
+
 /// The set of requests for async work that can be made to the worker thread.
 #[allow(clippy::large_enum_variant)]
 pub enum MatrixRequest {
@@ -925,7 +946,7 @@ pub enum MatrixRequest {
     /// Request to send a message to the given room.
     SendMessage {
         /// Composer handoff ends when the SDK accepts the message or reports a failure.
-        completion: Option<tokio::sync::oneshot::Sender<ComposerSendOutcome>>,
+        completion: Option<ComposerSendCompletion>,
         routing: Option<serde_json::Map<String, serde_json::Value>>,
         timeline_kind: TimelineKind,
         message: RoomMessageEventContent,
@@ -2714,17 +2735,15 @@ async fn matrix_worker_task(
                 sign_with_tsp,
             } => {
                 let Some((timeline, sender)) = get_timeline_and_sender(&timeline_kind).await else {
-                    drop(completion);
-                    SignalToUI::set_ui_signal();
                     log!("BUG: {timeline_kind} not found for send message request");
                     continue;
                 };
 
                 // Spawn a new async task that will send the actual message.
                 let _send_message_task = crate::account_session::spawn(async move {
-                    let report_failure = |message, replied_to, completion: Option<tokio::sync::oneshot::Sender<ComposerSendOutcome>>| {
+                    let report_failure = |message, replied_to, completion: Option<ComposerSendCompletion>| {
                         if let Some(completion) = completion {
-                            let _ = completion.send(ComposerSendOutcome::Failed);
+                            completion.finish(ComposerSendOutcome::Failed);
                         } else {
                             let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
                         }
@@ -2822,7 +2841,7 @@ async fn matrix_worker_task(
                     };
                     match timeline.send_with_extra_content(content, routing).await {
                         Ok(_send_handle) => {
-                            if let Some(completion) = completion { let _ = completion.send(ComposerSendOutcome::Queued); }
+                            if let Some(completion) = completion { completion.finish(ComposerSendOutcome::Queued); }
                             log!("Queued {r_or_m} for {timeline_kind}.");
                         }
                         Err(_e) => {

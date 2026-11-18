@@ -18,8 +18,8 @@
 //!
 
 use crate::theme::Snapshot as ThemeSnapshot;
-use crate::sliding_sync::ComposerSendOutcome;
-use std::sync::Arc;
+use crate::sliding_sync::{ComposerSendCompletion, ComposerSendOutcome};
+use std::{collections::VecDeque, sync::Arc};
 use makepad_widgets::*;
 use robius_speech::{NativeSpeechEvent, NativeSpeechSession, Replacement, SpeechErrorKind};
 use super::speech_input::{SpeechInput, SpeechPhase};
@@ -143,6 +143,12 @@ script_mod! {
             width: Fit height: Fit
             draw_text.color: (RBX_FG_SECONDARY)
             text: #(crate::i18n::tr("Sending…")) i18n_text: "Sending…"
+        }
+
+        restore_draft := ButtonFlat {
+            visible: false
+            width: Fit height: Fit
+            text: #(crate::i18n::tr("Restore unsent draft")) i18n_text: "Restore unsent draft"
         }
 
         // Upload progress view (shown when a file upload is in progress)
@@ -447,7 +453,8 @@ pub struct RoomInputBar {
     /// Whether the send button is currently enabled (the message input is non-empty).
     #[rust] is_send_enabled: bool,
     #[rust] typing_broadcast: TypingBroadcast,
-    #[rust] pending_sends: Vec<PendingComposerSend>,
+    #[rust] pending_sends: VecDeque<PendingComposerSend>,
+    #[rust] unsent_drafts: VecDeque<ComposerDraft>,
     /// The room or thread that this RoomInputBar is currently within.
     #[rust] timeline_kind: Option<TimelineKind>,
     /// The widget UID of the RoomScreen containing this RoomInputBar.
@@ -466,8 +473,11 @@ pub struct RoomInputBar {
 
 struct PendingComposerSend {
     completion: tokio::sync::oneshot::Receiver<ComposerSendOutcome>,
-    draft: MentionableTextInputState,
-    markdown: String,
+    draft: ComposerDraft,
+}
+
+struct ComposerDraft {
+    input: MentionableTextInputState,
     replying_to: Option<(EventTimelineItem, EmbeddedEvent)>,
 }
 
@@ -514,7 +524,7 @@ impl ScriptHook for RoomInputBar {
         if apply.is_script_reapply() {
             vm.with_cx_mut(|cx| {
                 self.enable_send_message_button(cx, self.is_send_enabled);
-                self.view.label(cx, ids!(pending_send_notice)).set_visible(cx, !self.pending_sends.is_empty());
+                self.update_send_status(cx);
             });
         }
     }
@@ -551,7 +561,7 @@ impl Widget for RoomInputBar {
             return;
         }
 
-        self.poll_pending_sends(cx);
+        if matches!(event, Event::Signal) { self.poll_pending_sends(cx); }
         self.handle_speech_event(cx, event);
         self.take_assistant_draft(cx);
 
@@ -933,6 +943,13 @@ impl RoomInputBar {
             return;
         };
 
+        if self.button(cx, ids!(restore_draft)).clicked(actions) {
+            if refs.input_bar.visible() && !refs.editing_pane.is_currently_shown(cx) {
+                self.restore_next_draft(cx, &timeline_kind);
+            }
+            return;
+        }
+
         let open_popup_menu_button = refs.open_popup_menu_button;
         if open_popup_menu_button.clicked(actions) || self.button(cx, ids!(mobile_more_button)).clicked(actions) {
             let button_rect = if self.mobile {
@@ -1283,13 +1300,14 @@ impl RoomInputBar {
         &mut self,
         cx: &mut Cx,
         input: &MentionableTextInputRef,
-    ) -> tokio::sync::oneshot::Sender<ComposerSendOutcome> {
-        let (completion, result) = tokio::sync::oneshot::channel();
-        self.pending_sends.push(PendingComposerSend {
+    ) -> ComposerSendCompletion {
+        let (completion, result) = ComposerSendCompletion::channel();
+        self.pending_sends.push_back(PendingComposerSend {
             completion: result,
-            draft: input.save_state(),
-            markdown: input.markdown_text(),
-            replying_to: self.replying_to.take(),
+            draft: ComposerDraft {
+                input: input.save_state(),
+                replying_to: self.replying_to.take(),
+            },
         });
         self.view.label(cx, ids!(pending_send_notice)).set_visible(cx, true);
         completion
@@ -1298,37 +1316,49 @@ impl RoomInputBar {
     fn poll_pending_sends(&mut self, cx: &mut Cx) {
         use tokio::sync::oneshot::error::TryRecvError;
         if self.pending_sends.is_empty() { return; }
-        let mut sends = std::mem::take(&mut self.pending_sends);
-        sends.retain_mut(|send| {
+        let previous_len = self.pending_sends.len();
+        for _ in 0..previous_len {
+            let mut send = self.pending_sends.pop_front().unwrap();
             match send.completion.try_recv() {
-                Err(TryRecvError::Empty) => return true,
-                Ok(ComposerSendOutcome::Queued) => return false,
-                Err(TryRecvError::Closed) => enqueue_popup_notification(
-                    crate::i18n::tr("Send interrupted. Check the conversation before retrying."),
-                    PopupKind::Error, None,
-                ),
-                Ok(ComposerSendOutcome::Failed) => {} // The backend already displayed the failure reason.
-            }
-            let input = self.mentionable_text_input(cx, ids!(mentionable_text_input));
-            let current = input.markdown_text();
-            if current.is_empty() {
-                input.restore_state(cx, std::mem::take(&mut send.draft));
-            } else {
-                input.set_text(cx, &format!("{current}\n{}", send.markdown));
-            }
-            if self.replying_to.is_none() {
-                if let (Some(reply), Some(kind)) = (send.replying_to.take(), self.timeline_kind.clone()) {
-                    self.show_replying_to(cx, reply, &kind, false);
+                Err(TryRecvError::Empty) => self.pending_sends.push_back(send),
+                Ok(ComposerSendOutcome::Queued) => {}
+                result => {
+                    if result.is_err() {
+                        enqueue_popup_notification(
+                            crate::i18n::tr("Send interrupted. Check the conversation before retrying."),
+                            PopupKind::Error, None,
+                        );
+                    }
+                    self.unsent_drafts.push_back(send.draft);
                 }
             }
-            self.enable_send_message_button(cx, true);
-            self.redraw(cx);
-            false
-        });
-        if sends.is_empty() {
-            self.view.label(cx, ids!(pending_send_notice)).set_visible(cx, false);
         }
-        self.pending_sends = sends;
+        if self.pending_sends.len() != previous_len {
+            self.update_send_status(cx);
+        }
+    }
+
+    fn update_send_status(&mut self, cx: &mut Cx) {
+        self.view.label(cx, ids!(pending_send_notice)).set_visible(cx, !self.pending_sends.is_empty());
+        self.button(cx, ids!(restore_draft)).set_visible(cx, !self.unsent_drafts.is_empty());
+    }
+
+    fn restore_next_draft(&mut self, cx: &mut Cx, kind: &TimelineKind) {
+        let input = self.mentionable_text_input(cx, ids!(mentionable_text_input));
+        if !input.text().is_empty() || self.replying_to.is_some() {
+            enqueue_popup_notification(crate::i18n::tr("Finish or clear your current draft before restoring another."),
+                PopupKind::Info, Some(5.0));
+            return;
+        }
+        if let Some(draft) = self.unsent_drafts.pop_front() {
+            input.restore_state(cx, draft.input);
+            if let Some(reply) = draft.replying_to {
+                self.show_replying_to(cx, reply, kind, true);
+            }
+            self.enable_send_message_button(cx, true);
+            self.update_send_status(cx);
+            self.redraw(cx);
+        }
     }
 
     /// Fills the input bar with the content of a message that failed to send (so the user can retry it).
@@ -1793,6 +1823,7 @@ impl RoomInputBarRef {
         inner.stop_typing();
         let saved = RoomInputBarState {
             pending_sends: std::mem::take(&mut inner.pending_sends),
+            unsent_drafts: std::mem::take(&mut inner.unsent_drafts),
             was_replying_preview_visible: inner.was_replying_preview_visible,
             replying_to: inner.replying_to.clone(),
             editing_pane_state: inner.child_by_path(ids!(editing_pane)).as_editing_pane().save_state(),
@@ -1822,6 +1853,7 @@ impl RoomInputBarRef {
         inner.cancel_dictation(cx);
         let RoomInputBarState {
             pending_sends,
+            unsent_drafts,
             was_replying_preview_visible,
             mentionable_input_state,
             replying_to,
@@ -1829,8 +1861,8 @@ impl RoomInputBarRef {
             upload,
         } = saved_state;
         inner.pending_sends = pending_sends;
-        let pending = !inner.pending_sends.is_empty();
-        inner.view.label(cx, ids!(pending_send_notice)).set_visible(cx, pending);
+        inner.unsent_drafts = unsent_drafts;
+        inner.update_send_status(cx);
 
         // Note: we do *not* restore the location preview state here; see `save_state()`.
 
@@ -1868,6 +1900,7 @@ impl RoomInputBarRef {
 
         // 5. Apply this room's tombstone state and the user's power levels.
         inner.update_room_state(cx, timeline_kind.room_id(), tombstone_info, user_power_levels);
+        inner.poll_pending_sends(cx);
     }
 
     /// See [`UploadProgressView::on_timeline_reconnected()`].
@@ -1967,7 +2000,8 @@ impl RoomInputBarRef {
 /// The saved UI state of a `RoomInputBar` widget.
 #[derive(Default)]
 pub struct RoomInputBarState {
-    pending_sends: Vec<PendingComposerSend>,
+    unsent_drafts: VecDeque<ComposerDraft>,
+    pending_sends: VecDeque<PendingComposerSend>,
     /// Whether or not the `replying_preview` widget was shown.
     was_replying_preview_visible: bool,
     /// The state of the MentionableTextInput within this input bar.
@@ -2039,17 +2073,19 @@ mod composer_send_tests {
         let saved = bar.save_state();
         assert_eq!(saved.pending_sends.len(), 2);
         assert!(bar.borrow().unwrap().pending_sends.is_empty());
-        let room = ruma::room_id!("!composer:example.org").to_owned();
-        bar.restore_state(&mut cx, TimelineKind::MainRoom { room_id: room }, saved, UserPowerLevels::all(), None, false);
+        let room = TimelineKind::MainRoom { room_id: ruma::room_id!("!composer:example.org").to_owned() };
+        bar.restore_state(&mut cx, room.clone(), saved, UserPowerLevels::all(), None, false);
         let mut composer = bar.borrow_mut().unwrap();
-        assert!(first.send(ComposerSendOutcome::Queued).is_ok());
+        first.finish(ComposerSendOutcome::Queued);
         composer.poll_pending_sends(&mut cx);
         assert!(notice.visible());
         assert!(input.text().is_empty());
 
-        assert!(second.send(ComposerSendOutcome::Failed).is_ok());
+        second.finish(ComposerSendOutcome::Failed);
         composer.poll_pending_sends(&mut cx);
         assert!(!notice.visible());
+        assert!(input.text().is_empty());
+        composer.restore_next_draft(&mut cx, &room);
         assert_eq!(input.text(), "/me second");
 
         let interrupted = composer.track_composer_send(&mut cx, &input);
@@ -2058,6 +2094,13 @@ mod composer_send_tests {
         composer.poll_pending_sends(&mut cx);
         composer.poll_pending_sends(&mut cx);
         assert!(!notice.visible());
-        assert_eq!(input.text(), "new draft\n/me second");
+        assert_eq!(input.text(), "new draft");
+        composer.restore_next_draft(&mut cx, &room);
+        assert_eq!(input.text(), "new draft");
+        assert_eq!(composer.unsent_drafts.len(), 1);
+        input.set_text(&mut cx, "");
+        composer.restore_next_draft(&mut cx, &room);
+        assert_eq!(input.text(), "/me second");
+        assert!(composer.unsent_drafts.is_empty());
     }
 }

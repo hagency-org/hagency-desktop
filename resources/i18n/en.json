@@ -529,6 +529,8 @@
   "Send your location to this room?": "Send your location to this room?",
   "Sender names and history were provided by the person who forwarded this card.": "Sender names and history were provided by the person who forwarded this card.",
   "Sending invite...": "Sending invite...",
+  "Restore unsent draft": "Restore unsent draft",
+  "Finish or clear your current draft before restoring another.": "Finish or clear your current draft before restoring another.",
   "Send interrupted. Check the conversation before retrying.": "Send interrupted. Check the conversation before retrying.",
   "Sending…": "Sending…",
   "Sent {0} of {1}. {2}": "Sent {0} of {1}. {2}",
