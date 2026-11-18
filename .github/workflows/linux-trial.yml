@@ -1,0 +1,62 @@
+name: Linux trial
+
+# A trial, not a gate: what of the Desktop checks passes on Linux. Nothing
+# depends on it and no pull request starts it. See tools/linux-trial.sh.
+on:
+  workflow_dispatch:
+  # While the trial is worked on, each push to its own branch starts it.
+  push:
+    branches: [ci/linux-tests]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: never
+  CARGO_INCREMENTAL: 0
+  RUST_BACKTRACE: 1
+  # Fixtures inject SecretStore; CI must never access a runner's native vault.
+  HAGENCY_NATIVE_CREDENTIAL_IO: deny
+
+jobs:
+  trial:
+    name: Linux trial (${{ matrix.part }})
+    # GitHub's Linux machine, until the project has Linux machines of its own.
+    # Setting the repository variable HAGENCY_LINUX_RUNNER to "own" sends the
+    # trial to machines that carry the hagency-linux label.
+    runs-on: ${{ vars.HAGENCY_LINUX_RUNNER == 'own' && fromJSON('["self-hosted","linux","x64","hagency-linux"]') || 'ubuntu-24.04' }}
+    timeout-minutes: 70
+    strategy:
+      fail-fast: false
+      matrix:
+        part: [lib-hagency, lib-store, lib-runtime, lib-rest, lib-features, app, gate]
+    steps:
+      - uses: actions/checkout@v7
+      - name: JIT-line makepad checkout
+        shell: bash
+        run: if [ -f .jit/sources.sh ]; then bash .jit/sources.sh; fi
+      - name: Free disk space on GitHub's machine
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
+          df -h / | tail -1
+      - name: Install system dependencies
+        if: runner.environment == 'github-hosted'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libssl-dev libsqlite3-dev pkg-config llvm clang libclang-dev cmake \
+            libxcursor-dev libx11-dev libasound2-dev libpulse-dev \
+            libwayland-dev libxkbcommon-dev libdrm-dev
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Run the part
+        run: bash tools/linux-trial.sh ${{ matrix.part }}
+      - name: Disk left
+        if: always()
+        run: df -h / | tail -1
