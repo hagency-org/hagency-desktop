@@ -350,6 +350,9 @@ pub struct MobileChatInfo {
     #[rust]
     request: u64,
     #[rust]
+    load_deadline: Option<std::time::Instant>,
+    #[rust] load_timer: Timer,
+    #[rust]
     data: Option<ChatInfoData>,
     #[rust] member_owners: HashMap<OwnedUserId, OwnedUserId>,
     #[rust] indented_members: HashSet<OwnedUserId>,
@@ -407,7 +410,31 @@ fn modes() -> [(Option<RoomNotificationMode>, &'static str); 4] {
     ]
 }
 
+const INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl MobileChatInfo {
+    fn expire_pending_load(&mut self, cx: &mut Cx, now: std::time::Instant) {
+        if self.load_deadline.is_some_and(|deadline| now >= deadline) {
+            self.fail_load(cx, crate::i18n::tr("The chat information request timed out."));
+        }
+    }
+
+    fn finish_load(&mut self, cx: &mut Cx) {
+        self.load_deadline = None;
+        cx.stop_timer(std::mem::take(&mut self.load_timer));
+    }
+
+    fn fail_load(&mut self, cx: &mut Cx, error: &str) {
+        self.finish_load(cx);
+        self.data = None;
+        self.close_agent_picker(cx);
+        self.failed = true;
+        self.status = crate::i18n::format(
+            "Could not load chat information: {error}", &[("error", error.to_owned())],
+        );
+        self.view.redraw(cx);
+    }
+
     fn services_response_matches(&self, loaded: &RoomServicesLoaded) -> bool {
         self.owner.as_ref() == Some(&loaded.owner) && self.origin == loaded.origin
             && self.epoch == loaded.epoch && self.services_request == loaded.request
@@ -482,13 +509,17 @@ impl MobileChatInfo {
             let result=tokio::time::timeout(std::time::Duration::from_secs(30),fetch_member_owners(ownership_room.as_str(),&ownership_owner)).await.unwrap_or_else(|_|Err("room_discovery_unavailable".into()));
             Cx::post_action(MemberOwnershipLoaded {owner:ownership_owner,origin:ownership_origin,epoch,room_id:ownership_room,request,result});
         });
+        cx.stop_timer(self.load_timer);
+        self.load_timer = cx.start_timeout(INFO_TIMEOUT.as_secs_f64());
+        self.load_deadline = Some(std::time::Instant::now() + INFO_TIMEOUT);
+        self.failed = false;
         self.status = crate::i18n::tr("Loading chat information…").into();
         self.view
             .portal_list(cx, ids!(list))
             .set_first_id_and_scroll(0, 0.0);
         self.view.redraw(cx);
         spawn_async_task(async move {
-            let result = async {
+            let result = tokio::time::timeout(INFO_TIMEOUT, async {
                 let room = client
                     .get_room(room.room_id())
                     .ok_or(crate::i18n::tr("This chat is no longer available."))?;
@@ -518,8 +549,7 @@ impl MobileChatInfo {
                     banned_members,
                     mode: room.user_defined_notification_mode().await,
                 })
-            }
-            .await;
+            }).await.unwrap_or_else(|_| Err(crate::i18n::tr("The chat information request timed out.").into()));
             Cx::post_action(ChatInfoLoaded {
                 owner,
                 origin,
@@ -690,6 +720,7 @@ impl MobileChatInfo {
         self.epoch = 0;
         self.room = None;
         self.request = 0;
+        self.load_deadline = None;
         self.data = None;
         self.member_owners.clear();self.indented_members.clear();self.ownership_unavailable=false;
         self.status.clear();
@@ -726,6 +757,9 @@ impl Widget for MobileChatInfo {
         if self.owner.is_some() && !self.pin_is_current() {
             self.clear();
         }
+        if self.load_timer.is_event(event).is_some() && self.load_deadline.is_some() {
+            self.fail_load(cx, crate::i18n::tr("The chat information request timed out."));
+        }
         if matches!(event, Event::Signal) {
             crate::avatar_cache::process_avatar_updates(cx);
             self.view.redraw(cx);
@@ -741,6 +775,12 @@ impl Widget for MobileChatInfo {
         }
         if let Event::Actions(actions) = event {
             for action in actions {
+                if let Some(verified) = action.downcast_ref::<crate::verification::VerificationStateAction>()
+                    && verified.state == matrix_sdk::encryption::VerificationState::Verified
+                    && verified.pin.is_current() && self.pin_is_current()
+                    && (self.failed || self.load_deadline.is_some())
+                    && let Some(room) = self.room.clone()
+                { self.fetch_info(cx, room); }
                 if let Some(loaded) = action.downcast_ref::<RoomServicesLoaded>()
                     && self.pin_is_current() && self.services_response_matches(loaded) {
                     self.services_busy = false;
@@ -800,6 +840,7 @@ impl Widget for MobileChatInfo {
                 }
                 if let Some(loaded) = action.downcast_ref::<ChatInfoLoaded>() {
                     if self.accepts(loaded) {
+                        self.finish_load(cx);
                         match &loaded.result {
                             Ok(data) => {
                                 let mut data=data.clone();
@@ -808,13 +849,7 @@ impl Widget for MobileChatInfo {
                                 self.failed = false;
                                 self.status.clear();
                             }
-                            Err(error) => {
-                                self.status = crate::i18n::format(
-                                    "Could not load chat information: {error}",
-                                    &[("error", (error).to_string())],
-                                );
-                                self.failed = true;
-                            }
+                            Err(error) => self.fail_load(cx, error),
                         }
                         self.view.redraw(cx);
                     }
@@ -922,6 +957,9 @@ impl Widget for MobileChatInfo {
         if self.owner.is_some() && !self.pin_is_current() {
             self.clear();
         }
+        // A covered tab can miss the one-shot result. When it next draws it
+        // must still leave the loading state and offer a new request.
+        self.expire_pending_load(cx, std::time::Instant::now());
         let members = self.tab == InfoTab::Members;
         self.view.label(cx,ids!(ownership_status)).set_visible(cx,members && self.ownership_unavailable);
         self.view.view(cx, ids!(services_panel)).set_visible(cx, !members && self.services_open);
@@ -941,7 +979,9 @@ impl Widget for MobileChatInfo {
         let summary_room = self.data.as_ref().map(|data|&data.room).or(self.room.as_ref());
         self.view.label(cx, ids!(summary_name)).set_text(cx, &summary_room.map_or_else(|| crate::i18n::tr("Chat information").to_owned(), |room|room.display().into_owned()));
         let count = self.data.as_ref().map_or_else(|| crate::i18n::tr("Loading members…").to_owned(), |data| crate::i18n::format("{0} members", &[("0",data.members.len().saturating_sub(data.banned_members.len()).to_string())]));
-        self.view.label(cx, ids!(summary_count)).set_text(cx, &count);
+        let summary_count = self.view.label(cx, ids!(summary_count));
+        summary_count.set_text(cx, &count);
+        summary_count.set_visible(cx, self.data.is_some() || (self.request != 0 && !self.failed));
         // Applying a style asks for a redraw, and this runs on every draw:
         // restyling the tabs each time kept the open panel drawing for ever.
         if self.styled_tab != Some(self.tab) {
@@ -1271,6 +1311,96 @@ mod information_target_tests {
         info.draw_walk_all(&mut cx2d,&mut Scope::empty(),Walk{width:Size::Fixed(280.0),height:Size::Fixed(775.0),..Walk::default()});
         overlay.end(&mut cx2d);cx2d.end_pass_sized_turtle();list.end(&mut cx2d);cx2d.end_pass(&pass);
     }
+    #[test]
+    fn verified_session_reloads_room_information_and_ignores_previous_device() {
+        use crate::matrix_context::SessionPin;
+        use crate::settings::crypto_settings::test_support::{Server, install_link_client};
+        use crate::verification::VerificationStateAction;
+        use std::{cell::RefCell, rc::Rc};
+
+        const TEST: &str = "home::mobile_chat_info::information_target_tests::verified_session_reloads_room_information_and_ignores_previous_device";
+        if std::env::var_os("HAGENCY_INFO_VERIFY_TEST").is_none() {
+            let profile = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--test-threads=1"])
+                .env("HAGENCY_INFO_VERIFY_TEST", "1")
+                .env("HAGENCY_DESKTOP_DATA_DIR", profile.path())
+                .env("HAGENCY_NATIVE_CREDENTIAL_IO", "deny")
+                .output().unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+
+        crate::sliding_sync::backend_runtime().block_on(async {
+            let server = Server::with_handler(false, std::sync::Arc::new(|_| None));
+            let old = server.room().await.client();
+            install_link_client(Some(old.clone()));
+            let old_pin = SessionPin::capture(&old).unwrap();
+            let room = server.room().await;
+            let current = room.client();
+            install_link_client(Some(current.clone()));
+
+            let panel = Rc::new(RefCell::new(None::<MobileChatInfo>));
+            let listener = Rc::clone(&panel);
+            let mut cx = Cx::new(Box::new(move |cx, event| {
+                if matches!(event, Event::Actions(_)) && let Some(info) = listener.borrow_mut().as_mut() {
+                    info.handle_event(cx, event, &mut Scope::empty());
+                }
+            }));
+            let mut info = cx.with_vm(|vm| {
+                makepad_widgets::script_mod(vm);
+                crate::app::register_widgets(vm);
+                let value = script_eval!(vm, {mod.widgets.MobileChatInfo {}});
+                MobileChatInfo::script_from_value(vm, value)
+            });
+            info.room = Some(RoomNameId::empty(room.room_id().to_owned()));
+            info.owner = current.user_id().map(ToOwned::to_owned);
+            info.epoch = crate::account_session::epoch();
+            info.origin = current.homeserver().to_string();
+            info.fail_load(&mut cx, "offline");
+            let verified = |pin| Event::Actions(vec![Box::new(VerificationStateAction {
+                pin, state: matrix_sdk::encryption::VerificationState::Verified,
+            })]);
+            info.handle_event(&mut cx, &verified(old_pin), &mut Scope::empty());
+            assert!(info.failed && info.load_deadline.is_none());
+            info.handle_event(&mut cx, &verified(SessionPin::capture(&current).unwrap()), &mut Scope::empty());
+            assert!(!info.failed && info.load_deadline.is_some());
+            *panel.borrow_mut() = Some(info);
+            tokio::time::timeout(INFO_TIMEOUT, async {
+                loop {
+                    cx.handle_action_receiver();
+                    if panel.borrow().as_ref().unwrap().load_deadline.is_none() { break; }
+                    tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                }
+            }).await.expect("the current room must receive a terminal response");
+            let panel = panel.borrow();
+            let info = panel.as_ref().unwrap();
+            assert!(!info.failed, "{}", info.status);
+            assert_eq!(info.data.as_ref().unwrap().room.room_id(), room.room_id());
+            install_link_client(None);
+        });
+    }
+
+    #[test]
+    fn returning_to_a_pane_that_missed_its_reply_shows_retry_and_ends_loading() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut info = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.MobileChatInfo {}});
+            MobileChatInfo::script_from_value(vm, value)
+        });
+        info.room = Some(RoomNameId::empty(ruma::owned_room_id!("!room:example.org")));
+        info.request = 1;
+        info.load_deadline = Some(std::time::Instant::now());
+        draw_information(&mut info, &mut cx);
+        assert!(info.failed && info.load_deadline.is_none());
+        assert!(info.view.button(&cx, ids!(retry)).visible());
+        assert!(!info.view.label(&cx, ids!(summary_count)).visible());
+        assert!(info.status.contains(crate::i18n::tr("The chat information request timed out.")));
+    }
+
     #[test]
     fn registered_room_tabs_keep_summary_fixed_and_original_invitation_intent() {
         let mut cx=Cx::new(Box::new(|_,_|{}));

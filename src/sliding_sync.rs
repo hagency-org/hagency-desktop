@@ -4165,11 +4165,18 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         // Its immediate check must neither exit on the old flag nor have a new
         // rejection cleared after it has synchronously retired native authority.
         subscriber_task_handles.push(handle_session_changes(client.clone()));
-        Cx::post_action(LoginAction::LoginSuccess);
-
-        // Attempt to load the previously-saved app state.
-        // One-shot, drops on its own; not tracked.
-        handle_load_app_state(logged_in_user_id.to_owned());
+        let mut app_state = match load_app_state(&logged_in_user_id).await {
+            Ok(state) => state.unwrap_or_default(),
+            Err(error) => {
+                error!("Failed to restore app state: {error}");
+                enqueue_popup_notification("Could not restore the previous session's app state.", PopupKind::Warning, None);
+                Default::default()
+            }
+        };
+        app_state.retain_accessible_rooms(|id| client.get_room(id).map(|room| room.state()));
+        let session = crate::matrix_context::SessionPin::capture(&client)
+            .expect("logged-in SDK client has session metadata");
+        Cx::post_action(crate::app::SessionReady { session, app_state });
         subscriber_task_handles.push(handle_sync_indicator_subscriber(&sync_service));
         subscriber_task_handles.push(handle_sync_service_state_subscriber(sync_service.state()));
 
@@ -5129,33 +5136,6 @@ fn handle_room_notification_subscriber(client: Client) -> JoinHandle<()> {
             }
         }
     })
-}
-
-/// Asynchronously loads and restores the app state from persistent storage for the given user.
-///
-/// When a saved state file is found, this emits a `RestoreAppStateFromPersistentState` action
-/// so that the app can restore preferences and the dock layout (on desktop).
-/// We emit this action even if the dock state is empty to ensure that prefs always get restored.
-fn handle_load_app_state(user_id: OwnedUserId) {
-    crate::account_session::spawn(async move {
-        match load_app_state(&user_id).await {
-            Ok(Some(app_state)) => {
-                log!("Loaded app state from persistent storage. Restoring now...");
-                Cx::post_action(AppStateAction::RestoreAppStateFromPersistentState { user_id, app_state });
-            }
-            Ok(None) => {
-                // No saved file (fresh install) or file was unreadable; nothing to restore.
-            }
-            Err(_e) => {
-                log!("Failed to restore app state from persistent storage: {_e}");
-                enqueue_popup_notification(
-                    "Could not restore the previous session's app state.",
-                    PopupKind::Warning,
-                    None,
-                );
-            }
-        }
-    });
 }
 
 /// Returns `true` if the given sync service error is due to an invalid/expired access token.
