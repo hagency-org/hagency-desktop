@@ -17,7 +17,7 @@
 
 use makepad_widgets::*;
 
-use crate::home::rooms_list::RoomsListWidgetExt;
+use crate::home::rooms_list::{RoomsListRef, RoomsListWidgetExt};
 use crate::home::joined_spaces::JoinedSpacesWidgetExt;
 use crate::home::navigation_tab_bar::{NavigationBarAction, SelectedTab};
 use crate::home::sidebar_action_menu::{new_or_join_menu_pos, SidebarMenuAction, SidebarMenuKind};
@@ -104,7 +104,7 @@ script_mod! {
 
             draw_bg.color: (RBX_BG_CANVAS)
 
-            CachedWidget {
+            AccountCachedWidget {
                 rooms_list_header := RoomsListHeader {}
             }
             // The filter field shrinks to leave room for "New or Join" on its right.
@@ -114,7 +114,7 @@ script_mod! {
                 width: Fill height: Fit
                 flow: Right spacing: 8
                 align: Align{y: 0.5}
-                CachedWidget {
+                AccountCachedWidget {
                     room_filter_input_bar := RoomFilterInputBar {
                         input +: {empty_text: #(crate::i18n::tr("Search")) i18n_empty_text: "Search"}
                     }
@@ -126,7 +126,7 @@ script_mod! {
             // navigation rail on the left, and selecting one filters this list.
             conversations := View {
                 width: Fill height: Fill
-                CachedWidget {rooms_list := RoomsList {}}
+                AccountCachedWidget {rooms_list := RoomsList {}}
             }
         },
 
@@ -155,11 +155,11 @@ script_mod! {
             ChatViewSwitch {}
             conversations := View {
                 width: Fill height: Fill
-                CachedWidget {rooms_list := RoomsList {}}
+                AccountCachedWidget {rooms_list := RoomsList {}}
             }
             spaces_tree := View {
                 width: Fill height: Fill visible: false
-                CachedWidget {joined_spaces := JoinedSpaces {}}
+                AccountCachedWidget {joined_spaces := JoinedSpaces {}}
             }
         }
     }
@@ -186,12 +186,16 @@ pub struct RoomsSideBar {
     #[rust] new_or_join_open: bool,
 }
 
+pub(crate) fn clear_session(cx: &mut Cx) {
+    *cx.global::<ChatsViewState>() = Default::default();
+}
+
 impl ScriptHook for RoomsSideBar {
     fn on_after_new(&mut self, vm: &mut ScriptVm) {
         vm.with_cx_mut(|cx| {
             // Here we set the global singleton for the RoomsList widget,
             // which is used to access the list of rooms from anywhere in the app.
-            cx.set_global(self.view.rooms_list(cx, ids!(rooms_list)));
+            *cx.global::<RoomsListRef>() = self.view.rooms_list(cx, ids!(rooms_list));
 
             // Follow the enclosing HomeScreen, including its view-mode override.
             // The desktop dock pane is narrow even in a wide window; selecting
