@@ -14,6 +14,11 @@ on:
         type: choice
         options: [library, all]
         default: library
+      runner:
+        description: "github: a GitHub machine. own: the project's own Linux machines, for this run only, whatever the repository variable says"
+        type: choice
+        options: [github, own]
+        default: github
 
 permissions:
   contents: read
@@ -38,11 +43,16 @@ jobs:
     # The repository variable HAGENCY_LINUX_RUNNER chooses the machine. With
     # "own", pushes, manual runs and pull requests from this repository go to
     # the project's own Linux machines, which carry the hagency-linux label;
-    # with any other value, or none, to a GitHub machine. A pull request from
-    # a fork stays on a GitHub machine: a fork never chooses what runs on the
-    # project's hardware. The own machines have the system packages and
+    # with any other value, or none, to a GitHub machine. A manual run can ask
+    # for the own machines by itself. A pull request from a fork stays on a
+    # GitHub machine: a fork never chooses what runs on the project's
+    # hardware. The own machines are arm64, have the system packages and
     # rustup installed, and a job there cannot use sudo.
-    runs-on: ${{ vars.HAGENCY_LINUX_RUNNER == 'own' && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","linux","x64","hagency-linux"]') || 'ubuntu-24.04' }}
+    #
+    # Each library part has its own machine there, named by a label equal to
+    # the part: the machine keeps cargo's build output between jobs, and that
+    # output is of use only to the part that made it.
+    runs-on: ${{ (inputs.runner == 'own' || vars.HAGENCY_LINUX_RUNNER == 'own') && (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON(startsWith(matrix.part, 'lib-') && format('["self-hosted","Linux","ARM64","hagency-linux","{0}"]', matrix.part) || '["self-hosted","Linux","ARM64","hagency-linux"]') || 'ubuntu-24.04' }}
     timeout-minutes: 90
     strategy:
       fail-fast: false
@@ -50,6 +60,21 @@ jobs:
         part: ${{ fromJSON(inputs.parts == 'all' && '["lib-hagency","lib-store","lib-runtime","lib-rest","lib-features","app","gate"]' || '["lib-hagency","lib-store","lib-runtime","lib-rest","lib-features"]') }}
     steps:
       - uses: actions/checkout@v7
+        with:
+          # An own machine keeps cargo's build output between jobs; the next
+          # step cleans the rest of its checkout.
+          clean: ${{ runner.environment == 'github-hosted' }}
+      - name: Keep the build output of the job before this one
+        if: runner.environment == 'self-hosted'
+        shell: bash
+        env:
+          # One part's output is a few GB; five checkouts share one disk.
+          CI_BUILD_OUTPUT_LIMIT_GB: 30
+          CI_BUILD_OUTPUT_FREE_GB: 25
+        run: |
+          bash tools/ci-keep-build-output.sh
+          # Five parts run side by side on one machine there.
+          echo "PARALLEL_TEST_JOBS=2" >> "$GITHUB_ENV"
       - name: JIT-line makepad checkout
         shell: bash
         run: if [ -f .jit/sources.sh ]; then bash .jit/sources.sh; fi
