@@ -153,6 +153,11 @@ impl Widget for VerificationBadge {
 
         if let Event::Actions(actions) = event {
             for action in actions {
+                if let Some(crate::login::login_screen::LoginAction::LoginSuccess) = action.downcast_ref()
+                    && let Some(client) = get_client() {
+                    self.verification_state = client.encryption().verification_state().get();
+                    self.update_icon_visibility(cx);
+                }
                 if let Some(update) = action.downcast_ref::<VerificationStateAction>()
                     && update.pin.is_current() {
                     self.verification_state = update.state;

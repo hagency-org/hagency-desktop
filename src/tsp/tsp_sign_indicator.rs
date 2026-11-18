@@ -100,11 +100,11 @@ impl Widget for TspSignIndicator {
                     self.appearance.muted,
                 ),
                 TspSignState::Verified => (
-                    "This message was signed with the user's verified TSP identity.",
+                    "The displayed message body matches the content signed by the sender’s verified TSP identity.",
                     self.appearance.role("color.status.success.foreground"),
                 ),
                 TspSignState::WrongSignature => (
-                    "Warning: this message's TSP signature does NOT match the expected sender signature.",
+                    "The TSP signature could not be verified for the displayed message.",
                     self.appearance.role("color.status.danger.foreground"),
                 ),
             };
@@ -114,8 +114,8 @@ impl Widget for TspSignIndicator {
                     text: text.to_string(),
                     widget_rect: area.rect(cx),
                     options: CalloutTooltipOptions {
-                        text_color,
-                        bg_color: self.appearance.surface,
+                        text_color: Some(text_color),
+                        bg_color: Some(self.appearance.surface),
                         ..Default::default()
                     },
                 },

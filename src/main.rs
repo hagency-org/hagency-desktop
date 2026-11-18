@@ -43,6 +43,8 @@ fn main() {
             std::process::exit(2);
         }
     }
+    #[cfg(target_os = "macos")]
+    rinx::macos_dev_output::install();
     // The HAL needs the main thread for its main loop; `run_app` gives it
     // that and runs the app on a thread of its own (under `makepad run`, the
     // host already did, and the app runs directly).

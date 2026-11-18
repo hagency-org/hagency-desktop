@@ -6,6 +6,12 @@ mod database_inspect;
 mod revoke_transport;
 mod owners;
 mod retained;
+#[cfg(windows)]
+mod windows_permissions;
+#[cfg(windows)]
+pub(crate) use windows_permissions::{
+    PermissionRepairLocation, authenticated_reauth_database, recover_verified_account,
+};
 pub(crate) use retained::{retain, retained_paths, retained_session};
 
 use super::{ClientSessionPersisted, FullSessionPersisted, PersistedUserSession, SlidingSyncVersion};
@@ -1792,6 +1798,17 @@ impl Service {
         self.inspect_database_source(path)
             .map(|(database, _)| database)
     }
+    fn open_v2_database(&self, stored: Stored) -> Result<ExistingDatabase> {
+        let original = self.read_original(&stored)?;
+        Ok(ExistingDatabase {
+            identity: stored.identity,
+            client_session: ClientSessionPersisted {
+                homeserver: stored.database.homeserver,
+                db_path: stored.database.db_path,
+                passphrase: original.secret.to_string(),
+            },
+        })
+    }
     fn inspect_database_source(&self, path: &Path) -> Result<(ExistingDatabase, Snapshot)> {
         self.cleanup_retired();
         let doc = Document::open(path, MAX_SESSION)?;
@@ -1800,18 +1817,7 @@ impl Service {
         if value.get("version").is_some() {
             let stored: Stored = serde_json::from_value(value)?;
             self.check_account_path(path, Some(&stored.identity.owner))?;
-            let original = self.read_original(&stored)?;
-            Ok((
-                ExistingDatabase {
-                    identity: stored.identity,
-                    client_session: ClientSessionPersisted {
-                        homeserver: stored.database.homeserver,
-                        db_path: stored.database.db_path,
-                        passphrase: original.secret.to_string(),
-                    },
-                },
-                source,
-            ))
+            Ok((self.open_v2_database(stored)?, source))
         } else {
             let session: FullSessionPersisted = serde_json::from_value(value)?;
             let identity = identity(&session);

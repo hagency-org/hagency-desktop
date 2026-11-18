@@ -15,6 +15,10 @@ pub(crate) fn browser_credential_error_message(
     error: &anyhow::Error,
     authorized: bool,
 ) -> Option<&'static str> {
+    #[cfg(windows)]
+    if error.is::<crate::persistence::credential_state::PermissionRepairLocation>() {
+        return None; // The recovery error already names the affected location.
+    }
     Some(match error.downcast_ref::<CredentialError>()? {
         CredentialError::WriteResourcesExhausted => tr(
             "Windows Credential Manager could not save a new sign-in credential. If the store is full, remove only entries you no longer use, then try again.",

@@ -1318,6 +1318,7 @@ pub struct RoomScreen {
     #[rust] chat_info_icon_open: Option<bool>,
     /// The timeline currently displayed by this RoomScreen, if any.
     #[rust] timeline_kind: Option<TimelineKind>,
+    #[rust] timeline_epoch: u64,
     /// The persistent UI-relevant states for the room that this widget is currently displaying.
     #[rust] tl_state: Option<TimelineUiState>,
     /// The set of pinned events in this room.
@@ -3750,6 +3751,7 @@ impl RoomScreen {
             .expect("BUG: Timeline::show_timeline(): no timeline_kind was set.");
         let room_id = kind.room_id().clone();
         let owner = self.widget_uid();
+        self.timeline_epoch = crate::account_session::epoch();
         crate::sliding_sync::note_timeline_interest(&kind, owner, true);
 
         let (mut tl_state, mut is_first_time_being_loaded) = match timeline_state_store::take(cx, &kind, owner) {
@@ -4032,6 +4034,14 @@ impl RoomScreen {
     /// Invoke this when this RoomScreen/timeline is being hidden or no longer being shown.
     fn hide_timeline(&mut self) {
         let Some(timeline_kind) = self.timeline_kind.clone() else { return };
+        // A retained tab can drop after teardown, even after another account
+        // has opened the same room. Its draft and subscriptions belong to it.
+        if self.timeline_epoch != crate::account_session::epoch()
+            || (self.tl_state.is_some() && !timeline_state_store::owns(&timeline_kind, self.widget_uid()))
+        {
+            self.tl_state = None;
+            return;
+        }
         crate::sliding_sync::note_timeline_interest(&timeline_kind, self.widget_uid(), false);
         if self.tl_state.is_none() {
             crate::sliding_sync::retire_hidden_timeline(&timeline_kind);
@@ -4984,6 +4994,12 @@ mod timeline_state_store {
         });
     }
 
+    pub(super) fn owns(kind: &TimelineKind, owner: WidgetUid) -> bool {
+        TIMELINE_STATES.with_borrow(|states| matches!(
+            states.get(kind), Some(StateEntry::Taken { owner: current, .. }) if *current == owner
+        ))
+    }
+
     /// Puts a timeline's UI state back into the store after a `RoomScreen` hides it,
     /// which allows a future RoomScreen to take it again.
     ///
@@ -4992,23 +5008,14 @@ mod timeline_state_store {
     pub(super) fn put_back(owner: WidgetUid, state: TimelineUiState) {
         let kind = state.kind.clone();
         TIMELINE_STATES.with_borrow_mut(|states| {
-            match states.remove(&kind) {
-                Some(StateEntry::Taken { owner: current_owner, invalidated }) if current_owner == owner => {
-                    // If it was invalidated and we (the `owner`) was the RoomScreen currently showing it,
-                    // just return here to keep it removed from the TIMELINE_STATES.
-                    if invalidated {
+            match states.get(&kind) {
+                Some(StateEntry::Taken { owner: current, invalidated }) if *current == owner => {
+                    if *invalidated {
+                        states.remove(&kind);
                         return;
                     }
                 }
-                Some(StateEntry::Taken { owner: current_owner, .. }) => {
-                    error!("RoomScreen::save_state(): timeline {kind} was put back by widget {owner:?}, but it was taken by widget {current_owner:?}");
-                }
-                Some(StateEntry::Stored(_)) => {
-                    error!("RoomScreen::save_state(): timeline {kind} was put back by widget {owner:?}, but a stored state already existed");
-                }
-                None => {
-                    log!("RoomScreen::save_state(): timeline {kind} was put back by widget {owner:?} without a taken marker");
-                }
+                _ => return,
             }
             states.insert(kind, StateEntry::Stored(state));
         });
@@ -6064,6 +6071,9 @@ fn populate_message_view(
         && agent_presentation.is_some();
     #[cfg(not(feature = "agent_chat"))]
     let agent_reply = false;
+    // Alternative card renderers can source their body from another event.
+    #[cfg(feature = "tsp")]
+    let tsp_body_visible = web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply;
     item.widget(cx, ids!(content.message)).set_visible(cx, web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply);
     item.forward_card(cx, ids!(content.forward_card)).set_bundle(cx, forward_bundle);
     new_drawn_status.content_drawn &= item.mini_app_card(cx, ids!(content.mini_app_card)).set_app(
@@ -6337,38 +6347,12 @@ fn populate_message_view(
     }
 
     #[cfg(feature = "tsp")] {
-        use matrix_sdk::ruma::serde::Base64;
-        use crate::tsp::{self, tsp_sign_indicator::{TspSignState, TspSignIndicatorWidgetRefExt}};
-
-        if let Some(mut tsp_sig) = event_tl_item.latest_json()
-            .and_then(|raw| raw.get_field::<serde_json::Value>("content").ok())
-            .flatten()
-            .and_then(|content_obj| content_obj.get("org.robius.tsp_signature").cloned())
-            .and_then(|tsp_sig_value| serde_json::from_value::<Base64>(tsp_sig_value).ok())
-            .map(|b64| b64.into_inner())
-        {
-            log!("Found event {:?} with TSP signature.", event_tl_item.event_id());
-            let tsp_sign_state = if let Some(sender_vid) = tsp::tsp_state_ref().lock().unwrap()
-                .get_verified_vid_for(event_tl_item.sender())
-            {
-                log!("Found verified VID for sender {}: \"{}\"", event_tl_item.sender(), sender_vid.identifier());
-                tsp_sdk::crypto::verify(&*sender_vid, &mut tsp_sig).map_or(
-                    TspSignState::WrongSignature,
-                    |(msg, msg_type)| {
-                        log!("TSP signature verified successfully!\n    Msg type: {msg_type:?}\n    Message: {:?} ({msg:X?})", std::str::from_utf8(msg));
-                        TspSignState::Verified
-                    }
-                )
-            } else {
-                TspSignState::Unknown
-            };
-
-            log!("TSP signature state for event {:?} is {:?}", event_tl_item.event_id(), tsp_sign_state);
-            item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator))
-                .show_with_state(cx, tsp_sign_state);
+        use crate::tsp::{message_signature::timeline_signature, tsp_sign_indicator::TspSignIndicatorWidgetRefExt};
+        let indicator = item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator));
+        if let Some(state) = tsp_body_visible.then(|| timeline_signature(event_tl_item, msg_like_content)).flatten() {
+            indicator.show_with_state(cx, state);
         } else {
-            // Hide the TSP indicator (in case we reused the message widget at this item index).
-            item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator)).hide(cx);
+            indicator.hide(cx);
         }
     }
 
@@ -8299,6 +8283,7 @@ impl MessageRef {
 pub fn clear_timeline_states(cx: &mut Cx) {
     crate::sliding_sync::clear_timeline_interest();
     timeline_state_store::clear_all(cx);
+    input_bar_focus::clear(cx);
 }
 
 /// Invalidates the UI-side cached state for a single timeline whose backend was just closed,
@@ -8323,6 +8308,8 @@ mod input_bar_focus {
     /// The timeline whose RoomScreen should focus its input bar when next shown.
     #[derive(Default)]
     struct PendingInputBarFocus(Option<TimelineKind>);
+
+    pub(super) fn clear(cx: &mut Cx) { cx.global::<PendingInputBarFocus>().0 = None; }
 
     /// Requests that the RoomScreen showing `kind` focus its input bar once it's shown.
     pub(super) fn request(cx: &mut Cx, kind: TimelineKind) {
@@ -8747,6 +8734,8 @@ pub(crate) mod crypto_recovery_resume_tests {
         inner.is_loaded = true;
         inner.timeline_kind = Some(TimelineKind::MainRoom {room_id: id.clone()});
         inner.room_name_id = Some(RoomNameId::empty(id));
+        inner.timeline_epoch = crate::account_session::epoch();
+        timeline_state_store::mark_taken(cx, &state.kind, inner.widget_uid());
         inner.tl_state = Some(state);
         inner.redraw(cx);
         sender
@@ -8801,6 +8790,30 @@ pub(crate) fn release_cached_timeline_history(kind: &TimelineKind, channel: usiz
 #[cfg(test)]
 mod retention_ui_tests {
     use super::*;
+    #[test]
+    fn late_room_drop_cannot_restore_previous_accounts_timeline() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (old, new) = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.RoomScreen {}});
+            (WidgetRef::script_from_value(vm, value).as_room_screen(),
+             WidgetRef::script_from_value(vm, value).as_room_screen())
+        });
+        crypto_recovery_resume_tests::prepare(&mut cx, &old);
+        let kind = old.borrow().unwrap().timeline_kind.clone().unwrap();
+        clear_timeline_states(&mut cx);
+        let retired = old.borrow_mut().unwrap().tl_state.take().unwrap();
+        timeline_state_store::put_back(old.widget_uid(), retired);
+        assert!(matches!(timeline_state_store::take(&mut cx, &kind, new.widget_uid()), timeline_state_store::TakeResult::Missing));
+        crypto_recovery_resume_tests::prepare(&mut cx, &old);
+        clear_timeline_states(&mut cx);
+        crypto_recovery_resume_tests::prepare(&mut cx, &new);
+        old.borrow_mut().unwrap().hide_timeline();
+        assert!(timeline_state_store::owns(&kind, new.widget_uid()));
+        clear_timeline_states(&mut cx);
+    }
+
     #[test]
     fn retained_timeline_ui_preserves_draft_and_reading_anchor_after_history_eviction() {
         let mut cx = Cx::new(Box::new(|_, _| {}));

@@ -424,6 +424,10 @@ pub enum SpacesListUpdate {
 
 static PENDING_SPACE_UPDATES: SegQueue<SpacesListUpdate> = SegQueue::new();
 
+pub(crate) fn clear_pending_updates() {
+    while PENDING_SPACE_UPDATES.pop().is_some() {}
+}
+
 /// Enqueue a new room update for the list of all spaces
 /// and signals the UI that a new update is available to be handled.
 pub fn enqueue_spaces_list_update(update: SpacesListUpdate) {

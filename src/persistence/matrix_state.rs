@@ -300,7 +300,9 @@ where
         }
         let mut documents = tokio::fs::read_dir(&state).await?;
         while let Some(entry) = documents.next_entry().await? {
-            if entry.file_name().to_string_lossy().starts_with("session.unavailable-") {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("session.unavailable-") || name.starts_with("retained_db.json.unavailable-") {
                 anyhow::bail!("Database inventory includes preserved, locked history");
             }
         }

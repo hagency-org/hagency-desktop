@@ -364,6 +364,8 @@ pub(crate) async fn finish_oauth_login(
 ) -> Result<(Client, Option<String>)> {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let mut history_unavailable = false;
+    #[cfg(windows)]
+    let mut permissions_archived = false;
     let save_error = crate::i18n::tr(
         "Your identity was verified, but this device could not save your sign-in. Check local storage and try signing in again.",
     );
@@ -377,6 +379,11 @@ pub(crate) async fn finish_oauth_login(
         let user = client
             .user_id()
             .ok_or_else(|| anyhow!("OAuth has no Matrix identity"))?;
+        #[cfg(windows)]
+        {
+            permissions_archived = persistence::credential_state::recover_verified_account(&client, epoch).await?;
+            history_unavailable |= permissions_archived;
+        }
         let path = persistence::session_file_path(user);
         if path.try_exists()? {
             match persistence::credential_state::existing_database(path).await {
@@ -461,8 +468,13 @@ pub(crate) async fn finish_oauth_login(
     OAUTH_REAUTH.lock().unwrap().take();
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     if history_unavailable {
+        let message = crate::i18n::tr("Signed in. Older chats on this device have been preserved, but their local key is missing. You can continue using Hagency.");
+        #[cfg(windows)]
+        let message = if permissions_archived {
+            crate::i18n::tr("Signed in. Some older chats could not be restored. Their local data has been preserved.")
+        } else { message };
         crate::shared::popup_list::enqueue_scoped_popup_notification(
-            epoch, crate::i18n::tr("Signed in. Older chats on this device have been preserved, but their local key is missing. You can continue using Hagency.").into(),
+            epoch, message.into(),
             PopupKind::Info, Some(10.0),
         );
     }
@@ -660,6 +672,32 @@ fn robrix_timeline_event_filter(
         return true;
     }
     crate::mini_app::is_timeline_event(event) || crate::forwarding::is_timeline_event(event) || default_event_filter(event, rules)
+}
+
+pub enum ComposerSendOutcome {
+    Queued,
+    Failed,
+}
+
+/// Wakes the UI even if the request is discarded before its worker runs.
+pub struct ComposerSendCompletion(Option<tokio::sync::oneshot::Sender<ComposerSendOutcome>>);
+
+impl ComposerSendCompletion {
+    pub(crate) fn channel() -> (Self, tokio::sync::oneshot::Receiver<ComposerSendOutcome>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (Self(Some(tx)), rx)
+    }
+
+    pub(crate) fn finish(mut self, outcome: ComposerSendOutcome) {
+        if let Some(tx) = self.0.take() { let _ = tx.send(outcome); }
+    }
+}
+
+impl Drop for ComposerSendCompletion {
+    fn drop(&mut self) {
+        drop(self.0.take());
+        SignalToUI::set_ui_signal();
+    }
 }
 
 /// The set of requests for async work that can be made to the worker thread.
@@ -919,6 +957,8 @@ pub enum MatrixRequest {
     },
     /// Request to send a message to the given room.
     SendMessage {
+        /// Composer handoff ends when the SDK accepts the message or reports a failure.
+        completion: Option<ComposerSendCompletion>,
         routing: Option<serde_json::Map<String, serde_json::Value>>,
         timeline_kind: TimelineKind,
         message: RoomMessageEventContent,
@@ -1076,8 +1116,10 @@ pub enum MatrixRequest {
 pub fn submit_async_request(req: MatrixRequest) {
     if account_changing() && !matches!(req, MatrixRequest::ChangeAccount(_) | MatrixRequest::Reauthenticate | MatrixRequest::ClearWorkerSession(_) | MatrixRequest::CancelSsoLogin) { return; }
     if let Some(sender) = REQUEST_SENDER.lock().unwrap().as_ref() {
-        sender.send((crate::account_session::epoch(), req))
-            .expect("BUG: matrix worker task receiver has died!");
+        if sender.send((crate::account_session::epoch(), req)).is_err() {
+            error!("Matrix worker is unavailable.");
+            SignalToUI::set_ui_signal();
+        }
     }
 }
 
@@ -2530,7 +2572,9 @@ async fn matrix_worker_task(
                 let sender = login_sender.clone();
                 let epoch = crate::account_session::epoch();
                 sso_task = Some(crate::account_session::spawn(async move {
-                    match run_sso_login(homeserver_url, provider_id, register).await {
+                    match run_sso_login(homeserver_url, provider_id, register, |url| async move {
+                        crate::login::homeserver::open_login_url(&url)
+                    }).await {
                         Ok((client, session)) => {
                             Cx::post_action(LoginAction::SsoPending(false));
                             Cx::post_action(LoginAction::Status {
@@ -2696,6 +2740,7 @@ async fn matrix_worker_task(
             }
 
             MatrixRequest::SendMessage {
+                completion,
                 routing,
                 timeline_kind,
                 message,
@@ -2710,7 +2755,14 @@ async fn matrix_worker_task(
 
                 // Spawn a new async task that will send the actual message.
                 let _send_message_task = crate::account_session::spawn(async move {
-                    log!("Sending message to {timeline_kind}: {message:?}...");
+                    let report_failure = |message, replied_to, completion: Option<ComposerSendCompletion>| {
+                        if let Some(completion) = completion {
+                            completion.finish(ComposerSendOutcome::Failed);
+                        } else {
+                            let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                        }
+                    };
+                    log!("Sending message to {timeline_kind}...");
                     #[cfg(feature = "tsp")]
                     let mut routing = routing;
                     let message = {
@@ -2742,7 +2794,7 @@ async fn matrix_worker_task(
                                                     PopupKind::Error,
                                                     None,
                                                 );
-                                                let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                                                report_failure(message, replied_to, completion);
                                                 SignalToUI::set_ui_signal();
                                                 return;
                                             }
@@ -2755,7 +2807,7 @@ async fn matrix_worker_task(
                                             PopupKind::Error,
                                             None,
                                         );
-                                        let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                                        report_failure(message, replied_to, completion);
                                         SignalToUI::set_ui_signal();
                                         return;
                                     }
@@ -2768,7 +2820,7 @@ async fn matrix_worker_task(
                     if let Err(error) = crate::room_encryption::confirmed_state(timeline.room()).await {
                         error!("Could not check the encryption of {timeline_kind} before sending: {error:?}");
                         enqueue_popup_notification(crate::i18n::tr(crate::room_encryption::UNCONFIRMED).to_string(), PopupKind::Error, None);
-                        let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                        report_failure(message, replied_to, completion);
                         SignalToUI::set_ui_signal();
                         return;
                     }
@@ -2776,7 +2828,7 @@ async fn matrix_worker_task(
                     #[cfg(feature = "agent_chat")]
                     if let Err(error) = crate::agent_chat::encrypted_send::ensure_ready(timeline.room(), &message).await {
                         enqueue_popup_notification(crate::i18n::tr(error).to_string(), PopupKind::Error, None);
-                        let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                        report_failure(message, replied_to, completion);
                         SignalToUI::set_ui_signal();
                         return;
                     }
@@ -2793,7 +2845,7 @@ async fn matrix_worker_task(
                             Err(_e) => {
                                 error!("Failed to build reply content to send to {timeline_kind}: {_e:?}");
                                 enqueue_popup_notification(format!("Failed to send reply: {_e}"), PopupKind::Error, None);
-                                let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                                report_failure(message, replied_to, completion);
                                 SignalToUI::set_ui_signal();
                                 return;
                             }
@@ -2802,11 +2854,14 @@ async fn matrix_worker_task(
                         message.clone().into()
                     };
                     match timeline.send_with_extra_content(content, routing).await {
-                        Ok(_send_handle) => log!("Sent {r_or_m} to {timeline_kind}."),
+                        Ok(_send_handle) => {
+                            if let Some(completion) = completion { completion.finish(ComposerSendOutcome::Queued); }
+                            log!("Queued {r_or_m} for {timeline_kind}.");
+                        }
                         Err(_e) => {
                             error!("Failed to send {r_or_m} to {timeline_kind}: {_e:?}");
                             enqueue_popup_notification(format!("Failed to send {r_or_m}: {_e}"), PopupKind::Error, None);
-                            let _ = sender.send(TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to });
+                            report_failure(message, replied_to, completion);
                         }
                     }
                     SignalToUI::set_ui_signal();
@@ -3994,7 +4049,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         log!("Trying to restore session for user: {:?}",
             specified_username.as_ref().or(most_recent_user_id.as_ref())
         );
-        match persistence::restore_session(specified_username).await {
+        match restore_previous_login(specified_username.or(most_recent_user_id)).await {
             Ok(session) => Some(session),
             Err(e) => {
                 let status_err = "Could not restore previous user session.\n\nPlease login again.";
@@ -4058,7 +4113,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
                                 crate::account_session::open();
                                 ACCOUNT_CHANGING.store(false, Ordering::Release);
                                 if let Some(user) = target {
-                                    match persistence::restore_session(Some(user)).await {
+                                    match restore_previous_login(Some(user)).await {
                                         Ok(session) => break session,
                                         Err(error) => Cx::post_action(LoginAction::LoginFailure(format!("Could not restore this account. Sign in again or choose another saved account.\n\n{error}"))),
                                     }
@@ -4165,11 +4220,18 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         // Its immediate check must neither exit on the old flag nor have a new
         // rejection cleared after it has synchronously retired native authority.
         subscriber_task_handles.push(handle_session_changes(client.clone()));
-        Cx::post_action(LoginAction::LoginSuccess);
-
-        // Attempt to load the previously-saved app state.
-        // One-shot, drops on its own; not tracked.
-        handle_load_app_state(logged_in_user_id.to_owned());
+        let mut app_state = match load_app_state(&logged_in_user_id).await {
+            Ok(state) => state.unwrap_or_default(),
+            Err(error) => {
+                error!("Failed to restore app state: {error}");
+                enqueue_popup_notification("Could not restore the previous session's app state.", PopupKind::Warning, None);
+                Default::default()
+            }
+        };
+        app_state.retain_accessible_rooms(|id| client.get_room(id).map(|room| room.state()));
+        let session = crate::matrix_context::SessionPin::capture(&client)
+            .expect("logged-in SDK client has session metadata");
+        Cx::post_action(crate::app::SessionReady { session, app_state });
         subscriber_task_handles.push(handle_sync_indicator_subscriber(&sync_service));
         subscriber_task_handles.push(handle_sync_service_state_subscriber(sync_service.state()));
 
@@ -4325,7 +4387,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
             crate::account_session::open();
             ACCOUNT_CHANGING.store(false, Ordering::Release);
             if let Some(user) = target {
-                match persistence::restore_session(Some(user)).await {
+                match restore_previous_login(Some(user)).await {
                     Ok(session) => initial_client_opt = Some(session),
                     Err(error) => Cx::post_action(LoginAction::LoginFailure(format!("Could not restore this account. Sign in again or choose another saved account.\n\n{error}"))),
                 }
@@ -5129,33 +5191,6 @@ fn handle_room_notification_subscriber(client: Client) -> JoinHandle<()> {
             }
         }
     })
-}
-
-/// Asynchronously loads and restores the app state from persistent storage for the given user.
-///
-/// When a saved state file is found, this emits a `RestoreAppStateFromPersistentState` action
-/// so that the app can restore preferences and the dock layout (on desktop).
-/// We emit this action even if the dock state is empty to ensure that prefs always get restored.
-fn handle_load_app_state(user_id: OwnedUserId) {
-    crate::account_session::spawn(async move {
-        match load_app_state(&user_id).await {
-            Ok(Some(app_state)) => {
-                log!("Loaded app state from persistent storage. Restoring now...");
-                Cx::post_action(AppStateAction::RestoreAppStateFromPersistentState { user_id, app_state });
-            }
-            Ok(None) => {
-                // No saved file (fresh install) or file was unreadable; nothing to restore.
-            }
-            Err(_e) => {
-                log!("Failed to restore app state from persistent storage: {_e}");
-                enqueue_popup_notification(
-                    "Could not restore the previous session's app state.",
-                    PopupKind::Warning,
-                    None,
-                );
-            }
-        }
-    });
 }
 
 /// Returns `true` if the given sync service error is due to an invalid/expired access token.
@@ -6512,17 +6547,53 @@ async fn run_registration(
     bail!("Create your account through Pasion on your Hagency server.")
 }
 
+pub(crate) async fn restore_previous_login(
+    user: Option<OwnedUserId>,
+) -> Result<(Client, Option<String>)> {
+    #[cfg(windows)]
+    let epoch = crate::account_session::epoch();
+    let restored = persistence::restore_session(user.clone()).await;
+    #[cfg(windows)]
+    if let (Some(user), Err(error)) = (user.as_ref(), &restored)
+        && error.downcast_ref::<hagency_store::credential_vault::Error>()
+            == Some(&hagency_store::credential_vault::Error::Storage)
+        && let Ok(Some(saved)) =
+            persistence::credential_state::authenticated_reauth_database(user).await
+        && saved.identity.oauth_client_id.is_some()
+        && epoch == crate::account_session::epoch()
+    {
+        *OAUTH_REAUTH.lock().unwrap() = Some((saved.identity.homeserver, user.clone()));
+    }
+    restored
+}
+
 /// Use only provider IDs advertised by the selected homeserver.
-async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, register: bool) -> Result<(Client, ClientSessionPersisted)> {
+pub(crate) async fn run_sso_login<Fut>(
+    homeserver_url: String,
+    provider_id: Option<String>,
+    register: bool,
+    open_browser: impl FnOnce(String) -> Fut,
+) -> Result<(Client, ClientSessionPersisted)>
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let reauth = OAUTH_REAUTH.lock().unwrap().clone().filter(|(origin,_)| !register && origin.trim_end_matches('/')==homeserver_url.trim_end_matches('/'));
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     if let Some((_, owner)) = reauth.as_ref() {
         let saved = match persistence::credential_state::existing_database(persistence::session_file_path(owner)).await {
             Ok(saved) => Some(saved),
             Err(error) if missing_local_credential(&error) => None,
+            #[cfg(windows)]
+            Err(error) if error.downcast_ref::<hagency_store::credential_vault::Error>()
+                == Some(&hagency_store::credential_vault::Error::Storage) => {
+                    persistence::credential_state::authenticated_reauth_database(owner).await?
+                },
             Err(error) => return Err(error),
         };
         if let Some(saved) = saved && let Some(id) = saved.identity.oauth_client_id.as_ref() {
+            anyhow::ensure!(&saved.identity.owner == owner &&
+                saved.identity.homeserver.trim_end_matches('/') == homeserver_url.trim_end_matches('/'),
+                "Saved OAuth identity or homeserver changed");
             // Public registration and expected device are sufficient for PKCE.
             // Old access/refresh credentials never enter this memory-only SDK.
             let client = Client::builder().homeserver_url(&homeserver_url)
@@ -6532,9 +6603,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
             persistence::credential_state::register_preauth(&client, saved.client_session.clone()).await?;
             client.oauth().restore_registered_client(matrix_sdk::authentication::oauth::ClientId::new(id.clone()));
             crate::login::homeserver::oauth_browser_login_expected(&client, false,
-                Some((owner.clone(), saved.identity.device.into())), |url| async move {
-                    crate::login::homeserver::open_login_url(&url)
-                }).await?;
+                Some((owner.clone(), saved.identity.device.into())), open_browser).await?;
             return Ok((client, saved.client_session));
         }
     }
@@ -6543,9 +6612,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
         let stored = persistence::credential_state::load(persistence::session_file_path(&owner)).await?;
         if matches!(stored.user_session, persistence::PersistedUserSession::OAuth { .. }) {
             let (client,_) = persistence::restore_session_for_login(owner.clone()).await?;
-            crate::login::homeserver::oauth_browser_login(&client, false, |url| async move {
-                crate::login::homeserver::open_login_url(&url)
-            }).await?;
+            crate::login::homeserver::oauth_browser_login(&client, false, open_browser).await?;
             if client.user_id()!=Some(&owner) { bail!("Pasion returned another Matrix account"); }
             return Ok((client,stored.client_session));
         }
@@ -6568,7 +6635,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
                 title: crate::i18n::tr("Continue in your browser").into(),
                 status: crate::i18n::tr("Finish signing in with Pasion in your browser, then return to Hagency.").into(),
             });
-            crate::login::homeserver::open_login_url(&url)
+            open_browser(url).await
         }).await?;
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         if let Some((_, owner)) = reauth.as_ref() && client.user_id() != Some(owner.as_ref()) {
@@ -6994,3 +7061,6 @@ pub(crate) fn notify_invalid_matrix_session(client: &matrix_sdk::Client, epoch: 
 }
 
 include!("timeline_retention.rs");
+
+#[cfg(test)]
+mod composer_send_tests;
