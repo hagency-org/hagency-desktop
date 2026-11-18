@@ -303,17 +303,30 @@ mod unix {
             }
             let root = match existing_root.map(existing).transpose()?.flatten() {
                 Some(root) => root,
-                None => {
-                    private_directory(&self.base)?;
-                    let base = self
-                        .base
-                        .canonicalize()
-                        .map_err(|_| RootError::Unavailable)?;
-                    private_directory(&base.join(OWNERS))?;
-                    base.join(OWNERS).join(key(origin, owner))
-                }
+                None => self.prepare_canonical_root(origin, owner)?,
             };
             self.register(origin, owner, &root)
+        }
+
+        /// Prepare the private parents of an unregistered canonical owner root.
+        /// Management-only sign-in can open its host before hosting Setup opens
+        /// the resource ledger. It must not create that ledger's parents with
+        /// the ambient umask. Existing unsafe directories are refused, never
+        /// chmodded or adopted. This does not create the owner root or register
+        /// an execution identity; only `resolve` performs registration.
+        pub fn prepare_canonical_root(
+            &self,
+            origin: &str,
+            owner: &str,
+        ) -> Result<PathBuf, RootError> {
+            check_identity(origin, owner)?;
+            private_directory(&self.base)?;
+            let base = self
+                .base
+                .canonicalize()
+                .map_err(|_| RootError::Unavailable)?;
+            private_directory(&base.join(OWNERS))?;
+            Ok(base.join(OWNERS).join(key(origin, owner)))
         }
 
         fn register(&self, origin: &str, owner: &str, root: &Path) -> Result<PathBuf, RootError> {
