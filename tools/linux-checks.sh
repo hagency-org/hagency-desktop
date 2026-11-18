@@ -1,19 +1,25 @@
 #!/usr/bin/env bash
-# What of the Desktop checks passes on Linux.
+# The Desktop checks on Linux, one part per call:
+#   bash tools/linux-checks.sh <part>
 #
-# A trial, not a gate. Each part runs the commands of one macOS job of
-# .github/workflows/main.yml, unchanged except where a line below says so,
-# and goes on after a command fails, so that one run lists everything that
-# fails. The last lines are a table of every command and of the failed tests.
+# Each part runs the commands of one macOS job of .github/workflows/main.yml,
+# unchanged except where a line below says so. A part goes on after a command
+# fails, so that one run lists everything that fails; its last lines are a
+# table of every command and of the failed tests, and it ends with an error
+# when anything failed.
 #
 # The library workspace is run in four groups of packages instead of once
 # with --workspace, so that the groups run side by side. Cargo therefore
 # picks each group's dependency features for that group alone.
+#
+# Parts: lib-hagency, lib-store, lib-runtime, lib-rest, lib-features (the
+# library workspace), app and gate (the app's own checks and the regression
+# gate, which the workflow runs only when asked).
 set -uo pipefail
 
-part="${1:?usage: linux-trial.sh <part>}"
+part="${1:?usage: linux-checks.sh <part>}"
 root="$(cd "$(dirname "$0")/.." && pwd)"
-out="${RUNNER_TEMP:-/tmp}/linux-trial"
+out="${RUNNER_TEMP:-/tmp}/linux-checks"
 mkdir -p "$out"
 : > "$out/steps.tsv"
 
@@ -28,7 +34,7 @@ step() {
     local code=${PIPESTATUS[0]}
     echo "::endgroup::"
     printf '%s\t%s\t%s\n' "$name" "$code" "$((SECONDS - start))" >> "$out/steps.tsv"
-    echo "trial-step $name exit=$code seconds=$((SECONDS - start))"
+    echo "linux-check $name exit=$code seconds=$((SECONDS - start))"
 }
 
 client=crates/hagency-client
@@ -100,7 +106,7 @@ source = pathlib.Path(sys.argv[1]).resolve()
 text = source.read_text()
 stop = 'raise SystemExit(f"Inspect {log}; no release until this check passes")'
 assert text.count(stop) == 1, "the gate's stop line changed"
-sys.argv = [str(source), "--output", ".run/linux-trial-regressions"]
+sys.argv = [str(source), "--output", ".run/linux-regressions"]
 exec(compile(text.replace(stop, "pass"), str(source), "exec"), {"__name__": "__main__", "__file__": str(source)})
 PY
     step regression-gate "" python3 "$out/gate-runner.py" tools/check-hagency-regressions.py
@@ -114,7 +120,7 @@ esac
 python3 - "$out" "$root" "$part" <<'PY'
 import json, os, pathlib, re, sys
 out, root, part = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2]), sys.argv[3]
-lines = [f"## Linux trial: {part}", "", "| command | exit | minutes | passed | failed | ignored |", "|---|---|---|---|---|---|"]
+lines = [f"## Linux checks: {part}", "", "| command | exit | minutes | passed | failed | ignored |", "|---|---|---|---|---|---|"]
 failed_tests, errors, bad = [], [], False
 for row in (out / "steps.tsv").read_text().splitlines():
     name, code, seconds = row.split("\t")
@@ -134,7 +140,7 @@ for row in (out / "steps.tsv").read_text().splitlines():
             failed_tests.append(f"{name}: [{target}] {found.group(1)}")
         if re.match(r"error(\[E\d+\])?:", line) and len(errors) < 40:
             errors.append(f"{name}: {line[:200]}")
-report = root / ".run/linux-trial-regressions/report.json"
+report = root / ".run/linux-regressions/report.json"
 if part == "gate" and report.is_file():
     rows = json.loads(report.read_text())
     lines += ["", f"Regression gate: {sum(r['passed'] for r in rows)} of {len(rows)} checks passed."]
