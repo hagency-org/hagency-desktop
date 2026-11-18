@@ -21,14 +21,17 @@
 #              removed here and fetched again by .jit/sources.sh.
 #
 # Build output grows: every set of features and every compiler version keeps
-# its own files. When all `target` folders together pass the limit they are
-# removed, and this job builds everything again.
+# its own files, and incremental data about doubles the size. The `target`
+# folders of this checkout are removed, and this job builds everything again,
+# when together they pass the limit or when the disk has less free space than
+# the reserve. The reserve is what two jobs side by side may add.
 #
 # Release builds do not use this: release.yml runs on machines that start
 # empty.
 set -euo pipefail
 
-limit_gb="${CI_BUILD_OUTPUT_LIMIT_GB:-80}"
+limit_gb="${CI_BUILD_OUTPUT_LIMIT_GB:-120}"
+reserve_gb="${CI_BUILD_OUTPUT_FREE_GB:-80}"
 root="$(git rev-parse --show-toplevel)"
 cd "$root"
 
@@ -65,9 +68,10 @@ if [ "${#folders[@]}" = 0 ]; then
 fi
 used_kb="$(du -sk "${folders[@]}" | awk '{ sum += $1 } END { print sum + 0 }')"
 used_gb=$((used_kb / 1024 / 1024))
-if [ "$used_gb" -ge "$limit_gb" ]; then
+free_gb="$(df -Pk . | awk 'NR == 2 { print int($4 / 1024 / 1024) }')"
+if [ "$used_gb" -ge "$limit_gb" ] || [ "$free_gb" -lt "$reserve_gb" ]; then
     rm -rf "${folders[@]}"
-    echo "removed  ${#folders[@]} build folders: ${used_gb} GB, the limit is ${limit_gb} GB. This job builds everything."
+    echo "removed  ${#folders[@]} build folders: ${used_gb} GB (limit ${limit_gb} GB), ${free_gb} GB free on the disk (reserve ${reserve_gb} GB). This job builds everything."
 else
-    echo "kept     ${#folders[@]} build folders, ${used_gb} GB (limit ${limit_gb} GB)"
+    echo "kept     ${#folders[@]} build folders, ${used_gb} GB (limit ${limit_gb} GB), ${free_gb} GB free on the disk (reserve ${reserve_gb} GB)"
 fi
