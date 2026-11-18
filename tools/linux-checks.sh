@@ -11,7 +11,7 @@
 # The library workspace is run in four groups of packages instead of once
 # with --workspace, so that the groups run side by side. Cargo therefore
 # picks each group's dependency features for that group alone. Inside a
-# group, tools/parallel-tests.py runs several test processes at a time.
+# group, tools/parallel-tests.py runs several test programs at a time.
 #
 # Parts: lib-hagency, lib-store, lib-runtime, lib-rest, lib-features (the
 # library workspace), app and gate (the app's own checks and the regression
@@ -52,8 +52,9 @@ runtime_probe() {
 library() {
     export RUST_TEST_THREADS=1 RUST_MIN_STACK=16777216
 }
-# cargo test with the same arguments, several test processes at a time.
-tests=(python3 "$root/tools/parallel-tests.py" --)
+# cargo test with the same arguments, several test programs at a time. Only
+# the unit tests of hagency-matrix run as several processes (see the tool).
+tests=(python3 "$root/tools/parallel-tests.py" --split hagency_matrix --)
 
 case "$part" in
 lib-hagency)
