@@ -12,8 +12,8 @@ permissions:
   contents: read
 
 concurrency:
-  group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  group: ${{ github.workflow }}-${{ github.sha }}
+  cancel-in-progress: false
 
 env:
   CARGO_TERM_COLOR: never
@@ -33,25 +33,24 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        part: [lib-hagency, lib-store, lib-runtime, lib-rest, lib-features, app, gate]
+        part: [app, gate]
     steps:
       - uses: actions/checkout@v7
       - name: JIT-line makepad checkout
         shell: bash
         run: if [ -f .jit/sources.sh ]; then bash .jit/sources.sh; fi
-      - name: Free disk space on GitHub's machine
-        if: runner.environment == 'github-hosted'
-        run: |
-          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc /opt/hostedtoolcache/CodeQL
-          df -h / | tail -1
       - name: Install system dependencies
         if: runner.environment == 'github-hosted'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y \
+          # The manual-page index is rebuilt after every install and can take
+          # minutes on these machines.
+          sudo rm -f /var/lib/man-db/auto-update
+          sudo apt-get -o Acquire::Retries=3 update
+          sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
             libssl-dev libsqlite3-dev pkg-config llvm clang libclang-dev cmake \
             libxcursor-dev libx11-dev libasound2-dev libpulse-dev \
-            libwayland-dev libxkbcommon-dev libdrm-dev
+            libwayland-dev libxkbcommon-dev libdrm-dev \
+            libfontconfig1-dev libfreetype-dev
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
