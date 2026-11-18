@@ -102,6 +102,7 @@ mod tests {
             Recovery::Access,
             Recovery::Service,
             Recovery::Unsupported,
+            Recovery::ManagementNotConfigured,
             Recovery::Retired,
             Recovery::Manual,
         ] {

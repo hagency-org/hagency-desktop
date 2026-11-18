@@ -267,6 +267,7 @@ mod shared_budget;
 
 struct Inner {
     encrypted_approvals: Option<::hagency::encrypted_approvals::Inbox>,
+    shared_approvals_unconfigured: std::sync::atomic::AtomicBool,
     origin: String,
     owner: String,
     epoch: u64,
@@ -364,6 +365,7 @@ impl Service {
         }
         let service = Self(Arc::new(Inner {
             encrypted_approvals: Some(::hagency::encrypted_approvals::Inbox::attach(&client)),
+            shared_approvals_unconfigured: Default::default(),
             origin,
             owner,
             epoch,
@@ -718,17 +720,64 @@ impl Service {
     pub(crate) async fn shared_permissions_with(&self, manager:Arc<::hagency::daemon::bridge::ManagementClient>, command: ::hagency::native_owner::ManagementCommand) -> Result<Value,String> {
         self.shared_permissions_with_detailed(manager,command).await.map_err(|error|error.code)
     }
+    pub(crate) fn shared_approvals_unconfigured(&self) -> bool {
+        self.0
+            .shared_approvals_unconfigured
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Share a server configuration failure across room and app-wide polling for
+    /// this session. An explicit status refresh can observe configuration changes.
+    pub(crate) async fn read_shared_approvals(
+        &self,
+        room_id: Option<String>,
+        manual: bool,
+    ) -> Result<Value, super::permission_failure::PermissionFailure> {
+        use super::permission_failure::MANAGEMENT_NOT_CONFIGURED;
+        self.check()?;
+        if !manual && self.shared_approvals_unconfigured() {
+            return Err(MANAGEMENT_NOT_CONFIGURED.into());
+        }
+        let result = self
+            .shared_permissions_detailed(
+                ::hagency::native_owner::ManagementCommand::SharedApprovals { room_id },
+            )
+            .await?;
+        if manual && result["approvals"].is_array() {
+            self.0
+                .shared_approvals_unconfigured
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
+        Ok(result)
+    }
+
     pub(crate) async fn shared_permissions_detailed(&self, command: ::hagency::native_owner::ManagementCommand) -> Result<Value,super::permission_failure::PermissionFailure> {
         use ::hagency::native_owner::{ManagementCommand,ManagementPackage,ManagementPermission};
         if !matches!(&command,ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..}) {return Err("invalid_permission_command".into());}
-        let manager=self.management(ManagementPackage{digest:blake3::hash(b"hagency-native-chat-permissions-v1").to_hex().to_string(),instance:1,account_epoch:1,permissions:vec![ManagementPermission::ReadAgentWork,ManagementPermission::DecideAgentRequests]}).await?;
+        let manager = self.management(ManagementPackage {
+            digest: blake3::hash(b"hagency-native-chat-permissions-v1").to_hex().to_string(),
+            instance: 1,
+            account_epoch: 1,
+            permissions: vec![ManagementPermission::ReadAgentWork, ManagementPermission::DecideAgentRequests],
+        }).await;
         // This polling handle belongs to this request, unlike the retained
         // mini-app manager passed directly to shared_permissions_with.
         // Retirement also runs when a status timeout or hidden widget cancels its observer.
         struct Retire(Arc<::hagency::daemon::bridge::ManagementClient>);
         impl Drop for Retire { fn drop(&mut self) { self.0.retire(); } }
-        let retained=Retire(manager);
-        self.shared_permissions_with_detailed(retained.0.clone(),command).await
+        let result = match manager {
+            Ok(manager) => {
+                let retained = Retire(manager);
+                self.shared_permissions_with_detailed(retained.0.clone(), command).await
+            }
+            Err(code) => Err(code.into()),
+        };
+        if result.as_ref().is_err_and(|error| error.code == super::permission_failure::MANAGEMENT_NOT_CONFIGURED) {
+            self.0
+                .shared_approvals_unconfigured
+                .store(true, std::sync::atomic::Ordering::Release);
+        }
+        result
     }
     async fn shared_permissions_with_detailed(&self,manager:Arc<::hagency::daemon::bridge::ManagementClient>,command: ::hagency::native_owner::ManagementCommand)->Result<Value,super::permission_failure::PermissionFailure> {
         use ::hagency::native_owner::ManagementCommand;

@@ -1,4 +1,8 @@
 //! Permission reads retain transport status; raw server text is never UI copy.
+pub(crate) const MANAGEMENT_NOT_CONFIGURED: &str = "management_not_configured";
+pub(crate) const MANAGEMENT_NOT_CONFIGURED_MESSAGE: &str =
+    "This server is not configured for Agent management.";
+
 #[derive(Clone, Debug)]
 pub(crate) struct PermissionFailure {
     pub status: Option<u16>,
@@ -11,6 +15,7 @@ pub(crate) enum Recovery {
     Access,
     Service,
     Unsupported,
+    ManagementNotConfigured,
     Transient,
     Retired,
     Manual,
@@ -39,6 +44,7 @@ impl PermissionFailure {
         // Specific local/session codes precede generic HTTP status. In particular,
         // an expired management handle is not an expired Matrix login.
         match self.code.as_str() {
+            MANAGEMENT_NOT_CONFIGURED => return ManagementNotConfigured,
             "matrix_account_changed" | "matrix_account_changing" | "matrix_account_mismatch" => {
                 return Retired;
             }
@@ -81,6 +87,7 @@ impl PermissionFailure {
             Recovery::Unsupported => {
                 "This server or local service does not support permission status. Check its version in My Agents."
             }
+            Recovery::ManagementNotConfigured => MANAGEMENT_NOT_CONFIGURED_MESSAGE,
             Recovery::Transient => {
                 "Permission status is temporarily unavailable. Check your connection; status will retry automatically."
             }
@@ -109,6 +116,7 @@ mod catalog_tests {
             (404, "error"),
             (503, "error"),
             (503, "owner_daemon_unavailable"),
+            (503, MANAGEMENT_NOT_CONFIGURED),
             (409, "matrix_account_changed"),
             (400, "error"),
         ] {
@@ -174,6 +182,14 @@ mod tests {
             }
             .recovery(),
             Recovery::Service
+        );
+        assert_eq!(
+            PermissionFailure::from(::hagency::native_owner::NativeError {
+                status: 503,
+                code: MANAGEMENT_NOT_CONFIGURED.into(),
+            })
+            .recovery(),
+            Recovery::ManagementNotConfigured
         );
     }
     #[test]

@@ -151,9 +151,18 @@ impl SharedPermissionNotice {
     }
     fn render(&mut self, cx: &mut Cx) {
         self.sync_animation(cx);
-        let failed = !self.error.is_empty();
-        self.view.widget(cx, ids!(recovery)).set_visible(cx, failed);
         let recovery = self.failure.as_ref().map(PermissionFailure::recovery);
+        let has_request = self.rows.get(self.selected).is_some();
+        let show_error = !self.error.is_empty()
+            && (recovery != Some(Recovery::ManagementNotConfigured)
+                || has_request
+                || self.decision_unconfirmed
+                || crate::hagency::pending_approvals::has_pending_in_scope(
+                    &self.identity,
+                    &self.room,
+                    &self.thread,
+                ));
+        self.view.widget(cx, ids!(recovery)).set_visible(cx, show_error);
         self.view
             .button(cx, ids!(refresh))
             .set_enabled(cx, self.active && !self.loading);
@@ -218,14 +227,13 @@ impl SharedPermissionNotice {
                 &format!("{}: {}", crate::i18n::tr("Last checked (UTC)"), checked),
             );
         }
-        let has_request=self.rows.get(self.selected).is_some();
         for id in [ids!(context),ids!(request_details),ids!(hint),ids!(actions)] {
             self.view.widget(cx,id).set_visible(cx,has_request);
         }
         let Some(row)=self.rows.get(self.selected) else {
-            self.view.set_visible(cx,!self.execution_text.is_empty() || !self.error.is_empty());
+            self.view.set_visible(cx,!self.execution_text.is_empty() || show_error);
             self.view.widget(cx,ids!(next)).set_visible(cx,false);
-            self.view.label(cx,ids!(title)).set_text(cx,if self.error.is_empty(){crate::i18n::tr(&self.execution_text)}else{crate::i18n::tr(&self.error)});
+            self.view.label(cx,ids!(title)).set_text(cx,if show_error{crate::i18n::tr(&self.error)}else{crate::i18n::tr(&self.execution_text)});
             self.view.redraw(cx);return;
         };
         let a=&row["approval"];
@@ -238,7 +246,7 @@ impl SharedPermissionNotice {
         else if row["encryptedPending"]==true {crate::i18n::tr("Approval becomes available after the encrypted details arrive.").into()}
         else if row["canDecide"]!=true {crate::i18n::format("Waiting for resource owner {owner}", &[("owner",a["ownerMxid"].as_str().unwrap_or("").to_owned())])}
         else {crate::i18n::tr("Session approval covers this Codex session only. It ends when this run stops.").into()};
-        self.view.label(cx,ids!(hint)).set_text(cx,if self.error.is_empty(){&hint}else{crate::i18n::tr(&self.error)});
+        self.view.label(cx,ids!(hint)).set_text(cx,if show_error{crate::i18n::tr(&self.error)}else{&hint});
         self.view.button(cx,ids!(once)).set_enabled(cx,can);
         self.view.button(cx,ids!(session)).set_enabled(cx,can && a["request"]["sessionAllowed"]==true);
         self.view.button(cx,ids!(deny)).set_enabled(cx,can);
@@ -355,14 +363,17 @@ impl SharedPermissionNotice {
         self.deciding = deciding;
         self.task = Some(crate::account_session::spawn(async move {
             let value = tokio::time::timeout(Duration::from_secs(30), async {
-                let result = service.shared_permissions_detailed(command).await?;
+                let result = match command {
+                    ManagementCommand::SharedApprovals { room_id } => {
+                        service.read_shared_approvals(room_id, manual).await?
+                    }
+                    command => service.shared_permissions_detailed(command).await?,
+                };
                 if result.get("approvals").is_some() {
                     Ok(result)
                 } else {
                     service
-                        .shared_permissions_detailed(ManagementCommand::SharedApprovals {
-                            room_id: Some(room.clone()),
-                        })
+                        .read_shared_approvals(Some(room.clone()), manual)
                         .await
                 }
             })
@@ -474,6 +485,13 @@ impl Widget for SharedPermissionNotice {
             for action in actions {
                 if let Some(done) = action.downcast_ref::<PermissionResult>() {
                     self.accept_result(cx, done);
+                } else if action
+                    .downcast_ref::<crate::hagency::pending_approvals::PendingApprovalsChanged>()
+                    .is_some()
+                    && self.failure.as_ref().map(PermissionFailure::recovery)
+                        == Some(Recovery::ManagementNotConfigured)
+                {
+                    self.render(cx);
                 }
             }
             if self.view.button(cx, ids!(refresh)).clicked(actions) {
