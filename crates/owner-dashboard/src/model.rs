@@ -103,6 +103,35 @@ pub struct HostOptions {
     /// The installed service runs another program than this app (for
     /// example an earlier separate Hosting app). Reinstalling moves it here.
     pub foreign_service: bool,
+    /// Where rented Claude Agents run on this computer.
+    pub containers: PoolContainers,
+}
+
+/// Rented Claude Agents in a Docker-compatible container instead of this
+/// computer's sandbox. The host finds the runtime and prepares the image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PoolContainers {
+    /// This computer's sandbox.
+    #[default]
+    Off,
+    /// Finding the runtime and preparing the image; minutes the first time.
+    TurningOn,
+    On,
+    /// On, but the chosen app is no longer there: they cannot start.
+    Unavailable,
+    /// Turning on stopped here; they keep the sandbox.
+    Failed(ContainerProblem),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerProblem {
+    /// No Docker-compatible app on this computer.
+    NoRuntime,
+    /// Its engine is not running.
+    EngineStopped,
+    /// The image did not build.
+    BuildFailed,
+    Other,
 }
 
 /// The host's view of its daemon connection. Reported by the host; the
@@ -275,6 +304,8 @@ pub enum DashboardAction {
     StartService,
     /// Keep the resource pool running after the host app quits.
     KeepRunning(bool),
+    /// Run rented Claude Agents in containers (true) or the sandbox.
+    PoolContainers(bool),
     /// Remove the background service; its sign-in and resources are kept.
     UninstallService,
     /// Open the owner's shared tool approvals and resource Agent requests.
@@ -733,6 +764,12 @@ pub struct OptionsCard {
     pub keep_running: bool,
     pub keep_running_title: &'static str,
     pub keep_running_body: &'static str,
+    /// The switch is on while turning on and once on.
+    pub containers: bool,
+    /// Turning on: the switch waits for the host.
+    pub containers_busy: bool,
+    pub containers_title: &'static str,
+    pub containers_body: &'static str,
     pub busy: bool,
     pub foreign_service: Option<&'static str>,
     pub uninstall_confirm: bool,
@@ -1503,6 +1540,19 @@ fn options_card(state: &DashboardState, locale: Locale) -> Option<OptionsCard> {
         keep_running: options.keep_running,
         keep_running_title: tr(locale, Msg::KeepRunningTitle),
         keep_running_body: tr(locale, if options.keep_running { Msg::KeepRunningOn } else { Msg::KeepRunningOff }),
+        containers: matches!(options.containers, PoolContainers::TurningOn | PoolContainers::On | PoolContainers::Unavailable),
+        containers_busy: options.containers == PoolContainers::TurningOn,
+        containers_title: tr(locale, Msg::ContainersTitle),
+        containers_body: tr(locale, match options.containers {
+            PoolContainers::Off => Msg::ContainersOff,
+            PoolContainers::TurningOn => Msg::ContainersTurningOn,
+            PoolContainers::On => Msg::ContainersOn,
+            PoolContainers::Unavailable => Msg::ContainersUnavailable,
+            PoolContainers::Failed(ContainerProblem::NoRuntime) => Msg::ContainersNoRuntime,
+            PoolContainers::Failed(ContainerProblem::EngineStopped) => Msg::ContainersEngineStopped,
+            PoolContainers::Failed(ContainerProblem::BuildFailed) => Msg::ContainersBuildFailed,
+            PoolContainers::Failed(ContainerProblem::Other) => Msg::ContainersFailed,
+        }),
         busy: options.busy,
         foreign_service: options.foreign_service.then(|| tr(locale, Msg::ForeignService)),
         uninstall_confirm: state.confirm_uninstall,

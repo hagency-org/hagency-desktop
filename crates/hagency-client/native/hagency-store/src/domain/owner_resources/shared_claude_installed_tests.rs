@@ -81,6 +81,7 @@ impl Native {
             },
             policy,
             resume,
+            hagency_runtime::owned::SharedClaudeIsolation::Sandbox,
         )
         .unwrap()
     }

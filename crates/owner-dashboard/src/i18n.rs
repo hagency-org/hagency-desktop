@@ -235,6 +235,15 @@ messages! {
     KeepRunningTitle => "Keep the resource pool running after Desktop quits", "关闭桌面端后继续运行资源池";
     KeepRunningOn => "Rented Agents keep working while Hagency is closed.", "关闭 Hagency 后，出租的 Agent 仍会继续工作。";
     KeepRunningOff => "Hagency pauses hosting when it quits and resumes it the next time it starts.", "Hagency 退出时会暂停托管，下次启动时恢复。";
+    ContainersTitle => "Run rented Claude Agents in containers", "在容器中运行出租的 Claude Agent";
+    ContainersOff => "Rented Claude Agents run on this Mac in its sandbox. Turn this on to run each in its own container (Docker Desktop, OrbStack or Colima) that sees only its own folders.", "出租的 Claude Agent 在这台 Mac 的沙盒中运行。开启后，每个 Agent 会在自己的容器（Docker Desktop、OrbStack 或 Colima）中运行，只能看到自己的文件夹。";
+    ContainersTurningOn => "Preparing the container image. The first time takes a few minutes…", "正在准备容器镜像，首次需要几分钟…";
+    ContainersOn => "From their next run, rented Claude Agents run in their own container and see only their own folders. Other Agents keep the sandbox.", "从下一次运行起，出租的 Claude Agent 会在自己的容器中运行，只能看到自己的文件夹。其他 Agent 仍使用沙盒。";
+    ContainersUnavailable => "The container app chosen for rented Claude Agents is not available, so they cannot start. Turn this off to use the sandbox, or off and on again to use the app you have now.", "为出租的 Claude Agent 选择的容器应用不可用，它们无法启动。关闭此项可改用沙盒；或关闭后重新开启，以使用当前的容器应用。";
+    ContainersNoRuntime => "No Docker-compatible app was found. Install and start Docker Desktop, OrbStack or Colima, then turn this on again.", "未找到 Docker 兼容的应用。请安装并启动 Docker Desktop、OrbStack 或 Colima，然后再次开启。";
+    ContainersEngineStopped => "The container engine isn't running. Start your container app, then turn this on again.", "容器引擎未运行。请启动容器应用，然后再次开启。";
+    ContainersBuildFailed => "The Agent image could not be built. Check that your container app can reach the internet, then turn this on again.", "无法构建 Agent 镜像。请确认容器应用可以访问网络，然后再次开启。";
+    ContainersFailed => "Containers could not be turned on. Rented Claude Agents keep running in the sandbox.", "无法开启容器。出租的 Claude Agent 仍在沙盒中运行。";
     UninstallService => "Uninstall hosting service", "卸载托管服务";
     UninstallConfirmTitle => "Uninstall the hosting service?", "卸载托管服务？";
     UninstallConfirmBody => "Hosting stops until you start the service again. Your setup, sign-in and resources are kept.", "在重新启动服务前，托管会停止。你的设置、登录和资源都会保留。";

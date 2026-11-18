@@ -38,7 +38,7 @@ fn setup(need: SetupNeed, progress: SetupProgress) -> Option<SetupView> {
 }
 
 fn options(keep_running: bool) -> Option<HostOptions> {
-    Some(HostOptions { keep_running, busy: false, foreign_service: false })
+    Some(HostOptions { keep_running, ..Default::default() })
 }
 
 fn counts(input: u64, output: u64, read: u64, write: u64) -> TokenCounts {

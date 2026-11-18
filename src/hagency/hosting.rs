@@ -654,6 +654,8 @@ pub struct View {
     pub service: Option<Service>,
     /// The running job, or the last finished one, for this account.
     pub job: Option<(JobKind, Progress)>,
+    /// Where rented Claude Agents run on this computer; `None` until read.
+    pub containers: Option<owner_dashboard::PoolContainers>,
     /// Changes whenever anything above changes.
     pub generation: u64,
 }
@@ -664,6 +666,8 @@ struct Shared {
     view: View,
     reading: bool,
     read_at: Option<std::time::Instant>,
+    /// A container switch change is running; it, not a read, decides.
+    containers_running: bool,
     /// One job at a time, whichever account started it.
     #[cfg(unix)]
     running: bool,
@@ -701,14 +705,19 @@ pub fn view(account: &Account) -> View {
         let spawned = std::thread::Builder::new().name("owner-hosting-status".into()).spawn(move || {
             let execution = Locations::system().and_then(|l| execution(&l, &account.origin, &account.owner));
             let service = installed_service();
+            let read = read_containers();
             let mut state = shared();
             state.reading = false;
             state.read_at = Some(std::time::Instant::now());
+            let containers = merged_containers(state.view.containers, read, state.containers_running);
             if state.account.as_ref() == Some(&account)
-                && (state.view.execution.as_ref() != Some(&execution) || state.view.service != Some(service))
+                && (state.view.execution.as_ref() != Some(&execution)
+                    || state.view.service != Some(service)
+                    || state.view.containers != containers)
             {
                 state.view.execution = Some(execution);
                 state.view.service = Some(service);
+                state.view.containers = containers;
                 state.view.generation += 1;
                 drop(state);
                 makepad_widgets::SignalToUI::set_ui_signal();
@@ -780,6 +789,104 @@ pub fn start(kind: JobKind, account: &Account) -> bool {
     }
 }
 
+/// Turn containers for rented Claude Agents on (finding the runtime and
+/// preparing the image, minutes the first time) or off. The setting is this
+/// computer's, kept in the daemon home, and applies from each Agent's next
+/// run. Refused while a change runs.
+pub fn set_containers(on: bool) -> bool {
+    use owner_dashboard::{ContainerProblem, PoolContainers};
+    #[cfg(unix)]
+    {
+        let mut state = shared();
+        if state.containers_running {
+            return false;
+        }
+        state.containers_running = true;
+        state.view.containers = Some(if on { PoolContainers::TurningOn } else { PoolContainers::Off });
+        state.view.generation += 1;
+        drop(state);
+        let finish = |result: PoolContainers| {
+            let mut state = shared();
+            state.containers_running = false;
+            state.view.containers = Some(result);
+            state.view.generation += 1;
+            drop(state);
+            makepad_widgets::SignalToUI::set_ui_signal();
+        };
+        let spawned = std::thread::Builder::new()
+            .name("owner-hosting-containers".into())
+            .spawn(move || finish(change_containers(on)));
+        if spawned.is_err() {
+            finish(PoolContainers::Failed(ContainerProblem::Other));
+        }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (on, ContainerProblem::Other, PoolContainers::Off);
+        false
+    }
+}
+
+#[cfg(unix)]
+fn change_containers(on: bool) -> owner_dashboard::PoolContainers {
+    use ::hagency::pool_containers::{self, Error, ProbeError};
+    use owner_dashboard::{ContainerProblem, PoolContainers};
+    let Ok(daemon_home) = ::hagency::service::default_daemon_dir() else {
+        return PoolContainers::Failed(ContainerProblem::Other);
+    };
+    if !on {
+        return match pool_containers::turn_off(&daemon_home) {
+            Ok(()) => PoolContainers::Off,
+            Err(_) => read_containers(),
+        };
+    }
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return PoolContainers::Failed(ContainerProblem::Other);
+    };
+    match pool_containers::turn_on(&daemon_home, std::path::Path::new(&home)) {
+        Ok(_) => PoolContainers::On,
+        Err(error) => {
+            makepad_widgets::warning!("Rented Claude Agents' containers did not turn on: {error:?}");
+            PoolContainers::Failed(match error {
+                Error::Probe(ProbeError::NoClient) => ContainerProblem::NoRuntime,
+                Error::Probe(ProbeError::EngineUnavailable) => ContainerProblem::EngineStopped,
+                Error::Probe(ProbeError::BuildFailed) => ContainerProblem::BuildFailed,
+                _ => ContainerProblem::Other,
+            })
+        }
+    }
+}
+
+/// The saved choice; reads one small file.
+fn read_containers() -> owner_dashboard::PoolContainers {
+    use owner_dashboard::PoolContainers;
+    #[cfg(unix)]
+    if let Ok(daemon_home) = ::hagency::service::default_daemon_dir() {
+        return match ::hagency::pool_containers::load(&daemon_home) {
+            Ok(None) => PoolContainers::Off,
+            Ok(Some(setting)) if setting.cli.is_file() => PoolContainers::On,
+            _ => PoolContainers::Unavailable,
+        };
+    }
+    PoolContainers::Off
+}
+
+/// A running change decides, and a failure stays shown until the owner
+/// changes the switch again.
+fn merged_containers(
+    current: Option<owner_dashboard::PoolContainers>,
+    read: owner_dashboard::PoolContainers,
+    running: bool,
+) -> Option<owner_dashboard::PoolContainers> {
+    use owner_dashboard::PoolContainers;
+    match current {
+        _ if running => current,
+        Some(PoolContainers::Failed(_)) if read == PoolContainers::Off => current,
+        _ => Some(read),
+    }
+}
+
 /// Cancel the running setup's browser sign-in.
 pub fn cancel() {
     #[cfg(unix)]
@@ -794,6 +901,53 @@ mod tests {
     use ::hagency::daemon::enrollment::Enrollment;
     use ::hagency::native_owner::NativeOwner;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_running_container_change_decides_and_a_failure_waits_for_the_owner() {
+        use owner_dashboard::{ContainerProblem, PoolContainers as P};
+        let failed = Some(P::Failed(ContainerProblem::EngineStopped));
+        assert_eq!(merged_containers(None, P::Off, false), Some(P::Off));
+        assert_eq!(merged_containers(Some(P::TurningOn), P::Off, true), Some(P::TurningOn));
+        assert_eq!(merged_containers(failed, P::Off, false), failed);
+        // A choice saved since, by this app or another, replaces the failure.
+        assert_eq!(merged_containers(failed, P::On, false), Some(P::On));
+        assert_eq!(merged_containers(Some(P::On), P::Unavailable, false), Some(P::Unavailable));
+    }
+
+    /// The switch end to end with a real engine, in the daemon home that
+    /// `HAGENCY_OWNER_DAEMON_HOME` names (an empty folder, never the real
+    /// one): on finds the client and its engine, prepares the image and saves
+    /// a choice a launch can run; off returns to the sandbox.
+    #[test]
+    #[ignore = "explicit Docker-compatible engine and an empty HAGENCY_OWNER_DAEMON_HOME"]
+    fn the_container_switch_turns_on_and_off_with_a_real_engine() {
+        use owner_dashboard::PoolContainers;
+        assert!(std::env::var_os("HAGENCY_OWNER_DAEMON_HOME").is_some_and(|h| !h.is_empty()));
+        let daemon = ::hagency::service::default_daemon_dir().unwrap();
+        assert_eq!(std::fs::read_dir(&daemon).unwrap().count(), 0, "an empty daemon home");
+        let settled = || {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1200);
+            loop {
+                let state = shared();
+                if !state.containers_running {
+                    return state.view.containers;
+                }
+                drop(state);
+                assert!(std::time::Instant::now() < deadline, "the change ended");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        assert!(set_containers(true));
+        // (the change runs the client at least twice: far longer than this call)
+        assert!(!set_containers(false), "refused while a change runs");
+        assert_eq!(settled(), Some(PoolContainers::On));
+        assert_eq!(read_containers(), PoolContainers::On);
+        assert!(::hagency::pool_containers::isolation(&daemon).unwrap().is_some());
+        assert!(set_containers(false));
+        assert_eq!(settled(), Some(PoolContainers::Off));
+        assert_eq!(read_containers(), PoolContainers::Off);
+        assert!(::hagency::pool_containers::isolation(&daemon).unwrap().is_none());
+    }
 
     const ORIGIN: &str = "https://hagency.example.test/";
     const OWNER: &str = "@owner:hagency.example.test";

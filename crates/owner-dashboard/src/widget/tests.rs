@@ -116,6 +116,7 @@ fn stable_ids_exist_for_the_harness() {
         assert!(!widget.label(&cx, path).is_empty(), "missing label {path:?}");
     }
     assert!(!widget.check_box(&cx, ids!(od_keep_running)).is_empty(), "missing switch");
+    assert!(!widget.check_box(&cx, ids!(od_containers)).is_empty(), "missing container switch");
     assert!(widget.widget(&cx, ids!(od_open_other)).is_empty(), "no cross-app button remains");
 }
 
@@ -142,8 +143,18 @@ fn setup_page_replaces_the_dashboard_and_the_switch_follows_the_host() {
     assert!(!visible(&cx, ids!(od_setup_page)) && visible(&cx, ids!(od_overview)) && visible(&cx, ids!(od_options_card)));
     assert!(widget.check_box(&cx, ids!(od_keep_running)).active(&cx));
     assert!(widget.button(&cx, ids!(od_stop)).visible());
-    dashboard.set_options(&mut cx, Some(crate::model::HostOptions { keep_running: false, busy: false, foreign_service: false }));
+    dashboard.set_options(&mut cx, Some(crate::model::HostOptions { keep_running: false, ..Default::default() }));
     assert!(!widget.check_box(&cx, ids!(od_keep_running)).active(&cx));
+    assert!(!widget.check_box(&cx, ids!(od_containers)).active(&cx));
+    for (containers, active) in [
+        (crate::model::PoolContainers::TurningOn, true),
+        (crate::model::PoolContainers::On, true),
+        (crate::model::PoolContainers::Failed(crate::model::ContainerProblem::EngineStopped), false),
+    ] {
+        dashboard.set_options(&mut cx, Some(crate::model::HostOptions { containers, ..Default::default() }));
+        assert_eq!(widget.check_box(&cx, ids!(od_containers)).active(&cx), active, "{containers:?}");
+    }
+    assert!(widget.label(&cx, ids!(od_containers_body)).text().contains("Start your container app"));
     dashboard.load_state(&mut cx, fixtures::scenario("hosted-stopped").unwrap());
     assert!(widget.button(&cx, ids!(od_resume)).visible() && !widget.button(&cx, ids!(od_stop)).visible());
     dashboard.load_state(&mut cx, fixtures::scenario("uninstall-confirm").unwrap());

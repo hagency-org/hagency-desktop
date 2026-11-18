@@ -55,6 +55,8 @@ pub async fn run(
     shutdown: hagency_matrix::CancellationToken,
 ) -> Result<(), HostError> {
     let home = DaemonHome::open(home)?;
+    // Pool Agents' container choice lives here, beside the daemon's state.
+    crate::pool_containers::serve_from(home.path());
     // Under the home lock and before either file is read: what an earlier
     // Hagency version left here is discarded, not migrated.
     if ControlStore::discard_imported_json(&home.control()) {

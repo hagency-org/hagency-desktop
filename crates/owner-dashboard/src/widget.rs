@@ -17,7 +17,8 @@ use crate::picker::{OdFilterPickerWidgetExt, OdFilterPickerWidgetRefExt};
 use crate::i18n::{Locale, Msg, tr};
 use crate::model::{
     BannerAction, CommandKind, CommandPhase, CommandResult, ConnectionStatus, DashboardAction, DashboardState, Glyph,
-    HostOptions, Presentation, ResourceRow, SetupView, SnapshotOutcome, Status, Tab, Tone, UsageCard, ViewState,
+    HostOptions, PoolContainers, Presentation, ResourceRow, SetupView, SnapshotOutcome, Status, Tab, Tone, UsageCard,
+    ViewState,
 };
 use hagency_metering::dashboard::{DashboardSnapshot, period::UsagePeriod};
 use makepad_widgets::*;
@@ -430,6 +431,16 @@ script_mod! {
                                     od_keep_running_body := mod.widgets.OdCaption {}
                                 }
                                 od_keep_running := mod.widgets.OdSwitch {}
+                            }
+                            mod.widgets.OdSeparator {}
+                            od_containers_row := View {
+                                width: Fill height: Fit flow: Right spacing: 12 align: Align{y: 0.5}
+                                View {
+                                    width: Fill height: Fit flow: Down spacing: 3
+                                    od_containers_title := mod.widgets.OdText {}
+                                    od_containers_body := mod.widgets.OdCaption {}
+                                }
+                                od_containers := mod.widgets.OdSwitch {}
                             }
                             mod.widgets.OdSeparator {}
                             od_foreign_service := mod.widgets.OdCaption {visible: false}
@@ -1058,6 +1069,14 @@ impl OwnerDashboard {
         if let Some(keep) = self.view.check_box(cx, ids!(od_keep_running)).changed(actions) {
             self.emit(cx, DashboardAction::KeepRunning(keep));
         }
+        if let Some(on) = self.view.check_box(cx, ids!(od_containers)).changed(actions) {
+            if self.state.options.as_ref().is_some_and(|o| o.containers == PoolContainers::TurningOn) {
+                // The host is still turning them on: the switch goes back.
+                self.changed(cx);
+            } else {
+                self.emit(cx, DashboardAction::PoolContainers(on));
+            }
+        }
         if self.clicked(cx, ids!(od_use_this_service), actions) {
             self.emit(cx, DashboardAction::StartService);
         }
@@ -1453,6 +1472,12 @@ impl OwnerDashboard {
             let switch = self.view.check_box(cx, ids!(od_keep_running));
             if switch.active(cx) != options.keep_running {
                 switch.set_active(cx, options.keep_running, Animate::No);
+            }
+            self.label(cx, ids!(od_containers_title), options.containers_title);
+            self.label(cx, ids!(od_containers_body), options.containers_body);
+            let switch = self.view.check_box(cx, ids!(od_containers));
+            if switch.active(cx) != options.containers {
+                switch.set_active(cx, options.containers, Animate::No);
             }
             self.show(cx, ids!(od_foreign_service), options.foreign_service.is_some());
             self.label(cx, ids!(od_foreign_service), options.foreign_service.unwrap_or(""));

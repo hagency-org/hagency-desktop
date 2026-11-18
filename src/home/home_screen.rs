@@ -1478,14 +1478,14 @@ mod mini_apps_side_tests {
         let region = side(&mut cx, &home);
         region.open(&mut cx, &MiniAppsAction::OpenAgent);
         let surface = region.surface(&mut cx, region.selected().unwrap());
-        let setup = View { execution: Some(Ok(Execution::Setup(SetupReason::NotEnrolled))), service: None, job: None, generation: 1 };
+        let setup = View { execution: Some(Ok(Execution::Setup(SetupReason::NotEnrolled))), service: None, job: None, containers: None, generation: 1 };
         surface.owner_fixture_hosting(&mut cx, &setup, true);
         frame(&mut cx, &mut home, &mut state, 1440.0);
         assert_eq!(surface.hosting_state(&mut cx), Some(true), "the Hosting tab is in front");
         let visible = |cx: &Cx, path: &[LiveId]| surface.widget(cx, path).visible();
         assert!(visible(&cx, ids!(owner_host.dashboard.od_setup_page)));
         assert!(!visible(&cx, ids!(owner_host.dashboard.od_overview)));
-        let hosted = View { execution: Some(Ok(Execution::Daemon { home: "/h".into() })), service: None, job: None, generation: 2 };
+        let hosted = View { execution: Some(Ok(Execution::Daemon { home: "/h".into() })), service: None, job: None, containers: None, generation: 2 };
         surface.owner_fixture_hosting(&mut cx, &hosted, true);
         surface.update_owner_fixture(&mut cx, owner_dashboard::fixtures::ordinary(owner_dashboard::dto::HostingState::Running));
         frame(&mut cx, &mut home, &mut state, 1440.0);

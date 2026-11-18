@@ -63,11 +63,44 @@ fn setup_replaces_the_dashboard_and_only_offers_what_applies() {
 }
 
 #[test]
+fn the_container_switch_says_what_happens_and_what_to_do_next() {
+    let mut state = running();
+    let mut card = |containers| {
+        state.set_options(Some(HostOptions { containers, ..Default::default() }));
+        state.present(clock()).options.unwrap()
+    };
+    let off = card(PoolContainers::Off);
+    assert!(!off.containers && !off.containers_busy);
+    assert_eq!(off.containers_title, "Run rented Claude Agents in containers");
+    assert!(off.containers_body.contains("sandbox"));
+    let turning = card(PoolContainers::TurningOn);
+    assert!(turning.containers && turning.containers_busy);
+    assert!(turning.containers_body.contains("few minutes"));
+    let on = card(PoolContainers::On);
+    assert!(on.containers && !on.containers_busy && on.containers_body.contains("next run"));
+    let gone = card(PoolContainers::Unavailable);
+    assert!(gone.containers && gone.containers_body.contains("cannot start"));
+    // A failure leaves the switch off and names the next step.
+    for (problem, step) in [
+        (ContainerProblem::NoRuntime, "Install and start"),
+        (ContainerProblem::EngineStopped, "Start your container app"),
+        (ContainerProblem::BuildFailed, "reach the internet"),
+        (ContainerProblem::Other, "keep running in the sandbox"),
+    ] {
+        let failed = card(PoolContainers::Failed(problem));
+        assert!(!failed.containers && !failed.containers_busy);
+        assert!(failed.containers_body.contains(step), "{problem:?}: {}", failed.containers_body);
+    }
+    state.locale = Locale::ZhHans;
+    assert_eq!(state.present(clock()).options.unwrap().containers_title, "在容器中运行出租的 Claude Agent");
+}
+
+#[test]
 fn a_hosted_owner_gets_the_switch_and_a_confirmed_uninstall() {
     let mut state = running();
     assert!(state.present(clock()).options.is_none(), "hosts without options show none");
     assert!(!state.request_uninstall());
-    state.set_options(Some(HostOptions { keep_running: true, busy: false, foreign_service: false }));
+    state.set_options(Some(HostOptions { keep_running: true, ..Default::default() }));
     let options = state.present(clock()).options.unwrap();
     assert!(options.keep_running && !options.uninstall_confirm && options.foreign_service.is_none());
     assert_eq!(options.keep_running_title, "Keep the resource pool running after Desktop quits");
@@ -84,7 +117,7 @@ fn a_hosted_owner_gets_the_switch_and_a_confirmed_uninstall() {
     assert!(!state.confirm_uninstall);
     // Busy service work closes the confirmation and refuses another.
     assert!(state.request_uninstall());
-    state.set_options(Some(HostOptions { keep_running: false, busy: true, foreign_service: true }));
+    state.set_options(Some(HostOptions { keep_running: false, busy: true, foreign_service: true, ..Default::default() }));
     assert!(!state.confirm_uninstall && !state.request_uninstall());
     let options = state.present(clock()).options.unwrap();
     assert!(!options.keep_running && options.busy && options.foreign_service.is_some());
