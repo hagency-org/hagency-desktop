@@ -531,6 +531,7 @@
   "Send your location to this room?": "将你的位置发送到此聊天室？",
   "Sender names and history were provided by the person who forwarded this card.": "发送者名称和聊天记录由转发此卡片的人提供。",
   "Sending invite...": "正在发送邀请…",
+  "Send interrupted. Check the conversation before retrying.": "发送中断。请先查看会话，再决定是否重试。",
   "Sending…": "正在发送…",
   "Sent {0} of {1}. {2}": "已发送 {0} / {1}。{2}",
   "Sent.": "已发送。",

@@ -135,7 +135,7 @@ pub(crate) fn check_in_background(room: Room) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use matrix_sdk::Client;
     use std::time::Duration;
@@ -148,7 +148,7 @@ mod tests {
 
     /// A client with one joined room that the library records as unencrypted,
     /// the way a sliding sync response without the room's state leaves it.
-    async fn recorded_unencrypted(server: &MockServer, room: &str) -> (Client, Room) {
+    pub(crate) async fn recorded_unencrypted(server: &MockServer, room: &str) -> (Client, Room) {
         let joined = serde_json::json!({ room: {
             "state": {"events": [
                 {"type":"m.room.create","state_key":"","event_id":"$create","sender":USER,"origin_server_ts":1,"content":{"creator":USER,"room_version":"10"}},

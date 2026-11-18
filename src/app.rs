@@ -286,6 +286,16 @@ impl ScriptHook for App {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn native_trace_writer(
+    output: impl std::io::Write + Send + 'static,
+) -> (tracing_appender::non_blocking::NonBlocking, tracing_appender::non_blocking::WorkerGuard) {
+    tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(1024)
+        .lossy(true)
+        .finish(output)
+}
+
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         if self.started { return; }
@@ -302,9 +312,19 @@ impl MatchEvent for App {
             .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
                 "info,matrix_sdk::latest_events=warn,matrix_sdk_ui::timeline::tasks=error",
             ));
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .try_init();
+        let subscriber = tracing_subscriber::fmt().with_env_filter(filter);
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // The global subscriber outlives individual standalone or embedded App widgets.
+            static LOGGER: std::sync::OnceLock<Option<tracing_appender::non_blocking::WorkerGuard>> =
+                std::sync::OnceLock::new();
+            LOGGER.get_or_init(|| {
+                let (writer, guard) = native_trace_writer(std::io::stdout());
+                subscriber.with_writer(writer).try_init().ok().map(|()| guard)
+            });
+        }
+        #[cfg(target_arch = "wasm32")]
+        let _ = subscriber.try_init();
 
         // On iOS (and potentially other devices), there is a very low limit
         // (albeit a soft limit) on max file descriptors, as little as 256.
@@ -2969,5 +2989,37 @@ mod back_navigation_tests {
         assert!(!browser.overlay_occluded());
         assert_eq!(browser.browser_id(), browser_id);
         assert_eq!(browser.session().tabs.len(), 1);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod trace_backpressure_tests {
+    use std::{io::{self, Write}, sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn a_stalled_diagnostic_sink_cannot_park_producers() {
+        struct StalledSink(Option<mpsc::Receiver<()>>);
+        impl Write for StalledSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(release) = self.0.take() { let _ = release.recv(); }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+
+        let (release, gate) = mpsc::channel();
+        let (mut writer, _guard) = super::native_trace_writer(StalledSink(Some(gate)));
+        let dropped = writer.error_counter();
+        let (done, finished) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            for _ in 0..4096 { writer.write_all(b"synthetic record\n").unwrap(); }
+            done.send(()).unwrap();
+        });
+
+        let finished_before_release = finished.recv_timeout(Duration::from_secs(5)).is_ok();
+        release.send(()).unwrap();
+        producer.join().unwrap();
+        assert!(finished_before_release);
+        assert!(dropped.dropped_lines() > 0);
     }
 }

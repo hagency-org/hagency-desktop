@@ -110,11 +110,22 @@ if [[ $inputs != "$previous_inputs" || ! -f $bundle/Contents/MacOS/rinx ]]; then
 fi
 
 # LaunchServices opens these paths in launchd, so /dev/stdout does not refer to
-# Cargo's output. Private FIFOs preserve logs for terminals and redirected runs.
-mkfifo "$launch_dir/stdout" "$launch_dir/stderr"
-(trap '' INT; exec cat "$launch_dir/stdout") &
+# Cargo's output. Give the app regular files so a slow or disconnected terminal
+# cannot block a runtime worker in write(). The launch directory is private.
+relay_log() {
+    trap '' INT
+    # Keep stdin open across reads so each cat resumes at the previous offset.
+    while [[ ! -e $launch_dir/logs-complete ]] && kill -0 "$$" 2>/dev/null; do
+        cat || return
+        sleep 0.5
+    done
+    cat
+}
+: > "$launch_dir/stdout"
+: > "$launch_dir/stderr"
+relay_log < "$launch_dir/stdout" &
 stdout_pid=$!
-(trap '' INT; exec cat "$launch_dir/stderr" >&2) &
+relay_log < "$launch_dir/stderr" >&2 &
 stderr_pid=$!
 # Makepad's macOS event loop completes this handshake: it adopts the working
 # directory, writes its pid here on the way in, and its exit status on the way out.
@@ -173,6 +184,11 @@ if [[ -n $app_pid ]]; then
     app_pid=
 fi
 if (( interrupted != 0 )); then exit "$interrupted"; fi
+: > "$launch_dir/logs-complete"
+wait "$stdout_pid" || true
+stdout_pid=
+wait "$stderr_pid" || true
+stderr_pid=
 if (( open_status != 0 )); then exit "$open_status"; fi
 if [[ ! -s $launch_dir/status ]]; then
     echo 'Rinx exited before reporting a normal application shutdown.' >&2
@@ -185,8 +201,4 @@ if [[ ! $app_status =~ ^[0-9]+$ || $app_status -gt 255 ]]; then
 fi
 completed=1
 app_pid=
-wait "$stdout_pid" || true
-stdout_pid=
-wait "$stderr_pid" || true
-stderr_pid=
 exit "$app_status"

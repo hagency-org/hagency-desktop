@@ -18,6 +18,7 @@
 //!
 
 use crate::theme::Snapshot as ThemeSnapshot;
+use crate::sliding_sync::ComposerSendOutcome;
 use std::sync::Arc;
 use makepad_widgets::*;
 use robius_speech::{NativeSpeechEvent, NativeSpeechSession, Replacement, SpeechErrorKind};
@@ -136,6 +137,13 @@ script_mod! {
 
         // Below that, display a preview of the current location that a user is about to send.
         location_preview := LocationPreview { }
+
+        pending_send_notice := Label {
+            visible: false
+            width: Fit height: Fit
+            draw_text.color: (RBX_FG_SECONDARY)
+            text: #(crate::i18n::tr("Sending…")) i18n_text: "Sending…"
+        }
 
         // Upload progress view (shown when a file upload is in progress)
         upload_progress_view := UploadProgressView { }
@@ -439,6 +447,7 @@ pub struct RoomInputBar {
     /// Whether the send button is currently enabled (the message input is non-empty).
     #[rust] is_send_enabled: bool,
     #[rust] typing_broadcast: TypingBroadcast,
+    #[rust] pending_sends: Vec<PendingComposerSend>,
     /// The room or thread that this RoomInputBar is currently within.
     #[rust] timeline_kind: Option<TimelineKind>,
     /// The widget UID of the RoomScreen containing this RoomInputBar.
@@ -453,6 +462,13 @@ pub struct RoomInputBar {
     #[rust] child_refs: Option<InputBarChildRefs>,
     /// The clipboard read asked for by the latest paste keystroke in the composer.
     #[rust] paste_request: Option<u64>,
+}
+
+struct PendingComposerSend {
+    completion: tokio::sync::oneshot::Receiver<ComposerSendOutcome>,
+    draft: MentionableTextInputState,
+    markdown: String,
+    replying_to: Option<(EventTimelineItem, EmbeddedEvent)>,
 }
 
 #[derive(Clone)]
@@ -496,7 +512,10 @@ impl ScriptHook for RoomInputBar {
             self.child_refs = None;
         }
         if apply.is_script_reapply() {
-            vm.with_cx_mut(|cx| self.enable_send_message_button(cx, self.is_send_enabled));
+            vm.with_cx_mut(|cx| {
+                self.enable_send_message_button(cx, self.is_send_enabled);
+                self.view.label(cx, ids!(pending_send_notice)).set_visible(cx, !self.pending_sends.is_empty());
+            });
         }
     }
     fn on_after_reload(&mut self, _vm: &mut ScriptVm) {
@@ -532,6 +551,7 @@ impl Widget for RoomInputBar {
             return;
         }
 
+        self.poll_pending_sends(cx);
         self.handle_speech_event(cx, event);
         self.take_assistant_draft(cx);
 
@@ -999,6 +1019,7 @@ impl RoomInputBar {
                     )
                 );
                 submit_async_request(MatrixRequest::SendMessage {
+                    completion: None,
                     routing: None,
                     timeline_kind: timeline_kind.clone(),
                     message,
@@ -1033,7 +1054,7 @@ impl RoomInputBar {
                             Ok(routing) => routing,
                             Err(error) => {enqueue_popup_notification(error, PopupKind::Error, Some(5.0)); return;}
                         };
-                        let replied_to = self.replying_to.take().and_then(|(event_tl_item, _emb)|
+                        let replied_to = self.replying_to.as_ref().and_then(|(event_tl_item, _emb)|
                             event_tl_item.event_id().map(|event_id| {
                                 let enforce_thread = if timeline_kind.thread_root_event_id().is_some() {
                                     EnforceThread::Threaded(ReplyWithinThread::Yes)
@@ -1055,7 +1076,9 @@ impl RoomInputBar {
                                 }
                             )
                         );
+                        let completion = self.track_composer_send(cx, &mentionable_text_input);
                         submit_async_request(MatrixRequest::SendMessage {
+                            completion: Some(completion),
                             routing,
                             timeline_kind: timeline_kind.clone(),
                             message,
@@ -1254,6 +1277,58 @@ impl RoomInputBar {
         }
         self.button(cx, ids!(cancel_reply_button)).reset_hover(cx);
         self.redraw(cx);
+    }
+
+    fn track_composer_send(
+        &mut self,
+        cx: &mut Cx,
+        input: &MentionableTextInputRef,
+    ) -> tokio::sync::oneshot::Sender<ComposerSendOutcome> {
+        let (completion, result) = tokio::sync::oneshot::channel();
+        self.pending_sends.push(PendingComposerSend {
+            completion: result,
+            draft: input.save_state(),
+            markdown: input.markdown_text(),
+            replying_to: self.replying_to.take(),
+        });
+        self.view.label(cx, ids!(pending_send_notice)).set_visible(cx, true);
+        completion
+    }
+
+    fn poll_pending_sends(&mut self, cx: &mut Cx) {
+        use tokio::sync::oneshot::error::TryRecvError;
+        if self.pending_sends.is_empty() { return; }
+        let mut sends = std::mem::take(&mut self.pending_sends);
+        sends.retain_mut(|send| {
+            match send.completion.try_recv() {
+                Err(TryRecvError::Empty) => return true,
+                Ok(ComposerSendOutcome::Queued) => return false,
+                Err(TryRecvError::Closed) => enqueue_popup_notification(
+                    crate::i18n::tr("Send interrupted. Check the conversation before retrying."),
+                    PopupKind::Error, None,
+                ),
+                Ok(ComposerSendOutcome::Failed) => {} // The backend already displayed the failure reason.
+            }
+            let input = self.mentionable_text_input(cx, ids!(mentionable_text_input));
+            let current = input.markdown_text();
+            if current.is_empty() {
+                input.restore_state(cx, std::mem::take(&mut send.draft));
+            } else {
+                input.set_text(cx, &format!("{current}\n{}", send.markdown));
+            }
+            if self.replying_to.is_none() {
+                if let (Some(reply), Some(kind)) = (send.replying_to.take(), self.timeline_kind.clone()) {
+                    self.show_replying_to(cx, reply, &kind, false);
+                }
+            }
+            self.enable_send_message_button(cx, true);
+            self.redraw(cx);
+            false
+        });
+        if sends.is_empty() {
+            self.view.label(cx, ids!(pending_send_notice)).set_visible(cx, false);
+        }
+        self.pending_sends = sends;
     }
 
     /// Fills the input bar with the content of a message that failed to send (so the user can retry it).
@@ -1717,6 +1792,7 @@ impl RoomInputBarRef {
         let Some(mut inner) = self.borrow_mut() else { return Default::default() };
         inner.stop_typing();
         let saved = RoomInputBarState {
+            pending_sends: std::mem::take(&mut inner.pending_sends),
             was_replying_preview_visible: inner.was_replying_preview_visible,
             replying_to: inner.replying_to.clone(),
             editing_pane_state: inner.child_by_path(ids!(editing_pane)).as_editing_pane().save_state(),
@@ -1745,12 +1821,16 @@ impl RoomInputBarRef {
         let Some(mut inner) = self.borrow_mut() else { return };
         inner.cancel_dictation(cx);
         let RoomInputBarState {
+            pending_sends,
             was_replying_preview_visible,
             mentionable_input_state,
             replying_to,
             editing_pane_state,
             upload,
         } = saved_state;
+        inner.pending_sends = pending_sends;
+        let pending = !inner.pending_sends.is_empty();
+        inner.view.label(cx, ids!(pending_send_notice)).set_visible(cx, pending);
 
         // Note: we do *not* restore the location preview state here; see `save_state()`.
 
@@ -1887,6 +1967,7 @@ impl RoomInputBarRef {
 /// The saved UI state of a `RoomInputBar` widget.
 #[derive(Default)]
 pub struct RoomInputBarState {
+    pending_sends: Vec<PendingComposerSend>,
     /// Whether or not the `replying_preview` widget was shown.
     was_replying_preview_visible: bool,
     /// The state of the MentionableTextInput within this input bar.
@@ -1926,5 +2007,57 @@ mod typing_broadcast_tests {
         assert_eq!(state.observe(false,true),None);
         assert_eq!(state.observe(true,false),Some(true));
         assert_eq!(state.observe(true,true),Some(false));
+    }
+}
+
+#[cfg(test)]
+mod composer_send_tests {
+    use super::*;
+
+    #[test]
+    fn pending_sends_follow_the_room_and_resolve_independently() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let bar = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, { mod.widgets.RoomInputBar {} });
+            let widget = WidgetRef::script_from_value(vm, value);
+            assert!(vm.take_errors().is_empty());
+            widget.as_room_input_bar()
+        });
+        let mut composer = bar.borrow_mut().unwrap();
+        let input = composer.child_refs(&mut cx).mentionable_text_input.clone();
+        let notice = composer.view.label(&mut cx, ids!(pending_send_notice));
+        input.set_text(&mut cx, "first");
+        let first = composer.track_composer_send(&mut cx, &input);
+        input.set_text(&mut cx, "/me second");
+        let second = composer.track_composer_send(&mut cx, &input);
+        input.set_text(&mut cx, "");
+        drop(composer);
+
+        let saved = bar.save_state();
+        assert_eq!(saved.pending_sends.len(), 2);
+        assert!(bar.borrow().unwrap().pending_sends.is_empty());
+        let room = ruma::room_id!("!composer:example.org").to_owned();
+        bar.restore_state(&mut cx, TimelineKind::MainRoom { room_id: room }, saved, UserPowerLevels::all(), None, false);
+        let mut composer = bar.borrow_mut().unwrap();
+        assert!(first.send(ComposerSendOutcome::Queued).is_ok());
+        composer.poll_pending_sends(&mut cx);
+        assert!(notice.visible());
+        assert!(input.text().is_empty());
+
+        assert!(second.send(ComposerSendOutcome::Failed).is_ok());
+        composer.poll_pending_sends(&mut cx);
+        assert!(!notice.visible());
+        assert_eq!(input.text(), "/me second");
+
+        let interrupted = composer.track_composer_send(&mut cx, &input);
+        input.set_text(&mut cx, "new draft");
+        drop(interrupted);
+        composer.poll_pending_sends(&mut cx);
+        composer.poll_pending_sends(&mut cx);
+        assert!(!notice.visible());
+        assert_eq!(input.text(), "new draft\n/me second");
     }
 }
