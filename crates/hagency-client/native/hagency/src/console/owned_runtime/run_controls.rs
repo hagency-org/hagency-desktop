@@ -138,6 +138,8 @@ pub(in crate::console) struct CardHost {
     text: hagency_runtime::live_text::LiveText,
     messages: Option<Arc<super::messages::Outbox>>,
     text_seen: StdMutex<(u64, Instant)>,
+    /// When this run started, for "Done in 41 s".
+    started: Instant,
     state: StdMutex<Option<(Arc<e2ee::AgentDevice>, PathBuf, Record)>>,
     receipts: StdMutex<Vec<PendingReceipt>>,
 }
@@ -147,6 +149,44 @@ struct PendingReceipt {
     stop: bool,
     poll: Box<dyn FnMut() -> Option<&'static str> + Send>,
 }
+// TODO(R4): run_controls.rs is over budget; split CardHost display (text, progress) out.
+/// The card's live step from the runtime's text view; `None` until a first step.
+fn live_progress(
+    text: &hagency_runtime::live_text::LiveText,
+    shown: Option<&crate::agent_run_controls::Progress>,
+) -> Option<crate::agent_run_controls::Progress> {
+    let (step, steps) = text.current_step();
+    if steps == 0 {
+        return shown.cloned();
+    }
+    let mut end = step.len().min(crate::agent_run_controls::MAX_STEP_BYTES);
+    while !step.is_char_boundary(end) {
+        end -= 1;
+    }
+    let step = step[..end].to_owned();
+    Some(crate::agent_run_controls::Progress { step, steps, elapsed_secs: None })
+}
+/// The finished summary ("Done in 41 s · 9 steps"); a run without steps
+/// keeps the plain "Done" instead of a "0 steps" summary.
+fn completed_progress(
+    live: Option<crate::agent_run_controls::Progress>,
+    elapsed_secs: u64,
+) -> Option<crate::agent_run_controls::Progress> {
+    live.filter(|progress| progress.steps > 0).map(|mut progress| {
+        progress.step.clear();
+        progress.elapsed_secs = Some(elapsed_secs);
+        progress
+    })
+}
+#[cfg(test)]
+#[test]
+fn a_run_without_steps_finishes_without_a_summary() {
+    use crate::agent_run_controls::Progress;
+    assert_eq!(completed_progress(None, 3), None);
+    assert_eq!(completed_progress(Some(Progress::default()), 3), None);
+    let live = Progress { step: "running x".into(), steps: 2, elapsed_secs: None };
+    assert_eq!(completed_progress(Some(live), 3), Some(Progress { step: String::new(), steps: 2, elapsed_secs: Some(3) }));
+}
 impl CardHost {
     pub(in crate::console) fn new(card: Card) -> Self {
         Self {
@@ -154,6 +194,7 @@ impl CardHost {
             text: Default::default(),
             messages: None,
             text_seen: StdMutex::new((0, Instant::now())),
+            started: Instant::now(),
             state: StdMutex::new(None),
             receipts: StdMutex::new(Vec::new()),
         }
@@ -182,11 +223,14 @@ impl CardHost {
         let mut held = self.state.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((_, _, record)) = held.as_mut()
             && record.card.state.active()
-            && record.card.preview != text
         {
-            record.card.preview = text;
-            record.card.fit_display();
-            record.card.revision += 1;
+            let progress = live_progress(&self.text, record.card.progress.as_ref());
+            if record.card.preview != text || record.card.progress != progress {
+                record.card.preview = text;
+                record.card.progress = progress;
+                record.card.fit_display();
+                record.card.revision += 1;
+            }
         }
         *seen = (revision, Instant::now());
     }
@@ -224,6 +268,10 @@ impl CardHost {
                 record.card.revision += 1;
                 if state == CardState::Completed {
                     record.card.preview.clear();
+                    record.card.progress = completed_progress(
+                        live_progress(&self.text, record.card.progress.as_ref()),
+                        self.started.elapsed().as_secs_f64().round() as u64,
+                    );
                 }
                 if save(path, record).is_err() {
                     tracing::warn!("Run card outcome awaits recovery");
@@ -994,6 +1042,24 @@ mod tests {
             "unavailable"
         );
         assert!(may_forget_closed_record(&record, true, later));
+    }
+    /// Runtime steps reach the card the room sees: the current step and the
+    /// count ride in the card content, bounded, and the card still validates.
+    #[test]
+    fn live_steps_ride_in_the_published_card() {
+        let text = hagency_runtime::live_text::LiveText::default();
+        assert_eq!(live_progress(&text, None), None);
+        text.step("running gh pr create --fill");
+        text.step(&"x".repeat(1000));
+        let mut card = crate::agent_run_controls::tests::card();
+        card.progress = live_progress(&text, None);
+        let progress = card.progress.clone().unwrap();
+        assert_eq!(progress.steps, 2);
+        assert!(progress.step.len() <= crate::agent_run_controls::MAX_STEP_BYTES);
+        card.validate().unwrap();
+        let content = card.content();
+        let back = Card::from_content(&content).unwrap();
+        assert_eq!(back.progress, Some(progress));
     }
     #[test]
     fn ending_during_authority_recheck_settles_every_staged_unwritten_action() {

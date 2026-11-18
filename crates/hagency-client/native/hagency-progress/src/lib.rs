@@ -1,13 +1,17 @@
 //! Pure progress projection, not canonical task truth or transport authority.
 mod accumulator;
 mod policy;
+mod redact;
 mod summary;
+mod step;
 mod tools;
 pub use accumulator::*;
 pub use policy::*;
+pub use redact::{REDACTED, redact};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 pub use summary::*;
+pub use step::*;
 pub use tools::*;
 
 pub const MAX_EVENTS: usize = 1024;

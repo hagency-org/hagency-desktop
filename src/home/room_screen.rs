@@ -2122,9 +2122,12 @@ impl Widget for RoomScreen {
                     let (item, item_new_draw_status) = match timeline_item.kind() {
                         TimelineItemKind::Event(event_tl_item) => match event_tl_item.content() {
                             TimelineItemContent::MsgLike(msg_like_content) => {
-                                if tl_state.kind.thread_root_event_id().is_none()
-                                    && msg_like_content.thread_root.is_some()
+                                if (tl_state.kind.thread_root_event_id().is_none()
+                                    && msg_like_content.thread_root.is_some())
+                                    || is_agent_run_status(&msg_like_content.kind)
                                 {
+                                    // An Agent run's status event is shown by its run card on the
+                                    // request (`populate_agent_run_cards`), never as its own message.
                                     // Hide threaded replies from the main room timeline UI.
                                     (list.item(cx, item_id, id!(Empty)), ItemDrawnStatus::both_drawn())
                                 } else {
@@ -6475,6 +6478,21 @@ fn populate_shared_permission_card(
     );
 }
 
+/// A valid Agent run status event (`im.hagency.agent_run`); the run card
+/// displays it. A message that only claims the msgtype but carries no valid
+/// card is not hidden: its plain body still shows.
+fn is_agent_run_status(kind: &MsgLikeKind) -> bool {
+    let MsgLikeKind::Message(message) = kind else { return false };
+    let msgtype = message.msgtype();
+    msgtype.msgtype() == ::hagency::agent_run_controls::MSGTYPE && is_run_card_data(msgtype.msgtype(), &msgtype.data())
+}
+/// Whether a custom message's data parses as a valid run card.
+fn is_run_card_data(msgtype: &str, data: &serde_json::Map<String, serde_json::Value>) -> bool {
+    let mut content = serde_json::Value::Object(data.clone());
+    content["msgtype"] = msgtype.into();
+    ::hagency::agent_run_controls::Card::from_content(&content).is_some()
+}
+
 fn populate_agent_run_cards(
     cx: &mut Cx,
     item: &WidgetRef,
@@ -8840,5 +8858,23 @@ mod retention_ui_tests {
         assert!(parked.content_drawn_since_last_update.contains(&0));
         drop(newer);
         timeline_state_store::clear_all(&mut cx);
+    }
+}
+
+#[cfg(test)]
+mod run_status_visibility_tests {
+    use super::is_run_card_data;
+    use ::hagency::agent_run_controls::MSGTYPE;
+
+    /// Regression: any message claiming the run msgtype vanished from the timeline.
+    #[test]
+    fn only_a_valid_run_card_is_hidden() {
+        let data = |card: serde_json::Value| serde_json::json!({"body": "hi", MSGTYPE: card}).as_object().unwrap().clone();
+        assert!(!is_run_card_data(MSGTYPE, &data(serde_json::Value::Null)));
+        assert!(!is_run_card_data(MSGTYPE, &data(serde_json::json!({"state": "running"}))));
+        let card = serde_json::json!({"version": 1, "id": "run_fixture", "dispatchId": "dispatch", "executionId": "execution",
+            "roomId": "!room:test", "eventId": "$trigger", "threadRoot": "!room:test", "requester": "@requester:test",
+            "owner": "@owner:test", "runtime": "codex", "state": "running", "revision": 0});
+        assert!(is_run_card_data(MSGTYPE, &data(card)));
     }
 }
