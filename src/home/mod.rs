@@ -39,6 +39,8 @@ pub mod sidebar_action_menu;
 pub mod search_messages;
 pub mod space_lobby;
 pub mod space_management;
+pub mod room_registration;
+pub mod new_room_dialog;
 pub mod spaces_bar;
 pub mod navigation_tab_bar;
 pub mod welcome_screen;
@@ -48,11 +50,14 @@ pub mod reaction_strip;
 pub mod reaction_picker;
 pub mod room_context_menu;
 pub mod link_preview;
+pub(crate) mod link_preview_policy;
+pub mod create_agent_cta;
 pub mod room_image_viewer;
 pub mod upload_progress;
 
 pub fn script_mod(vm: &mut ScriptVm) {
     space_management::script_mod(vm);
+    new_room_dialog::script_mod(vm);
     room_history::script_mod(vm);
     mobile::script_mod(vm);
     joined_spaces::script_mod(vm);
@@ -86,10 +91,13 @@ pub fn script_mod(vm: &mut ScriptVm) {
     agent_runtime_notice::script_mod(vm);
     agent_run_card::script_mod(vm);
     shared_permission_notice::script_mod(vm);
+    // The hover toolbar is used by RoomScreen's DSL, so it must exist first.
+    room_screen::hover_toolbar::script_mod(vm);
     room_screen::script_mod(vm);
     navigation_tab_bar::account_bar_script_mod(vm);
     room_filter_bubbles::script_mod(vm);
     rooms_sidebar::script_mod(vm);
+    create_agent_cta::script_mod(vm);
     welcome_screen::script_mod(vm);
     light_themed_dock::script_mod(vm);
     main_desktop_ui::script_mod(vm);

@@ -1,3 +1,8 @@
+pub mod agent_presence;
+pub mod bring_agent;
+pub mod create_agent;
+pub(crate) mod group_rooms;
+pub(crate) mod quick_setup;
 pub mod backend;
 pub mod model;
 pub mod ui;

@@ -21,6 +21,9 @@ use crate::{
     },
     utils::{self, RoomNameId},
 };
+// TODO(R4): over budget; the Add agent picker (request_agents, finish_agent_request,
+// the agent_picker_modal) belongs in add_agent_picker, split along that seam.
+pub(super) mod add_agent_picker;
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -173,6 +176,7 @@ script_mod! {
                     }
                 }
                 agent_status := ModalBody {}
+                allow_group_rooms := RobrixPositiveIconButton {visible: false text: #(crate::i18n::tr("Allow in group rooms")) i18n_text: "Allow in group rooms" height: 40 margin: Inset{top: 12} icon_walk: Walk{width: 0 height: 0}}
                 resume_agent_requests := RobrixNeutralIconButton {visible: false text: #(crate::i18n::tr("Resume original request in Agents")) i18n_text: "Resume original request in Agents" height: 40 margin: Inset{top: 12} icon_walk: Walk{width: 0 height: 0}}
             }
         }
@@ -222,7 +226,7 @@ fn add_member_owners(owners: &mut HashMap<OwnedUserId, OwnedUserId>, conflicts: 
         let Some(agent) = row["puppetMxid"].as_str().and_then(|id| OwnedUserId::try_from(id).ok()) else {continue;};
         let owner = row["ownerMxid"].as_str().and_then(|id| OwnedUserId::try_from(id).ok()).or_else(|| fallback_owner.cloned());
         let Some(owner) = owner else {continue;};
-        if agent == owner || agent.localpart() == "_hagency_service" || conflicts.contains(&agent) {continue;}
+        if agent == owner || crate::shared::mention_candidates::is_hagency_service_account(&agent) || conflicts.contains(&agent) {continue;}
         if owners.get(&agent).is_some_and(|old| old != &owner) {
             owners.remove(&agent);conflicts.insert(agent);
         } else {owners.insert(agent,owner);}
@@ -231,7 +235,7 @@ fn add_member_owners(owners: &mut HashMap<OwnedUserId, OwnedUserId>, conflicts: 
 fn group_members(members: &mut Vec<UserProfile>, owners: &HashMap<OwnedUserId, OwnedUserId>) -> HashSet<OwnedUserId> {
     members.sort_by_key(|p| (p.displayable_name().to_lowercase(), p.user_id.clone()));
     let present: HashSet<_> = members.iter().map(|p|p.user_id.clone()).collect();
-    let grouped: HashSet<_> = members.iter().filter(|p|p.user_id.localpart() != "_hagency_service" && owners.get(&p.user_id).is_some_and(|owner| present.contains(owner) && !owners.contains_key(owner) && owner.localpart() != "_hagency_service" && *owner != p.user_id)).map(|p|p.user_id.clone()).collect();
+    let grouped: HashSet<_> = members.iter().filter(|p|!crate::shared::mention_candidates::is_hagency_service_account(&p.user_id) && owners.get(&p.user_id).is_some_and(|owner| present.contains(owner) && !owners.contains_key(owner) && owner.localpart() != "_hagency_service" && *owner != p.user_id)).map(|p|p.user_id.clone()).collect();
     let mut ordered = Vec::with_capacity(members.len());
     for member in members.iter().filter(|p|!grouped.contains(&p.user_id)) {
         ordered.push(member.clone());
@@ -247,6 +251,8 @@ pub(crate) async fn fetch_member_owners(room: &str, owner: &OwnedUserId) -> Resu
     if roster["ownerMxid"].as_str() != Some(owner.as_str()) {return Err("matrix_account_changed".into());}
     let rows=roster["agents"].as_array().ok_or("room_discovery_unavailable")?;
     if rows.len()>128 {return Err("room_discovery_incomplete".into());}
+    // TODO(R4): split member ownership loading (add_member_owners, group_members,
+    // fetch_member_owners) out into home/chat_info_members.rs; this file is over budget.
     let mut owners = HashMap::new();let mut conflicts = HashSet::new();
     add_member_owners(&mut owners, &mut conflicts, &roster["agents"], Some(owner));
     let incomplete = match service.agents_for_registered_room(room).await {
@@ -254,14 +260,15 @@ pub(crate) async fn fetch_member_owners(room: &str, owner: &OwnedUserId) -> Resu
             let project = context["projectId"].as_str().filter(|id|!id.is_empty()).ok_or("room_discovery_unavailable")?;
             match service.execute(Command::RoomRoster {project_id:project.into(),room_id:room.into()}).await {
                 Ok(roster) if roster["agents"].as_array().is_some_and(|rows|rows.len()<=128) => {add_member_owners(&mut owners,&mut conflicts,&roster["agents"],None);false},
-                Ok(_) => true,
-                Err(_) => true,
+                Ok(_) => {makepad_widgets::warning!("Room roster too large to match Agent owners");true},
+                Err(error) => {makepad_widgets::warning!("Room roster unavailable: {error}");true},
             }
         },
         // Private/non-project Rooms can still group this owner's known Agents.
         Err(error) if error == "room_project_registration_required" => false,
-        Err(_) => true,
+        Err(error) => {makepad_widgets::warning!("Room Agents unavailable: {error}");true},
     };
+    if !conflicts.is_empty() {makepad_widgets::warning!("Agents claimed by two owners: {}", conflicts.len());}
     Ok((owners,incomplete || !conflicts.is_empty()))
 }
 
@@ -287,15 +294,21 @@ impl RoomAgentsSlow {
     }
 }
 
-pub(super) fn agent_binding_error(code: &str) -> &'static str {
+/// The picker's own text for a private Agent: its button is the choice.
+// TODO(R4): this file is over budget; split the Add agent picker state at the
+// `request_agents`/`finish_agent_request` seam into mobile_chat_info/add_agent_picker.rs.
+const PRIVATE_AGENT_CHOICE: &str = "This Agent is private: it only answers in your private chat with it. Allow in group rooms lets members of rooms you add it to @ it. This does not contribute its resources to a pool.";
+pub(crate) fn agent_binding_error(code: &str) -> &'static str {
     match code {
-        "room_project_registration_required" => "To chat with Agents, use an Agent space. Open + → Create a space or room, choose Agent space, then create a room inside it.",
+        "room_project_registration_required" => "This room could not be registered for your Agents: create an Agent first (Agent → Create agent), then add it here again.",
+        crate::home::room_registration::SPACE_LINK_FAILED => "This room could not be linked under your Agent space. Make sure you are joined and retry Add agent.",
         "room_join_required" | "room_membership_required" => "Join this room and its Agent space before adding an Agent.",
         "service_invitation_denied" | "agent_service_invite_permission_required" => "The Hagency service needs permission to invite Agents. Ask a room administrator to allow it to invite members, then retry.",
         "agent_service_banned" => "The Hagency service is banned from this room. Ask a room administrator to unban it, then retry.",
         "matrix_permission_denied" => "You do not have permission to invite members to this room. Ask a room administrator to enable invitations.",
         "agent_creation_denied" => "This space or room does not allow you to add Agents. Ask its owner to update the Agent permissions.",
         "agent_owner_binding_required" => "This Agent is not available to add. Check that it belongs to you and its resource authorization is still valid in Agent → My Agents.",
+        crate::hagency::group_rooms::PRIVATE_AGENT_REFUSAL => "This Agent is private: it only answers in your private chat with it. To let it join group rooms, open Room info → Members → Add agent and choose Allow in group rooms. This does not contribute its resources to a pool.",
         "agent_retired" => "This Agent has been retired and cannot join another room.",
         "agent_command_recovery_required" => "An original binding request needs confirmation. Resume it in Agents.",
         "sign_in_required" | "matrix_account_changed" => "Your account session changed. Reopen this room after signing in.",
@@ -376,6 +389,8 @@ pub struct MobileChatInfo {
     #[rust] agent_project: String,
     #[rust] agents: Vec<serde_json::Value>,
     #[rust] agent_command: Option<(String, String)>,
+    /// The owner chose Allow in group rooms: the next bind records that first.
+    #[rust] allow_group_rooms: bool,
     #[rust] agent_picker_open: bool,
     #[rust] services_open: bool,
     #[rust] services_busy: bool,
@@ -385,8 +400,12 @@ pub struct MobileChatInfo {
     #[rust] review_mode: bool,
 }
 
-fn is_hagency_service(user: &matrix_sdk::ruma::UserId, owner: &matrix_sdk::ruma::UserId) -> bool {
-    user.localpart() == "_hagency_service" && user.server_name() == owner.server_name()
+/// Names a Hagency service account: plain on the viewer's own server, with its server
+/// otherwise, so a remote account named `_hagency_service` cannot pass for the local one.
+fn service_label(user: &matrix_sdk::ruma::UserId, owner: Option<&matrix_sdk::ruma::OwnedUserId>) -> Option<String> {
+    if !crate::shared::mention_candidates::is_hagency_service_account(user) {return None;}
+    let label = crate::i18n::tr("Hagency service");
+    Some(if owner.is_some_and(|owner| owner.server_name() == user.server_name()) {label.to_string()} else {format!("{label} ({})", user.server_name())})
 }
 
 fn modes() -> [(Option<RoomNotificationMode>, &'static str); 4] {
@@ -598,6 +617,7 @@ impl MobileChatInfo {
         self.view.button(cx,ids!(resume_agent_requests)).set_visible(cx,false);
         let result = if self.agent_response_matches(loaded) {loaded.result.clone()}
             else {Err("invalid_server_response".into())};
+        self.log_bind_outcome(cx, loaded);
         let mut error = None;
         let message = match &result {
             Ok(value) if loaded.binding => match value["commandState"].as_str() {
@@ -615,20 +635,23 @@ impl MobileChatInfo {
             Ok(value) => {
                 self.agent_project=value["projectId"].as_str().unwrap_or("").into();
                 self.agents=value["agents"].as_array().map(|rows|rows.iter().filter(|a|a["state"] == "active").cloned().collect()).unwrap_or_default();
-                let labels=std::iter::once(crate::i18n::tr("Choose my Agent").to_owned()).chain(self.agents.iter().map(|a|a["displayName"].as_str().filter(|name|!name.is_empty()).unwrap_or("Agent").to_owned())).collect();
+                let labels=self.agent_picker_labels();
                 self.view.drop_down(cx,ids!(my_agents)).set_labels(cx,labels);
                 self.view.drop_down(cx,ids!(my_agents)).set_selected_item(cx,0);
                 if self.agents.is_empty() {"No active Agents owned by you are available."}
                 else {"Choose an Agent you own to bind to this Room."}
             },
+            Err(code) if code == crate::hagency::group_rooms::PRIVATE_AGENT_REFUSAL => {error=Some(code.as_str());PRIVATE_AGENT_CHOICE},
             Err(code) => {error=Some(code.as_str());agent_binding_error(code)},
         };
+        let text=self.bind_error_text(cx,error).unwrap_or_else(||crate::i18n::tr(message).to_owned());
         let mut label=self.view.label(cx,ids!(agent_status));
-        label.set_text(cx,crate::i18n::tr(message));
+        label.set_text(cx,&text);
         if error.is_some() {script_apply_eval!(cx,label,{draw_text +: {color: mod.widgets.RINX_DANGER_FG}});}
         else if self.agent_added {script_apply_eval!(cx,label,{draw_text +: {color: mod.widgets.RINX_SUCCESS_FG}});}
         else {script_apply_eval!(cx,label,{draw_text +: {color: mod.widgets.RINX_MUTED}});}
         self.view.button(cx,ids!(resume_agent_requests)).set_visible(cx,error==Some("agent_command_recovery_required"));
+        self.view.button(cx,ids!(allow_group_rooms)).set_visible(cx,error==Some(crate::hagency::group_rooms::PRIVATE_AGENT_REFUSAL));
         cx.redraw_all();
     }
     fn request_agents(&mut self, cx: &mut Cx, binding: bool) {
@@ -642,6 +665,7 @@ impl MobileChatInfo {
         if service.is_none() && !offline_review {return;}
         let command = if binding {
             let Some(index) = self.view.drop_down(cx,ids!(my_agents)).selected_item().checked_sub(1) else {return;};
+            if self.selected_agent_in_room(cx) {return;}
             let Some(agent) = self.agents.get(index).and_then(|a| a["id"].as_str()) else {return;};
             if self.agent_project.is_empty() {return;}
             let fingerprint = serde_json::to_string(&(agent,&self.agent_project,room.room_id())).unwrap_or_default();
@@ -666,11 +690,16 @@ impl MobileChatInfo {
         let mut status = self.view.label(cx,ids!(agent_status));
         script_apply_eval!(cx,status,{draw_text +: {color: mod.widgets.RINX_MUTED}});
         self.view.button(cx,ids!(resume_agent_requests)).set_visible(cx,false);
+        self.view.button(cx,ids!(allow_group_rooms)).set_visible(cx,false);
+        // Consent applies to this one bind only; a new choice asks again.
+        let allow = std::mem::take(&mut self.allow_group_rooms) && binding;
         if !binding {self.view.button(cx, ids!(resume_agent_requests)).set_visible(cx, false);self.agents.clear(); self.agent_project.clear(); self.view.drop_down(cx,ids!(my_agents)).set_labels(cx,vec![crate::i18n::tr("Choose my Agent").into()]);}
         if let Some(service) = service {spawn_async_task(async move {
             let future = async {
-                if let Some(command)=command {service.bind_agent_to_room(command).await}
-                else {service.agents_for_registered_room(room_id.as_str()).await}
+                if let Some(command)=command {
+                    if allow {service.allow_group_rooms_then_bind(command).await} else {service.bind_agent_to_room(command).await}
+                }
+                else {crate::home::room_registration::agents_for_room(&service, room_id.as_str()).await}
             };
             tokio::pin!(future);
             let result = tokio::select! {
@@ -705,6 +734,7 @@ impl MobileChatInfo {
         self.agent_project.clear();
         self.agents.clear();
         self.agent_command = None;
+        self.allow_group_rooms = false;
         self.agent_picker_open = false;
         self.services_open = false;
         self.services_busy = false;
@@ -862,7 +892,9 @@ impl Widget for MobileChatInfo {
             }
             if self.view.drop_down(cx,ids!(my_agents)).changed(actions).is_some() && !self.agent_busy {
                 self.agent_added=false;self.agent_pending=false;
-                self.view.label(cx,ids!(agent_status)).set_text(cx,crate::i18n::tr("Choose an Agent you own to bind to this Room."));
+                self.view.button(cx,ids!(allow_group_rooms)).set_visible(cx,false);
+                let status=self.selected_agent_status(cx);
+                self.view.label(cx,ids!(agent_status)).set_text(cx,&status);
                 cx.redraw_all();
             }
             if self.tab == InfoTab::Members && self.view.button(cx,ids!(invite_my_agent)).clicked(actions) {
@@ -870,6 +902,10 @@ impl Widget for MobileChatInfo {
                 else {self.request_agents(cx,false);}return;
             }
             if self.tab == InfoTab::Members && self.view.button(cx,ids!(invite_selected_agent)).clicked(actions) {self.request_agents(cx,true);return;}
+            if self.tab == InfoTab::Members && self.view.button(cx,ids!(allow_group_rooms)).clicked(actions) {
+                if !self.agent_busy {self.allow_group_rooms=true;self.request_agents(cx,true);self.allow_group_rooms=false;}
+                return;
+            }
             if self.view.button(cx,ids!(resume_agent_requests)).clicked(actions) {self.close_agent_picker(cx);cx.action(crate::hagency::ui::HagencyAction::OpenAgents);return;}
             if self.view.button(cx, ids!(retry)).clicked(actions) {
                 if let Some(room) = self.room.clone() {
@@ -953,7 +989,7 @@ impl Widget for MobileChatInfo {
             }
         }
         self.view.button(cx,ids!(invite_my_agent)).set_enabled(cx,self.owner.is_some());
-        let selected=self.view.drop_down(cx,ids!(my_agents)).selected_item().checked_sub(1).is_some_and(|i|i<self.agents.len());
+        let selected=self.view.drop_down(cx,ids!(my_agents)).selected_item().checked_sub(1).is_some_and(|i|i<self.agents.len()) && !self.selected_agent_in_room(cx);
         self.view.button(cx,ids!(invite_selected_agent)).set_enabled(cx,selected && !self.agent_project.is_empty() && !self.agent_busy && !self.agent_added);
         self.view.drop_down(cx,ids!(my_agents)).set_disabled(cx,self.agent_busy);
         self.view.button(cx,ids!(invite_selected_agent)).set_text(cx,crate::i18n::tr(if self.agent_added {"Added"} else if self.agent_pending {"Check status"} else {"Add agent"}));
@@ -995,8 +1031,8 @@ impl Widget for MobileChatInfo {
                             row.view.layout.align.y=if agent {0.25} else {0.5};
                         }
 
-                        let service = self.owner.as_ref().is_some_and(|owner| is_hagency_service(&profile.user_id, owner));
-                        widget.label(cx, ids!(name)).set_text(cx, if service {crate::i18n::tr("Hagency service")} else {profile.displayable_name()});
+                        let name = service_label(&profile.user_id, self.owner.as_ref()).unwrap_or_else(|| profile.displayable_name().to_string());
+                        widget.label(cx, ids!(name)).set_text(cx, &name);
                         let detail = crate::agent_access::framework_label(&profile.user_id)
                             .map_or_else(
                                 || profile.user_id.to_string(),
@@ -1255,11 +1291,11 @@ mod information_target_tests {
         }
     }
     #[test]
-    fn service_label_identifies_only_exact_service_identity_on_owner_server() {
-        let owner=matrix_sdk::ruma::user_id!("@alice:server");
-        assert!(is_hagency_service(matrix_sdk::ruma::user_id!("@_hagency_service:server"),owner));
-        assert!(!is_hagency_service(matrix_sdk::ruma::user_id!("@_hagency_service:other"),owner));
-        assert!(!is_hagency_service(matrix_sdk::ruma::user_id!("@agent:server"),owner));
+    fn service_label_names_local_plainly_and_remote_with_its_server() {
+        let owner=matrix_sdk::ruma::user_id!("@alice:server").to_owned();
+        assert_eq!(service_label(matrix_sdk::ruma::user_id!("@_hagency_service:server"),Some(&owner)).as_deref(),Some("Hagency service"));
+        assert_eq!(service_label(matrix_sdk::ruma::user_id!("@_hagency_service:other:8452"),Some(&owner)).as_deref(),Some("Hagency service (other:8452)"));
+        assert_eq!(service_label(matrix_sdk::ruma::user_id!("@agent:server"),Some(&owner)),None);
     }
     fn draw_information(info: &mut MobileChatInfo, cx: &mut Cx) {
         use makepad_widgets::makepad_draw::cx_draw::CxDraw;
