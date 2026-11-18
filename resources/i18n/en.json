@@ -1,4 +1,6 @@
 {
+  "Signed in. Some older chats could not be restored. Their local data has been preserved.": "Signed in. Some older chats could not be restored. Their local data has been preserved.",
+  "Could not secure local sign-in storage at {path}. {reason}": "Could not secure local sign-in storage at {path}. {reason}",
   "Tool": "Tool",
   "Working directory": "Working directory",
   "Risk": "Risk",

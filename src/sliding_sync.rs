@@ -364,6 +364,8 @@ pub(crate) async fn finish_oauth_login(
 ) -> Result<(Client, Option<String>)> {
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     let mut history_unavailable = false;
+    #[cfg(windows)]
+    let mut permissions_archived = false;
     let save_error = crate::i18n::tr(
         "Your identity was verified, but this device could not save your sign-in. Check local storage and try signing in again.",
     );
@@ -377,6 +379,11 @@ pub(crate) async fn finish_oauth_login(
         let user = client
             .user_id()
             .ok_or_else(|| anyhow!("OAuth has no Matrix identity"))?;
+        #[cfg(windows)]
+        {
+            permissions_archived = persistence::credential_state::recover_verified_account(&client, epoch).await?;
+            history_unavailable |= permissions_archived;
+        }
         let path = persistence::session_file_path(user);
         if path.try_exists()? {
             match persistence::credential_state::existing_database(path).await {
@@ -461,8 +468,13 @@ pub(crate) async fn finish_oauth_login(
     OAUTH_REAUTH.lock().unwrap().take();
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     if history_unavailable {
+        let message = crate::i18n::tr("Signed in. Older chats on this device have been preserved, but their local key is missing. You can continue using Hagency.");
+        #[cfg(windows)]
+        let message = if permissions_archived {
+            crate::i18n::tr("Signed in. Some older chats could not be restored. Their local data has been preserved.")
+        } else { message };
         crate::shared::popup_list::enqueue_scoped_popup_notification(
-            epoch, crate::i18n::tr("Signed in. Older chats on this device have been preserved, but their local key is missing. You can continue using Hagency.").into(),
+            epoch, message.into(),
             PopupKind::Info, Some(10.0),
         );
     }
@@ -2560,7 +2572,9 @@ async fn matrix_worker_task(
                 let sender = login_sender.clone();
                 let epoch = crate::account_session::epoch();
                 sso_task = Some(crate::account_session::spawn(async move {
-                    match run_sso_login(homeserver_url, provider_id, register).await {
+                    match run_sso_login(homeserver_url, provider_id, register, |url| async move {
+                        crate::login::homeserver::open_login_url(&url)
+                    }).await {
                         Ok((client, session)) => {
                             Cx::post_action(LoginAction::SsoPending(false));
                             Cx::post_action(LoginAction::Status {
@@ -4035,7 +4049,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         log!("Trying to restore session for user: {:?}",
             specified_username.as_ref().or(most_recent_user_id.as_ref())
         );
-        match persistence::restore_session(specified_username).await {
+        match restore_previous_login(specified_username.or(most_recent_user_id)).await {
             Ok(session) => Some(session),
             Err(e) => {
                 let status_err = "Could not restore previous user session.\n\nPlease login again.";
@@ -4099,7 +4113,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
                                 crate::account_session::open();
                                 ACCOUNT_CHANGING.store(false, Ordering::Release);
                                 if let Some(user) = target {
-                                    match persistence::restore_session(Some(user)).await {
+                                    match restore_previous_login(Some(user)).await {
                                         Ok(session) => break session,
                                         Err(error) => Cx::post_action(LoginAction::LoginFailure(format!("Could not restore this account. Sign in again or choose another saved account.\n\n{error}"))),
                                     }
@@ -4373,7 +4387,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
             crate::account_session::open();
             ACCOUNT_CHANGING.store(false, Ordering::Release);
             if let Some(user) = target {
-                match persistence::restore_session(Some(user)).await {
+                match restore_previous_login(Some(user)).await {
                     Ok(session) => initial_client_opt = Some(session),
                     Err(error) => Cx::post_action(LoginAction::LoginFailure(format!("Could not restore this account. Sign in again or choose another saved account.\n\n{error}"))),
                 }
@@ -6533,17 +6547,53 @@ async fn run_registration(
     bail!("Create your account through Pasion on your Hagency server.")
 }
 
+pub(crate) async fn restore_previous_login(
+    user: Option<OwnedUserId>,
+) -> Result<(Client, Option<String>)> {
+    #[cfg(windows)]
+    let epoch = crate::account_session::epoch();
+    let restored = persistence::restore_session(user.clone()).await;
+    #[cfg(windows)]
+    if let (Some(user), Err(error)) = (user.as_ref(), &restored)
+        && error.downcast_ref::<hagency_store::credential_vault::Error>()
+            == Some(&hagency_store::credential_vault::Error::Storage)
+        && let Ok(Some(saved)) =
+            persistence::credential_state::authenticated_reauth_database(user).await
+        && saved.identity.oauth_client_id.is_some()
+        && epoch == crate::account_session::epoch()
+    {
+        *OAUTH_REAUTH.lock().unwrap() = Some((saved.identity.homeserver, user.clone()));
+    }
+    restored
+}
+
 /// Use only provider IDs advertised by the selected homeserver.
-async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, register: bool) -> Result<(Client, ClientSessionPersisted)> {
+pub(crate) async fn run_sso_login<Fut>(
+    homeserver_url: String,
+    provider_id: Option<String>,
+    register: bool,
+    open_browser: impl FnOnce(String) -> Fut,
+) -> Result<(Client, ClientSessionPersisted)>
+where
+    Fut: std::future::Future<Output = Result<()>>,
+{
     let reauth = OAUTH_REAUTH.lock().unwrap().clone().filter(|(origin,_)| !register && origin.trim_end_matches('/')==homeserver_url.trim_end_matches('/'));
     #[cfg(not(any(target_os = "ios", target_os = "android")))]
     if let Some((_, owner)) = reauth.as_ref() {
         let saved = match persistence::credential_state::existing_database(persistence::session_file_path(owner)).await {
             Ok(saved) => Some(saved),
             Err(error) if missing_local_credential(&error) => None,
+            #[cfg(windows)]
+            Err(error) if error.downcast_ref::<hagency_store::credential_vault::Error>()
+                == Some(&hagency_store::credential_vault::Error::Storage) => {
+                    persistence::credential_state::authenticated_reauth_database(owner).await?
+                },
             Err(error) => return Err(error),
         };
         if let Some(saved) = saved && let Some(id) = saved.identity.oauth_client_id.as_ref() {
+            anyhow::ensure!(&saved.identity.owner == owner &&
+                saved.identity.homeserver.trim_end_matches('/') == homeserver_url.trim_end_matches('/'),
+                "Saved OAuth identity or homeserver changed");
             // Public registration and expected device are sufficient for PKCE.
             // Old access/refresh credentials never enter this memory-only SDK.
             let client = Client::builder().homeserver_url(&homeserver_url)
@@ -6553,9 +6603,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
             persistence::credential_state::register_preauth(&client, saved.client_session.clone()).await?;
             client.oauth().restore_registered_client(matrix_sdk::authentication::oauth::ClientId::new(id.clone()));
             crate::login::homeserver::oauth_browser_login_expected(&client, false,
-                Some((owner.clone(), saved.identity.device.into())), |url| async move {
-                    crate::login::homeserver::open_login_url(&url)
-                }).await?;
+                Some((owner.clone(), saved.identity.device.into())), open_browser).await?;
             return Ok((client, saved.client_session));
         }
     }
@@ -6564,9 +6612,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
         let stored = persistence::credential_state::load(persistence::session_file_path(&owner)).await?;
         if matches!(stored.user_session, persistence::PersistedUserSession::OAuth { .. }) {
             let (client,_) = persistence::restore_session_for_login(owner.clone()).await?;
-            crate::login::homeserver::oauth_browser_login(&client, false, |url| async move {
-                crate::login::homeserver::open_login_url(&url)
-            }).await?;
+            crate::login::homeserver::oauth_browser_login(&client, false, open_browser).await?;
             if client.user_id()!=Some(&owner) { bail!("Pasion returned another Matrix account"); }
             return Ok((client,stored.client_session));
         }
@@ -6589,7 +6635,7 @@ async fn run_sso_login(homeserver_url: String, provider_id: Option<String>, regi
                 title: crate::i18n::tr("Continue in your browser").into(),
                 status: crate::i18n::tr("Finish signing in with Pasion in your browser, then return to Hagency.").into(),
             });
-            crate::login::homeserver::open_login_url(&url)
+            open_browser(url).await
         }).await?;
         #[cfg(not(any(target_os = "ios", target_os = "android")))]
         if let Some((_, owner)) = reauth.as_ref() && client.user_id() != Some(owner.as_ref()) {

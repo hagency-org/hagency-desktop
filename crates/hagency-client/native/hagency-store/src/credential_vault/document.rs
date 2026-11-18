@@ -59,6 +59,25 @@ pub struct Journal {
     witness: Option<std::sync::Arc<File>>,
 }
 impl Journal {
+    /// Used while repairing the original Windows handle, before opening it as a
+    /// private Snapshot. Only a journal read through Document may attest these bytes.
+    #[cfg(windows)]
+    pub fn matches_original(&self, file: &File, bytes: &[u8]) -> Result<bool, Error> {
+        Ok(self.source_identity.as_ref()
+            == Some(&hagency_platform::file_identity(file).map_err(|_| Error::Storage)?)
+            && self.source_digest.as_deref() == Some(hex(&Sha256::digest(bytes)).as_str()))
+    }
+
+    #[cfg(windows)]
+    pub fn candidate_name(&self) -> &str {
+        &self.candidate
+    }
+
+    #[cfg(windows)]
+    pub fn matches_candidate_bytes(&self, bytes: &[u8]) -> bool {
+        self.payload_digest.as_deref() == Some(hex(&Sha256::digest(bytes)).as_str())
+    }
+
     pub fn candidate_digest(&self) -> Option<&str> {
         self.payload_digest.as_deref()
     }
