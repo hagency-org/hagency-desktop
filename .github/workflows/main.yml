@@ -58,7 +58,11 @@ jobs:
           workspaces: crates/hagency-client -> target
       - name: Build with every core of the project's own Mac
         if: runner.environment == 'self-hosted'
-        run: echo "CARGO_BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
+        # Six test programs at a time: the Mac has fourteen cores and runs
+        # the native job beside this one.
+        run: |
+          echo "CARGO_BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
+          echo "PARALLEL_TEST_JOBS=6" >> "$GITHUB_ENV"
       - run: brew install cmake
       - name: Check Linux qualification helper refusals without provisioning
         run: python3 native/scripts/test-qualify-linux-cgroup.py
@@ -69,8 +73,21 @@ jobs:
           echo "HAGENCY_TEST_RUNTIME_PROBE=$RUNNER_TEMP/hagency-library-runtime-probe" >> "$GITHUB_ENV"
       # These two existing qualification selectors require a live qualified
       # host; their evidence cannot be supplied by a disposable CI runner.
-      - run: cargo test --locked --workspace --all-targets --no-fail-fast -- --skip native_codex_real_app_server --skip native_two_agent_qualification_records_its_evidence
-      - run: cargo test --locked -p hagency --features shared-budget-execution,resource-adoption --lib
+      #
+      # tools/parallel-tests.py builds both selections as cargo test does and
+      # then starts every test program once, as cargo test does, several
+      # programs at a time. The tests of one program still share one process
+      # and run one after another (RUST_TEST_THREADS above). Only the unit
+      # tests of hagency-matrix, the longest program, run as several
+      # processes: none of them chooses the process's writer root, so none
+      # depends on which of them ran first.
+      - name: Library tests, several test programs at a time
+        run: >-
+          python3 ../../tools/parallel-tests.py --split hagency_matrix --
+          --locked --workspace --all-targets --
+          --skip native_codex_real_app_server --skip native_two_agent_qualification_records_its_evidence
+          ---
+          --locked -p hagency --features shared-budget-execution,resource-adoption --lib
       # These functional checks retain the production two-second inspection
       # deadline. Concurrent debug fixture/schema construction can exhaust it.
       - name: Check bounded empty-device inventory in isolation

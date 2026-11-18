@@ -10,7 +10,8 @@
 #
 # The library workspace is run in four groups of packages instead of once
 # with --workspace, so that the groups run side by side. Cargo therefore
-# picks each group's dependency features for that group alone.
+# picks each group's dependency features for that group alone. Inside a
+# group, tools/parallel-tests.py runs several test programs at a time.
 #
 # Parts: lib-hagency, lib-store, lib-runtime, lib-rest, lib-features (the
 # library workspace), app and gate (the app's own checks and the regression
@@ -51,34 +52,37 @@ runtime_probe() {
 library() {
     export RUST_TEST_THREADS=1 RUST_MIN_STACK=16777216
 }
+# cargo test with the same arguments, several test programs at a time. Only
+# the unit tests of hagency-matrix run as several processes (see the tool).
+tests=(python3 "$root/tools/parallel-tests.py" --split hagency_matrix --)
 
 case "$part" in
 lib-hagency)
     library
     runtime_probe
-    step tests "$client" cargo test --locked -p hagency --all-targets --no-fail-fast -- "${skip[@]}"
+    step tests "$client" "${tests[@]}" --locked -p hagency --all-targets -- "${skip[@]}"
     ;;
 lib-store)
     library
     runtime_probe
-    step tests "$client" cargo test --locked -p hagency-store --all-targets --no-fail-fast -- "${skip[@]}"
+    step tests "$client" "${tests[@]}" --locked -p hagency-store --all-targets -- "${skip[@]}"
     ;;
 lib-runtime)
     library
-    step tests "$client" cargo test --locked -p hagency-runtime -p hagency-agent-local \
-        --all-targets --no-fail-fast -- "${skip[@]}"
+    step tests "$client" "${tests[@]}" --locked -p hagency-runtime -p hagency-agent-local \
+        --all-targets -- "${skip[@]}"
     ;;
 lib-rest)
     library
     step linux-qualification-helper "$client" python3 native/scripts/test-qualify-linux-cgroup.py
-    step tests "$client" cargo test --locked --workspace --exclude hagency --exclude hagency-store \
-        --exclude hagency-runtime --exclude hagency-agent-local --all-targets --no-fail-fast -- "${skip[@]}"
+    step tests "$client" "${tests[@]}" --locked --workspace --exclude hagency --exclude hagency-store \
+        --exclude hagency-runtime --exclude hagency-agent-local --all-targets -- "${skip[@]}"
     ;;
 lib-features)
     library
     runtime_probe
-    step feature-tests "$client" cargo test --locked -p hagency \
-        --features shared-budget-execution,resource-adoption --lib --no-fail-fast
+    step feature-tests "$client" "${tests[@]}" --locked -p hagency \
+        --features shared-budget-execution,resource-adoption --lib
     step empty-device "$client" cargo test --locked -p hagency-store \
         --features shared-budget-execution,resource-adoption --lib \
         domain::owner_resources::adoption::empty_device::tests:: -- --test-threads=1
