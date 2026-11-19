@@ -242,6 +242,7 @@ requires_openai_auth = false
         effort: "medium".into(),
         shared_auth: false,
         web_search: false,
+        environment: Default::default(),
     };
     (tmp, profile, model)
 }
