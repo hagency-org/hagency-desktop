@@ -58,6 +58,10 @@ pub struct AppPreferences {
     /// Desktop paused hosting at its last quit and resumes it once running.
     #[serde(default, deserialize_with = "crate::utils::deserialize_or_default")]
     pub hosting_paused_on_quit: bool,
+    /// Origins paused on quit for this Matrix ID. The older unscoped flag
+    /// applies only to an enrollment in the original daemon home.
+    #[serde(default)]
+    pub hosting_paused_origins: std::collections::BTreeSet<String>,
 
     // Note: if you add a new preference here, be sure to add a new
     // function `on_<NEW_PREFERENCE>_changed` and update `broadcast_all()`.
@@ -80,6 +84,7 @@ impl Default for AppPreferences {
             agent_chat_enabled: false,
             keep_hosting_after_quit: true,
             hosting_paused_on_quit: false,
+            hosting_paused_origins: Default::default(),
         }
     }
 }
@@ -226,6 +231,7 @@ impl AppPreferences {
         let global = &mut cx.global::<AppPreferencesGlobal>().0;
         global.keep_hosting_after_quit = self.keep_hosting_after_quit;
         global.hosting_paused_on_quit = self.hosting_paused_on_quit;
+        global.hosting_paused_origins.clone_from(&self.hosting_paused_origins);
     }
 
     /// Broadcasts every preference to listening widgets.

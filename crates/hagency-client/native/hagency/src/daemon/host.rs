@@ -285,6 +285,10 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<(), ()>>,
 {
+    native_origin(origin)?;
+    if !super::protocol::valid_owner_id(owner) {
+        return Err(HostError::Code("owner_identity_invalid"));
+    }
     let base = home;
     let account_home = super::accounts::home(base, origin, owner).map_err(HostError::Code)?;
     let home = account_home.as_path();
@@ -543,6 +547,7 @@ mod tests {
             let home = accounts::home(&base, origin, owner).unwrap();
             let root = crate::owner_host::initialize(&temp.path().join(label)).unwrap();
             accounts::provision(&base, &home).unwrap();
+            let _lock = DaemonHome::open(&home).unwrap();
             let enrollment = Enrollment::enroll(&home, origin, owner, None, &root).unwrap();
             (home, enrollment)
         };

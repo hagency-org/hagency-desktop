@@ -87,7 +87,7 @@ messages! {
     IncompatibleTitle => "Update required", "需要更新";
     AuthExpiredTitle => "Sign-in needed", "需要重新登录";
     AuthExpiredBody => "The hosting service's owner sign-in has expired. Sign in again to keep accepting work.", "托管服务的所有者登录已过期。请重新登录以继续接收任务。";
-    OwnerMismatchTitle => "Hosting belongs to another account", "托管服务属于其他账号";
+    OwnerMismatchTitle => "Hosting identity mismatch", "托管身份不匹配";
     OwnerMismatchBody => "The service reported a different identity for this account. Its dashboard is hidden.", "服务为当前账号返回了不匹配的身份，已隐藏托管面板。";
     FailedTitle => "Can't reach the hosting service", "无法连接托管服务";
     ShowingLastKnown => "Showing the last known status.", "当前显示的是最后一次获取的状态。";
@@ -224,7 +224,7 @@ messages! {
     SetupBody => "Hagency hosts your resource pool with a background service on this Mac, so your rented Agents keep working while Hagency is closed. Setup opens your browser once to sign this Mac in.", "Hagency 通过这台 Mac 上的后台服务托管你的资源池，关闭 Hagency 后出租的 Agent 仍能继续工作。设置时会打开一次浏览器，为这台 Mac 登录。";
     SetupReplaceTitle => "Set up hosting again", "重新设置托管";
     SetupReplaceBody => "An earlier hosting sign-in on this Mac uses a different resource folder. Setting up again signs it out and hosts this account's resources.", "这台 Mac 上较早的托管登录使用了另一个资源目录。重新设置会退出该登录，并托管此账号的资源。";
-    SetupOtherOwnerTitle => "Hosting serves another account", "托管服务属于其他账号";
+    SetupOtherOwnerTitle => "Check the enrollment identity", "请核对托管登记身份";
     SetupOtherOwnerBody => "The enrollment for this account has a different identity. Check the homeserver and full Matrix ID before continuing.", "当前账号的托管登记身份不匹配。请核对服务器地址和完整 Matrix ID 后再继续。";
     SetupPreparing => "Preparing hosting setup…", "正在准备托管设置…";
     SetupSigningIn => "Complete sign-in in your browser…", "请在浏览器中完成登录…";

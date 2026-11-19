@@ -490,10 +490,11 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
             Err(failure) => failed(failure),
         };
     }
-    if kind == JobKind::Setup && installed_service() == Service::OtherProgram {
-        // A service of the former Hosting app would otherwise enroll and sign
-        // out with its own code over the socket. Remove it and wait until its
-        // daemon has released the home; the install below replaces it.
+    if kind == JobKind::Setup && (installed_service() == Service::OtherProgram
+        || (account_home != locations.daemon_home() && daemon::requires_upgrade(&account_home)))
+    {
+        // Replace the old single-account executable before enrolling another
+        // account. A running multi-account service keeps its existing workers.
         match run(command(&exe, &[OsStr::new("uninstall")]), Duration::from_secs(30), &helper::Cancellation::default(), false, || {}) {
             Ok(_) => {}
             Err(Failure::Code("setup_failed")) => return Progress::Failed("service_remove_failed"),
@@ -576,10 +577,21 @@ mod daemon {
     use owner_dashboard::transport::{OutcomeState, TransportError};
     use std::{path::Path, time::Duration};
 
+    fn hello_request() -> Request {
+        Request { version: API_VERSION, request_id: new_request_id("odq"), owner_id: None, expected_revision: None, command: Command::Hello }
+    }
+
+    pub fn requires_upgrade(scoped_home: &Path) -> bool {
+        let Ok(mut connection) = DaemonConnection::connect(&DaemonEndpoint::new(scoped_home)) else { return false };
+        // Older daemons reject the accountScope field. A current daemon
+        // explicitly reports an unknown account when the directory is new.
+        connection.call(&hello_request(), Duration::from_secs(3)).ok()
+            .and_then(|reply| reply.error).is_some_and(|error| error.code == "invalid_request")
+    }
+
     pub fn hello(home: &Path, timeout: Duration) -> Option<(DaemonConnection, Hello)> {
         let mut connection = DaemonConnection::connect(&DaemonEndpoint::new(home)).ok()?;
-        let request = Request { version: API_VERSION, request_id: new_request_id("odq"), owner_id: None, expected_revision: None, command: Command::Hello };
-        let hello = connection.call(&request, timeout.min(READ_TIMEOUT)).ok()?.hello().ok()?;
+        let hello = connection.call(&hello_request(), timeout.min(READ_TIMEOUT)).ok()?.hello().ok()?;
         Some((connection, hello))
     }
 
@@ -642,13 +654,14 @@ pub fn pause_for_quit(origin: &str, owner: &str, timeout: std::time::Duration) -
 
 /// Resume hosting that Desktop paused at its last quit. Blocking. False asks
 /// the caller to retry later.
-pub fn resume_after_start(origin: &str, owner: &str) -> bool {
+pub fn resume_after_start(origin: &str, owner: &str, legacy: bool) -> bool {
     #[cfg(target_os = "macos")]
     if let Ok(base) = ::hagency::service::default_daemon_dir()
         && let Ok(home) = ::hagency::daemon::accounts::home(&base, origin, owner) {
+        if legacy && home != base { return true; }
         return daemon::resume_after_start(&home, owner);
     }
-    let _ = (origin, owner);
+    let _ = (origin, owner, legacy);
     true
 }
 
