@@ -70,7 +70,8 @@ pub(crate) fn executable() -> Result<PathBuf, ProviderError> {
             "/Applications/ChatGPT.app/Contents/Resources/codex-cli/CodexCLI.app/Contents/MacOS/codex",
         )];
         if let Some(path) = std::env::var_os("PATH") {
-            paths.extend(std::env::split_paths(&path).map(|p| p.join("codex")));
+            let name = if cfg!(windows) { "codex.exe" } else { "codex" };
+            paths.extend(std::env::split_paths(&path).map(|p| p.join(name)));
         }
         paths
     };
@@ -91,12 +92,21 @@ pub(crate) struct ProviderPaths {
     pub credential_ref: String,
     pub shared: bool,
 }
-fn trusted_local_home() -> Result<PathBuf, ProviderError> {
+fn local_codex_home_path() -> Option<PathBuf> {
     let home = std::env::var_os("CODEX_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".codex")))
-        .ok_or(failure(503, "local_codex_home_unavailable"))?;
-    let home = home
+        .or_else(|| std::env::var_os("HOME").map(|p| PathBuf::from(p).join(".codex")));
+    #[cfg(windows)]
+    let home = home.or_else(|| {
+        hagency_platform::current_user_profile_dir()
+            .ok()
+            .map(|p| p.join(".codex"))
+    });
+    home
+}
+fn trusted_local_home() -> Result<PathBuf, ProviderError> {
+    let home = local_codex_home_path()
+        .ok_or(failure(503, "local_codex_home_unavailable"))?
         .canonicalize()
         .map_err(|_| failure(503, "local_codex_home_unavailable"))?;
     if !home.is_dir() {
@@ -1080,6 +1090,48 @@ async fn dispatch(req: &mut Request, depot: &Depot, res: &mut Response) {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(windows)]
+    #[test]
+    fn windows_codex_discovery_uses_path_and_os_profile() {
+        const EXPECTED_BINARY: &str = "HAGENCY_TEST_EXPECTED_CODEX_BINARY";
+        if let Some(expected) = std::env::var_os(EXPECTED_BINARY) {
+            assert_eq!(executable().unwrap(), PathBuf::from(expected));
+            let profile = hagency_platform::current_user_profile_dir().unwrap();
+            assert_ne!(
+                profile,
+                PathBuf::from(std::env::var_os("USERPROFILE").unwrap())
+            );
+            assert_eq!(local_codex_home_path(), Some(profile.join(".codex")));
+            return;
+        }
+
+        let fixture = tempfile::tempdir().unwrap();
+        let directory = fixture.path().canonicalize().unwrap();
+        let binary = directory.join("codex.exe");
+        std::fs::write(&binary, []).unwrap();
+        // Isolate the lookup environment from other tests in the parent process.
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "console::owner_provider::tests::windows_codex_discovery_uses_path_and_os_profile",
+                "--exact",
+                "--nocapture",
+            ])
+            .env(EXPECTED_BINARY, binary.canonicalize().unwrap())
+            .env("PATH", std::env::join_paths([&directory]).unwrap())
+            .env("USERPROFILE", &directory)
+            .env_remove("HAGENCY_CODEX_BINARY")
+            .env_remove("CODEX_HOME")
+            .env_remove("HOME")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success() && String::from_utf8_lossy(&result.stdout).contains("1 passed"),
+            "stdout: {}\nstderr: {}",
+            String::from_utf8_lossy(&result.stdout),
+            String::from_utf8_lossy(&result.stderr),
+        );
+    }
+
     #[test]
     fn model_catalog_projects_only_bounded_public_fields_and_errors_redact_credentials() {
         let page = json!({"data":[{"id":"m1","model":"real-model","displayName":"Real Model","description":"Catalog entry","isDefault":true,"hidden":false,"defaultReasoningEffort":"medium","supportedReasoningEfforts":[{"reasoningEffort":"medium","description":"Balanced"}],"token":"must-not-escape"}],"nextCursor":null});

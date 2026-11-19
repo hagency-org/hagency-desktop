@@ -8,6 +8,8 @@ pub mod pdf_text;
 #[allow(unsafe_code)] // Narrow getpwuid_r boundary; never inherits HOME for ownership.
 mod owner_home;
 pub mod private_state;
+#[cfg(windows)]
+pub use owner_home::current_user_profile_dir;
 pub use owner_home::{owner_home, codex_process_home};
 
 mod child_identity;
