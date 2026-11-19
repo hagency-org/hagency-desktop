@@ -669,7 +669,7 @@ pub struct SpaceManagementChanged {
 #[derive(Debug)]
 struct Loaded {
     session: Option<matrix_context::SessionPin>,
-    saved: Result<Option<super::creation_journal::Intent>,String>,
+    saved: Result<super::creation_journal::ReviewRecords, String>,
     owner: OwnedUserId,
     request: u64,
     result: Result<Snapshot, String>,
@@ -827,6 +827,12 @@ script_mod! {
             }
             create_form := ScrollYView {width: Fill height: Fill flow: Down spacing: 12 padding: Inset{right: 12}
                 scroll_bars +: {scroll_bar_y +: {bar_size: 7 bar_side_margin: 0 draw_bg +: {size: 3 border_size: 0 border_radius: 1.5 color: mod.widgets.RINX_BORDER color_hover: mod.widgets.RINX_MUTED color_drag: mod.widgets.RINX_MUTED}}}
+                archive_review := Section {visible: false
+                    Text {text: #(crate::i18n::tr("Unconfirmed archived creations")) i18n_text: "Unconfirmed archived creations"}
+                    archived_record := DropDown {width: Fill labels: []}
+                    archived_room := Input {empty_text: #(crate::i18n::tr("Original room ID · optional")) i18n_empty_text: "Original room ID · optional"}
+                    verify_archive := Quiet {text: #(crate::i18n::tr("Verify archived room")) i18n_text: "Verify archived room"}
+                }
                 choose_kind := View {width: Fill height: Fit flow: Down spacing: 12
                     kind_state := View {visible: false kind := DropDown {labels: ["ordinary" "agent" "room"]}}
                     ordinary_kind := Choice {
@@ -976,6 +982,7 @@ pub struct SpaceManagementPanel {
     #[rust]
     created: Option<RoomNameId>,
     #[rust] saved_creation: Option<super::creation_journal::Intent>,
+    #[rust] archived_creations: Vec<super::creation_journal::Intent>,
     #[rust] journal_failed:bool,
     #[rust]
     created_space: bool,
@@ -1154,6 +1161,8 @@ impl SpaceManagementPanel {
         self.view.button(cx, ids!(finish_setup)).set_visible(cx, self.setup_pending);
         self.view.button(cx,ids!(finish_setup)).set_text(cx,crate::i18n::tr(if self.saved_creation.as_ref().is_some_and(|i|i.room.is_none()){"Find original creation"}else{"Finish setup"}));
         self.view.widget(cx,ids!(original_room)).set_visible(cx,self.saved_creation.as_ref().is_some_and(|i|i.room.is_none()));
+        self.view.view(cx, ids!(archive_review)).set_visible(cx, !self.archived_creations.is_empty());
+        self.view.button(cx, ids!(verify_archive)).set_enabled(cx, !self.busy && !self.journal_failed);
         self.view.button(cx,ids!(archive_creation)).set_visible(cx,self.saved_creation.is_some());
         self.view.button(cx,ids!(archive_creation)).set_enabled(cx,!self.busy);
         self.view.button(cx, ids!(create_child)).set_visible(cx, self.created_space && !self.setup_pending);
@@ -1199,6 +1208,19 @@ impl SpaceManagementPanel {
         }).cloned().collect();
         self.view.redraw(cx);
     }
+    fn set_archived_creations(&mut self, cx: &mut Cx, archived: &[super::creation_journal::Intent]) {
+        let dropdown = self.view.drop_down(cx, ids!(archived_record));
+        let selected = self.archived_creations.get(dropdown.selected_item()).map(|i| i.operation);
+        self.archived_creations = archived.to_vec();
+        let index = self.archived_creations.iter().position(|i| Some(i.operation) == selected);
+        if index.is_none() {
+            self.view.text_input(cx, ids!(archived_room)).set_text(cx, "");
+        }
+        dropdown.set_labels(cx, self.archived_creations.iter()
+            .map(|i| format!("{} · {}", i.config.name.trim(), i.operation)).collect());
+        dropdown.set_selected_item(cx, index.unwrap_or(0));
+    }
+
     fn restore_creation(&mut self,cx:&mut Cx,intent:&super::creation_journal::Intent) {
         self.saved_creation=Some(intent.clone());self.setup_config=Some(intent.config.clone());
         self.setup_agent_space=intent.agent_space;self.setup_project=intent.project.clone();
@@ -1224,7 +1246,7 @@ impl SpaceManagementPanel {
         self.sync(cx);
         let session=matrix_context::SessionPin::capture(&client);
         spawn_async_task(async move {
-            let saved=match super::creation_journal::Journal::for_client(&client) {Ok(journal)=>journal.pending().await.map_err(|e|e.to_string()),Err(e)=>Err(e.to_string())};
+            let saved=match super::creation_journal::Journal::for_client(&client) {Ok(journal)=>journal.review_records().await.map_err(|e|e.to_string()),Err(e)=>Err(e.to_string())};
             let result = snapshot(&client, parent.as_ref())
                 .await
                 .map_err(|e| e.to_string());
@@ -1329,9 +1351,18 @@ impl Widget for SpaceManagementPanel {
                 self.busy = false;
                 self.journal_failed=loaded.saved.is_err();
                 match &loaded.saved {
-                    Ok(Some(intent))=>self.restore_creation(cx,intent),
-                    Ok(None)=>self.saved_creation=None,
-                    Err(_)=>self.status(cx,StatusTone::Error,"Saved creation could not be read. Creation is disabled until storage is available."),
+                    Ok(records) => {
+                        if let Some(intent) = &records.current {
+                            self.restore_creation(cx, intent);
+                        } else {
+                            self.saved_creation = None;
+                        }
+                        self.set_archived_creations(cx, &records.unresolved);
+                    }
+                    Err(_) => {
+                        self.archived_creations.clear();
+                        self.status(cx, StatusTone::Error, "Saved creation could not be read. Creation is disabled until storage is available.");
+                    }
                 }
                 match &loaded.result {
                     Ok(data) => {
@@ -1401,6 +1432,23 @@ impl Widget for SpaceManagementPanel {
             cx.action(SpaceManagementAction::Close);
         }
         if self.busy {
+            return;
+        }
+        let archived_record = self.view.drop_down(cx, ids!(archived_record));
+        if archived_record.selected(actions).is_some() {
+            self.view.text_input(cx, ids!(archived_room)).set_text(cx, "");
+        }
+        if self.view.button(cx, ids!(verify_archive)).clicked(actions) {
+            if let (Some(client), Some(intent)) = (get_client(), self.archived_creations.get(archived_record.selected_item()).cloned()) {
+                let selected = self.view.text_input(cx, ids!(archived_room)).text();
+                self.run(cx, async move {
+                    let confirmed = tokio::time::timeout(std::time::Duration::from_secs(30),
+                        super::creation_journal::recover(&client, &intent, &selected))
+                        .await.map_err(|_| anyhow!("Creation recovery timed out. Retry recovery; no new room was created."))??;
+                    let room = confirmed.room.ok_or_else(|| anyhow!("The original creation is not confirmed yet."))?;
+                    Ok((crate::i18n::format("Archived room confirmed: {room}", &[("room", room.to_string())]), None, false))
+                });
+            }
             return;
         }
         if self.view.button(cx,ids!(archive_creation)).clicked(actions)
@@ -1907,6 +1955,8 @@ impl SpaceManagementPanelRef {
                 inner.manage = parent.is_some();
                 inner.created = None;
                 inner.saved_creation=None;inner.journal_failed=false;
+                inner.archived_creations.clear();
+                inner.view.text_input(cx, ids!(archived_room)).set_text(cx, "");
                 inner.wizard_step = 0;
                 inner.setup_pending = false;
                 inner.setup_config = None;
@@ -2186,6 +2236,19 @@ mod tests {
         assert!(panel.view.button(&mut cx,ids!(finish_setup)).visible());assert!(panel.view.widget(&mut cx,ids!(original_room)).visible());
         assert!(panel.view.button(&mut cx,ids!(archive_creation)).visible());assert!(!panel.view.button(&mut cx,ids!(created)).visible());
         panel.manage=true;panel.manage=false;panel.sync(&mut cx);assert_eq!(panel.saved_creation.as_ref().unwrap().operation,saved.operation);
+        let mut old = saved.clone();
+        old.operation = uuid::Uuid::new_v4();
+        panel.set_archived_creations(&mut cx, &[old]);
+        panel.sync(&mut cx);
+        assert!(panel.view.view(&mut cx, ids!(archive_review)).visible());
+        assert!(panel.view.button(&mut cx, ids!(verify_archive)).borrow().unwrap().enabled());
+        assert_eq!(panel.saved_creation.as_ref().unwrap().operation, saved.operation);
+        panel.view.text_input(&mut cx, ids!(archived_room)).set_text(&mut cx, "!old:example.org");
+        panel.set_archived_creations(&mut cx, &[]);
+        panel.sync(&mut cx);
+        assert!(!panel.view.view(&mut cx, ids!(archive_review)).visible());
+        assert!(panel.view.text_input(&mut cx, ids!(archived_room)).text().is_empty());
+
     }
     #[test]
     fn creation_adoption_only_confirms_exact_original_object_and_active_registration() {
