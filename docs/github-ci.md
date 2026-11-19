@@ -39,9 +39,11 @@ runs from the Desktop binary and is managed from Agent → Hosting (Client
 ADR-192). There is no separate Hosting installer or workflow input.
 
 The regression gate runs on the project's own Mac, four checks at a time and
-without the second run the main workflow gives a failed check. When that Mac
-cannot take the job, dispatch with `gate_runner=github`: GitHub's Mac runs the
-same checks one after another and takes about an hour longer.
+without the second run the main workflow gives a failed check. The Apple
+Silicon Desktop tests run there too. When that Mac cannot take them, dispatch
+with `mac_checks=github`: GitHub's Mac runs the gate's checks one after
+another and takes about an hour longer, when GitHub has a Mac free. Every
+installer is built on a runner of GitHub's.
 
 An installer job does not build the pinned Octos kernel again when an earlier
 release run has kept it. `tools/release-kernel.py` names a kept kernel after

@@ -31,8 +31,8 @@ on:
       artifact_name:
         type: string
         default: candidate-installers-windows-amd64
-      gate_runner:
-        description: "Where the regression gate runs; choose github when the project's own Mac cannot take it"
+      mac_checks:
+        description: "Where the regression gate and the Apple Silicon Desktop tests run; choose github when the project's own Mac cannot take them"
         type: choice
         options: [own-mac, github]
         default: own-mac
@@ -90,7 +90,8 @@ jobs:
     name: Budget and chat regression gate
     # The project's own Mac runs the gate's checks four at a time and is done
     # in about a quarter of the time GitHub's Mac needs for them one by one.
-    runs-on: ${{ inputs.gate_runner == 'github' && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64","hagency-mac"]') }}
+    # It also does not wait for GitHub to have a Mac free.
+    runs-on: ${{ inputs.mac_checks == 'github' && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64","hagency-mac"]') }}
     timeout-minutes: 120
     env:
       # No step reads this. Naming the two secrets makes GitHub mask the
@@ -137,12 +138,16 @@ jobs:
           retention-days: 14
   # These tests ran inside each installer job, ahead of its build, for a
   # quarter of an hour. Here they run beside it; nothing is published unless
-  # they pass.
+  # they pass. The Apple Silicon ones run on the project's own Mac, like the
+  # gate; every installer is still built on a runner of GitHub's.
   desktop-tests:
     needs: plan
     name: Desktop tests (${{ matrix.platform }}-${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ (matrix.platform == 'macos' && matrix.arch == 'arm64' && inputs.mac_checks != 'github') && fromJSON('["self-hosted","macOS","ARM64","hagency-mac"]') || matrix.runner }}
     timeout-minutes: 90
+    env:
+      # As for the gate: masks the self-hosted machine's name in this public log.
+      MASKED_IN_LOGS: ${{ secrets.CI_MASK_MACHINE_NAME_A }} ${{ secrets.CI_MASK_MACHINE_NAME_B }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -171,6 +176,7 @@ jobs:
         if: runner.os == 'macOS'
         run: brew install cmake
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
         with:
           key: installer-${{ matrix.platform }}-${{ matrix.arch }}
           cache-on-failure: true
@@ -180,6 +186,7 @@ jobs:
           # tests must never reach a runner's native vault.
           HAGENCY_NATIVE_CREDENTIAL_IO: deny
         run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then unset CARGO_BUILD_JOBS; fi
           python3 tools/wechat-ux/check_i18n.py
           cargo test --locked -p octosense-app-contract --lib
           cargo test --locked --features agent_chat --lib
@@ -266,9 +273,12 @@ jobs:
       # The pinned Octos kernel takes about 25 minutes to build and is the same
       # program in every release with the same pin. tools/release-kernel.py
       # says which runs' kernels are taken. With none, or with one that fails
-      # its checks, packaging builds the kernel from source as before.
+      # its checks, packaging builds the kernel from source as before; that is
+      # also what happens when one of these steps fails, so none of them can
+      # fail the job.
       - name: Look for this Octos kernel from an earlier release run
         id: kernel
+        continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
           RUNNER_KIND: ${{ matrix.runner }}
@@ -284,6 +294,7 @@ jobs:
           path: .run/octos-kernel
       - name: Check the kernel that was found
         if: steps.kernel.outputs.artifact_id != ''
+        continue-on-error: true
         env:
           RUNNER_KIND: ${{ matrix.runner }}
           FROM_RUN: ${{ steps.kernel.outputs.run_id }}
@@ -313,6 +324,7 @@ jobs:
         run: cargo packager --manifest-path Cargo.toml --verbose --release --out-dir "$PWD/dist" --formats "$FORMATS"
       - name: Set aside the Octos kernel this job built
         id: built_kernel
+        continue-on-error: true
         env:
           RUNNER_KIND: ${{ matrix.runner }}
         run: python3 tools/release-kernel.py keep --runner "$RUNNER_KIND" --out .run/octos-kernel-built

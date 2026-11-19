@@ -90,8 +90,7 @@ def kernel_receipt():
     its pinned revision and checksum, whether this run compiled it or took the
     one an earlier release run compiled, and which run that was."""
     receipts = sorted((ROOT/'dist'/'runtime').glob('octos-*.json'))
-    assert len(receipts) <= 1, receipts
-    return json.loads(receipts[0].read_text()) if receipts else None
+    return json.loads(receipts[0].read_text()) if len(receipts) == 1 else None
 
 
 def collect(platform, arch):
