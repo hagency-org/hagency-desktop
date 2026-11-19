@@ -126,8 +126,14 @@ jobs:
       - run: python3 tools/test_package_octos.py
       - run: python3 tools/check-release-icons.py
       - run: cargo test --locked --features agent_chat,octosense-module --lib
+      - name: Check how the regression gate runs its checks
+        run: python3 tools/test-hagency-regressions-runner.py
       - name: Budget and chat regression gate
-        run: python3 tools/check-hagency-regressions.py --output .run/ci-regressions
+        # Four checks at a time on the project's own Mac, which runs the
+        # library job beside this one; one after another on GitHub's.
+        run: >-
+          python3 tools/check-hagency-regressions.py --output .run/ci-regressions
+          --jobs ${{ runner.environment == 'self-hosted' && 4 || 1 }}
       - run: cargo build --locked --features agent_chat
       - run: cargo check --locked --no-default-features --features agent_chat
       - run: python3 tools/wechat-ux/check_i18n.py
