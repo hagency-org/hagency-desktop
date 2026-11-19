@@ -187,6 +187,8 @@
   "Copy Text": "Copy Text",
   "Copy Text as HTML": "Copy Text as HTML",
   "Copy User ID": "Copy User ID",
+  "Copy Device ID": "Copy Device ID",
+  "Device ID copied.": "Device ID copied.",
   "Could not check this server: {error}": "Could not check this server: {error}",
   "Could not load chat information: {error}": "Could not load chat information: {error}",
   "Could not load contacts: {error}": "Could not load contacts: {error}",

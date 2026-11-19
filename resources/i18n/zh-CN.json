@@ -189,6 +189,8 @@
   "Copy Text": "复制文字",
   "Copy Text as HTML": "复制为 HTML",
   "Copy User ID": "复制用户账号",
+  "Copy Device ID": "复制设备编号",
+  "Device ID copied.": "已复制设备编号。",
   "Could not check this server: {error}": "无法检查此服务器：{error}",
   "Could not load chat information: {error}": "无法加载聊天信息：{error}",
   "Could not load contacts: {error}": "无法加载通讯录：{error}",
