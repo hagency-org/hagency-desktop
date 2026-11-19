@@ -1,6 +1,8 @@
 """Checks of how a release run keeps and takes the Octos kernel (no compiler, no network)."""
+import contextlib
 import hashlib
 import importlib.util
+import io
 import json
 import os
 from pathlib import Path
@@ -126,10 +128,15 @@ class Finding(unittest.TestCase):
                 os.environ["GITHUB_OUTPUT"] = str(Path(temporary) / "output")
                 wanted = description()
                 describe, kernel.describe = kernel.describe, lambda runner: wanted
+                # What it prints is held back: a runner would show the warning on the job that runs this check.
+                printed = io.StringIO()
                 try:
-                    self.assertEqual(kernel.main(["find", "--runner", "macos-15"]), 0)
+                    with contextlib.redirect_stdout(printed):
+                        self.assertEqual(kernel.main(["find", "--runner", "macos-15"]), 0)
                 finally:
                     kernel.describe = describe
+                self.assertIn("::warning title=Octos kernel built from source::", printed.getvalue())
+                self.assertIn("could not be listed", printed.getvalue())
                 self.assertFalse(Path(os.environ["GITHUB_OUTPUT"]).exists())
         finally:
             for key, value in saved.items():
