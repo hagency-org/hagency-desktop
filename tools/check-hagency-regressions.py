@@ -11,6 +11,9 @@ lets only one command at a time build into a target folder, so side by side
 it is the tests that overlap, not the builds. Two commands that build the
 programs of the same package never overlap: Cargo keeps one copy of such a
 program per target folder and replaces it when the features differ.
+Side by side as one after another, a check gets what the checks listed
+before it built for it (the script VM, the two probe programs) and nothing
+of a check listed after it.
 """
 import argparse
 from concurrent.futures import ThreadPoolExecutor
@@ -70,6 +73,8 @@ def main():
     futures = {}     # check name -> its future
     failed = []      # places of the checks that failed
     programs = {}    # (folder, package) -> lock held while its programs are in use
+    handed = {}      # variables a check hands to the checks listed after it
+    handing = []     # the checks that hand something on: later ones wait for them
     order = 0
 
     def stopped(index):
@@ -107,9 +112,12 @@ def main():
                 failed.append(index)
             raise
 
-    def check_once(index, name, command, cwd, rust_tests, run_env, native_lock, needs):
-        if needs:
-            futures[needs].result()
+    def check_once(index, name, command, cwd, rust_tests, run_env, native_lock, needs, late, hands_on):
+        for need in needs:
+            futures[need].result()
+        if late:
+            with lock:
+                run_env.update(handed)
         key = builds_programs_of(command, cwd)
         with lock:
             turn = programs.setdefault(key, threading.Lock()) if key else None
@@ -127,10 +135,18 @@ def main():
                     stream.write(f"Could not start {command[0]}: {error}\n")
                     code = 127
             took = time.monotonic() - begin
+            text = log.read_text()
+            if code == 0 and hands_on:
+                # Still this package's turn: what was built is what is kept.
+                try:
+                    hands_on(text)
+                except ValueError as error:
+                    with log.open("a") as stream:
+                        stream.write(f"\n{error}\n")
+                    code = 1
         finally:
             if turn:
                 turn.release()
-        text = log.read_text()
         count = sum(int(n) for n in re.findall(r"test result: ok\. (\d+) passed;", text))
         unchanged = native_lock is None or native_lock == (ROOT / 'Cargo.lock').read_bytes().split(b'[[patch.unused]]', 1)[0]
         passed = code == 0 and unchanged and (not rust_tests or count > 0)
@@ -158,9 +174,12 @@ def main():
             print("Also failed:", ", ".join(rows[i]["check"] for i in bad[1:]), flush=True)
         raise SystemExit(f"Inspect {log}; no release until this check passes")
 
-    def run(name, command, cwd=ROOT, rust_tests=False, needs=None, alone=False):
-        """Start one check. `needs` names a check that must end first; `alone`
-        waits for every check listed before this one and returns the log."""
+    def run(name, command, cwd=ROOT, rust_tests=False, needs=None, hands_on=None):
+        """Start one check. `needs` names a check that must end first.
+        `hands_on` is called with the check's log once it has passed, fills
+        `handed` for every check listed after this one, and raises ValueError
+        when the log lacks what it looks for. Returns the kept log of a check
+        that an earlier run passed and this run reuses, otherwise nothing."""
         nonlocal reached_start, order
         index = order
         order += 1
@@ -191,8 +210,9 @@ def main():
                 command.insert(1, '--offline')
             command = [command[0], "--config", str(args.cargo_config.resolve()), *command[1:]]
         logs[index] = output / (name + ".log")
-        # The environment as it is now: what a later check adds is not for this one.
-        run_env = env.copy()
+        # What a check listed before this one handed on, and nothing of a later one.
+        with lock:
+            run_env = {**env, **handed}
         if command[0] == "cargo" and "CARGO_TARGET_DIR" not in run_env and "--manifest-path" not in command:
             # Swift/Clang modules store absolute cache paths. Reusing the same
             # target through its worktree symlink and its real path otherwise
@@ -200,16 +220,16 @@ def main():
             target = cwd / "target"
             if target.is_symlink():
                 run_env["CARGO_TARGET_DIR"] = str(target.resolve())
-        if needs and needs not in futures:
-            needs = None  # reused from an earlier run
-        if alone:
-            finish()
-        futures[name] = pool.submit(execute, index, name, command, cwd, rust_tests, run_env, native_lock, needs)
-        if alone or args.jobs == 1:
+        # A check reused from an earlier run is not waited for.
+        needs = [need for need in ([needs] if needs else []) + handing if need in futures]
+        futures[name] = pool.submit(execute, index, name, command, cwd, rust_tests, run_env, native_lock,
+                                    needs, bool(handing), hands_on)
+        if hands_on:
+            handing.append(name)
+        if args.jobs == 1:
             # One after another, a failed check stops the list where it failed.
-            text = futures[name].result()
+            futures[name].result()
             finish()
-            return text
         return None
 
     run("native-minimal-agent-chat", ["cargo", "check", "--locked", "--no-default-features", "--features", "agent_chat"])
@@ -354,27 +374,38 @@ def main():
     run("native-model-qualification", ["cargo", "test", "--locked", "-p", "hagency-core", "--test", "qualification"], cwd=CLIENT, rust_tests=True)
     run("native-model-catalog", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "resource_onboarding::tests"], cwd=CLIENT, rust_tests=True)
     run("native-resource-creation", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution,resource-adoption", "--lib", "additional_configuration_", "--", "--test-threads=1"], cwd=CLIENT, rust_tests=True)
-    probe_build = run("native-context-probe", ["cargo", "build", "--locked", "-p", "hagency-runtime", "--features", "shared-context", "--bin", "hagency-managed-runtime-probe", "--bin", "hagency-runtime-probe", "--message-format=json"], cwd=CLIENT, alone=True)
-    artifacts = [json.loads(line) for line in probe_build.splitlines() if line.startswith("{")]
-
-    def keep(executable):
+    def keep(executable, fresh):
         # Later checks build this package with other features, and Cargo then
         # replaces the program where it stands. The checks that are handed the
         # program by path get this build of it, whatever is built beside them.
         kept = output / "programs" / Path(executable).name
-        if "native-context-probe" in futures or not kept.is_file():
+        if fresh or not kept.is_file():
             kept.parent.mkdir(exist_ok=True)
             shutil.copy2(executable, kept)
         return str(kept)
 
-    probes = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "hagency-managed-runtime-probe" and item.get("executable")]
-    if len(probes) != 1:
-        raise SystemExit("Expected one freshly built offline context probe")
-    env["HAGENCY_TEST_RUNTIME_PROBE"] = keep(probes[0])
-    claude_probes = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "hagency-runtime-probe" and item.get("executable")]
-    if len(claude_probes) != 1:
-        raise SystemExit("Expected one freshly built offline Claude probe")
-    env["HAGENCY_TEST_CLAUDE_RUNTIME_PROBE"] = keep(claude_probes[0])
+    def hand_on_probes(text, fresh=True):
+        artifacts = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+        found = {}
+        for variable, target, kind in [
+            ("HAGENCY_TEST_RUNTIME_PROBE", "hagency-managed-runtime-probe", "context"),
+            ("HAGENCY_TEST_CLAUDE_RUNTIME_PROBE", "hagency-runtime-probe", "Claude"),
+        ]:
+            built = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == target and item.get("executable")]
+            if len(built) != 1:
+                raise ValueError(f"Expected one freshly built offline {kind} probe")
+            found[variable] = built[0]
+        with lock:
+            handed.update({variable: keep(path, fresh) for variable, path in found.items()})
+
+    # The checks listed before this build never see its two programs; the
+    # checks listed after it wait for it and are handed the kept copies.
+    reused = run("native-context-probe", ["cargo", "build", "--locked", "-p", "hagency-runtime", "--features", "shared-context", "--bin", "hagency-managed-runtime-probe", "--bin", "hagency-runtime-probe", "--message-format=json"], cwd=CLIENT, hands_on=hand_on_probes)
+    if reused is not None:
+        try:
+            hand_on_probes(reused, fresh=False)
+        except ValueError as error:
+            raise SystemExit(str(error))
     run("native-claude-runtime-protocol", ["cargo", "test", "--locked", "-p", "hagency-runtime", "--lib", "--test", "claude", "--test", "claude_control", "--test", "claude_owned", "--test", "claude_session", "--test", "claude_usage", "--", "--test-threads=1"], cwd=CLIENT, rust_tests=True)
     run("native-shared-claude-custody", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution,resource-adoption", "--lib", "shared_claude", "--", "--include-ignored", "--test-threads=1"], cwd=CLIENT, rust_tests=True)
     run("native-shared-claude-lease", ["cargo", "test", "--locked", "-p", "hagency-runtime", "--test", "claude_owned", "shared_claude"], cwd=CLIENT, rust_tests=True)
