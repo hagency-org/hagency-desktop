@@ -32,6 +32,9 @@ def build_seconds(text):
     """How long Cargo says it took until everything was built, from a check's
     log. Side by side this includes waiting for another command's build."""
     total = 0.0
+    # Where Cargo is told to colour its output, as in CI, "Finished" is wrapped
+    # in escape codes.
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
     for minutes, seconds in re.findall(r"^\s*Finished .* in (?:(\d+)m )?([\d.]+)s\s*$", text, re.M):
         total += int(minutes or 0) * 60 + float(seconds)
     return total

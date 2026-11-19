@@ -29,7 +29,8 @@ if name == "cargo":
             path = os.path.join(os.environ["STAND_IN_BUILT"], target)
             open(path, "w").write("built with shared-context")
             print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": target}}, "executable": path}}))
-    print("    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.50s")
+    # As Cargo writes it with CARGO_TERM_COLOR=always, which CI sets.
+    print("\\x1b[1m\\x1b[32m    Finished\\x1b[0m `test` profile [unoptimized + debuginfo] target(s) in 1m 02s")
     if "test" in args and code == 0:
         print("test result: ok. 3 passed; 0 failed; 0 ignored")
 with open(os.environ["STAND_IN_TRACE"], "a") as stream:
@@ -142,6 +143,10 @@ def main():
         expect("the report lists every command that ran, each passed",
                len(report) == len(ran) > 100 and all(row["passed"] for row in report), (len(report), len(ran)))
         expect("one after another: order rules hold", not order_faults(ran, output), order_faults(ran, output)[:3])
+        times = {row["check"]: row for row in report}
+        expect("each row carries its seconds, and Cargo's build time where Cargo ran",
+               all(row["seconds"] >= 0 for row in report) and times["budget-host"]["build_seconds"] == 62.0
+               and times["owner-source-pins"]["build_seconds"] == 0, times["budget-host"])
         serial = commands(ran)
 
         done, ran, report = fixture.run("--jobs", "6")
