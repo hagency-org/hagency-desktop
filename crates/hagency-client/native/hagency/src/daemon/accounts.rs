@@ -1,7 +1,9 @@
 //! An installation has one socket. Each hosted (origin, Matrix ID) has its
 //! own enrollment, controller receipts, SDK device and runtime under it.
 use super::enrollment::Enrollment;
-use hagency_metering::daemon_endpoint::{ACCOUNTS, valid_key};
+use hagency_metering::daemon_endpoint::ACCOUNTS;
+#[cfg(unix)]
+use hagency_metering::daemon_endpoint::valid_key;
 use std::path::{Path, PathBuf};
 
 pub fn home(base: &Path, origin: &str, owner: &str) -> Result<PathBuf, &'static str> {
@@ -19,6 +21,7 @@ pub fn home(base: &Path, origin: &str, owner: &str) -> Result<PathBuf, &'static 
 }
 
 /// Reject an enrollment addressed to a different account before touching its runtime.
+#[cfg(unix)]
 pub(super) fn accepts(home: &Path, origin: &str, owner: &str) -> bool {
     let (base, scope) = hagency_metering::daemon_endpoint::endpoint(home);
     let key = crate::owner_roots::key(origin, owner);
@@ -30,6 +33,7 @@ pub(super) fn accepts(home: &Path, origin: &str, owner: &str) -> bool {
 
 /// Create account state before contacting the running service. An offline
 /// enrollment helper takes the same per-account lock as that service.
+#[cfg(unix)]
 pub(super) fn provision(base: &Path, home: &Path) -> Result<(), &'static str> {
     if let Some(parent) = base.parent() {
         std::fs::create_dir_all(parent).map_err(|_| "daemon_home_unavailable")?;
@@ -40,6 +44,7 @@ pub(super) fn provision(base: &Path, home: &Path) -> Result<(), &'static str> {
     Ok(())
 }
 
+#[cfg(unix)]
 pub(super) fn directories(base: &Path) -> std::io::Result<Vec<(String, PathBuf)>> {
     let directory = base.join(ACCOUNTS);
     match std::fs::symlink_metadata(&directory) {
