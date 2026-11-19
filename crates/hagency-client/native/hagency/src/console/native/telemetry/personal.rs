@@ -46,7 +46,7 @@ impl OwnerTelemetry {
     pub fn personal_resources(&self, at_ms: u64, options: SnapshotOptions) -> Result<Vec<ResourceUsage>, TelemetryError> {
         let parts = self.parts(at_ms, options)?;
         self.read(|collector| parts.resources.into_iter()
-            .filter(|resource| resource.resource_id.starts_with("personal-agent:"))
+            .filter(|resource| resource.resource_id.starts_with(hagency_metering::dashboard::PERSONAL_RESOURCE_PREFIX))
             .map(|resource| {
                 let bindings: Vec<_> = collector.ledger().bindings()
                     .filter(|binding| binding.resource_id == resource.resource_id).collect();

@@ -654,6 +654,9 @@ pub struct View {
     pub service: Option<Service>,
     /// The running job, or the last finished one, for this account.
     pub job: Option<(JobKind, Progress)>,
+    /// Which pools' Claude Agents run in containers on this computer; `None`
+    /// until read, and where this computer cannot run them.
+    pub containers: Option<owner_dashboard::ContainerChoices>,
     /// Changes whenever anything above changes.
     pub generation: u64,
 }
@@ -664,6 +667,9 @@ struct Shared {
     view: View,
     reading: bool,
     read_at: Option<std::time::Instant>,
+    /// A pool's container change is running (one at a time); it, not a
+    /// read, decides.
+    containers_running: bool,
     /// One job at a time, whichever account started it.
     #[cfg(unix)]
     running: bool,
@@ -701,14 +707,19 @@ pub fn view(account: &Account) -> View {
         let spawned = std::thread::Builder::new().name("owner-hosting-status".into()).spawn(move || {
             let execution = Locations::system().and_then(|l| execution(&l, &account.origin, &account.owner));
             let service = installed_service();
+            let read = read_containers();
             let mut state = shared();
             state.reading = false;
             state.read_at = Some(std::time::Instant::now());
+            let containers = merged_containers(state.view.containers.as_ref(), read, state.containers_running);
             if state.account.as_ref() == Some(&account)
-                && (state.view.execution.as_ref() != Some(&execution) || state.view.service != Some(service))
+                && (state.view.execution.as_ref() != Some(&execution)
+                    || state.view.service != Some(service)
+                    || state.view.containers != containers)
             {
                 state.view.execution = Some(execution);
                 state.view.service = Some(service);
+                state.view.containers = containers;
                 state.view.generation += 1;
                 drop(state);
                 makepad_widgets::SignalToUI::set_ui_signal();
@@ -780,6 +791,126 @@ pub fn start(kind: JobKind, account: &Account) -> bool {
     }
 }
 
+/// Run `pool`'s Claude Agents in containers (finding the runtime and
+/// preparing the image, minutes the first time) or back in the sandbox. The
+/// choice is kept in this computer's daemon home and applies from each of
+/// the pool's Agents' next run. Refused while a change runs.
+pub fn set_containers(pool: String, on: bool) -> bool {
+    use owner_dashboard::{ContainerProblem, PoolContainers};
+    #[cfg(unix)]
+    {
+        let mut guard = shared();
+        let state = &mut *guard;
+        if state.containers_running {
+            return false;
+        }
+        state.containers_running = true;
+        let choices = state.view.containers.get_or_insert_with(Default::default);
+        choices.pools.insert(pool.clone(), if on { PoolContainers::TurningOn } else { PoolContainers::Off });
+        state.view.generation += 1;
+        drop(guard);
+        let changing = pool.clone();
+        let spawned = std::thread::Builder::new().name("owner-hosting-containers".into()).spawn(move || {
+            let result = change_containers(&changing, on);
+            finish_containers(changing, result);
+        });
+        if spawned.is_err() {
+            finish_containers(pool, PoolContainers::Failed(ContainerProblem::Other));
+        }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pool, on, ContainerProblem::Other, PoolContainers::Off);
+        false
+    }
+}
+
+#[cfg(unix)]
+fn finish_containers(pool: String, result: owner_dashboard::PoolContainers) {
+    let mut guard = shared();
+    let state = &mut *guard;
+    state.containers_running = false;
+    state.view.containers.get_or_insert_with(Default::default).pools.insert(pool, result);
+    state.view.generation += 1;
+    drop(guard);
+    makepad_widgets::SignalToUI::set_ui_signal();
+}
+
+#[cfg(unix)]
+fn change_containers(pool: &str, on: bool) -> owner_dashboard::PoolContainers {
+    use ::hagency::pool_containers::{self, Error, ProbeError};
+    use owner_dashboard::{ContainerProblem, PoolContainers};
+    let Ok(daemon_home) = ::hagency::service::default_daemon_dir() else {
+        return PoolContainers::Failed(ContainerProblem::Other);
+    };
+    if !on {
+        return match pool_containers::turn_off(&daemon_home, pool) {
+            Ok(()) => PoolContainers::Off,
+            // Whatever is saved.
+            Err(_) => read_containers().map(|choices| choices.of(pool)).unwrap_or_default(),
+        };
+    }
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return PoolContainers::Failed(ContainerProblem::Other);
+    };
+    match pool_containers::turn_on(&daemon_home, std::path::Path::new(&home), pool) {
+        Ok(_) => PoolContainers::On,
+        Err(error) => {
+            makepad_widgets::warning!("A pool's containers did not turn on: {error:?}");
+            PoolContainers::Failed(match error {
+                Error::Probe(ProbeError::NoClient) => ContainerProblem::NoRuntime,
+                Error::Probe(ProbeError::EngineUnavailable) => ContainerProblem::EngineStopped,
+                Error::Probe(ProbeError::BuildFailed) => ContainerProblem::BuildFailed,
+                _ => ContainerProblem::Other,
+            })
+        }
+    }
+}
+
+/// The saved choices; reads one small file. `None` where this computer
+/// cannot run containers.
+fn read_containers() -> Option<owner_dashboard::ContainerChoices> {
+    use owner_dashboard::{ContainerChoices, PoolContainers};
+    #[cfg(unix)]
+    {
+        let daemon_home = ::hagency::service::default_daemon_dir().ok()?;
+        Some(match ::hagency::pool_containers::load(&daemon_home) {
+            Ok(None) => ContainerChoices::default(),
+            Ok(Some(setting)) => {
+                let state = if setting.cli.is_file() { PoolContainers::On } else { PoolContainers::Unavailable };
+                ContainerChoices { pools: setting.pools.into_iter().map(|pool| (pool, state)).collect(), unreadable: false }
+            }
+            Err(_) => ContainerChoices { unreadable: true, ..Default::default() },
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (ContainerChoices::default(), PoolContainers::Off);
+        None
+    }
+}
+
+/// A running change decides, and a pool's failure stays shown until the
+/// owner changes that pool's switch again.
+fn merged_containers(
+    current: Option<&owner_dashboard::ContainerChoices>,
+    read: Option<owner_dashboard::ContainerChoices>,
+    running: bool,
+) -> Option<owner_dashboard::ContainerChoices> {
+    use owner_dashboard::PoolContainers;
+    if running {
+        return current.cloned();
+    }
+    let mut read = read?;
+    for (pool, state) in current.map(|c| &c.pools).into_iter().flatten() {
+        if matches!(state, PoolContainers::Failed(_)) && read.of(pool) == PoolContainers::Off {
+            read.pools.insert(pool.clone(), *state);
+        }
+    }
+    Some(read)
+}
+
 /// Cancel the running setup's browser sign-in.
 pub fn cancel() {
     #[cfg(unix)]
@@ -794,6 +925,82 @@ mod tests {
     use ::hagency::daemon::enrollment::Enrollment;
     use ::hagency::native_owner::NativeOwner;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_running_container_change_decides_and_a_failure_waits_for_the_owner() {
+        use owner_dashboard::{ContainerChoices, ContainerProblem, PoolContainers as P};
+        let choices = |pools: &[(&str, P)]| ContainerChoices {
+            pools: pools.iter().map(|(pool, state)| (pool.to_string(), *state)).collect(),
+            unreadable: false,
+        };
+        let failed = P::Failed(ContainerProblem::EngineStopped);
+        // Not offered on this computer: no switch.
+        assert_eq!(merged_containers(None, None, false), None);
+        assert_eq!(merged_containers(None, Some(choices(&[])), false), Some(choices(&[])));
+        // A running change decides over a read.
+        let turning = choices(&[("a", P::TurningOn)]);
+        assert_eq!(merged_containers(Some(&turning), Some(choices(&[])), true), Some(turning.clone()));
+        // A pool's failure waits for its owner; other pools follow the read.
+        let current = choices(&[("a", failed), ("b", P::On)]);
+        assert_eq!(merged_containers(Some(&current), Some(choices(&[])), false), Some(choices(&[("a", failed)])));
+        // A choice saved since, by this app or another, replaces the failure.
+        let on = choices(&[("a", P::On)]);
+        assert_eq!(merged_containers(Some(&current), Some(on.clone()), false), Some(on.clone()));
+        let gone = choices(&[("a", P::Unavailable)]);
+        assert_eq!(merged_containers(Some(&on), Some(gone.clone()), false), Some(gone));
+        // Choices that cannot be read stop every Claude pool, failed or not.
+        let unreadable = ContainerChoices { unreadable: true, ..Default::default() };
+        let merged = merged_containers(Some(&current), Some(unreadable), false).unwrap();
+        assert_eq!((merged.of("a"), merged.of("c")), (P::Unavailable, P::Unavailable));
+    }
+
+    /// The switch end to end with a real engine, in the daemon home that
+    /// `HAGENCY_OWNER_DAEMON_HOME` names (an empty folder, never the real
+    /// one): turning a pool on finds the client and its engine, prepares the
+    /// image and saves a choice its launches can run, while other pools keep
+    /// the sandbox; turning the last pool off removes the choice.
+    #[test]
+    #[ignore = "explicit Docker-compatible engine and an empty HAGENCY_OWNER_DAEMON_HOME"]
+    fn the_container_switch_turns_on_and_off_with_a_real_engine() {
+        use ::hagency::pool_containers::isolation;
+        use owner_dashboard::PoolContainers;
+        assert!(std::env::var_os("HAGENCY_OWNER_DAEMON_HOME").is_some_and(|h| !h.is_empty()));
+        let daemon = ::hagency::service::default_daemon_dir().unwrap();
+        assert_eq!(std::fs::read_dir(&daemon).unwrap().count(), 0, "an empty daemon home");
+        let settled = |pool: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1200);
+            loop {
+                let state = shared();
+                if !state.containers_running {
+                    return state.view.containers.as_ref().map(|c| c.of(pool));
+                }
+                drop(state);
+                assert!(std::time::Instant::now() < deadline, "the change ended");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        assert!(set_containers("resource_a".into(), true));
+        // (the change runs the client at least twice: far longer than this call)
+        assert!(!set_containers("resource_b".into(), true), "refused while a change runs");
+        assert_eq!(settled("resource_a"), Some(PoolContainers::On));
+        assert!(set_containers("resource_b".into(), true));
+        assert_eq!(settled("resource_b"), Some(PoolContainers::On));
+        let saved = read_containers().unwrap();
+        assert_eq!(
+            (saved.of("resource_a"), saved.of("resource_b"), saved.of("resource_c")),
+            (PoolContainers::On, PoolContainers::On, PoolContainers::Off),
+        );
+        assert!(isolation(&daemon, "resource_a").unwrap().is_some());
+        assert!(isolation(&daemon, "resource_c").unwrap().is_none(), "other pools keep the sandbox");
+        assert!(set_containers("resource_a".into(), false));
+        assert_eq!(settled("resource_a"), Some(PoolContainers::Off));
+        assert!(isolation(&daemon, "resource_a").unwrap().is_none());
+        assert!(isolation(&daemon, "resource_b").unwrap().is_some(), "the other pool keeps its choice");
+        assert!(set_containers("resource_b".into(), false));
+        assert_eq!(settled("resource_b"), Some(PoolContainers::Off));
+        assert_eq!(read_containers(), Some(Default::default()));
+        assert!(isolation(&daemon, "resource_b").unwrap().is_none());
+    }
 
     const ORIGIN: &str = "https://hagency.example.test/";
     const OWNER: &str = "@owner:hagency.example.test";

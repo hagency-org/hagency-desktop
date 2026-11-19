@@ -58,6 +58,7 @@ pub mod ops;
 pub mod owner_host;
 /// One owner root per account per computer (ADR-192).
 pub mod owner_roots;
+pub mod pool_containers;
 pub(crate) mod receive_service;
 mod resources;
 mod runner;

@@ -103,6 +103,61 @@ pub struct HostOptions {
     /// The installed service runs another program than this app (for
     /// example an earlier separate Hosting app). Reinstalling moves it here.
     pub foreign_service: bool,
+    /// Which pools' Claude Agents run in containers on this computer; `None`
+    /// where this computer cannot run them.
+    pub containers: Option<ContainerChoices>,
+}
+
+/// The owner's container choice for each pool hosted on this computer.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ContainerChoices {
+    /// By resource ID, every pool that is not simply in the sandbox.
+    pub pools: std::collections::BTreeMap<String, PoolContainers>,
+    /// The saved choices cannot be read, so no pool's Claude Agents can
+    /// start until the owner turns a pool off, which clears them.
+    pub unreadable: bool,
+}
+
+impl ContainerChoices {
+    pub fn of(&self, pool: &str) -> PoolContainers {
+        match self.pools.get(pool) {
+            Some(state) => *state,
+            None if self.unreadable => PoolContainers::Unavailable,
+            None => PoolContainers::Off,
+        }
+    }
+    /// A pool is turning on; the host makes one change at a time.
+    pub fn changing(&self) -> bool {
+        self.pools.values().any(|state| *state == PoolContainers::TurningOn)
+    }
+}
+
+/// A pool's Claude Agents in a Docker-compatible container instead of this
+/// computer's sandbox. The host finds the runtime and prepares the image.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum PoolContainers {
+    /// This computer's sandbox.
+    #[default]
+    Off,
+    /// Finding the runtime and preparing the image; minutes the first time.
+    TurningOn,
+    On,
+    /// On, but the chosen app is no longer there or the choice cannot be
+    /// read: its Agents cannot start.
+    Unavailable,
+    /// Turning on stopped here; its Agents keep the sandbox.
+    Failed(ContainerProblem),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ContainerProblem {
+    /// No Docker-compatible app on this computer.
+    NoRuntime,
+    /// Its engine is not running.
+    EngineStopped,
+    /// The image did not build.
+    BuildFailed,
+    Other,
 }
 
 /// The host's view of its daemon connection. Reported by the host; the
@@ -275,6 +330,8 @@ pub enum DashboardAction {
     StartService,
     /// Keep the resource pool running after the host app quits.
     KeepRunning(bool),
+    /// Run a pool's Claude Agents in containers (true) or the sandbox.
+    PoolContainers { pool: String, on: bool },
     /// Remove the background service; its sign-in and resources are kept.
     UninstallService,
     /// Open the owner's shared tool approvals and resource Agent requests.
@@ -865,6 +922,44 @@ pub struct ResourceDetail {
     pub facts: Vec<(&'static str, String)>,
     pub tokens: Vec<TokenLine>,
     pub cache_ratio: String,
+    /// Where this pool's Agents run, for a Claude pool on a computer that can
+    /// run containers.
+    pub containers: Option<ContainerSwitch>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ContainerSwitch {
+    /// On while turning on and once on.
+    pub on: bool,
+    /// Turning on: the switch waits for the host.
+    pub busy: bool,
+    pub title: &'static str,
+    pub body: &'static str,
+}
+
+fn container_switch(state: &DashboardState, resource: &ResourceUsage, locale: Locale) -> Option<ContainerSwitch> {
+    let choices = state.options.as_ref()?.containers.as_ref()?;
+    // The choice is made for a hosted pool. A personal Agent's usage row is
+    // not one: its runs never take the pooled launch that reads the choice.
+    if resource.is_personal() || !resource.provider.eq_ignore_ascii_case("claude") {
+        return None;
+    }
+    let containers = choices.of(&resource.id);
+    Some(ContainerSwitch {
+        on: matches!(containers, PoolContainers::TurningOn | PoolContainers::On | PoolContainers::Unavailable),
+        busy: containers == PoolContainers::TurningOn,
+        title: tr(locale, Msg::ContainersTitle),
+        body: tr(locale, match containers {
+            PoolContainers::Off => Msg::ContainersOff,
+            PoolContainers::TurningOn => Msg::ContainersTurningOn,
+            PoolContainers::On => Msg::ContainersOn,
+            PoolContainers::Unavailable => Msg::ContainersUnavailable,
+            PoolContainers::Failed(ContainerProblem::NoRuntime) => Msg::ContainersNoRuntime,
+            PoolContainers::Failed(ContainerProblem::EngineStopped) => Msg::ContainersEngineStopped,
+            PoolContainers::Failed(ContainerProblem::BuildFailed) => Msg::ContainersBuildFailed,
+            PoolContainers::Failed(ContainerProblem::Other) => Msg::ContainersFailed,
+        }),
+    })
 }
 
 fn hosting_status(state: HostingState, locale: Locale) -> (Status, Msg, Msg) {
@@ -1413,6 +1508,7 @@ fn present(state: &DashboardState, clock: Clock) -> Presentation {
                 ],
                 tokens: token_lines(&r.counts, locale),
                 cache_ratio: ratio_text(r.cache_hit_ratio(), locale),
+                containers: container_switch(state, r, locale),
             }),
             None => Some(ResourceDetail {
                 row: ResourceRow {
@@ -1428,6 +1524,7 @@ fn present(state: &DashboardState, clock: Clock) -> Presentation {
                 facts: vec![(tr(locale, Msg::ResourceId), id.clone())],
                 tokens: Vec::new(),
                 cache_ratio: tr(locale, Msg::Unavailable).into(),
+                containers: None,
             }),
         }
     });

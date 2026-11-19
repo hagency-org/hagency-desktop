@@ -91,6 +91,10 @@ pub(super) struct ClaudeLaunch {
     workspace: Option<super::claude_workspace::Lease>,
     /// The space's shared project folder, when the space has one.
     project: Option<hagency_runtime::owned::SharedProject>,
+    /// The owner's container runtime for pool Agents on this computer, read
+    /// once per launch so the session settings and the start agree. `None`
+    /// is the macOS sandbox.
+    container: Option<hagency_runtime::owned::container::ContainerIsolation>,
 }
 impl Launch {
     pub async fn for_resource(
@@ -175,6 +179,10 @@ impl Launch {
             #[cfg(test)]
             fixture_mode: None,
         };
+        // A setting that cannot run stops the launch: the owner may have
+        // chosen not to run this pool's Agents on this computer directly.
+        let container = crate::pool_containers::hosted_isolation(&resource.id)
+            .map_err(|_| failure(409, "shared_claude_container_invalid"))?;
         Ok(Self::Claude(ClaudeLaunch {
             selection: Arc::new(selected),
             profile_authority: profile.clone(),
@@ -186,6 +194,7 @@ impl Launch {
             workspaces: None,
             workspace: None,
             project: None,
+            container,
             profile: Profile {
                 executable: owner_provider::external::executable(Kind::Claude)
                     .map_err(|e| failure(e.status, e.code))?,
@@ -516,6 +525,7 @@ impl ClaudeLaunch {
             workspaces: None,
             workspace: None,
             project: None,
+            container: None,
         }
     }
     pub fn check(&self) -> Result<(), NativeError> {
@@ -530,9 +540,15 @@ impl ClaudeLaunch {
             .ok_or_else(|| failure(409, "provider_identity_unavailable"))
     }
     pub fn session_settings_digest(&self) -> Result<String, NativeError> {
+        // A conversation resumes only where it ran: the sandbox, or a
+        // container of the same image.
+        let isolation = match &self.container {
+            None => "host-owned-room-v1".to_owned(),
+            Some(container) => format!("container-room-v1:{}", container.image()),
+        };
         digest(
             &serde_json::json!({"version":2,"executable":self.profile.executable,
-            "isolation":"host-owned-room-v1","resource":self.resource,"revision":self.revision,
+            "isolation":isolation,"resource":self.resource,"revision":self.revision,
             "model":self.profile.model,"effort":self.profile.effort,"policy":self.policy.name(),
             "roomTools":cfg!(feature = "shared-execution")}),
         )
@@ -647,6 +663,10 @@ impl ClaudeLaunch {
             )
             .map_err(|_| failure(409, "shared_execution_launch_unavailable"));
         }
+        let isolation = match &self.container {
+            Some(container) => hagency_runtime::owned::SharedClaudeIsolation::Container(container),
+            None => hagency_runtime::owned::SharedClaudeIsolation::Sandbox,
+        };
         OwnedClaudeSession::spawn_shared_isolated_resuming(
             &guardian,
             launch,
@@ -656,7 +676,16 @@ impl ClaudeLaunch {
             Default::default(),
             self.policy,
             resume,
+            isolation,
         )
-        .map_err(|_| failure(409, "shared_execution_launch_unavailable"))
+        .map_err(|error| {
+            if self.container.is_some() {
+                tracing::warn!(code = "shared_claude_container_start_failed", ?error,
+                    "A pool Agent's container did not start");
+                failure(409, "shared_claude_container_unavailable")
+            } else {
+                failure(409, "shared_execution_launch_unavailable")
+            }
+        })
     }
 }

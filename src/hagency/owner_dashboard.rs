@@ -6,8 +6,8 @@
 use crate::hagency::hosting::{self, Execution, JobKind, Progress, SetupReason};
 use makepad_widgets::*;
 use owner_dashboard::{
-    CommandKind, CommandResult, ConnectionStatus, DashboardAction, HostOptions, Locale, OwnerDashboardRef,
-    OwnerDashboardWidgetExt, SetupNeed, SetupProgress, SetupView,
+    CommandKind, CommandResult, ConnectionStatus, ContainerChoices, DashboardAction, HostOptions, Locale,
+    OwnerDashboardRef, OwnerDashboardWidgetExt, SetupNeed, SetupProgress, SetupView,
     i18n::{Msg, phrase, tr},
     model::{Glyph, Status, Tone},
     transport::{ConnectorEvent, DaemonConnector, DaemonEndpoint, Job, OwnerScope},
@@ -99,6 +99,8 @@ struct Page {
     busy: bool,
     /// The installed service runs another program (an earlier Hosting app).
     foreign_service: bool,
+    /// Which pools' Claude Agents run in containers on this computer.
+    containers: Option<ContainerChoices>,
 }
 
 fn page(view: &hosting::View, last_need: SetupNeed) -> Page {
@@ -130,7 +132,8 @@ fn page(view: &hosting::View, last_need: SetupNeed) -> Page {
     let hosted = setup.is_none() && matches!(view.execution, Some(Ok(Execution::Daemon { .. })));
     let in_app = matches!(view.execution, Some(Ok(Execution::InProcess)));
     let foreign_service = view.service == Some(hosting::Service::OtherProgram);
-    Page { setup, hosted, in_app, busy, foreign_service }
+    let containers = view.containers.clone();
+    Page { setup, hosted, in_app, busy, foreign_service, containers }
 }
 
 /// A notice for a job that just changed, outside the setup page.
@@ -250,7 +253,12 @@ impl OwnerDashboardHost {
             _ => { self.pending_keep = None; saved }
         };
         let Some(page) = &self.page else { return };
-        let options = page.hosted.then(|| HostOptions { keep_running, busy: page.busy, foreign_service: page.foreign_service });
+        let options = page.hosted.then(|| HostOptions {
+            keep_running,
+            busy: page.busy,
+            foreign_service: page.foreign_service,
+            containers: page.containers.clone(),
+        });
         self.dashboard(cx).set_options(cx, options);
     }
 
@@ -316,6 +324,13 @@ impl OwnerDashboardHost {
             DashboardAction::KeepRunning(keep) => {
                 self.pending_keep = Some(keep);
                 cx.action(HostingAction::KeepRunning(keep));
+                None
+            }
+            DashboardAction::PoolContainers { pool, on } => {
+                // Refused while a change runs; the switch follows the state.
+                if !self.fixture { hosting::set_containers(pool, on); }
+                self.applied = None;
+                self.synchronize(cx);
                 None
             }
             DashboardAction::ReviewApprovals => {
@@ -461,7 +476,7 @@ mod tests {
     }
 
     fn state(execution: Option<Result<Execution, String>>, job: Option<(JobKind, Progress)>, generation: u64) -> hosting::View {
-        hosting::View { execution, service: Some(hosting::Service::ThisApp), job, generation }
+        hosting::View { execution, service: Some(hosting::Service::ThisApp), job, containers: None, generation }
     }
 
     #[test]
@@ -477,7 +492,7 @@ mod tests {
         let in_app = page(&state(Some(Ok(Execution::InProcess)), None, 1), SetupNeed::NotSetUp);
         assert!(in_app.in_app && !in_app.hosted && in_app.setup.is_none());
         // Before the first read nothing is decided.
-        assert_eq!(page(&state(None, None, 0), SetupNeed::NotSetUp), Page { setup: None, hosted: false, in_app: false, busy: false, foreign_service: false });
+        assert_eq!(page(&state(None, None, 0), SetupNeed::NotSetUp), Page { setup: None, hosted: false, in_app: false, busy: false, foreign_service: false, containers: None });
         // A running setup keeps its page after the enrollment flips execution.
         let confirming = page(&state(daemon(), Some((JobKind::Setup, Progress::Confirming)), 2), SetupNeed::Replace);
         assert_eq!(need(confirming.clone()), Some((SetupNeed::Replace, SetupProgress::Confirming)));
