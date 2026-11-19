@@ -58,11 +58,13 @@ jobs:
           workspaces: crates/hagency-client -> target
       - name: Build with every core of the project's own Mac
         if: runner.environment == 'self-hosted'
-        # Six test programs at a time: the Mac has fourteen cores and runs
-        # the native job beside this one.
+        # Two test programs at a time for every three performance cores. Six
+        # was measured on the Mac with ten of them, which runs the native job
+        # beside this one; the Mac with six gets the same share, four.
         run: |
           echo "CARGO_BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
-          echo "PARALLEL_TEST_JOBS=6" >> "$GITHUB_ENV"
+          fast=$(sysctl -n hw.perflevel0.physicalcpu)
+          echo "PARALLEL_TEST_JOBS=$(( fast * 2 / 3 > 2 ? fast * 2 / 3 : 2 ))" >> "$GITHUB_ENV"
       - run: brew install cmake
       - name: Check Linux qualification helper refusals without provisioning
         run: python3 native/scripts/test-qualify-linux-cgroup.py
