@@ -22,6 +22,13 @@ pub(super) struct AccountLoginPrompt {
 fn pending(state: &str) -> bool {
     matches!(state, "starting" | "awaiting_authorization" | "stopping")
 }
+fn primary_label(state: &str) -> Option<&'static str> {
+    match state {
+        "review" => Some("Start sign-in"),
+        "awaiting_authorization" => Some("Reopen authorization page"),
+        _ => None,
+    }
+}
 fn words(state: &str) -> (&'static str, &'static str) {
     match state {
         "review" => (
@@ -33,16 +40,16 @@ fn words(state: &str) -> (&'static str, &'static str) {
             "Keep this window open while the provider prepares authorization.",
         ),
         "awaiting_authorization" => (
-            "Finish sign-in with the provider",
-            "Open the secure sign-in page. This window will update when Codex confirms the result.",
+            "Complete authorization in your browser",
+            "If the page didn’t open, reopen it below. This window updates when Codex confirms.",
         ),
         "stopping" => (
             "Finishing the original request…",
             "The original login process is being stopped. No second login is started.",
         ),
         "authenticated" => (
-            "Account signed in",
-            "Codex confirmed this account’s login. Resource enrollment is the next step.",
+            "Codex connected",
+            "Select Done to return to Coding Tools.",
         ),
         "cancelled" => (
             "Sign-in cancelled",
@@ -124,20 +131,15 @@ impl MiniAppsPanel {
             .label(cx, ids!(account_login_panel.sheet_scroll.namespace))
             .set_text(cx, p.flow.namespace());
         let review = p.state == "review";
-        let open = p.state == "awaiting_authorization";
         let primary = self
             .view
             .button(cx, ids!(account_login_panel.buttons.primary));
-        primary.set_visible(cx, review || open);
-        primary.set_enabled(cx, p.receiver.is_none() && p.flow.active());
-        primary.set_text(
-            cx,
-            crate::i18n::tr(if review {
-                "Start sign-in"
-            } else {
-                "Open sign-in page"
-            }),
-        );
+        let label = primary_label(&p.state);
+        primary.set_visible(cx, label.is_some());
+        if let Some(label) = label {
+            primary.set_enabled(cx, p.receiver.is_none() && p.flow.active());
+            primary.set_text(cx, crate::i18n::tr(label));
+        }
         self.view
             .button(cx, ids!(account_login_panel.buttons.cancel))
             .set_text(
@@ -172,7 +174,13 @@ impl MiniAppsPanel {
             let result = match action.as_str() {
                 "start" => Reply::Status(flow.start().await),
                 "cancel" => Reply::Status(flow.cancel().await),
-                "open" => Reply::Authorization(flow.authorization().await),
+                "open" => match flow.authorization().await {
+                    // The provider may have finished between the last poll and this click.
+                    Err(code) if code == "provider_authorization_unavailable" => {
+                        Reply::Status(flow.status().await)
+                    }
+                    result => Reply::Authorization(result),
+                },
                 _ => Reply::Status(flow.status().await),
             };
             let _ = tx.try_send(result);
@@ -317,6 +325,23 @@ mod tests {
     use super::*;
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
     #[test]
+    fn browser_prompt_offers_reopen_until_codex_confirms() {
+        let zh = |key| crate::i18n::text_for(crate::i18n::Language::Chinese, key);
+        assert_eq!(zh(words("awaiting_authorization").0), "请在浏览器中完成授权");
+        assert_eq!(
+            primary_label("awaiting_authorization").map(zh),
+            Some("重新打开授权页")
+        );
+        assert_eq!(zh(words("authenticated").0), "Codex 已连接");
+        assert_eq!(primary_label("authenticated"), None);
+        for state in [
+            "starting", "awaiting_authorization", "stopping", "cancelled", "expired", "uncertain",
+        ] {
+            assert_ne!(words(state).0, words("authenticated").0);
+        }
+    }
+
+    #[test]
     fn native_hagency_account_login_controls_stay_reachable_through_review_progress_result() {
         for (width, height, language) in [
             (360., 640., crate::i18n::Language::English),
@@ -379,25 +404,14 @@ mod tests {
                     .view
                     .label(&cx, ids!(account_login_panel.sheet_scroll.explanation))
                     .set_text(&mut cx, crate::i18n::text_for(language, body));
-                let primary = state == "review" || state == "awaiting_authorization";
-                panel
+                let button = panel
                     .view
-                    .button(&cx, ids!(account_login_panel.buttons.primary))
-                    .set_visible(&mut cx, primary);
-                panel
-                    .view
-                    .button(&cx, ids!(account_login_panel.buttons.primary))
-                    .set_text(
-                        &mut cx,
-                        crate::i18n::text_for(
-                            language,
-                            if state == "review" {
-                                "Start sign-in"
-                            } else {
-                                "Open sign-in page"
-                            },
-                        ),
-                    );
+                    .button(&cx, ids!(account_login_panel.buttons.primary));
+                let label = primary_label(state);
+                button.set_visible(&mut cx, label.is_some());
+                if let Some(label) = label {
+                    button.set_text(&mut cx, crate::i18n::text_for(language, label));
+                }
                 panel.request_confirmation_redraw(&mut cx);
                 let event = std::mem::take(&mut cx.new_draw_event);
                 assert!(event.will_redraw());
