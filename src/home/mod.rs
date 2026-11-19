@@ -100,3 +100,5 @@ pub fn script_mod(vm: &mut ScriptVm) {
     // Keep HomeScreen last, it references many widgets registered above.
     home_screen::script_mod(vm);
 }
+
+mod creation_journal;
