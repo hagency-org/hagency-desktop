@@ -37,7 +37,19 @@ fn account_settings_reflow_with_the_pane() {
     let banner = settings.widget(&cx, ids!(verification_banner_verified));
     let recovery = settings.widget(&cx, ids!(encryption_recovery));
     let status = recovery.label(&cx, ids!(status));
-    banner.set_visible(&mut cx, true);
+    let account = settings.widget(&cx, ids!(account_settings));
+    let device_info = account.label(&cx, ids!(current_device_info));
+    let session = matrix_sdk::SessionMeta {
+        user_id: ruma::user_id!("@local:example.org").to_owned(),
+        device_id: "LOCALDEVICE42".into(),
+    };
+    {
+        let mut account = account.borrow_mut::<super::AccountSettings>().unwrap();
+        account.verification_state = matrix_sdk::encryption::VerificationState::Verified;
+        account.update_verification_banner(&mut cx);
+        account.update_current_device(&mut cx, Some(&session));
+    }
+    assert!(device_info.text().contains("LOCALDEVICE42"));
     recovery
         .widget(&cx, ids!(restore_section))
         .set_visible(&mut cx, true);
@@ -53,7 +65,7 @@ fn account_settings_reflow_with_the_pane() {
         assert!((banner_rect.size.x - recovery_rect.size.x).abs() < 1.0);
         assert!(banner_rect.size.x > width.min(700.0) - 40.0);
         assert!(recovery_rect.pos.x + recovery_rect.size.x <= width);
-        for label in [&status, &description] {
+        for label in [&device_info, &status, &description] {
             let ink = label.borrow().unwrap().draw_text.area();
             let bounds = ink.rect_union(&cx);
             let visible = ink.clipped_rect_union(&cx);
@@ -76,12 +88,26 @@ fn account_settings_reflow_with_the_pane() {
     assert!(heights[2].0 > heights[1].0 && heights[2].1 > heights[1].1);
     assert_eq!(heights[3], heights[1]);
 
-    banner.set_visible(&mut cx, false);
+    {
+        let mut account = account.borrow_mut::<super::AccountSettings>().unwrap();
+        account.verification_state = matrix_sdk::encryption::VerificationState::Unverified;
+        account.update_verification_banner(&mut cx);
+    }
     let unverified = settings.widget(&cx, ids!(verification_banner_unverified));
-    unverified.set_visible(&mut cx, true);
     draw(&mut cx, &settings, 816.0);
     assert_eq!(
         unverified.area().rect(&cx).size.x,
         recovery.area().rect(&cx).size.x
     );
+    assert!(device_info.text().contains("LOCALDEVICE42"));
+
+    let mut account = account.borrow_mut::<super::AccountSettings>().unwrap();
+    account.verification_state = matrix_sdk::encryption::VerificationState::Unknown;
+    account.update_verification_banner(&mut cx);
+    let section = account.view.widget(&cx, ids!(current_device_section));
+    assert!(section.visible());
+    assert!(device_info.text().contains("LOCALDEVICE42"));
+    account.update_current_device(&mut cx, None);
+    assert!(device_info.text().is_empty());
+    assert!(!section.visible());
 }
