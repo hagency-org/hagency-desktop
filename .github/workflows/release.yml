@@ -31,6 +31,11 @@ on:
       artifact_name:
         type: string
         default: candidate-installers-windows-amd64
+      mac_checks:
+        description: "Where the regression gate and the Apple Silicon Desktop tests run; choose github when the project's own Mac cannot take them"
+        type: choice
+        options: [own-mac, github]
+        default: own-mac
 
 permissions:
   contents: read
@@ -78,12 +83,20 @@ jobs:
           SCOPE: ${{ inputs.platforms || 'macos-arm64-windows' }}
         run: |
           python3 tools/test-release-assets.py
+          python3 tools/test-release-kernel.py
           python3 tools/release-assets.py plan --scope "$SCOPE"
   regression:
     needs: plan
     name: Budget and chat regression gate
-    runs-on: macos-15
+    # The project's own Mac runs the gate's checks four at a time and is done
+    # in about a quarter of the time GitHub's Mac needs for them one by one.
+    # It also does not wait for GitHub to have a Mac free.
+    runs-on: ${{ inputs.mac_checks == 'github' && 'macos-15' || fromJSON('["self-hosted","macOS","ARM64","hagency-mac"]') }}
     timeout-minutes: 120
+    env:
+      # No step reads this. Naming the two secrets makes GitHub mask the
+      # self-hosted machine's name wherever it would appear in this public log.
+      MASKED_IN_LOGS: ${{ secrets.CI_MASK_MACHINE_NAME_A }} ${{ secrets.CI_MASK_MACHINE_NAME_B }}
     steps:
       - uses: actions/checkout@v7
         with:
@@ -96,6 +109,7 @@ jobs:
         with:
           toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
         with:
           cache-on-failure: true
           workspaces: |
@@ -104,16 +118,78 @@ jobs:
             crates/owner-dashboard -> target
             crates/hagency-client -> target
       - run: brew install cmake
-      - run: python3 tools/check-hagency-regressions.py --output .run/release-regressions
+      - name: Run the gate
         env:
           # Fixtures inject SecretStore; tests must never reach a runner's native vault.
           HAGENCY_NATIVE_CREDENTIAL_IO: deny
+          CHECKS_AT_A_TIME: ${{ runner.environment == 'self-hosted' && 4 || 1 }}
+        # The two build jobs this workflow sets are for GitHub's runners; the
+        # project's own Mac builds with every core, as in the main workflow.
+        # A release gives no check a second run: unlike the main workflow,
+        # this one does not pass --second-run.
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then unset CARGO_BUILD_JOBS; fi
+          python3 tools/check-hagency-regressions.py --output .run/release-regressions --jobs "$CHECKS_AT_A_TIME"
       - uses: actions/upload-artifact@v7
         if: always()
         with:
           name: release-regressions
           path: .run/release-regressions
           retention-days: 14
+  # These tests ran inside each installer job, ahead of its build, for a
+  # quarter of an hour. Here they run beside it; nothing is published unless
+  # they pass. The Apple Silicon ones run on the project's own Mac, like the
+  # gate; every installer is still built on a runner of GitHub's.
+  desktop-tests:
+    needs: plan
+    name: Desktop tests (${{ matrix.platform }}-${{ matrix.arch }})
+    runs-on: ${{ (matrix.platform == 'macos' && matrix.arch == 'arm64' && inputs.mac_checks != 'github') && fromJSON('["self-hosted","macOS","ARM64","hagency-mac"]') || matrix.runner }}
+    timeout-minutes: 90
+    env:
+      # As for the gate: masks the self-hosted machine's name in this public log.
+      MASKED_IN_LOGS: ${{ secrets.CI_MASK_MACHINE_NAME_A }} ${{ secrets.CI_MASK_MACHINE_NAME_B }}
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: JIT-line makepad checkout
+        shell: bash
+        working-directory: ${{ github.workspace }}
+        run: if [ -f .jit/sources.sh ]; then bash .jit/sources.sh; fi
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.98.0
+      - name: Linux dependencies
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libssl-dev libsqlite3-dev pkg-config cmake clang libclang-dev \
+            libxcursor-dev libx11-dev libasound2-dev libpulse-dev libwayland-dev \
+            libxkbcommon-dev libdrm-dev libegl1 libva2 libva-drm2
+      - name: macOS dependencies
+        if: runner.os == 'macOS'
+        run: brew install cmake
+      - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
+        with:
+          key: installer-${{ matrix.platform }}-${{ matrix.arch }}
+          cache-on-failure: true
+      - name: Test Desktop
+        env:
+          # Same setting as the main CI workflow: fixtures inject SecretStore and
+          # tests must never reach a runner's native vault.
+          HAGENCY_NATIVE_CREDENTIAL_IO: deny
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then unset CARGO_BUILD_JOBS; fi
+          python3 tools/wechat-ux/check_i18n.py
+          cargo test --locked -p octosense-app-contract --lib
+          cargo test --locked --features agent_chat --lib
   package:
     needs: plan
     name: Installer (${{ matrix.platform }}-${{ matrix.arch }})
@@ -170,30 +246,23 @@ jobs:
       - name: Windows installer tools
         if: runner.os == 'Windows'
         run: choco install nsis --no-progress -y
-      - uses: Swatinem/rust-cache@v2
+      # The Desktop tests are the job "Desktop tests" above; this job holds
+      # the packaging tools and the optimized build, under a cache key of its own.
+      - name: Restore optimized build cache
+        uses: Swatinem/rust-cache@v2
         with:
-          key: installer-${{ matrix.platform }}-${{ matrix.arch }}
+          key: release-${{ matrix.platform }}-${{ matrix.arch }}
           cache-on-failure: true
       - name: Install pinned packaging tools
         run: |
           cargo install cargo-packager --version 0.10.1 --locked
           cargo install robius-packaging-commands --version 0.4.1 --locked
-      - name: Test Desktop before packaging
-        env:
-          # Same setting as the main CI workflow: fixtures inject SecretStore and
-          # tests must never reach a runner's native vault. Set on the test steps
-          # only, so the packaged app started later uses the real store.
-          HAGENCY_NATIVE_CREDENTIAL_IO: deny
-        run: |
-          python3 tools/wechat-ux/check_i18n.py
-          cargo test --locked -p octosense-app-contract --lib
-          cargo test --locked --features agent_chat --lib
-      # The engine test this step ran (device_tier_starts_on_software_adapter) belonged to
-      # the earlier engine line and does not exist on this one, whose device code retries
-      # without video support on a software adapter. Its D3D11 tests live in the engine's
-      # own test target, which cargo cannot run from this workspace. Start-up on this
-      # runner's software adapter is checked by "Install and start the packaged Desktop on
-      # Windows" below, which requires three rendered sign-in frames from the installer.
+      # The engine has no test that this workflow runs for start-up on a software
+      # adapter (device_tier_starts_on_software_adapter belonged to the earlier engine
+      # line; this line's D3D11 tests live in the engine's own test target, which cargo
+      # cannot run from this workspace). Start-up on this runner's software adapter is
+      # checked by "Install and start the packaged Desktop on Windows" below, which
+      # requires three rendered sign-in frames from the installer.
       - uses: actions/setup-python@v6
         with:
           python-version: '3.12'
@@ -201,13 +270,35 @@ jobs:
         run: |
           python3 -m pip install -r tools/release-smoke-requirements.txt
           python3 tools/test-release-image-check.py
-      # Keep optimized dependencies separately: a failed test run can populate
-      # the earlier immutable cache before any release compilation has happened.
-      - name: Restore optimized build cache
-        uses: Swatinem/rust-cache@v2
+      # The pinned Octos kernel takes about 25 minutes to build and is the same
+      # program in every release with the same pin. tools/release-kernel.py
+      # says which runs' kernels are taken. With none, or with one that fails
+      # its checks, packaging builds the kernel from source as before; that is
+      # also what happens when one of these steps fails, so none of them can
+      # fail the job.
+      - name: Look for this Octos kernel from an earlier release run
+        id: kernel
+        continue-on-error: true
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          RUNNER_KIND: ${{ matrix.runner }}
+        run: python3 tools/release-kernel.py find --runner "$RUNNER_KIND"
+      - name: Download the kernel that was found
+        if: steps.kernel.outputs.artifact_id != ''
+        continue-on-error: true
+        uses: actions/download-artifact@v8
         with:
-          key: release-${{ matrix.platform }}-${{ matrix.arch }}
-          cache-on-failure: true
+          artifact-ids: ${{ steps.kernel.outputs.artifact_id }}
+          run-id: ${{ steps.kernel.outputs.run_id }}
+          github-token: ${{ github.token }}
+          path: .run/octos-kernel
+      - name: Check the kernel that was found
+        if: steps.kernel.outputs.artifact_id != ''
+        continue-on-error: true
+        env:
+          RUNNER_KIND: ${{ matrix.runner }}
+          FROM_RUN: ${{ steps.kernel.outputs.run_id }}
+        run: python3 tools/release-kernel.py accept --runner "$RUNNER_KIND" --dir .run/octos-kernel --from-run "$FROM_RUN"
       - name: Import Apple certificate for configured signed releases
         if: runner.os == 'macOS' && vars.MACOS_SIGNED_RELEASE == 'true'
         uses: ./.github/actions/import-apple-cert
@@ -231,6 +322,21 @@ jobs:
         # An absolute output directory avoids cargo-packager 0.10.1 resolving
         # generated scripts twice when it changes the working directory.
         run: cargo packager --manifest-path Cargo.toml --verbose --release --out-dir "$PWD/dist" --formats "$FORMATS"
+      - name: Set aside the Octos kernel this job built
+        id: built_kernel
+        continue-on-error: true
+        env:
+          RUNNER_KIND: ${{ matrix.runner }}
+        run: python3 tools/release-kernel.py keep --runner "$RUNNER_KIND" --out .run/octos-kernel-built
+      - name: Keep that kernel for later release runs
+        if: steps.built_kernel.outputs.name != ''
+        continue-on-error: true
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.built_kernel.outputs.name }}
+          path: .run/octos-kernel-built/*
+          if-no-files-found: error
+          retention-days: 90
       - name: Preserve Windows candidate before installer checks
         if: runner.os == 'Windows'
         run: python3 tools/release-assets.py collect --platform windows --arch amd64
@@ -287,7 +393,7 @@ jobs:
 
   release:
     name: Publish complete release
-    needs: [plan, regression, package]
+    needs: [plan, regression, desktop-tests, package]
     if: startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish)
     runs-on: ubuntu-24.04
     timeout-minutes: 15

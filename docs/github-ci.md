@@ -24,8 +24,9 @@ Windows amd64 on main/PR. Mobile compilation remains manual-only. Build summary
 output is informational; protect main using the actual build/test jobs.
 
 `release.yml` runs on `v*` tags or manual dispatch using Rust 1.98.0 and pinned
-cargo-packager 0.10.1 / robius-packaging-commands 0.4.1. Each platform runs library
-tests, then packages the app with its existing resource and Octos runtime hooks:
+cargo-packager 0.10.1 / robius-packaging-commands 0.4.1. Each platform packages the
+app with its existing resource and Octos runtime hooks, while a job beside it runs
+that platform's Desktop tests:
 
 | Platform | Architecture | Artifact |
 |---|---|---|
@@ -36,6 +37,24 @@ tests, then packages the app with its existing resource and Octos runtime hooks:
 Resource hosting ships inside the Desktop package: on macOS the owner daemon
 runs from the Desktop binary and is managed from Agent → Hosting (Client
 ADR-192). There is no separate Hosting installer or workflow input.
+
+The regression gate runs on the project's own Mac, four checks at a time and
+without the second run the main workflow gives a failed check. The Apple
+Silicon Desktop tests run there too. When that Mac cannot take them, dispatch
+with `mac_checks=github`: GitHub's Mac runs the gate's checks one after
+another and takes about an hour longer, when GitHub has a Mac free. Every
+installer is built on a runner of GitHub's.
+
+An installer job does not build the pinned Octos kernel again when an earlier
+release run has kept it. `tools/release-kernel.py` names a kept kernel after
+the pinned revision, the build command, the target, the compiler and the kind
+of runner, and takes one only from a run of `release.yml` in this repository
+that was started by hand or by a version tag, on `main` or on the ref of the
+current run. An artifact uploaded by a pull request is never taken. The file
+is checked against the checksum in its record and must report the pinned
+revision; otherwise, and whenever none is found, the job builds the kernel
+from source and keeps it for 90 days. Each `build-<platform>-<arch>.json`
+names the kernel's checksum and the run that compiled it.
 
 Manual runs upload Actions artifacts only by default (14-day retention).
 An explicit `publish=true` dispatch builds and verifies every installer first,
