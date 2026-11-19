@@ -83,7 +83,8 @@ jobs:
       # depends on which of them ran first.
       - name: Library tests, several test programs at a time
         run: >-
-          python3 ../../tools/parallel-tests.py --split hagency_matrix --
+          python3 ../../tools/parallel-tests.py --split hagency_matrix,hagency
+          --first _process_writer_root::is_selected_before_any_other_test --
           --locked --workspace --all-targets --
           --skip native_codex_real_app_server --skip native_two_agent_qualification_records_its_evidence
           ---

@@ -301,6 +301,11 @@ impl ServerManagementJournal {
                         }
                         Job::Shutdown(reply) => {
                             drop(database);
+                            // Close the channel before the acknowledgement,
+                            // not after it when this thread ends: whoever
+                            // holds the acknowledgement must find the journal
+                            // no longer live.
+                            rx.close();
                             let _ = reply.send(());
                             return;
                         }
