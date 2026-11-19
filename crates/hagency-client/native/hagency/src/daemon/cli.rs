@@ -86,27 +86,37 @@ pub enum Command {
     },
     /// Show the running daemon's owner and hosting snapshot.
     Status {
+        #[command(flatten)]
+        account: AccountSelector,
         #[arg(long)]
         home: Option<PathBuf>,
     },
     /// Stop admitting new work; running work finishes.
     Pause {
+        #[command(flatten)]
+        account: AccountSelector,
         #[arg(long)]
         home: Option<PathBuf>,
     },
     /// Resume admission, restarting hosting if it was stopped.
     Resume {
+        #[command(flatten)]
+        account: AccountSelector,
         #[arg(long)]
         home: Option<PathBuf>,
     },
     /// Drain and stop hosting; the daemon stays reachable.
     Stop {
+        #[command(flatten)]
+        account: AccountSelector,
         #[arg(long)]
         home: Option<PathBuf>,
     },
     /// Explicit owner sign-out: revoke native and SDK credentials. The owner
     /// root and its registration are kept.
     SignOut {
+        #[command(flatten)]
+        account: AccountSelector,
         #[arg(long)]
         home: Option<PathBuf>,
     },
@@ -118,6 +128,39 @@ pub enum Command {
     },
     /// Remove the daemon service; its home and enrollment are kept.
     Uninstall,
+}
+
+#[cfg(unix)]
+/// Select the hosting account without relying on the foreground chat session.
+#[derive(clap::Args, Clone, Debug, PartialEq, Eq)]
+pub struct AccountSelector {
+    #[arg(long, requires = "owner")]
+    server: Option<String>,
+    #[arg(long, requires = "server")]
+    owner: Option<String>,
+}
+#[cfg(unix)]
+impl AccountSelector {
+    fn select(&self, base: &std::path::Path) -> Result<std::path::PathBuf, Box<dyn std::error::Error>> {
+        if let (Some(origin), Some(owner)) = (&self.server, &self.owner) {
+            let home = super::accounts::home(base, origin, owner)?;
+            let enrollment = super::enrollment::Enrollment::load(&home)?
+                .ok_or(super::enrollment::EnrollmentError::Missing)?;
+            if enrollment.owner != *owner || !super::same_origin(&enrollment.origin, origin) {
+                return Err(super::enrollment::EnrollmentError::OtherOwner.into());
+            }
+            return Ok(home);
+        }
+        let mut homes = Vec::new();
+        for path in std::iter::once(base.to_owned()).chain(super::accounts::directories(base)?.into_iter().map(|(_, path)| path)) {
+            if super::enrollment::Enrollment::load(&path)?.is_some() { homes.push(path); }
+        }
+        match homes.as_slice() {
+            [] => Ok(base.to_owned()),
+            [home] => Ok(home.clone()),
+            _ => Err("Select a hosting account with --server and --owner".into()),
+        }
+    }
 }
 
 #[cfg(unix)]
@@ -138,7 +181,7 @@ struct Invocation {
 #[cfg(unix)]
 #[derive(clap::Subcommand, Debug)]
 enum Top {
-    /// Per-user owner daemon: hosts the enrolled owner independently of any UI.
+    /// Per-user owner daemon: hosts enrolled accounts independently of any UI.
     Daemon {
         #[command(subcommand)]
         command: Command,
@@ -409,8 +452,8 @@ pub async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 ),
             }
         }
-        Command::Status { home } => {
-            let home = daemon_home(home)?;
+        Command::Status { home, account } => {
+            let home = account.select(&daemon_home(home)?)?;
             match host::probe(&home).await {
                 host::Presence::NotRunning => println!("Hagency owner daemon is not running."),
                 host::Presence::Unsafe => {
@@ -429,20 +472,24 @@ pub async fn run(command: Command) -> Result<(), Box<dyn std::error::Error>> {
                 }
             }
         }
-        Command::Pause { home } => {
-            let reply = call(&daemon_home(home)?, C::PauseHosting).await?;
+        Command::Pause { home, account } => {
+            let home = account.select(&daemon_home(home)?)?;
+            let reply = call(&home, C::PauseHosting).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
         }
-        Command::Resume { home } => {
-            let reply = call(&daemon_home(home)?, C::ResumeHosting).await?;
+        Command::Resume { home, account } => {
+            let home = account.select(&daemon_home(home)?)?;
+            let reply = call(&home, C::ResumeHosting).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
         }
-        Command::Stop { home } => {
-            let reply = call(&daemon_home(home)?, C::StopHosting).await?;
+        Command::Stop { home, account } => {
+            let home = account.select(&daemon_home(home)?)?;
+            let reply = call(&home, C::StopHosting).await?;
             println!("{}", serde_json::to_string_pretty(&reply)?);
         }
-        Command::SignOut { home } => {
-            host::sign_out(&daemon_home(home)?).await?;
+        Command::SignOut { home, account } => {
+            let home = account.select(&daemon_home(home)?)?;
+            host::sign_out(&home).await?;
             println!("Owner signed out of the Hagency owner daemon. Its owner root is kept.");
         }
         Command::Install { home } => {
@@ -560,6 +607,34 @@ mod tests {
     }
 
     #[test]
+    fn account_selection_preserves_legacy_enrollments_and_rejects_ambiguous_commands() {
+        use super::super::{accounts, enrollment::Enrollment};
+        let temp = tempfile::tempdir().unwrap();
+        let base = temp.path().join("daemon");
+        hagency_store::private::directory(&base).unwrap();
+        let owner = "@admin:one.test";
+        let first = "https://one.test/";
+        let second = "https://two.test/";
+        Enrollment::enroll(&base, first, owner, None, &temp.path().join("one")).unwrap();
+        let automatic = AccountSelector { server: None, owner: None };
+        assert_eq!(automatic.select(&base).unwrap(), base);
+        // Even identical Matrix IDs must be routed by homeserver origin.
+        let other = accounts::home(&base, second, owner).unwrap();
+        accounts::provision(&base, &other).unwrap();
+        Enrollment::enroll(&other, second, owner, None, &temp.path().join("two")).unwrap();
+        assert!(automatic.select(&base).is_err());
+        let explicit = |server: &str| AccountSelector {
+            server: Some(server.into()), owner: Some(owner.into()),
+        };
+        assert_eq!(explicit("HTTPS://ONE.TEST").select(&base).unwrap(), base);
+        assert_eq!(explicit(second).select(&base).unwrap(), other);
+        assert!(explicit("https://typo.test").select(&base).is_err());
+        assert!(!accounts::accepts(&other, first, owner));
+        assert!(!accounts::accepts(&other, second, "@other:one.test"));
+        assert!(!accounts::accepts(&base, second, owner));
+    }
+
+    #[test]
     fn subcommands_parse_and_handover_commands_are_gone() {
         assert_eq!(
             parse(&["x", "daemon", "run", "--home", "/tmp/h"]).unwrap(),
@@ -570,6 +645,7 @@ mod tests {
         for args in [
             &["x", "daemon", "status"][..],
             &["x", "daemon", "pause"],
+            &["x", "daemon", "sign-out", "--server", "https://two.test", "--owner", "@admin:two.test"],
             &["x", "daemon", "resume"],
             &["x", "daemon", "stop"],
             &["x", "daemon", "sign-out"],
@@ -589,6 +665,7 @@ mod tests {
         }
         for args in [
             &["x", "daemon", "release"][..],
+            &["x", "daemon", "pause", "--owner", "@admin:two.test"],
             &["x", "daemon", "enroll", "--server", "https://s.example/"],
             &["x", "daemon", "enroll", "--owner", "@o:s.example"],
             &[

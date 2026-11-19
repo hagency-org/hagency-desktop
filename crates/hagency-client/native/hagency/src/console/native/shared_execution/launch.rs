@@ -181,7 +181,7 @@ impl Launch {
         };
         // A setting that cannot run stops the launch: the owner may have
         // chosen not to run this pool's Agents on this computer directly.
-        let container = crate::pool_containers::hosted_isolation(&resource.id)
+        let container = crate::pool_containers::hosted_isolation(device.origin(), device.owner_mxid(), &resource.id)
             .map_err(|_| failure(409, "shared_claude_container_invalid"))?;
         Ok(Self::Claude(ClaudeLaunch {
             selection: Arc::new(selected),
