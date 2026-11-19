@@ -1,4 +1,11 @@
 {
+  "Waiting for this room to sync…": "正在等待此房间同步…",
+  "This room hasn’t loaded yet. You can retry or leave this tab open.": "此房间暂未加载。你可以重试，也可以保持此页面打开，等待同步。",
+  "Offline. Waiting for the connection to return.": "当前离线，正在等待连接恢复。",
+  "You are no longer a member of this room.": "你已不再是此房间的成员。",
+  "You have been banned from this room.": "你已被禁止进入此房间。",
+  "The server could not find this room.": "服务器找不到此房间。",
+  "You do not have access to this room.": "你没有访问此房间的权限。",
   "Signed in. Some older chats could not be restored. Their local data has been preserved.": "已登录。部分旧聊天记录无法恢复，原有本地数据已保留。",
   "Could not secure local sign-in storage at {path}. {reason}": "无法为 {path} 设置安全的本地登录存储权限。{reason}",
   "Your quota, period and access list are submitted. Administrator approval makes this pool available without another confirmation.": "额度、周期和可申请名单已提交，管理员批准后即可使用，无需再次确认。",

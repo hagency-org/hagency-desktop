@@ -332,6 +332,38 @@ mod retention_tests {
             return;
         }
         let id: OwnedRoomId = "!waiting:example.org".try_into().unwrap();
+        let root = std::rc::Rc::new(std::cell::RefCell::new(WidgetRef::empty()));
+        let events = root.clone();
+        let mut cx = Cx::new(Box::new(move |cx, event| {
+            events.borrow().handle_event(cx, event, &mut Scope::empty());
+        }));
+        let screen = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, {mod.widgets.RoomScreen {}});
+            let widget = WidgetRef::script_from_value(vm, value);
+            widget.register_as_ui_root(vm);
+            assert!(vm.take_errors().is_empty());
+            *root.borrow_mut() = widget.clone();
+            widget.as_room_screen()
+        });
+        let name = crate::utils::RoomNameId::empty(id.clone());
+        // Restore a saved tab before its room has arrived in sync.
+        screen.set_displayed_room(&mut cx, &name, None);
+        let spinner = screen.view(&cx, ids!(restore_status_spinner));
+        let retry = screen.button(&cx, ids!(restore_retry));
+        assert!(spinner.visible());
+        screen.expire_room_restore(&mut cx);
+        assert!(!spinner.visible());
+        assert!(retry.visible());
+        let stopped = screen.label(&cx, ids!(restore_status_label)).text();
+        assert_eq!(stopped, crate::i18n::tr("This room hasn’t loaded yet. You can retry or leave this tab open."));
+        for _ in 0..3 {
+            screen.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        }
+        assert!(!spinner.visible(), "ordinary sync traffic must not restart the spinner");
+
         // The mock server must outlive the timeline build below.
         let _server = backend_runtime().block_on(async {
             let server = MockServer::start().await;
@@ -346,6 +378,10 @@ mod retention_tests {
                     }
                 }}})))
                 .mount(&server).await;
+            Mock::given(method("GET")).and(path_regex(".*/state/m[.]room[.]create/?$"))
+                .respond_with(ResponseTemplate::new(404).set_body_json(serde_json::json!({
+                    "errcode": "M_NOT_FOUND", "error": "Unknown room"
+                }))).expect(1).mount(&server).await;
             let client = Client::builder().homeserver_url(server.uri())
                 .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_11]).build().await.unwrap();
             client.matrix_auth().restore_session(serde_json::from_value(serde_json::json!({
@@ -361,24 +397,12 @@ mod retention_tests {
             });
             server
         });
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let screen = cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);
-            crate::app::register_widgets(vm);
-            vm.bx.captured_errors = Some(Vec::new());
-            let value = script_eval!(vm, {mod.widgets.RoomScreen {}});
-            let widget = WidgetRef::script_from_value(vm, value);
-            assert!(vm.take_errors().is_empty());
-            widget.as_room_screen()
-        });
-        let name = crate::utils::RoomNameId::empty(id.clone());
-        // First show: no timeline exists yet, so the screen waits for one.
-        screen.set_displayed_room(&mut cx, &name, None);
-        assert!(ALL_JOINED_ROOMS.lock().unwrap().get(&id).unwrap().main_timeline.is_none());
-        // The backend builds the timeline the screen asked for.
+        let actions = cx.capture_actions(|cx| cx.action(AppStateAction::RoomLoadedSuccessfully {
+            room_name_id: name, is_invite: false,
+        }));
+        screen.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::empty());
         backend_runtime().block_on(ensure_main_timeline(&id)).unwrap();
-        // The next UI signal makes the waiting screen retry.
-        screen.set_displayed_room(&mut cx, &name, None);
+        cx.handle_action_receiver(); // Delivers the backend’s actual TimelineEndpointsRecreated.
         {
             let rooms = ALL_JOINED_ROOMS.lock().unwrap();
             let details = rooms.get(&id).unwrap().main_timeline.as_ref()
@@ -389,6 +413,23 @@ mod retention_tests {
         // A screen that moves on to another conversation still releases the one it showed.
         screen.hide_displayed_room(&mut cx);
         assert!(ALL_JOINED_ROOMS.lock().unwrap().get(&id).unwrap().main_timeline.is_none(), "hiding must still retire the timeline");
+        let missing = crate::utils::RoomNameId::empty("!missing:example.org".try_into().unwrap());
+        screen.set_displayed_room(&mut cx, &missing, None);
+        assert!(spinner.visible());
+        let label = screen.label(&cx, ids!(restore_status_label));
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        while spinner.visible() && std::time::Instant::now() < deadline {
+            cx.handle_action_receiver();
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        for _ in 0..3 {
+            screen.handle_event(&mut cx, &Event::Signal, &mut Scope::empty());
+        }
+        assert!(!spinner.visible());
+        assert_eq!(label.text(), crate::i18n::tr("The server could not find this room."));
+        assert!(!retry.visible());
+        assert!(screen.button(&cx, ids!(restore_close)).visible());
+        screen.hide_displayed_room(&mut cx);
         ALL_JOINED_ROOMS.lock().unwrap().clear();
         test_set_current_client(None);
     }

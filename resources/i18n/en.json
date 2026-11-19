@@ -1,4 +1,11 @@
 {
+  "Waiting for this room to sync…": "Waiting for this room to sync…",
+  "This room hasn’t loaded yet. You can retry or leave this tab open.": "This room hasn’t loaded yet. You can retry or leave this tab open.",
+  "Offline. Waiting for the connection to return.": "Offline. Waiting for the connection to return.",
+  "You are no longer a member of this room.": "You are no longer a member of this room.",
+  "You have been banned from this room.": "You have been banned from this room.",
+  "The server could not find this room.": "The server could not find this room.",
+  "You do not have access to this room.": "You do not have access to this room.",
   "Signed in. Some older chats could not be restored. Their local data has been preserved.": "Signed in. Some older chats could not be restored. Their local data has been preserved.",
   "Could not secure local sign-in storage at {path}. {reason}": "Could not secure local sign-in storage at {path}. {reason}",
   "Tool": "Tool",

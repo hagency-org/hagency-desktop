@@ -1094,6 +1094,7 @@ impl RoomsList {
                     // drop all of its saved UI state, including its thread timelines.
                     if matches!(new_state, RoomState::Left | RoomState::Banned) {
                         invalidate_entire_room_timeline_states(cx, &room_id);
+                        cx.action(super::room_screen::RoomMembershipLost(room_id.clone(), new_state));
                     }
 
                     self.update_status();
