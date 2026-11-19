@@ -16,7 +16,7 @@ import tempfile
 GATE = Path(__file__).resolve().parent / "check-hagency-regressions.py"
 
 STAND_IN = '''#!{python}
-import json, os, random, sys, time
+import hashlib, json, os, random, sys, time
 args = sys.argv[1:]
 name = os.path.basename(sys.argv[0])
 line = " ".join(args)
@@ -24,6 +24,14 @@ start = time.time()
 slow = any(part in line for part in os.environ.get("STAND_IN_SLOW", "").split("|") if part)
 time.sleep(1.5 if slow else 0.01 * (1 + random.random()))
 code = 1 if any(part in line for part in os.environ.get("STAND_IN_FAIL", "").split("|") if part) else 0
+# A test that fails every time, and one that fails the first time the command runs.
+test_fails = any(part in line for part in os.environ.get("STAND_IN_FAIL_TESTS", "").split("|") if part)
+if any(part in line for part in os.environ.get("STAND_IN_FAIL_ONCE", "").split("|") if part):
+    marker = os.path.join(os.environ["STAND_IN_ONCE"], hashlib.sha1(line.encode()).hexdigest())
+    test_fails = test_fails or not os.path.exists(marker)
+    open(marker, "w").close()
+if test_fails:
+    code = 101
 if name == "cargo":
     if "--message-format=json" in args:
         for target in ("hagency-managed-runtime-probe", "hagency-runtime-probe"):
@@ -32,7 +40,10 @@ if name == "cargo":
             print(json.dumps({{"reason": "compiler-artifact", "target": {{"name": target}}, "executable": path}}))
     # As Cargo writes it with CARGO_TERM_COLOR=always, which CI sets.
     print("\\x1b[1m\\x1b[32m    Finished\\x1b[0m `test` profile [unoptimized + debuginfo] target(s) in 1m 02s")
-    if "test" in args and code == 0:
+    if "test" in args and test_fails:
+        print("test stand_in::misses_its_limit ... FAILED")
+        print("test result: FAILED. 2 passed; 1 failed; 0 ignored")
+    elif "test" in args and code == 0:
         print("test result: ok. 3 passed; 0 failed; 0 ignored")
 with open(os.environ["STAND_IN_TRACE"], "a") as stream:
     stream.write(json.dumps({{"program": name, "args": args, "cwd": os.getcwd(), "start": start, "end": time.time(),
@@ -59,14 +70,17 @@ class Fixture:
         self.output = root / "output"
         self.runs = 0
 
-    def run(self, *options, fail="", slow="", fresh=True, jobs_from_environment=None):
+    def run(self, *options, fail="", slow="", fresh=True, jobs_from_environment=None, fail_once="", fail_tests=""):
         if fresh:
             shutil.rmtree(self.output, ignore_errors=True)
         self.runs += 1
         trace = self.root / f"trace-{self.runs}"
+        once = self.root / f"once-{self.runs}"
+        once.mkdir()
         env = dict(os.environ, PATH=f"{self.root / 'bin'}{os.pathsep}{os.environ.get('PATH', '')}",
                    STAND_IN_TRACE=str(trace), STAND_IN_BUILT=str(self.root / "built"), STAND_IN_FAIL=fail,
-                   STAND_IN_SLOW=slow)
+                   STAND_IN_SLOW=slow, STAND_IN_FAIL_ONCE=fail_once, STAND_IN_FAIL_TESTS=fail_tests,
+                   STAND_IN_ONCE=str(once))
         env.pop("HAGENCY_REGRESSION_JOBS", None)
         env.pop("CARGO_TARGET_DIR", None)
         if jobs_from_environment:
@@ -219,6 +233,52 @@ def main():
         expect("no check listed after a failed probe build runs",
                "native-context-probe.log; no release" in done.stderr
                and not any(place[command(r)] > probe for r in ran), done.stderr[-300:])
+
+        tests = "hagency::run_controls::tests"
+        named = "agent-run-cards (stand_in::misses_its_limit)"
+
+        def times_run(ran):
+            return len([r for r in ran if tests in " ".join(r["args"])])
+
+        done, ran, report = fixture.run("--second-run", fail_once=tests)
+        row = next((row for row in report if row["check"] == "agent-run-cards"), {})
+        expect("with --second-run, a check whose tests failed once runs once more and passes",
+               done.returncode == 0 and times_run(ran) == 2 and len(ran) == len(every) + 1
+               and [row["check"] for row in report] == every and all(row["passed"] for row in report),
+               (done.returncode, times_run(ran), done.stderr[-300:]))
+        expect("the report, the output and a warning name the check and the test that had failed",
+               row.get("failed_first") == ["stand_in::misses_its_limit"]
+               and f"Passed only on a second run: {named}" in done.stdout
+               and "::warning title=Passed only on a second run::agent-run-cards: stand_in::misses_its_limit" in done.stdout
+               and "FAILED" in (output / "agent-run-cards.first.log").read_text()
+               and "test result: ok" in (output / "agent-run-cards.log").read_text(), row)
+        expect("no other row tells of a second run",
+               all("failed_first" not in other for other in report if other["check"] != "agent-run-cards"))
+
+        done, ran, report = fixture.run("--jobs", "6", "--second-run", fail_once=tests)
+        expect("six at a time, the same: one command more, the order rules hold",
+               done.returncode == 0 and times_run(ran) == 2 and len(ran) == len(every) + 1
+               and sorted(set(commands(ran))) == serial and f"Passed only on a second run: {named}" in done.stdout
+               and not order_faults(ran, output, listed), (done.returncode, times_run(ran), order_faults(ran, output, listed)[:3]))
+
+        done, ran, report = fixture.run(fail_once=tests)
+        expect("without --second-run the same failure ends the list, as in a release",
+               done.returncode != 0 and times_run(ran) == 1 and len(ran) == len(report)
+               and "agent-run-cards.log; no release until this check passes" in done.stderr
+               and "failed_first" not in report[-1], (done.returncode, times_run(ran)))
+
+        done, ran, report = fixture.run("--second-run", fail_tests=tests)
+        expect("a check whose tests fail twice fails after its second run, and is not named as passed",
+               done.returncode != 0 and times_run(ran) == 2
+               and report[-1] == dict(report[-1], check="agent-run-cards", passed=False,
+                                      failed_first=["stand_in::misses_its_limit"])
+               and "agent-run-cards.log; no release until this check passes" in done.stderr
+               and "Passed only on a second run" not in done.stdout, (done.returncode, times_run(ran)))
+
+        done, ran, report = fixture.run("--second-run", fail=tests)
+        expect("a check that failed without a failed test, as a build does, does not run again",
+               done.returncode != 0 and times_run(ran) == 1 and "failed_first" not in report[-1],
+               (done.returncode, times_run(ran)))
 
         done, ran, report = fixture.run("--jobs", "0")
         expect("--jobs 0 is refused", done.returncode == 2 and not ran)

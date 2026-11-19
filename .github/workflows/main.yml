@@ -130,12 +130,16 @@ jobs:
       - run: cargo test --locked --features agent_chat,octosense-module --lib
       - name: Check how the regression gate runs its checks
         run: python3 tools/test-hagency-regressions-runner.py
+      - name: Check how the library tests run a failed process once more
+        run: python3 tools/test-parallel-tests.py
       - name: Budget and chat regression gate
         # Four checks at a time on the project's own Mac, which runs the
-        # library job beside this one; one after another on GitHub's.
+        # library job beside this one; one after another on GitHub's. A check
+        # whose tests failed runs once more and is named when only that run
+        # passed. The release workflow gives no second run.
         run: >-
           python3 tools/check-hagency-regressions.py --output .run/ci-regressions
-          --jobs ${{ runner.environment == 'self-hosted' && 4 || 1 }}
+          --jobs ${{ runner.environment == 'self-hosted' && 4 || 1 }} --second-run
       - run: cargo build --locked --features agent_chat
       - run: cargo check --locked --no-default-features --features agent_chat
       - run: python3 tools/wechat-ux/check_i18n.py

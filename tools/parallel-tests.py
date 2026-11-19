@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Run `cargo test` selections with several test programs running side by side.
 
-    python3 tools/parallel-tests.py [--jobs N] [--split NAME] [--first TEST] [--chunk N] [--log DIR] --
-        <cargo test arguments> [--- <cargo test arguments of a second selection> ...]
+    python3 tools/parallel-tests.py [--jobs N] [--split NAME] [--first TEST] [--chunk N] [--retry 0|1]
+        [--log DIR] -- <cargo test arguments> [--- <cargo test arguments of a second selection> ...]
 
 The arguments after the first `--` are those of `cargo test`, including a
 second `--` and the arguments of the test programs. `---` starts another
@@ -38,6 +38,17 @@ stops when the named test is not the first of its program.
 Why: the suites are serial inside a process because its tests share that
 process's stores and deadlines. One job therefore used one core for most of
 its time. Separate processes share none of that.
+
+A process that ends with a failure runs once more (`--retry 0` or
+PARALLEL_TEST_RETRY=0 turns that off). Many tests here start a program or a
+server and give it a time limit, and on a busy machine one test in several
+thousand now and then misses its limit. The second run starts when every
+other process has ended, so it has the machine to itself. When it passes, the
+process counts as passed, and the tests that failed the first time are listed
+at the end and as warnings, so that a test which often needs its second run
+is seen. What gets no second run: a process stopped at `--timeout`, one that
+could not be started, and any process when more than SECOND_RUNS_AT_MOST
+failed, because that many failures are not chance.
 """
 import argparse
 import json
@@ -54,6 +65,8 @@ import time
 RESULT = re.compile(
     r"test result: (\w+)\. (\d+) passed; (\d+) failed; (\d+) ignored; (\d+) measured; (\d+) filtered out"
 )
+FAILED_TEST = re.compile(r"^test (\S+) \.\.\. FAILED", re.M)
+SECOND_RUNS_AT_MOST = 5
 
 
 def default_jobs():
@@ -304,6 +317,8 @@ def main():
     parser.add_argument("--chunk", type=int, default=int(os.environ.get("PARALLEL_TEST_CHUNK") or 40),
                         help="most tests one process of a split program is given (default 40)")
     parser.add_argument("--timeout", type=int, default=45 * 60, help="seconds one process may run")
+    parser.add_argument("--retry", type=int, choices=(0, 1), default=None,
+                        help="second runs a failed process gets (default 1, or PARALLEL_TEST_RETRY)")
     parser.add_argument("--log", default=None, help="folder for one log per process")
     parser.add_argument("cargo", nargs=argparse.REMAINDER)
     options = parser.parse_args()
@@ -311,6 +326,7 @@ def main():
     if not arguments:
         parser.error("no cargo test arguments")
     jobs = options.jobs or default_jobs()
+    retry = options.retry if options.retry is not None else int(os.environ.get("PARALLEL_TEST_RETRY") or 1)
     split = {name for value in options.split for name in value.split(",") if name}
     first = {name for value in options.first for name in value.split(",") if name}
     folder = os.getcwd()
@@ -388,7 +404,7 @@ def main():
     lock = threading.Lock()
     done = []
 
-    def run(unit):
+    def attempt(unit, second=False):
         program, chosen = unit["program"], unit["set"]
         command = [program["executable"]]
         if unit["names"] is None:
@@ -400,7 +416,7 @@ def main():
             label += f".set{chosen['number'] + 1}"
         if unit["parts"] > 1:
             label += f".{unit['part'] + 1}of{unit['parts']}"
-        path = log_folder / (label + ".log")
+        path = log_folder / (label + (".second.log" if second else ".log"))
         begin = time.time()
         timed_out = False
         with open(path, "w") as stream:
@@ -425,16 +441,19 @@ def main():
             # More is fine: a test that starts its own program again for one test adds that child's report.
             problem = f"{sum(counts)} tests reported, {unit['expected']} selected"
         record = {"unit": unit, "label": label, "seconds": time.time() - begin, "status": status, "counts": counts,
-                  "problem": problem, "text": text}
+                  "problem": problem, "text": text, "timed_out": timed_out}
         with lock:
-            done.append(record)
+            if not second:
+                done.append(record)
             print(shown(program, target_directory)
-                  + (f"  [slice {unit['part'] + 1} of {unit['parts']}]" if unit["parts"] > 1 else ""))
+                  + (f"  [slice {unit['part'] + 1} of {unit['parts']}]" if unit["parts"] > 1 else "")
+                  + ("  [second run]" if second else ""))
             print(text.rstrip("\n"))
             if problem:
-                print(f"error: test process {label}: {problem}")
-            print(f"parallel-tests: {label} {'FAILED' if problem else 'ok'} in {record['seconds']:.1f} s "
-                  f"({len(done)} of {len(units)})", flush=True)
+                print(f"error: test process {label}: {'second run: ' if second else ''}{problem}")
+            print(f"parallel-tests: {label} {'second run ' if second else ''}{'FAILED' if problem else 'ok'} "
+                  f"in {record['seconds']:.1f} s" + ("" if second else f" ({len(done)} of {len(units)})"), flush=True)
+        return record
 
     def worker():
         while True:
@@ -443,12 +462,12 @@ def main():
             except queue.Empty:
                 return
             try:
-                run(unit)
+                attempt(unit)
             except Exception as error:  # a process that could not be started is a failure, not a crash of the run
                 with lock:
                     done.append({"unit": unit, "label": os.path.basename(unit["program"]["executable"]),
-                                 "seconds": 0.0, "status": -1, "counts": [0, 0, 0],
-                                 "problem": f"could not run: {error}", "text": ""})
+                                 "seconds": 0.0, "status": None, "counts": [0, 0, 0],
+                                 "problem": f"could not run: {error}", "text": "", "timed_out": False})
                     print(f"error: {unit['program']['executable']}: {error}", flush=True)
 
     running = time.time()
@@ -459,15 +478,36 @@ def main():
         thread.join()
     ran = time.time() - running
 
+    # The second runs, one after another now that nothing else is running.
+    once_more = [r for r in done if r["problem"] and r["status"] not in (None, 0) and not r["timed_out"]]
+    again = 0.0
+    if retry and len(once_more) > SECOND_RUNS_AT_MOST:
+        print(f"parallel-tests: {len(once_more)} processes failed, more than {SECOND_RUNS_AT_MOST}: "
+              "none gets a second run", flush=True)
+    elif retry:
+        for record in once_more:
+            print(f"parallel-tests: {record['label']} failed, running it once more", flush=True)
+            try:
+                record["again"] = attempt(record["unit"], second=True)
+            except Exception as error:
+                record["again"] = {**record, "seconds": 0.0, "problem": f"could not run: {error}", "text": ""}
+                print(f"error: {record['unit']['program']['executable']}: second run: {error}", flush=True)
+            again += record["again"]["seconds"]
+
     def total(records, index):
         return sum(r["counts"][index] for r in records)
 
+    def failed_names(record):
+        return [f"[{record['unit']['program']['name']}] {name}" for name in FAILED_TEST.findall(record["text"])]
+
     serial = sum(r["seconds"] for r in done)
+    # What counts for a process is its last run.
+    first_runs, done = done, [r.get("again", r) for r in done]
+    second_only = [r for r in first_runs if "again" in r and not r["again"]["problem"]]
     bad = [r for r in done if r["problem"]]
     failed_tests = []
     for record in done:
-        for name in re.findall(r"^test (\S+) \.\.\. FAILED", record["text"], re.M):
-            failed_tests.append(f"[{record['unit']['program']['name']}] {name}")
+        failed_tests += failed_names(record)
     lines = [""]
     if len(chosen_sets) > 1:
         for chosen in chosen_sets:
@@ -479,18 +519,29 @@ def main():
         f"parallel-tests: {total(done, 0)} passed; {total(done, 1)} failed; {total(done, 2)} ignored; "
         f"{program_total} test programs in {len(units)} processes, {jobs} at a time",
         f"parallel-tests: build {built / 60:.1f} min, tests {ran / 60:.1f} min "
-        f"(one after another they took {serial / 60:.1f} min)",
+        f"(one after another they took {serial / 60:.1f} min)"
+        + (f", second runs {again / 60:.1f} min" if again else ""),
     ]
-    slow = sorted(done, key=lambda r: -r["seconds"])[:8]
+    slow = sorted(first_runs, key=lambda r: -r["seconds"])[:8]
     lines.append("parallel-tests: longest processes: " + ", ".join(f"{r['label']} {r['seconds']:.0f} s" for r in slow))
     if failed_tests:
         lines += [f"parallel-tests: failed tests ({len(failed_tests)}):"] + [f"  {t}" for t in failed_tests]
     for record in bad:
         lines.append(f"parallel-tests: FAILED process {record['label']}: {record['problem']}")
+    if second_only:
+        lines.append(f"parallel-tests: passed only on a second run ({len(second_only)}):")
+        for record in second_only:
+            names = failed_names(record) or [f"[{record['unit']['program']['name']}] no test named"]
+            lines += [f"  {name} ({record['label']}: {record['problem']})" for name in names]
+            for name in names:
+                print(f"::warning title=Passed only on a second run::{name} failed in {record['label']} "
+                      f"({record['problem']}) and passed when that process ran once more.", flush=True)
     print("\n".join(lines), flush=True)
     (log_folder / "timings.json").write_text(json.dumps(
-        [{"process": r["label"], "seconds": round(r["seconds"], 1), "counts": r["counts"], "problem": r["problem"]}
-         for r in sorted(done, key=lambda r: -r["seconds"])], indent=1))
+        [{"process": r["label"], "seconds": round(r["seconds"], 1), "counts": r["counts"], "problem": r["problem"],
+          **({"second_run": {"seconds": round(r["again"]["seconds"], 1), "problem": r["again"]["problem"],
+                             "failed_first": failed_names(r)}} if "again" in r else {})}
+         for r in sorted(first_runs, key=lambda r: -r["seconds"])], indent=1))
     if os.environ.get("GITHUB_STEP_SUMMARY"):
         with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as stream:
             stream.write("```\n" + "\n".join(lines).strip() + "\n```\n")

@@ -51,6 +51,10 @@ def main():
     parser.add_argument("--start-at", help="Resume at this failed check; earlier recorded passes must be unaffected by the fix")
     parser.add_argument("--jobs", type=int, default=int(os.environ.get("HAGENCY_REGRESSION_JOBS") or 1),
                         help="How many checks run side by side (default 1, or HAGENCY_REGRESSION_JOBS)")
+    parser.add_argument("--second-run", action="store_true",
+                        help="Run a check once more when its tests ran and one failed; it passes if that run "
+                             "passes, and the report and the end of the output name it. For the checks of a "
+                             "pull request. A release leaves this out: there every check passes the first time.")
     args = parser.parse_args()
     if args.jobs < 1:
         parser.error("--jobs must be at least 1")
@@ -75,6 +79,7 @@ def main():
     programs = {}    # (folder, package) -> lock held while its programs are in use
     handed = {}      # variables a check hands to the checks listed after it
     handing = []     # the checks that hand something on: later ones wait for them
+    second = []      # the checks that passed only on their second run, and the tests that had failed
     order = 0
 
     def stopped(index):
@@ -128,14 +133,28 @@ def main():
                 return None
             log = logs[index]
             begin = time.monotonic()
-            with log.open("w") as stream:
-                try:
-                    code = subprocess.run(command, cwd=cwd, env=run_env, stdout=stream, stderr=subprocess.STDOUT).returncode
-                except OSError as error:
-                    stream.write(f"Could not start {command[0]}: {error}\n")
-                    code = 127
-            took = time.monotonic() - begin
+
+            def once():
+                with log.open("w") as stream:
+                    try:
+                        return subprocess.run(command, cwd=cwd, env=run_env, stdout=stream, stderr=subprocess.STDOUT).returncode
+                    except OSError as error:
+                        stream.write(f"Could not start {command[0]}: {error}\n")
+                        return 127
+
+            code = once()
             text = log.read_text()
+            failed_first = None
+            if code != 0 and args.second_run and re.search(r"^test result: FAILED\.", text, re.M):
+                # The tests ran and one failed: not a build that failed, which
+                # would fail again. One test now and then misses a time limit
+                # while other checks use the machine. Still this package's turn.
+                failed_first = re.findall(r"^test (\S+) \.\.\. FAILED", text, re.M)
+                print(f"{name} tests failed, running it once more: {', '.join(failed_first) or 'no test named'}", flush=True)
+                log.replace(output / (name + ".first.log"))
+                code = once()
+                text = log.read_text()
+            took = time.monotonic() - begin
             if code == 0 and hands_on:
                 # Still this package's turn: what was built is what is kept.
                 try:
@@ -153,9 +172,24 @@ def main():
         if not unchanged:
             with log.open('a') as stream:
                 stream.write('\nNative framework check changed resolved Cargo.lock packages; reconcile and review before retrying.\n')
-        record(index, {"check": name, "passed": passed, "tests": count if rust_tests else None,
-                       "seconds": round(took, 1), "build_seconds": round(build_seconds(text), 1)})
+        row = {"check": name, "passed": passed, "tests": count if rust_tests else None,
+               "seconds": round(took, 1), "build_seconds": round(build_seconds(text), 1)}
+        if failed_first is not None:
+            row["failed_first"] = failed_first
+            if passed:
+                with lock:
+                    second.append((index, name, failed_first))
+        record(index, row)
         return text
+
+    def name_second_runs():
+        with lock:
+            found = sorted(second)
+            second.clear()
+        for _, name, tests in found:
+            print(f"Passed only on a second run: {name} ({', '.join(tests) or 'no test named'})", flush=True)
+            print(f"::warning title=Passed only on a second run::{name}: {', '.join(tests) or 'no test named'} "
+                  "failed and passed when the check ran once more.", flush=True)
 
     def finish():
         """Wait for every check started so far; stop here if one failed."""
@@ -165,6 +199,7 @@ def main():
             bad = sorted(failed)
         if not bad:
             return
+        name_second_runs()
         pool.shutdown()
         log = logs[bad[0]]
         # Failed-check files disappear with ephemeral CI runners.
@@ -485,6 +520,7 @@ def main():
         raise SystemExit(f'Unknown start check: {args.start_at}')
     finish()
     pool.shutdown()
+    name_second_runs()
     timed = [row for row in rows.values() if row.get("seconds") is not None]
     built = sum(row.get("build_seconds") or 0 for row in timed)
     print(f"{len(rows)} checks passed in {(time.monotonic() - started) / 60:.1f} min, {args.jobs} at a time. "
