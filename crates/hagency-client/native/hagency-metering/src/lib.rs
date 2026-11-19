@@ -4,6 +4,7 @@
 pub mod attribution;
 pub mod claude_usage;
 pub mod dashboard;
+pub mod daemon_endpoint;
 mod json;
 pub mod observation;
 pub mod octos_usage;

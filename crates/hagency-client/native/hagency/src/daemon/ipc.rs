@@ -79,14 +79,24 @@ pub struct Server {
     path: PathBuf,
 }
 
+type Lookup<R> = Arc<dyn Fn(&str) -> Option<Arc<Controller<R>>> + Send + Sync>;
+
 impl Server {
     pub fn start<R: Runtime>(
         home: &Path,
         controller: Arc<Controller<R>>,
     ) -> Result<Self, IpcError> {
+        Self::start_routed(home, controller, Arc::new(|_| None))
+    }
+
+    pub(super) fn start_routed<R: Runtime>(
+        home: &Path,
+        controller: Arc<Controller<R>>,
+        lookup: Lookup<R>,
+    ) -> Result<Self, IpcError> {
         let listener = bind(home)?;
         Ok(Self {
-            task: Some(tokio::spawn(serve(listener, controller, effective_uid()))),
+            task: Some(tokio::spawn(serve(listener, controller, effective_uid(), lookup))),
             path: home.join(SOCKET),
         })
     }
@@ -112,6 +122,7 @@ pub(crate) async fn serve<R: Runtime>(
     listener: UnixListener,
     controller: Arc<Controller<R>>,
     expected_uid: u32,
+    lookup: Lookup<R>,
 ) {
     let permits = Arc::new(tokio::sync::Semaphore::new(MAX_CONNECTIONS));
     let mut connections = tokio::task::JoinSet::new();
@@ -139,9 +150,10 @@ pub(crate) async fn serve<R: Runtime>(
             continue;
         };
         let controller = controller.clone();
+        let lookup = lookup.clone();
         connections.spawn(async move {
             let _permit = permit;
-            connection(stream, controller).await;
+            connection(stream, controller, lookup).await;
         });
     }
 }
@@ -157,7 +169,7 @@ async fn refuse(
         .map_err(|_| FrameError::Closed)?
 }
 
-async fn connection<R: Runtime>(mut stream: UnixStream, controller: Arc<Controller<R>>) {
+async fn connection<R: Runtime>(mut stream: UnixStream, controller: Arc<Controller<R>>, lookup: Lookup<R>) {
     for _ in 0..MAX_REQUESTS_PER_CONNECTION {
         let payload = match tokio::time::timeout(IDLE_TIMEOUT, read_frame(&mut stream)).await {
             Ok(Ok(payload)) => payload,
@@ -170,7 +182,13 @@ async fn connection<R: Runtime>(mut stream: UnixStream, controller: Arc<Controll
         // The command future runs to completion even if this peer leaves:
         // a mutation is never cancelled by a controller closing.
         let reply = match decode_request(&payload) {
-            Ok(request) => controller.handle(request).await,
+            Ok(request) => match request.account_scope.as_deref() {
+                None => controller.handle(request).await,
+                Some(scope) => match lookup(scope) {
+                    Some(account) => account.handle(request).await,
+                    None => Reply::err(&request.request_id, 0, errors::OWNER_NOT_ADOPTED),
+                },
+            },
             Err((id, error)) => Reply::err(&id, controller.revision(), error),
         };
         let Ok(mut bytes) = serde_json::to_vec(&reply) else {
@@ -191,6 +209,7 @@ async fn connection<R: Runtime>(mut stream: UnixStream, controller: Arc<Controll
 /// Controller-side connector. Holds one private connection.
 pub struct DaemonClient {
     stream: UnixStream,
+    scope: Option<String>,
 }
 
 pub use super::new_request_id;
@@ -198,6 +217,7 @@ pub use super::new_request_id;
 impl DaemonClient {
     pub async fn connect(home: &Path) -> Result<Self, IpcError> {
         use std::os::unix::fs::{FileTypeExt, MetadataExt};
+        let (home, scope) = hagency_metering::daemon_endpoint::endpoint(home);
         let uid = effective_uid();
         let dir = std::fs::symlink_metadata(home).map_err(|_| IpcError::Unavailable)?;
         if !dir.is_dir() || dir.uid() != uid || dir.mode() & 0o077 != 0 {
@@ -219,13 +239,15 @@ impl DaemonClient {
         {
             return Err(IpcError::PeerRejected);
         }
-        Ok(Self { stream })
+        Ok(Self { stream, scope: scope.map(str::to_owned) })
     }
 
     /// Send one request and await its reply. A transport failure after the
     /// request was written is `Uncertain`: retry with the same request ID.
     pub async fn call(&mut self, request: &Request) -> Result<Reply, IpcError> {
-        let bytes = serde_json::to_vec(request).map_err(|_| IpcError::Protocol)?;
+        let mut routed = request.clone();
+        routed.account_scope.clone_from(&self.scope);
+        let bytes = serde_json::to_vec(&routed).map_err(|_| IpcError::Protocol)?;
         if bytes.len() > protocol::MAX_FRAME {
             return Err(IpcError::Protocol);
         }
@@ -304,6 +326,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn pausing_one_account_keeps_another_running_on_the_same_socket() {
+        use super::super::accounts;
+        use std::sync::atomic::Ordering;
+        let base = private_dir();
+        let a = Probe::new(Some("@admin:one.test"));
+        let b = Probe::new(Some("@admin:two.test"));
+        let home = accounts::home(base.path(), "https://two.test", "@admin:two.test").unwrap();
+        accounts::provision(base.path(), &home).unwrap();
+        let legacy = controller(base.path(), a.clone());
+        let scoped = controller(&home, b.clone());
+        legacy.boot().await;
+        scoped.boot().await;
+        let key = crate::owner_roots::key("https://two.test", "@admin:two.test");
+        let mut server = Server::start_routed(base.path(), legacy, Arc::new(move |scope| {
+            (scope == key).then(|| scoped.clone())
+        })).unwrap();
+        let mut first = DaemonClient::connect(base.path()).await.unwrap();
+        let mut second = DaemonClient::connect(&home).await.unwrap();
+        let pause = |owner: &str| Request::new("same-id", Some(owner.into()), Command::PauseHosting);
+        first.call(&pause("@admin:one.test")).await.unwrap().outcome().unwrap();
+        assert!(!a.admission_open.load(Ordering::Acquire));
+        assert!(b.admission_open.load(Ordering::Acquire));
+        assert_eq!(b.stops.load(Ordering::Acquire), 0);
+        assert!(second.call(&pause("@admin:one.test")).await.unwrap().error.is_some());
+        assert!(b.admission_open.load(Ordering::Acquire));
+        second.call(&pause("@admin:two.test")).await.unwrap().outcome().unwrap();
+        assert!(!b.admission_open.load(Ordering::Acquire));
+        let resume = Request::new("resume", Some("@admin:one.test".into()), Command::ResumeHosting);
+        first.call(&resume).await.unwrap().outcome().unwrap();
+        assert!(a.admission_open.load(Ordering::Acquire));
+        assert!(!b.admission_open.load(Ordering::Acquire));
+        server.stop().await;
+    }
+
+    #[tokio::test]
     async fn client_refuses_shared_socket_or_directory() {
         let temp = private_dir();
         let c = controller(temp.path(), Probe::new(Some("@o:s")));
@@ -332,7 +389,7 @@ mod tests {
         let c = controller(temp.path(), Probe::new(Some("@o:s")));
         let listener = bind(temp.path()).unwrap();
         // The server expects a different UID than this test process has.
-        let task = tokio::spawn(serve(listener, c, effective_uid().wrapping_add(1)));
+        let task = tokio::spawn(serve(listener, c, effective_uid().wrapping_add(1), Arc::new(|_| None)));
         let mut stream = UnixStream::connect(temp.path().join(SOCKET)).await.unwrap();
         let bytes = serde_json::to_vec(&req("x", Command::PauseHosting)).unwrap();
         let _ = write_frame(&mut stream, &bytes).await;

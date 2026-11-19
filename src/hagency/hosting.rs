@@ -479,6 +479,10 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
     };
     let home = locations.daemon_home().as_os_str();
     let (origin, owner) = (account.origin.as_str(), account.owner.as_str());
+    let account_home = match ::hagency::daemon::accounts::home(locations.daemon_home(), origin, owner) {
+        Ok(home) => home,
+        Err(_) => return Progress::Failed("daemon_home_unavailable"),
+    };
     if kind == JobKind::Uninstall {
         return match run(command(&exe, &[OsStr::new("uninstall")]), Duration::from_secs(30), cancel, false, || {}) {
             Ok(_) => Progress::Done,
@@ -486,10 +490,11 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
             Err(failure) => failed(failure),
         };
     }
-    if kind == JobKind::Setup && installed_service() == Service::OtherProgram {
-        // A service of the former Hosting app would otherwise enroll and sign
-        // out with its own code over the socket. Remove it and wait until its
-        // daemon has released the home; the install below replaces it.
+    if kind == JobKind::Setup && (installed_service() == Service::OtherProgram
+        || (account_home != locations.daemon_home() && daemon::requires_upgrade(&account_home)))
+    {
+        // Replace the old single-account executable before enrolling another
+        // account. A running multi-account service keeps its existing workers.
         match run(command(&exe, &[OsStr::new("uninstall")]), Duration::from_secs(30), &helper::Cancellation::default(), false, || {}) {
             Ok(_) => {}
             Err(Failure::Code("setup_failed")) => return Progress::Failed("service_remove_failed"),
@@ -521,7 +526,7 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
         if stale {
             // The enrollment names another root: revoke its executor first, so
             // enrolling the registered root never leaves a second executor.
-            let sign_out = command(&exe, &[OsStr::new("sign-out"), OsStr::new("--home"), home]);
+            let sign_out = command(&exe, &[OsStr::new("sign-out"), OsStr::new("--home"), home, OsStr::new("--server"), OsStr::new(origin), OsStr::new("--owner"), OsStr::new(owner)]);
             if let Err(failure) = run(sign_out, Duration::from_secs(60), &helper::Cancellation::default(), false, || {}) {
                 return failed(failure);
             }
@@ -543,14 +548,16 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
         }
     }
     report(Progress::Enabling);
-    let install = command(&exe, &[OsStr::new("install"), OsStr::new("--home"), home]);
-    match run(install, Duration::from_secs(30), &helper::Cancellation::default(), false, || {}) {
-        Ok(_) => {}
-        Err(Failure::Code("setup_failed")) => return Progress::Failed("service_start_failed"),
-        Err(failure) => return failed(failure),
+    if installed_service() != Service::ThisApp || daemon::hello(locations.daemon_home(), Duration::from_secs(3)).is_none() {
+        let install = command(&exe, &[OsStr::new("install"), OsStr::new("--home"), home]);
+        match run(install, Duration::from_secs(30), &helper::Cancellation::default(), false, || {}) {
+            Ok(_) => {}
+            Err(Failure::Code("setup_failed")) => return Progress::Failed("service_start_failed"),
+            Err(failure) => return failed(failure),
+        }
     }
     report(Progress::Confirming);
-    let result = confirm(locations.daemon_home(), owner, Duration::from_secs(45), cancel);
+    let result = confirm(&account_home, owner, Duration::from_secs(45), cancel);
     match (result, registration_pending) {
         (Progress::Unconfirmed, Some(code)) => Progress::Failed(code),
         (result, _) => result,
@@ -570,10 +577,21 @@ mod daemon {
     use owner_dashboard::transport::{OutcomeState, TransportError};
     use std::{path::Path, time::Duration};
 
+    fn hello_request() -> Request {
+        Request { version: API_VERSION, request_id: new_request_id("odq"), owner_id: None, expected_revision: None, command: Command::Hello }
+    }
+
+    pub fn requires_upgrade(scoped_home: &Path) -> bool {
+        let Ok(mut connection) = DaemonConnection::connect(&DaemonEndpoint::new(scoped_home)) else { return false };
+        // Older daemons reject the accountScope field. A current daemon
+        // explicitly reports an unknown account when the directory is new.
+        connection.call(&hello_request(), Duration::from_secs(3)).ok()
+            .and_then(|reply| reply.error).is_some_and(|error| error.code == "invalid_request")
+    }
+
     pub fn hello(home: &Path, timeout: Duration) -> Option<(DaemonConnection, Hello)> {
         let mut connection = DaemonConnection::connect(&DaemonEndpoint::new(home)).ok()?;
-        let request = Request { version: API_VERSION, request_id: new_request_id("odq"), owner_id: None, expected_revision: None, command: Command::Hello };
-        let hello = connection.call(&request, timeout.min(READ_TIMEOUT)).ok()?.hello().ok()?;
+        let hello = connection.call(&hello_request(), timeout.min(READ_TIMEOUT)).ok()?.hello().ok()?;
         Some((connection, hello))
     }
 
@@ -624,23 +642,26 @@ mod daemon {
 
 /// Pause hosting of `owner` before Desktop exits; see the daemon module.
 /// Blocking, bounded by `timeout`. True when Desktop paused it.
-pub fn pause_for_quit(owner: &str, timeout: std::time::Duration) -> bool {
+pub fn pause_for_quit(origin: &str, owner: &str, timeout: std::time::Duration) -> bool {
     #[cfg(target_os = "macos")]
-    if let Ok(home) = ::hagency::service::default_daemon_dir() {
+    if let Ok(base) = ::hagency::service::default_daemon_dir()
+        && let Ok(home) = ::hagency::daemon::accounts::home(&base, origin, owner) {
         return daemon::pause_for_quit(&home, owner, timeout);
     }
-    let _ = (owner, timeout);
+    let _ = (origin, owner, timeout);
     false
 }
 
 /// Resume hosting that Desktop paused at its last quit. Blocking. False asks
 /// the caller to retry later.
-pub fn resume_after_start(owner: &str) -> bool {
+pub fn resume_after_start(origin: &str, owner: &str, legacy: bool) -> bool {
     #[cfg(target_os = "macos")]
-    if let Ok(home) = ::hagency::service::default_daemon_dir() {
+    if let Ok(base) = ::hagency::service::default_daemon_dir()
+        && let Ok(home) = ::hagency::daemon::accounts::home(&base, origin, owner) {
+        if legacy && home != base { return true; }
         return daemon::resume_after_start(&home, owner);
     }
-    let _ = owner;
+    let _ = (origin, owner, legacy);
     true
 }
 
@@ -707,7 +728,7 @@ pub fn view(account: &Account) -> View {
         let spawned = std::thread::Builder::new().name("owner-hosting-status".into()).spawn(move || {
             let execution = Locations::system().and_then(|l| execution(&l, &account.origin, &account.owner));
             let service = installed_service();
-            let read = read_containers();
+            let read = read_containers(&account);
             let mut state = shared();
             state.reading = false;
             state.read_at = Some(std::time::Instant::now());
@@ -804,18 +825,20 @@ pub fn set_containers(pool: String, on: bool) -> bool {
         if state.containers_running {
             return false;
         }
+        let Some(account) = state.account.clone() else { return false };
         state.containers_running = true;
         let choices = state.view.containers.get_or_insert_with(Default::default);
         choices.pools.insert(pool.clone(), if on { PoolContainers::TurningOn } else { PoolContainers::Off });
         state.view.generation += 1;
         drop(guard);
         let changing = pool.clone();
+        let worker_account = account.clone();
         let spawned = std::thread::Builder::new().name("owner-hosting-containers".into()).spawn(move || {
-            let result = change_containers(&changing, on);
-            finish_containers(changing, result);
+            let result = change_containers(&worker_account, &changing, on);
+            finish_containers(&worker_account, changing, result);
         });
         if spawned.is_err() {
-            finish_containers(pool, PoolContainers::Failed(ContainerProblem::Other));
+            finish_containers(&account, pool, PoolContainers::Failed(ContainerProblem::Other));
         }
         true
     }
@@ -827,10 +850,11 @@ pub fn set_containers(pool: String, on: bool) -> bool {
 }
 
 #[cfg(unix)]
-fn finish_containers(pool: String, result: owner_dashboard::PoolContainers) {
+fn finish_containers(account: &Account, pool: String, result: owner_dashboard::PoolContainers) {
     let mut guard = shared();
     let state = &mut *guard;
     state.containers_running = false;
+    if state.account.as_ref() != Some(account) { return; }
     state.view.containers.get_or_insert_with(Default::default).pools.insert(pool, result);
     state.view.generation += 1;
     drop(guard);
@@ -838,17 +862,17 @@ fn finish_containers(pool: String, result: owner_dashboard::PoolContainers) {
 }
 
 #[cfg(unix)]
-fn change_containers(pool: &str, on: bool) -> owner_dashboard::PoolContainers {
+fn change_containers(account: &Account, pool: &str, on: bool) -> owner_dashboard::PoolContainers {
     use ::hagency::pool_containers::{self, Error, ProbeError};
     use owner_dashboard::{ContainerProblem, PoolContainers};
-    let Ok(daemon_home) = ::hagency::service::default_daemon_dir() else {
+    let Some(daemon_home) = container_home(account) else {
         return PoolContainers::Failed(ContainerProblem::Other);
     };
     if !on {
         return match pool_containers::turn_off(&daemon_home, pool) {
             Ok(()) => PoolContainers::Off,
             // Whatever is saved.
-            Err(_) => read_containers().map(|choices| choices.of(pool)).unwrap_or_default(),
+            Err(_) => read_containers(account).map(|choices| choices.of(pool)).unwrap_or_default(),
         };
     }
     let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
@@ -868,13 +892,19 @@ fn change_containers(pool: &str, on: bool) -> owner_dashboard::PoolContainers {
     }
 }
 
+#[cfg(unix)]
+fn container_home(account: &Account) -> Option<PathBuf> {
+    let base = ::hagency::service::default_daemon_dir().ok()?;
+    ::hagency::daemon::accounts::home(&base, &account.origin, &account.owner).ok()
+}
+
 /// The saved choices; reads one small file. `None` where this computer
 /// cannot run containers.
-fn read_containers() -> Option<owner_dashboard::ContainerChoices> {
+fn read_containers(account: &Account) -> Option<owner_dashboard::ContainerChoices> {
     use owner_dashboard::{ContainerChoices, PoolContainers};
     #[cfg(unix)]
     {
-        let daemon_home = ::hagency::service::default_daemon_dir().ok()?;
+        let daemon_home = container_home(account)?;
         Some(match ::hagency::pool_containers::load(&daemon_home) {
             Ok(None) => ContainerChoices::default(),
             Ok(Some(setting)) => {
@@ -886,7 +916,7 @@ fn read_containers() -> Option<owner_dashboard::ContainerChoices> {
     }
     #[cfg(not(unix))]
     {
-        let _ = (ContainerChoices::default(), PoolContainers::Off);
+        let _ = (account, ContainerChoices::default(), PoolContainers::Off);
         None
     }
 }
@@ -967,6 +997,10 @@ mod tests {
         assert!(std::env::var_os("HAGENCY_OWNER_DAEMON_HOME").is_some_and(|h| !h.is_empty()));
         let daemon = ::hagency::service::default_daemon_dir().unwrap();
         assert_eq!(std::fs::read_dir(&daemon).unwrap().count(), 0, "an empty daemon home");
+        let account = Account { origin: ORIGIN.into(), owner: OWNER.into() };
+        shared().account = Some(account.clone());
+        let daemon = container_home(&account).unwrap();
+        private(&daemon);
         let settled = |pool: &str| {
             let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1200);
             loop {
@@ -985,7 +1019,7 @@ mod tests {
         assert_eq!(settled("resource_a"), Some(PoolContainers::On));
         assert!(set_containers("resource_b".into(), true));
         assert_eq!(settled("resource_b"), Some(PoolContainers::On));
-        let saved = read_containers().unwrap();
+        let saved = read_containers(&account).unwrap();
         assert_eq!(
             (saved.of("resource_a"), saved.of("resource_b"), saved.of("resource_c")),
             (PoolContainers::On, PoolContainers::On, PoolContainers::Off),
@@ -998,7 +1032,7 @@ mod tests {
         assert!(isolation(&daemon, "resource_b").unwrap().is_some(), "the other pool keeps its choice");
         assert!(set_containers("resource_b".into(), false));
         assert_eq!(settled("resource_b"), Some(PoolContainers::Off));
-        assert_eq!(read_containers(), Some(Default::default()));
+        assert_eq!(read_containers(&account), Some(Default::default()));
         assert!(isolation(&daemon, "resource_b").unwrap().is_none());
     }
 
@@ -1169,8 +1203,8 @@ mod tests {
         // A daemon enrollment from before ADR-192 names another root: stale.
         enrolled_daemon_root(&locations, Some(true));
         assert_eq!(execution(&locations, ORIGIN, OWNER).unwrap(), setup(SetupReason::StaleRoot));
-        // The daemon hosts another account: one Mac user hosts one owner.
-        assert_eq!(execution(&locations, ORIGIN, OTHER).unwrap(), setup(SetupReason::OtherOwner));
+        // A second account can set up hosting alongside the first.
+        assert_eq!(execution(&locations, ORIGIN, OTHER).unwrap(), setup(SetupReason::NotEnrolled));
         // Enrolling the registered root hands execution to the daemon.
         Enrollment::enroll(locations.daemon_home(), ORIGIN, OWNER, None, &registered).unwrap();
         assert_eq!(execution(&locations, ORIGIN, OWNER).unwrap(), daemon(&locations));

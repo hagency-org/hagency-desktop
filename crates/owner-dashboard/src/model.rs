@@ -52,8 +52,7 @@ pub enum SetupNeed {
     /// An earlier hosting sign-in names another owner root. Setting up again
     /// signs it out and hosts the account's one registered root.
     Replace,
-    /// The hosting service on this computer serves another account. One user
-    /// of a computer can host one account's resource pool at a time.
+    /// The selected enrollment does not match the signed-in account's identity.
     OtherOwner,
 }
 

@@ -421,10 +421,13 @@ impl MatchEvent for App {
                     self.app_state.app_prefs.keep_hosting_after_quit = *keep;
                     self.app_state.app_prefs.on_hosting_changed(cx);
                 }
-                Some(crate::hagency::owner_dashboard::HostingAction::Resumed { owner, settled }) => {
+                Some(crate::hagency::owner_dashboard::HostingAction::Resumed { origin, owner, settled }) => {
                     self.hosting_resume = false;
-                    if *settled && current_user_id().is_some_and(|id| id.as_str() == owner) {
+                    if *settled && crate::sliding_sync::get_client().is_some_and(|client|
+                        client.user_id().is_some_and(|id| id.as_str() == owner) && client.homeserver().as_str() == origin)
+                    {
                         self.app_state.app_prefs.hosting_paused_on_quit = false;
+                        self.app_state.app_prefs.hosting_paused_origins.remove(origin);
                         self.app_state.app_prefs.on_hosting_changed(cx);
                     }
                 }
@@ -2142,14 +2145,21 @@ impl App {
     /// Resume hosting that Desktop paused at its last quit, off the UI thread.
     /// A service that is not reachable yet is retried on the next tick.
     fn resume_hosting_paused_at_quit(&mut self) {
-        if !self.app_state.app_prefs.hosting_paused_on_quit || self.hosting_resume || self.lifecycle.shutdown_started {
+        let prefs = &self.app_state.app_prefs;
+        if (prefs.hosting_paused_origins.is_empty() && !prefs.hosting_paused_on_quit)
+            || self.hosting_resume || self.lifecycle.shutdown_started
+        {
             return;
         }
-        let Some(owner) = current_user_id() else { return };
+        let Some(client) = crate::sliding_sync::get_client() else { return };
+        let Some(owner) = client.user_id() else { return };
+        let origin = client.homeserver().to_string();
+        let legacy = !prefs.hosting_paused_origins.contains(&origin);
+        if legacy && !prefs.hosting_paused_on_quit { return; }
         let owner = owner.to_string();
         self.hosting_resume = std::thread::Builder::new().name("owner-hosting-resume".into()).spawn(move || {
-            let settled = crate::hagency::hosting::resume_after_start(&owner);
-            Cx::post_action(crate::hagency::owner_dashboard::HostingAction::Resumed { owner, settled });
+            let settled = crate::hagency::hosting::resume_after_start(&origin, &owner, legacy);
+            Cx::post_action(crate::hagency::owner_dashboard::HostingAction::Resumed { origin, owner, settled });
         }).is_ok();
     }
 
@@ -2164,10 +2174,11 @@ impl App {
         // The owner chose not to keep the resource pool running after Desktop
         // quits: pause hosting now, and resume it at the next start.
         if !self.app_state.app_prefs.keep_hosting_after_quit
-            && let Some(owner) = current_user_id()
-            && crate::hagency::hosting::pause_for_quit(owner.as_str(), Duration::from_secs(10))
+            && let Some(client) = crate::sliding_sync::get_client()
+            && let Some(owner) = client.user_id()
+            && crate::hagency::hosting::pause_for_quit(client.homeserver().as_str(), owner.as_str(), Duration::from_secs(10))
         {
-            self.app_state.app_prefs.hosting_paused_on_quit = true;
+            self.app_state.app_prefs.hosting_paused_origins.insert(client.homeserver().to_string());
         }
 
         self.persist_runtime_state(cx, "shutdown");

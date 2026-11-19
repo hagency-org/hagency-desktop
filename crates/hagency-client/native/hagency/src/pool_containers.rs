@@ -204,9 +204,9 @@ pub(crate) fn serve_from(daemon_home: &Path) {
     let _ = SERVED.set(daemon_home.to_path_buf());
 }
 /// What the daemon this process is runs `pool`'s Agents in.
-pub(crate) fn hosted_isolation(pool: &str) -> Result<Option<ContainerIsolation>, Error> {
+pub(crate) fn hosted_isolation(origin: &str, owner: &str, pool: &str) -> Result<Option<ContainerIsolation>, Error> {
     match SERVED.get() {
-        Some(home) => isolation(home, pool),
+        Some(base) => isolation(&crate::daemon::accounts::home(base, origin, owner).map_err(|_| Error::State)?, pool),
         None => Ok(None),
     }
 }

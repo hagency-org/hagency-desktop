@@ -51,7 +51,7 @@ pub enum HostingAction {
     KeepRunning(bool),
     /// A resume of hosting paused at the last quit finished. `settled` means
     /// nothing remains to resume for `owner`.
-    Resumed { owner: String, settled: bool },
+    Resumed { origin: String, owner: String, settled: bool },
 }
 
 fn locale() -> Locale {
@@ -208,15 +208,12 @@ impl OwnerDashboardHost {
         }
         let keep_running = cx.global::<crate::settings::app_preferences::AppPreferencesGlobal>().0.keep_hosting_after_quit;
         self.options(cx, keep_running);
-        if self.page.as_ref().is_some_and(|page| page.hosted) && self.connector.is_none() {
-            self.connector = Some(DaemonConnector::spawn(DaemonEndpoint::new(self.daemon_home()), OwnerScope::Fixed(account.owner.clone()), SignalToUI::set_ui_signal));
+        if self.page.as_ref().is_some_and(|page| page.hosted) && self.connector.is_none()
+            && let Some(Ok(Execution::Daemon { home })) = &view.execution {
+            self.connector = Some(DaemonConnector::spawn(DaemonEndpoint::new(home.clone()), OwnerScope::Fixed(account.owner.clone()), SignalToUI::set_ui_signal));
             let view = dashboard.view_state(cx);
             self.submit(cx, Job::Snapshot { period: view.period, usage_filter: Some(view.usage_filter()) });
         }
-    }
-
-    fn daemon_home(&self) -> std::path::PathBuf {
-        ::hagency::service::default_daemon_dir().unwrap_or_default()
     }
 
     /// Present one hosting state: the setup page, the hosted dashboard or the
@@ -536,10 +533,10 @@ mod tests {
         assert!(!widget.button(&cx, ids!(od_setup_cancel)).visible());
         assert!(!widget.button(&cx, ids!(od_setup_start)).visible());
         assert_eq!(widget.label(&cx, ids!(od_setup_progress_text)).text(), "Signed in. Registering this Mac’s executor…");
-        // Another account hosts this Mac: an explanation without a setup button.
+        // Conflicting enrollment identity requires checking the account before setup.
         host.fixture_hosting(&mut cx, &state(Some(Ok(Execution::Setup(SetupReason::OtherOwner))), None, 3), true);
         assert!(!widget.button(&cx, ids!(od_setup_start)).visible());
-        assert!(widget.label(&cx, ids!(od_setup_body)).text().contains("one account's resource pool"));
+        assert!(widget.label(&cx, ids!(od_setup_body)).text().contains("homeserver and full Matrix ID"));
         // Running: the dashboard, Stop, and the switch on by default.
         host.fixture_hosting(&mut cx, &state(Some(Ok(Execution::Daemon { home: "/h".into() })), Some((JobKind::Setup, Progress::Done)), 4), true);
         dashboard.set_snapshot(&mut cx, fixtures::ordinary(owner_dashboard::dto::HostingState::Running));

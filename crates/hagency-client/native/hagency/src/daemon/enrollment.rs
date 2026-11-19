@@ -87,7 +87,9 @@ impl Enrollment {
             return Ok(None);
         };
         let stored: Self = serde_json::from_slice(&raw).map_err(|_| EnrollmentError::Storage)?;
-        if stored.version != VERSION
+        let (_, scope) = hagency_metering::daemon_endpoint::endpoint(home);
+        if scope.is_some_and(|key| key != crate::owner_roots::key(&stored.origin, &stored.owner))
+            || stored.version != VERSION
             || Self::check_root(home, &stored.owner_root).is_err()
             || !super::protocol::valid_owner_id(&stored.owner)
         {
@@ -119,7 +121,8 @@ impl Enrollment {
             return Err(EnrollmentError::Root);
         }
         let root = super::assignment::identity(root).map_err(|_| EnrollmentError::Root)?;
-        let home = super::assignment::identity(home).map_err(|_| EnrollmentError::Root)?;
+        let (installation, _) = hagency_metering::daemon_endpoint::endpoint(home);
+        let home = super::assignment::identity(installation).map_err(|_| EnrollmentError::Root)?;
         // The owner root is a sibling custody domain. Only `owners/` under the
         // daemon home, where builds before ADR-192 created roots, is allowed;
         // never the home itself or its files.

@@ -37,7 +37,7 @@ fn setup_replaces_the_dashboard_and_only_offers_what_applies() {
         assert!(p.banner.is_none() && p.empty_page.is_none() && p.options.is_none());
     }
     let other = state.present(clock()).setup_page.unwrap();
-    assert!(other.body.contains("one account's resource pool"), "{}", other.body);
+    assert!(other.body.contains("homeserver and full Matrix ID"), "{}", other.body);
     state.set_setup(Some(SetupView { need: SetupNeed::NotSetUp, progress: SetupProgress::SigningIn }));
     let page = state.present(clock()).setup_page.unwrap();
     assert!(page.busy && page.can_cancel && page.start.is_none());
