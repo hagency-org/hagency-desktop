@@ -198,7 +198,8 @@ fn client_config(daemon_home: &Path) -> Result<PathBuf, Error> {
 
 static SERVED: OnceLock<PathBuf> = OnceLock::new();
 /// The owner daemon names its home before hosting starts. Elsewhere pool
-/// Agents keep the sandbox.
+/// Agents keep the sandbox. The daemon is built for Unix only.
+#[cfg(unix)]
 pub(crate) fn serve_from(daemon_home: &Path) {
     let _ = SERVED.set(daemon_home.to_path_buf());
 }
