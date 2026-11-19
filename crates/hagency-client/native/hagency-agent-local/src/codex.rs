@@ -2044,7 +2044,17 @@ impl<R: AsyncRead + Unpin, W: AsyncWrite + Unpin> Session<R, W> {
             policy_revision: versions.map(|v| v.revision),
             expires: now() + 300,
         };
-        let disposition = ledger.tool_disposition(&proposal, now()).ok();
+        let disposition = match ledger.tool_disposition(&proposal, now()) {
+            Ok(policy) => Some(policy),
+            Err(error) => {
+                let cause = match error {
+                    crate::Error::Denied => "tool_policy_denied",
+                    _ => "tool_policy_check_failed",
+                };
+                hagency_runtime::codex::approval::declined_unseen(method, cause);
+                None
+            }
+        };
         approvals.offer(
             approvals::Request {
                 id,
