@@ -95,9 +95,7 @@ pub fn sign_in_root(locations: &Locations, data_dir: &Path, origin: &str, owner:
 fn sign_in_root_with(locations: &Locations, data_dir: &Path, origin: &str, owner: &str, delegated: bool) -> Result<PathBuf, String> {
     #[cfg(unix)]
     if delegated {
-        return Ok(locations.roots.lookup(origin, owner).map_err(root_code)?
-            .unwrap_or_else(||locations.roots.base().join(::hagency::owner_roots::OWNERS)
-                .join(::hagency::owner_roots::key(origin, owner))));
+        return locations.roots.management_root(origin, owner).map_err(root_code);
     }
     let _ = delegated;
     select_root(locations, data_dir, origin, owner)
@@ -1188,6 +1186,107 @@ mod tests {
         let third = Temp::new();
         let locations = third.locations();
         assert_eq!(sign_in_root_with(&locations, &third.data_dir(), ORIGIN, OWNER, false).unwrap(), canonical(&locations));
+    }
+
+    #[test]
+    fn management_only_sign_in_preserves_private_canonical_parents() {
+        const CHILD: &str = "HAGENCY_PRIVATE_CANONICAL_PARENTS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // A shell changes only the child process's umask, never the test
+            // runner's process-wide mask while other tests may create files.
+            let name = "hagency::hosting::tests::management_only_sign_in_preserves_private_canonical_parents";
+            let result = std::process::Command::new("/bin/sh")
+                .args(["-c", "umask 022; exec \"$@\"", "private-canonical-parents"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(result.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}", String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        let temp = Temp::new();
+        let locations = temp.locations();
+        assert!(!locations.roots.base().exists());
+        assert!(sign_in_root_with(&locations, &temp.data_dir(), "invalid origin", OWNER, true).is_err());
+        assert!(!locations.roots.base().exists());
+        let root = sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).unwrap();
+        assert_eq!(root, canonical(&locations));
+        assert!(!root.exists());
+        assert_eq!(locations.roots.lookup(ORIGIN, OWNER).unwrap(), None);
+        assert!(!locations.roots.base().join(::hagency::owner_roots::RECORDS).exists());
+
+        // Management can open its owner host before Setup opens the canonical
+        // resource ledger. Its strict private-directory gate must still pass.
+        ::hagency::owner_host::initialize(&root).unwrap();
+        for directory in [locations.roots.base().to_owned(), root.parent().unwrap().to_owned(), root] {
+            assert_eq!(std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700,
+                "{}", directory.display());
+            hagency_platform::private_state::directory(&directory).unwrap();
+        }
+        assert_eq!(locations.roots.lookup(ORIGIN, OWNER).unwrap(), None);
+        assert!(!locations.roots.base().join("domain.sqlite3").exists());
+        assert_eq!(std::fs::read_dir(locations.daemon_home()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn management_only_sign_in_refuses_writable_canonical_parents_without_repair() {
+        for owners in [false, true] {
+            let temp = Temp::new();
+            let locations = temp.locations();
+            let path = if owners {
+                private(locations.roots.base());
+                locations.roots.base().join(::hagency::owner_roots::OWNERS)
+            } else { locations.roots.base().to_owned() };
+            private(&path);
+            let sentinel = path.join("foreign-data");
+            std::fs::write(&sentinel, b"unchanged").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).is_err());
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o777);
+            assert_eq!(std::fs::read(sentinel).unwrap(), b"unchanged");
+            assert!(!canonical(&locations).exists());
+            assert!(!locations.roots.base().join(::hagency::owner_roots::RECORDS).exists());
+        }
+    }
+
+    #[test]
+    fn management_only_sign_in_refuses_symlink_canonical_parents() {
+        for owners in [false, true] {
+            let temp = Temp::new();
+            let locations = temp.locations();
+            let target = temp.0.join("untouched");
+            private(&target);
+            std::fs::write(target.join("sentinel"), b"unchanged").unwrap();
+            let link = if owners {
+                private(locations.roots.base());
+                locations.roots.base().join(::hagency::owner_roots::OWNERS)
+            } else { locations.roots.base().to_owned() };
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).is_err());
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"unchanged");
+            assert_eq!(std::fs::read_dir(target).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn management_only_sign_in_does_not_adopt_foreign_owner_state() {
+        let temp = Temp::new();
+        let locations = temp.locations();
+        private(locations.roots.base());
+        private(&locations.roots.base().join(::hagency::owner_roots::OWNERS));
+        let root = canonical(&locations);
+        private(&root);
+        let sentinel = root.join("foreign-state");
+        std::fs::write(&sentinel, b"unchanged").unwrap();
+        assert_eq!(sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).unwrap(), root);
+        assert!(::hagency::owner_host::initialize(&root).is_err());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        assert_eq!(locations.roots.lookup(ORIGIN, OWNER).unwrap(), None);
     }
 
     #[test]

@@ -1,3 +1,9 @@
+#[cfg(target_os = "macos")]
+#[allow(unsafe_code)] // Darwin ACL access on retained directory descriptors.
+mod macos;
+#[cfg(target_os = "macos")]
+pub use macos::prepare_owner_parents;
+
 #[cfg(windows)]
 #[allow(unsafe_code)] // Audited retained-object synchronous Windows IO boundary.
 mod windows_directory;
