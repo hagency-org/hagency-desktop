@@ -58,7 +58,7 @@ fn execution_notice(value:&Value,room:&str,thread:&str)->Option<&'static str> {
     match row["state"].as_str()? {
         "started"=>Some("Agent is working…"),
         "pending"|"queued"|"acknowledged"|"bound"=>Some("Message queued; waiting for Agent."),
-        "unknown"=>Some("Run interrupted; no final answer confirmed. Send the message again if you still need it."),
+        "unknown"=>Some("Run outcome is unknown. External actions or charges may already exist. Review the original message and task records before starting a separate request."),
         "failed"=>Some("Agent run failed."),
         "blocked"=>Some("Message could not start. Check the resource and Agent connection."),
         "paused"=>Some("Agent is paused."),
@@ -89,6 +89,7 @@ script_mod! {
             session := Button {width: Fill text: #(crate::i18n::tr("Always approve for this session")) i18n_text: "Always approve for this session"}
             deny := Button {width: Fill text: #(crate::i18n::tr("Deny")) i18n_text: "Deny"}
         }
+        execution_review := Button {visible:false width:Fill text:#(crate::i18n::tr("Review original task records")) i18n_text:"Review original task records"}
         recovery := View {width: Fill height: Fit flow: Down spacing: 6 visible: false
             recovery_hint := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
             last_checked := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
@@ -138,6 +139,7 @@ pub struct SharedPermissionNotice {
     execution_text: String,
     #[rust]
     execution_busy: bool,
+    #[rust] execution_source: Option<Value>,
 }
 impl SharedPermissionNotice {
     /// Shows the spinner while the Agent works. The spinner updates its retained
@@ -151,6 +153,9 @@ impl SharedPermissionNotice {
     }
     fn render(&mut self, cx: &mut Cx) {
         self.sync_animation(cx);
+        let review=self.execution_source.as_ref().is_some_and(|r|matches!(r["state"].as_str(),Some("unknown"|"reply_unknown")) && r["eventId"].as_str().is_some() && r["agentId"].as_str().is_some());
+        self.view.widget(cx,ids!(execution_review)).set_visible(cx,review);
+        self.view.button(cx,ids!(execution_review)).set_enabled(cx,self.active && !self.loading);
         let failed = !self.error.is_empty();
         self.view.widget(cx, ids!(recovery)).set_visible(cx, failed);
         let recovery = self.failure.as_ref().map(PermissionFailure::recovery);
@@ -405,6 +410,7 @@ impl SharedPermissionNotice {
                 self.failure = None;
                 self.decision_unconfirmed = false;
                 self.retry.success(Instant::now());
+                self.execution_source=execution_row(value,&self.room,&self.thread).cloned();
                 self.execution_busy = execution_busy(value, &self.room, &self.thread);
                 self.execution_text = execution_notice(value, &self.room, &self.thread)
                     .unwrap_or_default()
@@ -476,6 +482,12 @@ impl Widget for SharedPermissionNotice {
                     self.accept_result(cx, done);
                 }
             }
+            if self.view.button(cx,ids!(execution_review)).clicked(actions) && !self.loading
+                && let (Some(row),Some(client))=(self.execution_source.as_ref(),crate::sliding_sync::get_client())
+                && let (Ok(room),Some(event),Some(agent),Some(session))=(self.room.parse(),row["eventId"].as_str().and_then(|e|e.parse().ok()),row["agentId"].as_str(),crate::matrix_context::SessionPin::capture(&client))
+                && session.is_current() {
+                cx.action(crate::hagency::work_review::WorkReviewAction::Open(crate::hagency::work_review::OriginalWork{session,room,event,agent:agent.into()}));
+            }
             if self.view.button(cx, ids!(refresh)).clicked(actions) {
                 self.request(cx, None, true);
             }
@@ -539,6 +551,7 @@ impl SharedPermissionNoticeRef {
             this.retry = PermissionRetry::default();
             this.decision_unconfirmed = false;
             this.execution_text.clear();
+            this.execution_source=None;
             this.rows.clear();
             this.selected = 0;
             this.active = true;
@@ -563,7 +576,7 @@ mod tests {
             {"roomId":"!room","threadRoot":"$done","state":"replied"}
         ]});
         assert!(execution_notice(&v,"!room","").unwrap().contains("unsettled calls"));
-        assert!(execution_notice(&v,"!room","$old").unwrap().contains("interrupted"));
+        assert!(execution_notice(&v,"!room","$old").unwrap().contains("unknown"));
         assert!(execution_notice(&v,"!room","$done").is_none());
         assert!(execution_notice(&v,"!room","$foreign").is_none());
         assert!(execution_notice(&v,"!foreign","").is_none());
@@ -589,6 +602,15 @@ mod tests {
         assert!(!execution_busy(&json!({"executions":[{"roomId":"!room","state":"pending","reason":"budget_blocked"}]}),"!room",""));
         // Latest delivered reply must not resurrect an older interrupted run.
         assert!(!execution_busy(&json!({"executions":[{"roomId":"!room","state":"replied"},{"roomId":"!room","state":"started"}]}),"!room",""));
+    }
+
+    #[test]
+    fn unknown_guidance_requires_original_record_review_instead_of_resending() {
+        let value=json!({"executions":[{"roomId":"!original:test","eventId":"$original","agentId":"original-agent","state":"unknown"}]});
+        let text=execution_notice(&value,"!original:test","").unwrap();
+        assert!(text.contains("External actions or charges may already exist"));
+        assert!(text.contains("original message and task records"));assert!(!text.contains("Send the message again"));
+        assert!(!execution_busy(&value,"!original:test",""));
     }
 
     /// How many timers `f` starts: `Cx` hands out timer ids in sequence.

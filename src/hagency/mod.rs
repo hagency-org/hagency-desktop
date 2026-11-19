@@ -9,3 +9,5 @@ pub mod pending_questions;
 mod approvals;
 
 pub(crate) mod permission_failure;
+
+pub mod work_review;

@@ -2,6 +2,7 @@
 //!
 //! See `handle_startup()` for the first code that runs on app startup.
 
+use crate::hagency::work_review::{WorkReviewAction,WorkReviewWidgetRefExt};
 use crate::home::reaction_picker::{ReactionPickerAction, ReactionPickerWidgetRefExt};
 use crate::moderation_modal::{ModerationModalAction, ModerationModalWidgetRefExt};
 #[cfg(feature = "agent_chat")]
@@ -74,6 +75,7 @@ mod embedded_content {
                     login_screen := LoginScreen {}
                 }
 
+                work_review_modal := Modal {can_dismiss:false content := WorkReview {}}
                 image_viewer_modal := Modal {
                     content := ImageViewer {}
                 }
@@ -350,6 +352,10 @@ impl MatchEvent for App {
     }
 
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions) {
+        for action in actions {if let Some(review)=action.downcast_ref::<WorkReviewAction>() {
+            let modal=self.ui.modal(cx,ids!(work_review_modal));let view=self.ui.work_review(cx,ids!(work_review_modal.content));
+            match review {WorkReviewAction::Open(context) if context.session.is_current()=>{view.open(cx,context.clone());modal.open(cx);},WorkReviewAction::Close=>{view.clear(cx);modal.close(cx);},_=>{}}
+        }}
         crate::shared::attachment_download::handle_share_actions(actions);
         crate::memory_budget::process_completed_decodes(cx, actions);
         for action in actions {
@@ -1312,6 +1318,8 @@ impl App {
     }
 
     fn clear_session_ui(&mut self, cx: &mut Cx) {
+        self.ui.work_review(cx,ids!(work_review_modal.content)).clear(cx);
+        self.ui.modal(cx,ids!(work_review_modal)).close(cx);
         self.matrix_link_navigation.cancel();
         {
             use crate::settings::crypto_settings::CryptoSettingsWidgetRefExt;
@@ -1454,6 +1462,7 @@ pub fn register_widgets(vm: &mut ScriptVm) {
     crate::moderation_modal::script_mod(vm);
     crate::verification_modal::script_mod(vm);
     crate::profile::script_mod(vm);
+    crate::hagency::work_review::script_mod(vm);
     crate::hagency::ui::script_mod(vm);
     crate::hagency::owner_dashboard::register(vm);
     // A mini-apps host body, the docked region holding them, and the pop-out window.
@@ -1557,6 +1566,10 @@ impl AppMain for App {
             return;
         }
         if back_unhandled || matches!(event, Event::KeyDown(k) if k.key_code == KeyCode::Escape) {
+            let work=self.ui.modal(cx,ids!(work_review_modal));
+            if work.is_open() && !self.ui.modal(cx,ids!(delete_confirmation_modal)).is_open() && !self.ui.modal(cx,ids!(positive_confirmation_modal)).is_open() {
+                event.back_pressed();self.ui.work_review(cx,ids!(work_review_modal.content)).clear(cx);work.close(cx);return;
+            }
             let management = self.ui.modal(cx, ids!(hagency_management_modal));
             if management.is_open() {
                 event.back_pressed();
@@ -2675,6 +2688,15 @@ mod back_navigation_tests {
         let event = Event::BackPressed { handled: std::cell::Cell::new(false) };
         AppMain::handle_event(app, cx, &event);
         matches!(event, Event::BackPressed { handled } if handled.get())
+    }
+
+    #[test]
+    fn back_closes_original_work_review_without_launching_or_replaying_a_task() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));let mut app=embedded_app(&mut cx);
+        let modal=app.ui.modal(&mut cx,ids!(work_review_modal));modal.open(&mut cx);
+        assert!(back(&mut cx,&mut app));assert!(!modal.is_open());
+        modal.open(&mut cx);app.ui.label(&mut cx,ids!(work_review_modal.content.source)).set_text(&mut cx,"old-original-record");
+        app.clear_session_ui(&mut cx);assert!(!modal.is_open());assert!(app.ui.label(&mut cx,ids!(work_review_modal.content.source)).text().is_empty());
     }
 
     #[test]
