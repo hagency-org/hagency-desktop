@@ -27,6 +27,7 @@ struct CommandSource {
     current: Source,
     failed: Arc<AtomicBool>,
     code: &'static str,
+    observed: Arc<tokio::sync::Notify>,
 }
 
 impl MatrixTokenSource for CommandSource {
@@ -37,6 +38,7 @@ impl MatrixTokenSource for CommandSource {
     > {
         Box::pin(async {
             if self.failed.load(Ordering::Acquire) {
+                self.observed.notify_one();
                 return Err(failure(
                     if self.code.ends_with("unavailable") {
                         503
@@ -51,12 +53,17 @@ impl MatrixTokenSource for CommandSource {
     }
 }
 
-async fn command_source(f: &Fixture, code: &'static str) -> Arc<AtomicBool> {
+pub(super) async fn command_source(
+    f: &Fixture,
+    code: &'static str,
+) -> (Arc<AtomicBool>, Arc<tokio::sync::Notify>) {
+    let observed = Arc::new(tokio::sync::Notify::new());
     let failed = Arc::new(AtomicBool::new(false));
     let source: Arc<dyn MatrixTokenSource> = Arc::new(CommandSource {
         current: Source(f.current.clone()),
         failed: failed.clone(),
         code,
+        observed: observed.clone(),
     });
     let cookie = f
         .owner
@@ -75,7 +82,7 @@ async fn command_source(f: &Fixture, code: &'static str) -> Arc<AtomicBool> {
         .unwrap();
     *f.owner.0.matrix_source.lock().unwrap() = Some(source);
     *f.owner.0.cookie.lock().await = format!("hagency_console={cookie}");
-    failed
+    (failed, observed)
 }
 
 #[tokio::test]
@@ -218,7 +225,7 @@ async fn native_owner_command_source_loss_suspends_without_withdrawing_saved_acc
 async fn native_owner_post_request_source_loss_retires_ordinary_and_guarded_commands() {
     for guarded in [false, true] {
         let f = Fixture::new().await;
-        let failed = command_source(&f, "matrix_account_changed").await;
+        let (failed, _) = command_source(&f, "matrix_account_changed").await;
         let retained = f.owner.management(package(20)).await.unwrap();
         let path = f
             .owner
@@ -250,7 +257,7 @@ async fn native_owner_temporary_command_source_failure_preserves_active_work_and
                 "hagency_server_unavailable",
             ] {
                 let f = Fixture::new().await;
-                let failed = command_source(&f, code).await;
+                let (failed, _) = command_source(&f, code).await;
                 let retained = f.owner.management(package(20)).await.unwrap();
                 let path = f
                     .owner

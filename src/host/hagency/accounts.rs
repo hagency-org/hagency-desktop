@@ -98,11 +98,26 @@ impl AccountLoginFlow {
         ::hagency::native_owner::AccountLoginStatus{command_id:self.input.command_id.clone(),account_id:self.input.account_id.clone(),state:"cancelled".into()}
     }
     async fn manager(&self) -> Result<std::sync::Arc<::hagency::daemon::bridge::ManagementClient>,String> {
-        self.check()?;let manager=self.host.manager(&self.lease).await?;self.check()?;Ok(manager)
+        self.check()?;
+        let mut manager = self.host.manager(&self.lease).await;
+        // A cold management connection verifies Matrix before it can dispatch the login.
+        if manager.as_ref().is_err_and(|e| e == "matrix_authorization_unavailable")
+            && std::time::Instant::now() < self.expires
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(250)).await;
+            self.check()?;
+            if std::time::Instant::now() < self.expires {
+                manager = self.host.manager(&self.lease).await;
+            }
+        }
+        self.check()?;
+        manager
     }
     pub async fn start(&self) -> Result<::hagency::native_owner::AccountLoginStatus,String> {
         if std::time::Instant::now()>=self.expires {return Err("provider_confirmation_expired".into());}
-        let result=self.manager().await?.login_account(self.input.clone()).await.map_err(|e|e.code);
+        let manager = self.manager().await?;
+        if std::time::Instant::now() >= self.expires { return Err("provider_confirmation_expired".into()); }
+        let result=manager.login_account(self.input.clone()).await.map_err(|e|e.code);
         self.check().map_err(|_|"management_outcome_unknown".to_owned())?;result
     }
     pub async fn status(&self) -> Result<::hagency::native_owner::AccountLoginStatus,String> {
