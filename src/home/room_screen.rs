@@ -1405,6 +1405,12 @@ impl Widget for RoomScreen {
         if self.tl_state.is_none() && self.room_name_id.is_none() {
             return;
         }
+        if self.matrix_link_ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
+            self.matrix_link_ticket = None;
+            self.pending_history_jump = None;
+            self.history_jump_started = false;
+            self.loading_pane(cx, ids!(loading_pane)).hide(cx);
+        }
         if self.handle_room_restore(cx, event, _scope) {
             return;
         }
@@ -1465,12 +1471,6 @@ impl Widget for RoomScreen {
             jump_to_bottom_button,
         } = self.cached_widget_refs(cx);
 
-        if self.matrix_link_ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
-            self.matrix_link_ticket = None;
-            self.pending_history_jump = None;
-            self.history_jump_started = false;
-            loading_pane.hide(cx);
-        }
         let is_pane_shown = loading_pane.is_currently_shown(cx)
             || user_profile_sliding_pane.is_currently_shown(cx);
         let is_popup_menu_open = room_input_popup_menu.is_open();
