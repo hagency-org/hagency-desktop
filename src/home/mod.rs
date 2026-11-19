@@ -18,6 +18,7 @@ pub mod failed_send_banner;
 pub mod identity_reset_banner;
 pub mod home_screen;
 pub mod invite_modal;
+pub mod invite_selection;
 pub mod invite_screen;
 pub mod light_themed_dock;
 pub mod tombstone_footer;
