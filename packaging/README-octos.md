@@ -39,6 +39,12 @@ The macOS development runner copies and signs the adjacent kernel inside
 its development bundle. `--kernel <path>` can reuse a native executable
 whose version reports the pinned revision. It is not a cross-build option.
 
+A release run reuses the kernel an earlier release run built from the same
+pin, in the same way: `tools/release-kernel.py` finds and checks it and names
+it in `HAGENCY_RELEASE_KERNEL`, which the helper reads when `--kernel` is not
+given. Which kernels it takes is described in `docs/github-ci.md`. The staged
+receipt's `builtByRun` names the CI run that compiled the file.
+
 ## Android
 
 Use the pinned cargo-makepad and a **full** NDK (its minimal installation

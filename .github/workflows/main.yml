@@ -126,6 +126,7 @@ jobs:
       - run: cargo test --locked --manifest-path crates/system-apps/Cargo.toml
       - run: bash tools/package-system-apps/check.sh
       - run: python3 tools/test_package_octos.py
+      - run: python3 tools/test-release-kernel.py
       - run: python3 tools/check-release-icons.py
       - run: cargo test --locked --features agent_chat,octosense-module --lib
       - name: Check how the regression gate runs its checks

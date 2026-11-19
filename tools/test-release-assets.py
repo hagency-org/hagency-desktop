@@ -103,6 +103,19 @@ class ReleaseAssets(unittest.TestCase):
         release.ROOT = Path(__file__).resolve().parents[1]
         release.check_one_binary_target()
 
+    def test_the_report_names_the_packaged_kernel(self):
+        (self.root/'dist').mkdir()
+        (self.root/'dist'/'Hagency Desktop.dmg').write_bytes(b'installer')
+        release.collect('macos', 'arm64')
+        self.assertNotIn('kernel', json.loads((self.out/'build-macos-arm64.json').read_text()))
+        receipt = dict(revision='f'*40, target='aarch64-apple-darwin', sha256='0'*64,
+                       source='prebuilt-verified-version', features=None, builtByRun='100')
+        (self.root/'dist'/'runtime').mkdir()
+        (self.root/'dist'/'runtime'/'octos-aarch64-apple-darwin.json').write_text(json.dumps(receipt))
+        release.collect('macos', 'arm64')
+        self.assertEqual(json.loads((self.out/'build-macos-arm64.json').read_text())['kernel'], receipt)
+        release.verify('macos-arm64-windows')
+
     def test_unrecorded_installer_is_rejected(self):
         path = self.out/'build-macos-arm64.json'
         report = json.loads(path.read_text())

@@ -85,6 +85,15 @@ def sha(path):
     return digest.hexdigest()
 
 
+def kernel_receipt():
+    """What tools/package-octos.py recorded about the kernel in this installer:
+    its pinned revision and checksum, whether this run compiled it or took the
+    one an earlier release run compiled, and which run that was."""
+    receipts = sorted((ROOT/'dist'/'runtime').glob('octos-*.json'))
+    assert len(receipts) <= 1, receipts
+    return json.loads(receipts[0].read_text()) if receipts else None
+
+
 def collect(platform, arch):
     out = ROOT/'release-assets'
     out.mkdir(exist_ok=True)
@@ -97,6 +106,9 @@ def collect(platform, arch):
         assets.append(destination)
     sums = {p.name: sha(p) for p in assets}
     report = dict(metadata(), platform=platform, arch=arch, assets=sums)
+    kernel = kernel_receipt()
+    if kernel:
+        report['kernel'] = kernel
     (out/f'build-{platform}-{arch}.json').write_text(json.dumps(report, indent=2)+'\n')
     (out/f'SHA256SUMS-{platform}-{arch}.txt').write_text(''.join(f'{v}  {k}\n' for k,v in sums.items()))
 
