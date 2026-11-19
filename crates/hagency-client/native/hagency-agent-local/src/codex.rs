@@ -18,6 +18,7 @@ mod room_mcp;
 mod approvals;
 mod controls;
 mod native_usage;
+mod inspection;
 
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
@@ -248,6 +249,12 @@ impl Profile {
                 environment.insert(name.into(), value);
             }
         }
+        #[cfg(windows)]
+        for name in ["TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(name) {
+                environment.insert(name.into(), value);
+            }
+        }
         Ok(hagency_platform::Launch {
             executable: self.executable.clone(),
             arguments,
@@ -372,48 +379,50 @@ pub async fn sealed_shared_overrides(
     home: &std::path::Path,
     codex_home: &std::path::Path,
 ) -> Result<Vec<String>> {
-    let inspection = home.join("hagency-provider-inspection");
-    if !inspection.exists() {
-        std::fs::create_dir(&inspection)?;
-    }
-    if std::fs::symlink_metadata(&inspection)?
-        .file_type()
-        .is_symlink()
-        || !inspection.is_dir()
-    {
-        return Err(Error::Profile("inspection workspace invalid"));
-    }
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::set_permissions(&inspection, std::fs::Permissions::from_mode(0o700))?;
-    }
+    // Retain the private cwd through child shutdown. Account and configuration
+    // paths remain unchanged; Windows cannot create a process with a long cwd.
+    let inspection = inspection_step(
+        "workspace",
+        hagency_platform::codex_inspection_directory(home).map_err(Error::from),
+    )?;
     let profile = Profile {
         executable: executable.into(),
         home: home.into(),
         codex_home: codex_home.into(),
-        cwd: inspection.canonicalize()?,
+        cwd: inspection.path().into(),
         model: "probe".into(),
         effort: "medium".into(),
         shared_auth: true,
         web_search: false,
     };
-    profile.validate()?;
-    let mut probe = profile.spawn_inner(&[]).await?;
+    inspection_step("profile", profile.validate())?;
+    let probe = inspection_step("spawn", profile.spawn_inner(&[]).await)?;
+    inspect_shared_configuration(inspection, probe).await
+}
+
+async fn inspect_shared_configuration(
+    inspection: hagency_platform::CodexInspectionDirectory,
+    process: Process,
+) -> Result<Vec<String>> {
+    let mut probe = inspection::Probe::new(process, inspection);
     let result = async {
-        probe.session.initialize().await?;
-        let response = probe
-            .session
-            .rpc("config/read", value!({"includeLayers":false}))
-            .await?;
+        inspection_step("initialize", probe.session.initialize().await)?;
+        let response = inspection_step(
+            "config/read",
+            probe
+                .session
+                .rpc("config/read", value!({"includeLayers":false}))
+                .await,
+        )?;
         let c = &response["config"];
-        validate_shared_provider(c)?;
+        inspection_step("provider", validate_shared_provider(c))?;
         let mut overrides = vec![];
         if let Some(servers) = c.get("mcp_servers").filter(|v| !v.is_null()) {
             let servers = servers
                 .as_object()
                 .filter(|m| m.len() <= 128)
-                .ok_or(Error::Profile("MCP catalog invalid"))?;
+                .ok_or(Error::Profile("MCP catalog invalid"));
+            let servers = inspection_step("mcp/catalog", servers)?;
             for name in servers.keys() {
                 if name.is_empty()
                     || name.len() > 128
@@ -421,7 +430,7 @@ pub async fn sealed_shared_overrides(
                         .bytes()
                         .all(|c| c.is_ascii_alphanumeric() || c == b'_' || c == b'-')
                 {
-                    return Err(Error::Profile("MCP name invalid"));
+                    return inspection_step("mcp/name", Err(Error::Profile("MCP name invalid")));
                 }
                 // CLI dotted override keys do not implement TOML quoting.
                 // Restrict segments rather than disabling a different quoted name.
@@ -431,7 +440,44 @@ pub async fn sealed_shared_overrides(
         Ok(overrides)
     }
     .await;
-    probe.stop().await?;
+    if result.is_err() {
+        match probe.child.try_wait() {
+            Ok(status) => tracing::warn!(
+                stage = "inspection.child_status",
+                exited = status.is_some(),
+                exit_code = ?status.and_then(|s| s.code()),
+                "Codex inspection failed"
+            ),
+            Err(error) => tracing::warn!(
+                stage = "inspection.child_status",
+                os_error = ?error.raw_os_error(),
+                "Codex inspection status unavailable"
+            ),
+        }
+    }
+    let stopped = inspection_step("stop", probe.stop().await);
+    // Preserve the original failure if stopping the failed probe also fails.
+    let overrides = result?;
+    stopped?;
+    Ok(overrides)
+}
+
+fn inspection_step<T>(stage: &'static str, result: Result<T>) -> Result<T> {
+    if let Err(error) = &result {
+        let (kind, detail) = error.diagnostic();
+        let os_error = match error {
+            Error::Io(error) => error.raw_os_error(),
+            _ => None,
+        };
+        // Fixed diagnostic fields only: never log config/RPC/stderr bodies.
+        tracing::warn!(
+            stage,
+            kind,
+            detail,
+            ?os_error,
+            "Codex configuration inspection failed"
+        );
+    }
     result
 }
 pub fn verify_shared_configuration(c: &Value, home: &std::path::Path) -> Result<()> {
@@ -442,20 +488,35 @@ pub fn verify_shared_configuration(c: &Value, home: &std::path::Path) -> Result<
         || metadata.file_type().is_symlink()
         || metadata.len() != SEALED_INSTRUCTIONS.len() as u64
         || std::fs::read(&expected)? != SEALED_INSTRUCTIONS.as_bytes()
-        || c["model_instructions_file"].as_str() != expected.to_str()
-        || c["instructions"] != ""
-        || c["notify"].as_array().is_none_or(|v| !v.is_empty())
-        || c.get("model_catalog_json").is_some_and(|v| !v.is_null())
     {
         return Err(Error::Profile("shared ambient configuration differs"));
     }
-    if c.get("mcp_servers").is_some_and(|v| {
-        !v.is_null()
-            && v.as_object()
-                .is_none_or(|m| m.values().any(|s| s["enabled"] != false))
-    }) {
-        return Err(Error::Profile("shared MCP is enabled"));
+    for (field, accepted) in [
+        (
+            "model_instructions_file",
+            shared_instructions_path_matches(c["model_instructions_file"].as_str(), &expected),
+        ),
+        ("instructions", c["instructions"] == ""),
+        (
+            "notify",
+            c["notify"].as_array().is_some_and(|v| v.is_empty()),
+        ),
+        (
+            "model_catalog_json",
+            c.get("model_catalog_json").is_none_or(|v| v.is_null()),
+        ),
+    ] {
+        shared_configuration_check(accepted, field, "shared ambient configuration differs")?;
     }
+    shared_configuration_check(
+        !c.get("mcp_servers").is_some_and(|v| {
+            !v.is_null()
+                && v.as_object()
+                    .is_none_or(|m| m.values().any(|s| s["enabled"] != false))
+        }),
+        "mcp_servers",
+        "shared MCP is enabled",
+    )?;
     for key in [
         "shell_tool",
         "unified_exec",
@@ -486,35 +547,97 @@ pub fn verify_shared_configuration(c: &Value, home: &std::path::Path) -> Result<
         "remote_control",
         "memories",
     ] {
-        if c["features"][key] != false {
-            return Err(Error::Profile("shared native tool is enabled"));
-        }
+        shared_configuration_check(
+            c["features"][key] == false,
+            key,
+            "shared native tool is enabled",
+        )?;
     }
-    if !matches!(c["web_search"].as_str(), Some("disabled" | "live"))
-        || c["project_doc_max_bytes"] != 0
-        || c["skills"]["include_instructions"] != false
-        || c["skills"]["bundled"]["enabled"] != false
-        || c["developer_instructions"] != ""
-        || c["include_apps_instructions"] != false
-        || c["include_environment_context"] != false
+    for (field, accepted) in [
+        (
+            "web_search",
+            matches!(c["web_search"].as_str(), Some("disabled" | "live")),
+        ),
+        ("project_doc_max_bytes", c["project_doc_max_bytes"] == 0),
+        (
+            "skills.include_instructions",
+            c["skills"]["include_instructions"] == false,
+        ),
+        (
+            "skills.bundled.enabled",
+            c["skills"]["bundled"]["enabled"] == false,
+        ),
+        ("developer_instructions", c["developer_instructions"] == ""),
+        (
+            "include_apps_instructions",
+            c["include_apps_instructions"] == false,
+        ),
+        (
+            "include_environment_context",
+            c["include_environment_context"] == false,
+        ),
+    ] {
+        shared_configuration_check(accepted, field, "shared instructions enabled")?;
+    }
+    Ok(())
+}
+fn shared_instructions_path_matches(reported: Option<&str>, expected: &std::path::Path) -> bool {
+    let (Some(reported), Some(expected)) = (reported, expected.to_str()) else {
+        return false;
+    };
+    if reported == expected {
+        return true;
+    }
+    #[cfg(windows)]
     {
-        return Err(Error::Profile("shared instructions enabled"));
+        // Codex's config/read strips Windows verbatim prefixes. Accept only
+        // this spelling difference; do not resolve aliases or other files.
+        if let Some(unc) = expected.strip_prefix(r"\\?\UNC\") {
+            return reported.strip_prefix(r"\\") == Some(unc);
+        }
+        expected.strip_prefix(r"\\?\").is_some_and(|plain| {
+            std::path::Path::new(plain).is_absolute() && reported == plain
+        })
+    }
+    #[cfg(not(windows))]
+    false
+}
+fn shared_configuration_check(
+    accepted: bool,
+    field: &'static str,
+    detail: &'static str,
+) -> Result<()> {
+    if !accepted {
+        tracing::warn!(
+            stage = "verify_configuration",
+            field,
+            detail,
+            "Codex configuration field rejected"
+        );
+        return Err(Error::Profile(detail));
     }
     Ok(())
 }
 fn validate_shared_provider(c: &Value) -> Result<()> {
-    if c["model_provider"] != "openai" || c["chatgpt_base_url"] != "https://chatgpt.com/backend-api"
-    {
-        return Err(Error::Profile("shared provider origin differs"));
-    }
+    shared_configuration_check(
+        c["model_provider"] == "openai",
+        "model_provider",
+        "shared provider origin differs",
+    )?;
+    shared_configuration_check(
+        c["chatgpt_base_url"] == "https://chatgpt.com/backend-api",
+        "chatgpt_base_url",
+        "shared provider origin differs",
+    )?;
     // Installed Codex reserves immutable built-in IDs. Never turn a daily
     // custom table into an authenticated provider; select only its built-in.
-    if c["model_providers"]
-        .get("openai")
-        .is_some_and(|v| !v.is_null())
-    {
-        return Err(Error::Profile("custom built-in provider unsupported"));
-    }
+    shared_configuration_check(
+        !c["model_providers"]
+            .get("openai")
+            .is_some_and(|v| !v.is_null()),
+        "model_providers.openai",
+        "custom built-in provider unsupported",
+    )?;
 
     Ok(())
 }
@@ -2115,6 +2238,54 @@ fn now() -> i64 {
 mod tests {
     mod approvals;
     mod controls;
+    #[cfg(windows)]
+    #[test]
+    fn shared_instructions_accepts_windows_prefix_spelling_but_rejects_other_files() {
+        let expected = std::path::Path::new(r"\\?\C:\private\sealed.md");
+        assert!(shared_instructions_path_matches(Some(r"C:\private\sealed.md"), expected));
+        assert!(shared_instructions_path_matches(expected.to_str(), expected));
+        for rejected in [None, Some(r"C:\other\sealed.md"), Some(r"C:\private\other.md"), Some(r"private\sealed.md")] {
+            assert!(!shared_instructions_path_matches(rejected, expected));
+        }
+        assert!(shared_instructions_path_matches(Some(r"\\server\share\sealed.md"), std::path::Path::new(r"\\?\UNC\server\share\sealed.md")));
+    }
+    #[cfg(windows)]
+    #[tokio::test]
+    #[ignore = "installed CLI; config/read only, no account or inference"]
+    async fn installed_windows_inspection_with_long_account_home() {
+        let executable = PathBuf::from(std::env::var_os("HAGENCY_CODEX_BINARY").unwrap())
+            .canonicalize()
+            .unwrap();
+        let temporary = tempfile::tempdir().unwrap();
+        use std::os::windows::ffi::OsStrExt;
+        let parent = temporary.path().canonicalize().unwrap();
+        // 233 visible characters plus the canonical Windows verbatim prefix.
+        let padding = 237 - parent.as_os_str().encode_wide().count() - 1;
+        let home = parent.join("a".repeat(padding));
+        let codex_home = temporary.path().join("codex");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir(&codex_home).unwrap();
+        let former = home.join("hagency-provider-inspection");
+        std::fs::create_dir(&former).unwrap();
+        let old_failure = std::process::Command::new(&executable)
+            .arg("--version")
+            .current_dir(&former)
+            .output()
+            .unwrap_err();
+        assert_eq!(old_failure.raw_os_error(), Some(267));
+        let config = codex_home.join("config.toml");
+        std::fs::write(&config, b"# preserved\n").unwrap();
+        let overrides = sealed_shared_overrides(
+            &executable,
+            &home.canonicalize().unwrap(),
+            &codex_home.canonicalize().unwrap(),
+        )
+        .await
+        .unwrap();
+        assert!(overrides.is_empty());
+        assert_eq!(std::fs::read(config).unwrap(), b"# preserved\n");
+        assert!(former.is_dir(), "preserve the existing account directory layout");
+    }
     #[cfg(unix)]
     mod shared_project;
     #[test]

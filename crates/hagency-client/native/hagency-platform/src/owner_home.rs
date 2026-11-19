@@ -56,7 +56,7 @@ pub fn owner_home() -> io::Result<PathBuf> {
 #[cfg(windows)]
 mod windows;
 #[cfg(windows)]
-pub use windows::owner_home;
+pub use windows::{current_user_profile_dir, owner_home};
 
 #[cfg(not(any(unix, windows)))]
 pub fn owner_home() -> io::Result<PathBuf> {
