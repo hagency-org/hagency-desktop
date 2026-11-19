@@ -2,6 +2,17 @@
 
 更新：2026-11-19。
 
+## 2026-11-19 rc.13 发布
+
+用户要求基于最新合入的 PR 发布新的 RC；由 Claude 执行。
+
+- [v0.5.0-rc.13](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.13) 于 2026-11-19 04:40:58 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `5d9933a9d04577d0637723e35f369abe5f1c6e61` 构建：rc.12 之后合入了按资源池选择让 Claude 池 Agent 在容器中运行的 PR #156（默认关闭）、托管管理库关闭顺序的一行修正（在 PR #159 中），以及版本和发布说明 PR #164；其余是只改 CI 的 PR #154、#158、#159。Makepad 与 rc.12 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 44445855545](https://github.com/hagency-org/hagency-desktop/actions/runs/44445855545) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过，从触发到公开 2 小时 02 分。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,884,184 字节）和 `hagency-desktop-windows-amd64.exe`（122,505,475 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过，两份构建报告都写明上述提交和版本 0.5.0-rc.13。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：第一次运行通过，随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，没有资源错误。Windows 安装包没有在实机上运行。
+- 容器模式在 PR #156 合入前由其作者在一台 Mac 上对两个版本各跑通过一次；发布执行者本人没有运行容器模式，发布说明中这一节依据 PR 的说明写成，并由 PR 作者对照合入的代码核对过。
+- 这次发布没有部署服务端。
+
 ## 2026-11-18 rc.12 发布
 
 用户要求合并当时已通过检查的五个 PR 并通过 CI 发布；由 Claude 执行。
