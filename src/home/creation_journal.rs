@@ -10,6 +10,7 @@ use serde_json::{Value, json};
 use std::{io::Read, path::PathBuf, time::Duration};
 const MARKER: &str = "org.hagency.creation.v1";
 const LIMIT: u64 = 64 * 1024;
+const ARCHIVE_LIMIT: usize = 32;
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub(super) struct Intent {
     pub operation: uuid::Uuid,
@@ -27,6 +28,12 @@ impl Intent {
             "intent":blake3::hash(&serde_json::to_vec(&(&self.config,self.agent_space,&self.project)).expect("serializable intent")).to_hex().to_string()})
     }
 }
+#[derive(Debug)]
+pub(super) struct ReviewRecords {
+    pub current: Option<Intent>,
+    pub unresolved: Vec<Intent>,
+}
+
 #[derive(Clone)]
 pub(super) struct Journal {
     root: PathBuf,
@@ -91,20 +98,111 @@ impl Journal {
         tokio::task::spawn_blocking(move || {
             hagency_store::private::directory(journal.root.parent().unwrap())?;
             hagency_store::private::directory(&journal.root)?;
-            let lease_path=journal.root.join("lease");
-            let lease=match hagency_store::private::open(&lease_path,true) {
-                Ok(lease)=>lease,
-                Err(hagency_store::Error::Io(error)) if error.kind()==std::io::ErrorKind::AlreadyExists=>hagency_store::private::open(&lease_path,false)?,
-                Err(error)=>return Err(error.into()),
+            let lease_path = journal.root.join("lease");
+            let lease = match hagency_store::private::open(&lease_path, true) {
+                Ok(lease) => lease,
+                Err(hagency_store::Error::Io(error))
+                    if error.kind() == std::io::ErrorKind::AlreadyExists =>
+                {
+                    hagency_store::private::open(&lease_path, false)?
+                }
+                Err(error) => return Err(error.into()),
             };
             lease.try_lock().map_err(|_| {
                 anyhow!("Another window is updating the saved creation. Try again shortly.")
             })?;
+            let confirmed = journal.root.join("confirmed");
+            #[cfg(unix)]
+            let new_directory = !confirmed.try_exists()?;
+            hagency_store::private::directory(&confirmed)?;
+            #[cfg(unix)]
+            if new_directory {
+                std::fs::File::open(&journal.root)?.sync_all()?;
+            }
             work(&journal)
         })
         .await
         .map_err(|_| anyhow!("Saved creation storage is unavailable."))?
     }
+    fn unresolved_path(&self, operation: uuid::Uuid) -> PathBuf {
+        self.root.join(format!("unresolved-{operation}.json"))
+    }
+
+    fn confirmed_path(&self, operation: uuid::Uuid) -> PathBuf {
+        self.root
+            .join("confirmed")
+            .join(format!("{operation}.json"))
+    }
+
+    // Keep the returned room ID for late callbacks. Only unknown outcomes
+    // consume one of the 32 slots. Write the receipt durably before unlinking
+    // its unresolved copy so an interrupted migration can be retried.
+    fn save_archive(&self, intent: &Intent) -> Result<()> {
+        let unresolved = self.unresolved_path(intent.operation);
+        let bytes = serde_json::to_vec(intent)?;
+        ensure!(bytes.len() as u64 <= LIMIT, "Saved creation is too large.");
+        if intent.room.is_none() {
+            hagency_store::private::replace(&unresolved, &bytes)?;
+        } else {
+            hagency_store::private::replace(&self.confirmed_path(intent.operation), &bytes)?;
+            match std::fs::remove_file(unresolved) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                result => result?,
+            }
+        }
+        Ok(())
+    }
+
+    fn unresolved(&self) -> Result<Vec<Intent>> {
+        let mut records = Vec::new();
+        for entry in std::fs::read_dir(&self.root)? {
+            let entry = entry?;
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("unresolved-")
+            {
+                continue;
+            }
+            let record = self
+                .read_path(&entry.path())?
+                .ok_or_else(|| anyhow!("Saved creation is missing."))?;
+            ensure!(
+                entry.path() == self.unresolved_path(record.operation),
+                "Saved creation changed."
+            );
+            if let Some(confirmed) = self.read_path(&self.confirmed_path(record.operation))? {
+                ensure!(
+                    confirmed.operation == record.operation
+                        && confirmed.room.is_some()
+                        && record
+                            .room
+                            .as_ref()
+                            .is_none_or(|id| Some(id) == confirmed.room.as_ref()),
+                    "Saved creation changed."
+                );
+                std::fs::remove_file(entry.path())?;
+            } else if record.room.is_some() {
+                self.save_archive(&record)?;
+            } else {
+                records.push(record);
+            }
+        }
+        records.sort_by_key(|record| record.operation);
+        Ok(records)
+    }
+
+    pub async fn review_records(&self) -> Result<ReviewRecords> {
+        self.io(|j| {
+            Ok(ReviewRecords {
+                current: j.read()?.filter(|i| !i.complete),
+                unresolved: j.unresolved()?,
+            })
+        })
+        .await
+    }
+
+    #[cfg(test)]
     pub async fn pending(&self) -> Result<Option<Intent>> {
         self.io(|j| Ok(j.read()?.filter(|i| !i.complete))).await
     }
@@ -141,24 +239,26 @@ impl Journal {
         change: impl FnOnce(&mut Intent) -> Result<()>,
     ) -> Result<Intent> {
         let current = self.read()?;
-        let active = current.as_ref().is_some_and(|i| i.operation == operation);
-        let path = if active {
-            self.root.join("current.json")
-        } else {
-            self.root.join(format!("unresolved-{operation}.json"))
+        let active = current.filter(|i| i.operation == operation);
+        let archive = match self.read_path(&self.confirmed_path(operation))? {
+            Some(receipt) => Some(receipt),
+            None => self.read_path(&self.unresolved_path(operation))?,
         };
-        let mut intent = if active {
-            current
-        } else {
-            self.read_path(&path)?
-        }
-        .ok_or_else(|| anyhow!("Saved creation is missing."))?;
+        let mut intent = archive
+            .clone()
+            .or_else(|| active.clone())
+            .ok_or_else(|| anyhow!("Saved creation is missing."))?;
         ensure!(intent.operation == operation, "Saved creation changed.");
         change(&mut intent)?;
-        hagency_store::private::replace(&path, &serde_json::to_vec(&intent)?)?;
-        let archive = self.root.join(format!("unresolved-{operation}.json"));
-        if active && archive.exists() {
-            hagency_store::private::replace(&archive, &serde_json::to_vec(&intent)?)?;
+        if archive.is_some() {
+            self.save_archive(&intent)?;
+        }
+        if let Some(current) = active {
+            // Explicitly stopping tracking closes the active slot even while
+            // the archive still awaits confirmation of the room ID.
+            let mut updated = intent.clone();
+            updated.complete |= current.complete;
+            self.write(&updated)?;
         }
         Ok(intent)
     }
@@ -195,19 +295,26 @@ impl Journal {
                 intent.operation == operation && !intent.complete,
                 "Saved creation changed."
             );
+            let records = j.unresolved()?;
+            if let Some(receipt) = j.read_path(&j.confirmed_path(operation))? {
+                ensure!(
+                    receipt.operation == operation
+                        && receipt.room.is_some()
+                        && intent
+                            .room
+                            .as_ref()
+                            .is_none_or(|room| Some(room) == receipt.room.as_ref()),
+                    "Saved creation changed."
+                );
+                intent.room = receipt.room;
+            }
             ensure!(
-                std::fs::read_dir(&j.root)?
-                    .filter_map(Result::ok)
-                    .filter(|e| e.file_name().to_string_lossy().starts_with("unresolved-"))
-                    .count()
-                    < 32,
+                intent.room.is_some()
+                    || records.len() < ARCHIVE_LIMIT
+                    || records.iter().any(|saved| saved.operation == operation),
                 "Too many unresolved creations. Review saved records before starting another."
             );
-            // Keep the original uncertain record before acknowledging explicit abandonment.
-            hagency_store::private::replace(
-                &j.root.join(format!("unresolved-{}.json", intent.operation)),
-                &serde_json::to_vec(&intent)?,
-            )?;
+            j.save_archive(&intent)?;
             intent.complete = true;
             j.write(&intent)
         })
@@ -324,7 +431,7 @@ async fn recover_in(
             !incomplete,
             "Some rooms could not be checked. Retry recovery; no new room was created."
         );
-        found.ok_or_else(||anyhow!("The original creation is not confirmed yet. Retry recovery or enter its room ID; creating again is blocked."))?
+        found.ok_or_else(||anyhow!("The original creation is not confirmed yet. Retry recovery or enter its room ID."))?
     };
     validate_original(client, intent, &room).await?;
     journal.identified(intent.operation, room).await
@@ -446,12 +553,116 @@ mod tests {
         assert_eq!(current.operation, new.operation);
         assert!(current.room.is_none());
         let archive = j
-            .read_path(&j.root.join(format!("unresolved-{}.json", old.operation)))
+            .read_path(&j.confirmed_path(old.operation))
             .unwrap()
             .unwrap();
         assert_eq!(archive.room, Some(oldroom));
         assert!(archive.complete);
     }
+    #[tokio::test]
+    async fn full_archive_releases_only_confirmed_rooms_and_keeps_the_current_request() {
+        let root = tempfile::tempdir().unwrap();
+        let j = journal(root.path());
+        for _ in 0..ARCHIVE_LIMIT {
+            let intent = j.begin(config(), false, None).await.unwrap();
+            j.archive(intent.operation).await.unwrap();
+        }
+        let current = j.begin(config(), false, None).await.unwrap();
+        assert!(j.archive(current.operation).await.is_err());
+        let saved = j.review_records().await.unwrap();
+        assert_eq!(saved.current.unwrap().operation, current.operation);
+        assert_eq!(saved.unresolved.len(), ARCHIVE_LIMIT);
+        let old = &saved.unresolved[0];
+        let room: OwnedRoomId = "!old:example.org".try_into().unwrap();
+        j.identified(old.operation, room.clone()).await.unwrap();
+        j.archive(current.operation).await.unwrap();
+
+        // The last archived intent is also still in current.json. A late ID
+        // must not reopen it or turn another unknown outcome into a success.
+        j.identified(
+            current.operation,
+            "!current:example.org".try_into().unwrap(),
+        )
+        .await
+        .unwrap();
+        let reopened = journal(root.path()).review_records().await.unwrap();
+        assert!(reopened.current.is_none());
+        assert_eq!(reopened.unresolved.len(), ARCHIVE_LIMIT - 1);
+        assert!(
+            reopened
+                .unresolved
+                .iter()
+                .all(|i| i.operation != old.operation && i.room.is_none())
+        );
+        assert!(
+            j.identified(old.operation, "!wrong:example.org".try_into().unwrap())
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            j.read_path(&j.confirmed_path(old.operation))
+                .unwrap()
+                .unwrap()
+                .room,
+            Some(room)
+        );
+    }
+
+    #[tokio::test]
+    async fn review_migrates_legacy_archives_and_retries_partial_writes_at_capacity() {
+        let root = tempfile::tempdir().unwrap();
+        let j = journal(root.path());
+        let current = j.begin(config(), false, None).await.unwrap();
+        let write_legacy = |intent: &Intent| {
+            hagency_store::private::replace(
+                &j.unresolved_path(intent.operation),
+                &serde_json::to_vec(intent).unwrap(),
+            )
+            .unwrap();
+        };
+        for _ in 0..ARCHIVE_LIMIT - 1 {
+            let mut unknown = current.clone();
+            unknown.operation = uuid::Uuid::new_v4();
+            // Old active tombstones could carry complete=true without a room.
+            unknown.complete = true;
+            write_legacy(&unknown);
+        }
+        // The last slot was persisted, but closing current.json was interrupted.
+        write_legacy(&current);
+        let mut known = current.clone();
+        known.operation = uuid::Uuid::new_v4();
+        known.room = Some("!verified:example.org".try_into().unwrap());
+        write_legacy(&known);
+        j.archive(current.operation).await.unwrap();
+        assert_eq!(
+            j.review_records().await.unwrap().unresolved.len(),
+            ARCHIVE_LIMIT
+        );
+        assert!(!j.unresolved_path(known.operation).exists());
+        assert_eq!(
+            j.read_path(&j.confirmed_path(known.operation))
+                .unwrap()
+                .unwrap()
+                .room,
+            known.room
+        );
+
+        // A duplicate left after receipt creation must not replace a known ID.
+        let mut stale = known.clone();
+        stale.room = None;
+        write_legacy(&stale);
+        let next = j.begin(config(), false, None).await.unwrap();
+        j.identified(next.operation, "!next:example.org".try_into().unwrap())
+            .await
+            .unwrap();
+        j.archive(next.operation).await.unwrap();
+        assert!(!j.unresolved_path(stale.operation).exists());
+        assert_eq!(
+            j.review_records().await.unwrap().unresolved.len(),
+            ARCHIVE_LIMIT
+        );
+    }
+
     #[tokio::test]
     async fn private_storage_and_account_and_corruption_checks_fail_closed() {
         let root = tempfile::tempdir().unwrap();
@@ -540,9 +751,28 @@ mod tests {
                 Mock::given(method("GET")).and(path_regex(".*/rooms/.*/state$")).respond_with(move|r:&wiremock::Request|if r.url.path().contains("foreign"){ResponseTemplate::new(200).set_body_json(json!([]))}else{ResponseTemplate::new(200).set_body_json(&state)}).mount(&server).await;
                 assert!(recover_in(&client,&saved,"!foreign:example.org",&j).await.is_err());
                 assert!(j.pending().await.unwrap().unwrap().room.is_none());
-                let recovered=recover_in(&client,&saved,"",&j).await.unwrap();assert_eq!(recovered.operation,saved.operation);assert_eq!(recovered.room.as_deref().unwrap().as_str(),"!original:example.org");
+                if agent {
+                    // The archived request can be verified while a newer creation is pending.
+                    j.archive(saved.operation).await.unwrap();
+                    let next = j.begin(config.clone(), false, None).await.unwrap();
+                    let unknown = j.review_records().await.unwrap().unresolved.pop().unwrap();
+                    assert!(recover_in(&client, &unknown, "!foreign:example.org", &j).await.is_err());
+                    assert_eq!(j.review_records().await.unwrap().unresolved.len(), 1);
+                    let verified = recover_in(&client, &unknown, "!original:example.org", &j).await.unwrap();
+                    assert_eq!(verified.room.as_deref().unwrap().as_str(), "!original:example.org");
+                    let view = j.review_records().await.unwrap();
+                    assert!(view.unresolved.is_empty());
+                    assert_eq!(view.current.unwrap().operation, next.operation);
+                } else {
+                    let recovered = recover_in(&client, &saved, "", &j).await.unwrap();
+                    assert_eq!(recovered.operation, saved.operation);
+                    assert_eq!(recovered.room.as_deref().unwrap().as_str(), "!original:example.org");
+                    let reopened = j.pending().await.unwrap().unwrap();
+                    assert_eq!(reopened.room, recovered.room);
+                    assert_eq!(reopened.agent_space, agent);
+                    assert_eq!(reopened.config.parent, config.parent);
+                }
                 assert_eq!(server.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/createRoom")).count(),1);
-                let reopened=j.pending().await.unwrap().unwrap();assert_eq!(reopened.room,recovered.room);assert_eq!(reopened.agent_space,agent);assert_eq!(reopened.config.parent,config.parent);
                 crate::sliding_sync::test_set_current_client(None);
             }
         });
