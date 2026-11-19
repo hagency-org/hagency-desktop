@@ -4182,6 +4182,7 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         subscriber_task_handles.push(handle_blocked_user_list_subscriber(client.clone()));
         subscriber_task_handles.push(crate::account_session::spawn(crate::moments::dm_sharing::dm_sharing_loop()));
         subscriber_task_handles.push(handle_room_notification_subscriber(client.clone()));
+        subscriber_task_handles.push(watch_room_membership(&client));
 
         Cx::post_action(LoginAction::Status {
             title: "Connecting".into(),
@@ -5168,6 +5169,26 @@ fn handle_blocked_user_list_subscriber(client: Client) -> JoinHandle<()> {
                 .filter_map(|u| OwnedUserId::try_from(u).ok())
                 .collect::<HashSet<_, ConstHasher>>();
             set_blocked_users(blocked_users_new);
+        }
+    })
+}
+
+/// The sidebar filters left and banned rooms before producing list diffs.
+/// Open tabs must also hear about rooms first discovered in either state.
+fn watch_room_membership(client: &Client) -> JoinHandle<()> {
+    let mut updates = client.subscribe_to_all_room_updates();
+    let epoch = crate::account_session::epoch();
+    crate::account_session::spawn(async move {
+        loop {
+            match updates.recv().await {
+                Ok(batch) if batch.left.is_empty() => continue,
+                Ok(_) | Err(broadcast::error::RecvError::Lagged(_)) => {
+                    // The UI reads the current SDK state, including a rejoin
+                    // that may have arrived before it consumes this action.
+                    Cx::post_action(crate::home::room_screen::RoomMembershipChanged(epoch));
+                }
+                Err(broadcast::error::RecvError::Closed) => break,
+            }
         }
     })
 }
@@ -7064,3 +7085,6 @@ include!("timeline_retention.rs");
 
 #[cfg(test)]
 mod composer_send_tests;
+
+#[cfg(test)]
+mod room_restore_tests;

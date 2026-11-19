@@ -8734,7 +8734,7 @@ pub(crate) mod crypto_recovery_resume_tests {
 #[path = "room_screen/system_updates.rs"]
 mod system_updates;
 mod restore;
-pub(crate) use restore::RoomMembershipLost;
+pub(crate) use restore::RoomMembershipChanged;
 use system_updates::{system_update_ranges, is_groupable_system_update, present_system_update_group};
 
 /// Offline layout fixture using the production disclosure presentation.

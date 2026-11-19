@@ -48,7 +48,7 @@ impl Status {
 pub(super) struct RoomRestore {
     pub(super) status: Option<Status>,
     timer: Timer,
-    probe: Option<tokio::task::JoinHandle<()>>,
+    probe: Option<(u64, tokio::task::JoinHandle<()>)>,
 }
 
 impl RoomRestore {
@@ -56,7 +56,7 @@ impl RoomRestore {
         cx.stop_timer(self.timer);
         self.timer = Timer::empty();
         self.status = None;
-        if let Some(probe) = self.probe.take() {
+        if let Some((_, probe)) = self.probe.take() {
             probe.abort();
         }
     }
@@ -64,7 +64,7 @@ impl RoomRestore {
 
 impl Drop for RoomRestore {
     fn drop(&mut self) {
-        if let Some(probe) = self.probe.take() {
+        if let Some((_, probe)) = self.probe.take() {
             probe.abort();
         }
     }
@@ -79,11 +79,17 @@ struct ProbeResult {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct RoomMembershipLost(pub OwnedRoomId, pub RoomState);
+pub(crate) struct RoomMembershipChanged(pub u64);
 
 impl RoomScreen {
     fn set_restore_status(&mut self, cx: &mut Cx, status: Status) {
-        self.restore.clear(cx);
+        if status == Status::TimedOut {
+            // The one-shot timer fired. A slower access check can still give
+            // this attempt a definitive answer before the SDK request times out.
+            self.restore.timer = Timer::empty();
+        } else {
+            self.restore.clear(cx);
+        }
         self.restore.status = Some(status);
         self.view
             .restore_status_view(cx, ids!(restore_status_view))
@@ -125,7 +131,7 @@ impl RoomScreen {
         {
             let attempt = self.restore.timer.0;
             let epoch = crate::account_session::epoch();
-            self.restore.probe = Some(crate::account_session::spawn(async move {
+            let probe = crate::account_session::spawn(async move {
                 let request = get_state_event_for_key::v3::Request::new(
                     room_id,
                     StateEventType::RoomCreate,
@@ -146,7 +152,8 @@ impl RoomScreen {
                     epoch,
                     status,
                 });
-            }));
+            });
+            self.restore.probe = Some((attempt, probe));
         }
     }
 
@@ -156,20 +163,17 @@ impl RoomScreen {
         event: &Event,
         scope: &mut Scope,
     ) -> bool {
-        if let Event::Actions(actions) = event {
-            for action in actions {
-                if let Some(RoomMembershipLost(id, state)) = action.downcast_ref()
-                    && self
-                        .timeline_kind
-                        .as_ref()
-                        .is_some_and(|k| k.room_id() == id)
-                    && let Some(status) = Status::membership(*state)
-                {
-                    self.hide_timeline();
-                    self.is_loaded = false;
-                    self.set_restore_status(cx, status);
-                }
-            }
+        if let Event::Actions(actions) = event
+            && actions.iter().any(|a| matches!(a.downcast_ref(), Some(RoomMembershipChanged(epoch)) if *epoch == crate::account_session::epoch()))
+            && let Some(kind) = &self.timeline_kind
+            && let Some(room) = crate::sliding_sync::get_client().and_then(|c| c.get_room(kind.room_id()))
+            && let Some(status) = Status::membership(room.state())
+            && self.restore.status != Some(status)
+        {
+            invalidate_entire_room_timeline_states(cx, kind.room_id());
+            self.hide_timeline();
+            self.is_loaded = false;
+            self.set_restore_status(cx, status);
         }
         if self.is_loaded || self.restore.status.is_none() {
             return false;
@@ -209,7 +213,11 @@ impl RoomScreen {
             for action in actions {
                 if let Some(result) = action.downcast_ref::<ProbeResult>()
                     && result.epoch == crate::account_session::epoch()
-                    && result.attempt == self.restore.timer.0
+                    && self
+                        .restore
+                        .probe
+                        .as_ref()
+                        .is_some_and(|(attempt, _)| result.attempt == *attempt)
                 {
                     self.set_restore_status(cx, result.status);
                 }
