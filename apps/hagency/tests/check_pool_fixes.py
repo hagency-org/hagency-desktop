@@ -37,6 +37,30 @@ let open=fn(row){
 let floor_reply={contributionId:"con_main" heldTokens:9000000 heldAgents:1 perRequestTokens:9000000 mostTokens:9000000 periodEndMs:1793491200000}
 '''
 CASES={
+'local_agents_refresh_without_pool_support': '''
+H.entry_role="manager" H.page="pool_agents" H.session.features=[] H.session.localAgentsHere=true
+A.refresh_page()
+assert(find("hagency.personal_agents.list")>=0)
+assert(find("hagency.pools.agents.list")==-1)
+''',
+'local_agent_add_opens_only_on_the_hosting_device': '''
+H.entry_role="manager" H.page="pool_agents" H.session.features=[] H.local_list=[]
+let opened=[]
+A.native_open=fn(destination){opened.push(destination)}
+let tap_add=fn(node){
+    if !node.is_object(){return}
+    for i key child in node {
+        if key.to_string()=="local_add"{child.on_click()}
+        tap_add(child)
+    }
+}
+for here in [false,true] {
+    H.session.localAgentsHere=here
+    let page=View{POOL_PAGE_CONTENT}
+    tap_add(page)
+    if here {assert(opened.len()==1 && opened[0]=="local_agents")} else {assert(opened.len()==0)}
+}
+''',
 'published_parent_is_not_counted_again_when_approving_an_agent': '''
 main.budget.pool.ceiling=500000000 main.budget.pool.committed=500000000 main.budget.remainingTokens=0
 open(main)
@@ -303,9 +327,12 @@ assert(!A.pool_published(closed,grant))
 def main():
  p=argparse.ArgumentParser();p.add_argument('vm',type=Path);p.add_argument('--output',type=Path,required=True);a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True)
  source=(APP/'bundle/main.splash').read_text();results=[]
+ # Evaluate the shipped page in a View so its named tap targets are available in the VM.
+ start=source.index('    if H.ready && (H.page=="pools" || H.page=="pool_apply"')
+ pool_pages=source[start:source.index('    if H.needs_signin',start)]
  for lang in ('en','zh-CN'):
   for name,case in CASES.items():
-   path=a.output/(lang+'-'+name+'.splash');path.write_text(fixture(source+SETUP+case,lang))
+   path=a.output/(lang+'-'+name+'.splash');path.write_text(fixture(source+SETUP+case.replace('POOL_PAGE_CONTENT',pool_pages),lang))
    r=subprocess.run([str(a.vm.resolve()),'root',str(path)],stdout=subprocess.PIPE,stderr=subprocess.STDOUT,text=True)
    path.with_suffix('.log').write_text(r.stdout);results.append(dict(case=name,language=lang,passed=r.returncode==0))
  (a.output/'report.json').write_text(json.dumps(results,indent=2)+'\n');print(json.dumps(dict(passed=sum(r['passed'] for r in results),total=len(results))));raise SystemExit(not all(r['passed'] for r in results))
