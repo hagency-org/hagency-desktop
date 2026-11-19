@@ -35,6 +35,7 @@ impl MatrixTokenSource for Source {
 #[derive(Clone)]
 struct MatrixApi {
     owner: &'static str,
+    revocation_endpoint: String,
     fixture: OAuthFixture,
     whoami: Arc<AtomicU64>,
 }
@@ -57,7 +58,7 @@ impl MatrixApi {
         }
         let value = if path.ends_with("/auth_metadata") {
             Some(
-                json!({"issuer":format!("{base}auth/"),"authorization_endpoint":format!("{base}auth/oauth2/authorize"),"token_endpoint":format!("{base}auth/oauth2/token"),"revocation_endpoint":format!("{base}auth/oauth2/revoke"),"response_types_supported":["code"],"response_modes_supported":["query","fragment"],"grant_types_supported":["authorization_code","refresh_token"],"code_challenge_methods_supported":["S256"]}),
+                json!({"issuer":format!("{base}auth/"),"authorization_endpoint":format!("{base}auth/oauth2/authorize"),"token_endpoint":format!("{base}auth/oauth2/token"),"revocation_endpoint":self.revocation_endpoint,"response_types_supported":["code"],"response_modes_supported":["query","fragment"],"grant_types_supported":["authorization_code","refresh_token"],"code_challenge_methods_supported":["S256"]}),
             )
         } else if path.ends_with("/account/whoami") {
             assert_eq!(
@@ -141,7 +142,42 @@ fn launch(
     )
 }
 
-async fn homeserver(owner: &'static str) -> (OAuthFixture, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
+/// Forward the SDK's HTTPS revocation request to the same OAuth fixture.
+async fn tls_revocation_proxy(upstream: std::net::SocketAddr) -> (String, impl std::future::Future<Output = ()> + Send) {
+    use tokio_rustls::{
+        TlsAcceptor,
+        rustls::{self, pki_types::{CertificateDer, PrivatePkcs8KeyDer}},
+    };
+    let config = rustls::ServerConfig::builder_with_provider(Arc::new(rustls::crypto::ring::default_provider()))
+        .with_safe_default_protocol_versions().unwrap()
+        .with_no_client_auth().with_single_cert(
+            vec![CertificateDer::from(include_bytes!("../../../hagency-matrix/tests/fixtures/server.der").to_vec())],
+            PrivatePkcs8KeyDer::from(include_bytes!("../../../hagency-matrix/tests/fixtures/public-test-key.der").to_vec()).into(),
+        ).unwrap();
+    let acceptor = TlsAcceptor::from(Arc::new(config));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("https://{}/auth/oauth2/revoke", listener.local_addr().unwrap());
+    let forward = async move {
+        let mut connections = tokio::task::JoinSet::new();
+        loop {
+            tokio::select! {
+                Ok((socket, _)) = listener.accept() => {
+                    let acceptor = acceptor.clone();
+                    connections.spawn(async move {
+                        if let Ok(mut tls) = acceptor.accept(socket).await {
+                            let mut http = tokio::net::TcpStream::connect(upstream).await.unwrap();
+                            let _ = tokio::io::copy_bidirectional(&mut tls, &mut http).await;
+                        }
+                    });
+                }
+                Some(_) = connections.join_next() => (),
+            }
+        }
+    };
+    (url, forward)
+}
+
+async fn homeserver(owner: &'static str, tls_revocation: bool) -> (OAuthFixture, Arc<AtomicU64>, tokio::task::JoinHandle<()>) {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     drop(listener);
@@ -176,12 +212,19 @@ async fn homeserver(owner: &'static str) -> (OAuthFixture, Arc<AtomicU64>, tokio
             direct_journal: None,
         })),
     };
+    let (revocation_endpoint, proxy) = if tls_revocation {
+        let (url, task) = tls_revocation_proxy(address).await;
+        (url, Some(task))
+    } else {
+        (format!("{}/auth/oauth2/revoke", fake.origin), None)
+    };
     let whoami = Arc::new(AtomicU64::new(0));
     let service = Service::new(
         Router::new()
             .hoop(fake.clone())
             .hoop(MatrixApi {
                 owner,
+                revocation_endpoint,
                 fixture: fake.clone(),
                 whoami: whoami.clone(),
             })
@@ -189,7 +232,12 @@ async fn homeserver(owner: &'static str) -> (OAuthFixture, Arc<AtomicU64>, tokio
     );
     let acceptor = salvo::conn::TcpListener::new(address).bind().await;
     let server = tokio::spawn(async move {
-        Server::new(acceptor).serve(service).await;
+        let serve = Server::new(acceptor).serve(service);
+        if let Some(forward) = proxy {
+            tokio::select! { _ = serve => (), _ = forward => () }
+        } else {
+            serve.await;
+        }
     });
     (fake, whoami, server)
 }
@@ -219,7 +267,7 @@ fn temporary_daemon_home() -> tempfile::TempDir {
 
 #[tokio::test]
 async fn enrolled_owner_runtime_survives_two_controller_detaches_and_restart() {
-    let (fake, whoami, server) = homeserver(OWNER).await;
+    let (fake, whoami, server) = homeserver(OWNER, false).await;
     let owner_home = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
     let root = owner_home.path().join("owner");
     let home = temporary_daemon_home();
@@ -308,9 +356,23 @@ async fn enrolled_owner_runtime_survives_two_controller_detaches_and_restart() {
 
 #[tokio::test]
 async fn two_authenticated_accounts_share_a_daemon_and_sign_out_independently() {
+    // Linux's TLS verifier accepts a CA bundle scoped to a child process.
+    // Other platforms exercise the pending-revocation case with the HTTP
+    // fixture. No system trust settings are changed.
+    let tls = cfg!(target_os = "linux");
+    if tls && std::env::var_os("HAGENCY_TEST_REVOCATION_TLS").is_none() {
+        let ca = Path::new(env!("CARGO_MANIFEST_DIR")).join("../hagency-matrix/tests/fixtures/ca.pem");
+        let thread = std::thread::current();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", thread.name().unwrap(), "--nocapture"])
+            .env("SSL_CERT_FILE", ca).env("HAGENCY_TEST_REVOCATION_TLS", "1").output().unwrap();
+        assert!(output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "isolated SDK logout test: {} {}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+        return;
+    }
     const PEER: &str = "@owner:peer.test";
-    let (first, _, first_server) = homeserver(OWNER).await;
-    let (second, _, second_server) = homeserver(PEER).await;
+    let (first, _, first_server) = homeserver(OWNER, tls).await;
+    let (second, _, second_server) = homeserver(PEER, false).await;
     let origins = [format!("{}/", first.origin), format!("{}/", second.origin)];
     let roots = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
     let base = temporary_daemon_home();
@@ -333,12 +395,30 @@ async fn two_authenticated_accounts_share_a_daemon_and_sign_out_independently() 
     assert!(peer_control.execute(NativeCommand::Agents).await.unwrap()["agents"].is_array());
 
     host::sign_out(base.path()).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(30), async {
-        while Enrollment::load(base.path()).unwrap().is_some() {
-            tokio::time::sleep(Duration::from_millis(25)).await;
+    if tls {
+        let complete = tokio::time::timeout(Duration::from_secs(30), async {
+            while Enrollment::load(base.path()).unwrap().is_some() {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await;
+        if complete.is_err() {
+            let request = daemon::Request::new("logout-state", Some(OWNER.into()), daemon::Command::Snapshot { period: None, usage_filter: None });
+            let state = client.call(&request).await.unwrap().snapshot().unwrap().hosting;
+            panic!("SDK sign-out did not finish: {state:?}; fixture revocations: {}", first.state.lock().unwrap().revocations);
         }
-    }).await.expect("first account completes native and SDK sign-out");
-    assert!(!base.path().join(daemon::MATRIX).join("session.json").exists());
+        assert!(!base.path().join(daemon::MATRIX).join("session.json").exists());
+    } else {
+        // RFC 7009 requires HTTPS. Native credentials are revoked and the
+        // SDK retains a retry journal while the HTTP-only endpoint is refused.
+        tokio::time::timeout(Duration::from_secs(30), async {
+            loop {
+                if let host::Presence::Running(hello) = host::probe(base.path()).await
+                    && hello.hosting == hagency_metering::dashboard::HostingState::Failed { break; }
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+        }).await.expect("first account reports the unavailable revocation endpoint");
+        assert!(daemon::revocation::load(base.path()).unwrap().is_some());
+    }
     assert_eq!(std::fs::read(&session).unwrap(), original_session);
     assert!(peer_control.execute(NativeCommand::Agents).await.unwrap()["agents"].is_array());
     assert_eq!(second.state.lock().unwrap().revocations, peer_revocations);
