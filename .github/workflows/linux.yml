@@ -59,6 +59,15 @@ jobs:
           # The manual-page index is rebuilt after every install and can take
           # minutes on these machines.
           sudo rm -f /var/lib/man-db/auto-update
+          # Some of these machines are set up with the EC2 package mirror of
+          # one region in place of Azure's. On 2026-11-18 every machine that
+          # had it got the 50 MB of packages at about 60 kB/s, 7 to 16
+          # minutes; every machine with Azure's took seconds.
+          mirrors=/etc/apt/apt-mirrors.txt
+          if [ -f "$mirrors" ] && grep -q '\.ec2\.archive\.ubuntu\.com/' "$mirrors"; then
+            sudo sed -i -E 's#^https?://[a-z0-9.-]+\.ec2\.archive\.ubuntu\.com/#http://azure.archive.ubuntu.com/#' "$mirrors"
+            echo "package mirror changed to Azure's:"; cat "$mirrors"
+          fi
           sudo apt-get -o Acquire::Retries=3 update
           sudo apt-get -o Acquire::Retries=3 -o DPkg::Lock::Timeout=120 install -y --no-install-recommends \
             libssl-dev libsqlite3-dev pkg-config llvm clang libclang-dev cmake \
