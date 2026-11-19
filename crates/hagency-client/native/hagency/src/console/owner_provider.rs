@@ -36,6 +36,24 @@ pub(crate) struct ProviderError {
 fn failure(status: u16, code: &'static str) -> ProviderError {
     ProviderError { status, code }
 }
+fn shared_configuration_failure(
+    stage: &'static str,
+    error: hagency_agent_local::codex::Error,
+) -> ProviderError {
+    let (kind, detail) = error.diagnostic();
+    let os_error = match &error {
+        hagency_agent_local::codex::Error::Io(error) => error.raw_os_error(),
+        _ => None,
+    };
+    tracing::warn!(
+        stage,
+        kind,
+        detail,
+        ?os_error,
+        "Local Codex configuration check failed"
+    );
+    failure(409, "local_codex_configuration_unsupported")
+}
 fn private_directory(path: &Path) -> Result<PathBuf, ProviderError> {
     hagency_store::private::directory(path)
         .map_err(|_| failure(503, "provider_directory_unavailable"))?;
@@ -338,7 +356,7 @@ impl Process {
                 &paths.codex_home,
             )
             .await
-            .map_err(|_| failure(409, "local_codex_configuration_unsupported"))?
+            .map_err(|error| shared_configuration_failure("inspection", error))?
         } else {
             vec![]
         };
@@ -389,7 +407,7 @@ impl Process {
         }
         if paths.shared {
             for value in hagency_agent_local::codex::shared_base_overrides(&paths.home)
-                .map_err(|_| failure(409, "local_codex_configuration_unsupported"))?
+                .map_err(|error| shared_configuration_failure("sealed_instructions", error))?
             {
                 command.arg("-c").arg(value);
             }
@@ -399,6 +417,12 @@ impl Process {
         }
         if let Some(path) = std::env::var_os("PATH") {
             command.env("PATH", path);
+        }
+        #[cfg(windows)]
+        for name in ["SystemRoot", "TEMP", "TMP"] {
+            if let Some(value) = std::env::var_os(name) {
+                command.env(name, value);
+            }
         }
         for feature in [
             "shell_tool",
@@ -434,7 +458,10 @@ impl Process {
         }
         let child = command
             .spawn()
-            .map_err(|_| failure(503, "codex_provider_unavailable"))?;
+            .map_err(|error| {
+                tracing::warn!(stage = "provider.spawn", os_error = ?error.raw_os_error(), "Codex process creation failed");
+                failure(503, "codex_provider_unavailable")
+            })?;
         let mut child = drain::TrackedChild::new(child, tasks);
         creation.complete();
         let input = child
@@ -457,7 +484,10 @@ impl Process {
             until: None,
             reference: paths.credential_ref.clone(),
         };
-        let started = p.rpc("initialize",json!({"clientInfo":{"name":"hagency-client","title":"Hagency Client","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false}})).await?;
+        let started = p.rpc("initialize",json!({"clientInfo":{"name":"hagency-client","title":"Hagency Client","version":env!("CARGO_PKG_VERSION")},"capabilities":{"experimentalApi":false}})).await.map_err(|error| {
+                tracing::warn!(stage = "provider.initialize", code = error.code, exit_code = ?p.child.try_wait().ok().flatten().and_then(|s| s.code()), "Codex initialization failed");
+                error
+            })?;
         // Before `initialized`, so an older Codex is never used for an account.
         if !started["userAgent"]
             .as_str()
@@ -468,10 +498,13 @@ impl Process {
         }
         p.write(json!({"method":"initialized"})).await?;
         if paths.shared || identity {
-            let c = p.rpc("config/read", json!({"includeLayers":false})).await?;
+            let c = p.rpc("config/read", json!({"includeLayers":false})).await.map_err(|error| {
+                tracing::warn!(stage = "provider.config/read", code = error.code, "Codex configuration read failed");
+                error
+            })?;
             if paths.shared {
                 hagency_agent_local::codex::verify_shared_configuration(&c["config"], &paths.home)
-                    .map_err(|_| failure(409, "local_codex_configuration_unsupported"))?;
+                    .map_err(|error| shared_configuration_failure("verify_configuration", error))?;
             }
             if identity {
                 identity::configuration(&c["config"])?;
@@ -1090,6 +1123,66 @@ async fn dispatch(req: &mut Request, depot: &Depot, res: &mut Response) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn local_configuration_logs_stage_os_code_and_field_without_private_bodies() {
+        #[derive(Clone)]
+        struct Sink(Arc<std::sync::Mutex<Vec<u8>>>);
+        impl std::io::Write for Sink {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.0.lock().unwrap().extend_from_slice(bytes);
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+        impl<'a> tracing_subscriber::fmt::MakeWriter<'a> for Sink {
+            type Writer = Sink;
+            fn make_writer(&'a self) -> Sink {
+                self.clone()
+            }
+        }
+        let sink = Sink(Arc::new(std::sync::Mutex::new(Vec::new())));
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(sink.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        tracing::subscriber::with_default(subscriber, || {
+            let error = shared_configuration_failure(
+                "inspection.spawn",
+                hagency_agent_local::codex::Error::Io(std::io::Error::from_raw_os_error(267)),
+            );
+            assert_eq!(error.code, "local_codex_configuration_unsupported");
+            let _ = shared_configuration_failure(
+                "inspection.workspace",
+                hagency_agent_local::codex::Error::Io(std::io::Error::other(
+                    "token=secret /private/credential",
+                )),
+            );
+            assert!(
+                hagency_agent_local::codex::verify_shared_configuration(
+                    &json!({"model_provider":"token=secret"}),
+                    Path::new("/private/credential")
+                )
+                .is_err()
+            );
+        });
+        let log = String::from_utf8(sink.0.lock().unwrap().clone()).unwrap();
+        for expected in [
+            "inspection.spawn",
+            "Some(267)",
+            "verify_configuration",
+            "model_provider",
+        ] {
+            assert!(
+                log.contains(expected),
+                "missing fixed diagnostic {expected}"
+            );
+        }
+        assert!(!log.contains("secret"));
+        assert!(!log.contains("/private/credential"));
+    }
     #[cfg(windows)]
     #[test]
     fn windows_codex_discovery_uses_path_and_os_profile() {
@@ -1238,9 +1331,17 @@ mod tests {
     #[tokio::test]
     #[ignore = "explicit reuse of installed managed account; account/read and model/list only, no inference"]
     async fn installed_shared_managed_account_and_models_without_inference() {
+        let _ = tracing_subscriber::fmt()
+            .with_env_filter("hagency=warn,hagency_agent_local=warn")
+            .with_test_writer()
+            .try_init();
+        #[cfg(windows)]
+        let os_home = hagency_platform::current_user_profile_dir().unwrap();
+        #[cfg(not(windows))]
+        let os_home = hagency_platform::owner_home().unwrap();
         let temp = tempfile::Builder::new()
             .prefix(".hagency-shared-ancestry-probe-")
-            .tempdir_in(std::env::var_os("HOME").unwrap())
+            .tempdir_in(os_home)
             .unwrap();
         let root = temp.path().canonicalize().unwrap().join("state");
         let mut p = paths(
@@ -1251,6 +1352,16 @@ mod tests {
             "@owner:example",
         )
         .unwrap();
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            let parent = temp.path().canonicalize().unwrap();
+            // Match eva2: provider cwd fits CreateProcessW, but the former
+            // nested inspection cwd does not (233 + separator + 27 = 261).
+            let padding = 237 - parent.as_os_str().encode_wide().count() - 1;
+            p.home = private_directory(&parent.join("p".repeat(padding))).unwrap();
+            assert_eq!(p.home.as_os_str().encode_wide().count(), 237);
+        }
         p.codex_home = trusted_local_home().unwrap();
         p.shared = true;
         p.credential_ref = selected_reference(&p.codex_home, true).unwrap();

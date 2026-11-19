@@ -224,7 +224,7 @@ impl From<crate::native_owner::NativeError> for Failure {
     }
 }
 impl Failure {
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     fn native(self) -> crate::native_owner::NativeError {
         crate::native_owner::NativeError {
             status: self.status,
