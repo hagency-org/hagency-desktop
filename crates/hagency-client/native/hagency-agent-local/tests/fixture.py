@@ -21,7 +21,8 @@ def send(value):
     value = json.loads(json.dumps(value))
     # Captured CLI 2.1.321 result metadata: breakdowns do not add billed tokens.
     if value.get('type') == 'result':
-        value['uuid'] = f'fixture-result-{os.getpid()}-{native_result_index}'
+        result_index = 0 if mode == 'background_native_reused_id' and native_result_index == 1 else native_result_index
+        value['uuid'] = f'fixture-result-{os.getpid()}-{result_index}'
         native_result_index += 1
         if 'modelUsage' not in value and value.get('usage') and mode != 'mixed_usage':
             usage = value['usage']
@@ -190,13 +191,22 @@ if kind == 'claude':
         assert prompt.get('session_id') in ('', session), prompt
         if os.environ.get('CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS') == '1':
             send({'type':'system','subtype':'session_state_changed','state':'running','session_id':session})
-            send({'type':'command_lifecycle','command_uuid':'fixture-command','state':'started','session_id':session})
+            # The CLI reports a prompt as a command under the identifier the
+            # host gave the prompt (2.1.323, every offline capture).
+            send({'type':'command_lifecycle','command_uuid':prompt.get('uuid') or 'fixture-command','state':'started','session_id':session})
         send({'type': 'system', 'subtype': 'init', 'session_id': session, 'user_message_uuids':[prompt.get('uuid')]})
         aborted = False
-        if mode == 'spontaneous_messages':
-            send({'type':'assistant','session_id':session,'parent_tool_use_id':None,
-                'message':{'id':'progress-a','content':[{'type':'text','text':'First finding'},
-                    {'type':'tool_use','id':'progress-tool-a','name':'Read','input':{}}]}})
+        if mode in ('spontaneous_messages', 'spontaneous_split'):
+            text = {'type':'text','text':'First finding'}
+            tool = {'type':'tool_use','id':'progress-tool-a','name':'Read','input':{}}
+            if mode == 'spontaneous_split':
+                send({'type':'assistant','session_id':session,'parent_tool_use_id':None,
+                    'message':{'id':'progress-a','content':[text]}})
+                send({'type':'assistant','session_id':session,'parent_tool_use_id':None,
+                    'message':{'id':'progress-a','content':[tool]}})
+            else:
+                send({'type':'assistant','session_id':session,'parent_tool_use_id':None,
+                    'message':{'id':'progress-a','content':[text, tool]}})
             deadline = time.monotonic() + 5
             while not (root / 'progress-observed').exists() and time.monotonic() < deadline:
                 time.sleep(.01)
@@ -291,7 +301,11 @@ if kind == 'claude':
                 assert not reply['isError']
         if mode in ('approval', 'cancel', 'hold', 'long_wait'):
             send({'type': 'assistant', 'session_id': session, 'message': {'id': 'step-1', 'content': [{'type': 'tool_use', 'id': 'tool-1', 'name': 'Write', 'input': {'file_path': str(root / 'outside' / 'result')}}], 'usage': {'input_tokens': 10, 'output_tokens': 2, 'cache_read_input_tokens': 3, 'cache_creation_input_tokens': 4}}})
-            send({'type': 'control_request', 'request_id': 'approval-1', 'request': {'subtype': 'can_use_tool', 'tool_name': approval_tool, 'tool_use_id': 'tool-1', 'input': {'file_path': str(root / 'outside' / 'result'), 'content': 'exact'}}})
+            approval_input = {'file_path': str(root / 'outside' / 'result'), 'content': 'exact'}
+            if approval_tool.startswith('ToolSearch='):
+                approval_tool, query = approval_tool.split('=', 1)
+                approval_input = {'query': query, 'max_results': 5}
+            send({'type': 'control_request', 'request_id': 'approval-1', 'request': {'subtype': 'can_use_tool', 'tool_name': approval_tool, 'tool_use_id': 'tool-1', 'input': approval_input}})
             if mode == 'cancel':
                 send({'type': 'control_cancel_request', 'request_id': 'approval-1'})
             else:
@@ -371,7 +385,7 @@ if kind == 'claude':
             result['modelUsage'] = {'main': {'inputTokens':9007199254740991,'outputTokens':1,'cacheReadInputTokens':0,'cacheCreationInputTokens':0}}
         if mode == 'long_usage':
             result['modelUsage'] = {'main':{'inputTokens':12000,'outputTokens':1200,'cacheReadInputTokens':0,'cacheCreationInputTokens':0}}
-        if continuous or mode in ('cumulative', 'mixed_usage', 'regressing_usage', 'wrong_session', 'background_usage', 'background_wrong_snapshot', 'background_approval', 'background_regressing', 'background_snapshot_eof', 'background_native_followup', 'background_stop_after_answer'):
+        if continuous or mode in ('cumulative', 'mixed_usage', 'regressing_usage', 'wrong_session', 'background_usage', 'background_wrong_snapshot', 'background_approval', 'background_regressing', 'background_snapshot_eof', 'background_native_followup', 'background_native_equal', 'background_native_reused_id', 'background_stop_after_answer'):
             count_file = root / 'count'
             count = int(count_file.read_text()) + 1 if count_file.exists() else 1
             count_file.write_text(str(count))
@@ -384,7 +398,7 @@ if kind == 'claude':
                     result['modelUsage']['subagent']['outputTokens'] = 20*(n-1)+10
         if mode.startswith('background_'):
             child_task = {'task_id':'child-one','task_type':'local_agent'}
-            if mode == 'background_native_followup': child_task['run_id'] = 'native-child-run'
+            if mode in ('background_native_followup', 'background_native_equal', 'background_native_reused_id'): child_task['run_id'] = 'native-child-run'
             send({'type':'system','subtype':'background_tasks_changed','session_id':session,'tasks':[child_task]})
         send(result)
         if mode == 'steer_cycle':
@@ -414,18 +428,19 @@ if kind == 'claude':
                     response = read()['response']['response']
                     if response['behavior'] == 'allow':
                         (root / 'child-effect').write_text('one')
-            if mode != 'background_native_followup':
+            if mode not in ('background_native_followup', 'background_native_equal', 'background_native_reused_id'):
                 send({'type':'system','subtype':'session_state_changed','state':'idle','session_id':session})
             import time
             time.sleep(0.05)
             (root / 'background-completed').write_text(str(count))
             send({'type':'system','subtype':'task_notification','session_id':session,**child_task,'status':'completed'})
             send({'type':'system','subtype':'background_tasks_changed','session_id':session,'tasks':[]})
-            if mode == 'background_native_followup':
+            if mode in ('background_native_followup', 'background_native_equal', 'background_native_reused_id'):
                 send({'type':'system','subtype':'init','session_id':session})
                 result['modelUsage']['subagent']['outputTokens'] = 20 * process_count
-                result['result'] = 'native background final answer'
+                result['result'] = 'offline reply' if mode == 'background_native_equal' else 'native background final answer'
                 result.pop('user_message_uuid', None)
+                result.pop('uuid', None)
                 result['origin'] = {'kind':'task-notification','producer':'session-task','runId':'native-child-run'}
                 send(result)
                 send({'type':'system','subtype':'session_state_changed','state':'idle','session_id':session})
@@ -446,6 +461,53 @@ if kind == 'claude':
             result['user_message_uuid'] = 'wrong-call' if mode == 'background_wrong_snapshot' else snapshot['uuid']
             send(result)
         if os.environ.get('CLAUDE_CODE_EMIT_SESSION_STATE_EVENTS') == '1':
+            send({'type':'system','subtype':'session_state_changed','state':'idle','session_id':session})
+        self_tool = mode.endswith('_tool')
+        self_mode = mode[:-5] if self_tool else mode
+        if self_mode in ('self_timer', 'self_peer', 'self_unknown') and not (root / 'self-started').exists():
+            # Captured CLI 2.1.323 (offline, 2026-11-17): a timer the session
+            # set, or a message from another session on this computer, starts
+            # a turn while the host has the session parked. Nothing was
+            # written to stdin; no frame names a user message. A timer's
+            # result has no origin, a peer message's result names the peer.
+            while not (root / 'fire').exists():
+                time.sleep(0.01)
+            (root / 'self-started').write_text('')
+            process_count += 1
+            n = process_count
+            started = {'type':'command_lifecycle','command_uuid':'self-command','state':'started','session_id':session}
+            if self_mode == 'self_timer':
+                started.update({'wakeup_source':'loop_wakeup','scheduled_for':1794939960000})
+            send({'type':'system','subtype':'session_state_changed','state':'running','session_id':session})
+            if not (root / 'no-command-frame').exists():
+                send(started)
+            send({'type':'system','subtype':'init','session_id':session})
+            send({'type':'system','subtype':'status','status':'requesting','session_id':session})
+            if self_tool:
+                send({'type':'assistant','session_id':session,'parent_tool_use_id':None,
+                    'message':{'id':'self-step','content':[{'type':'tool_use','id':'self-command-tool','name':'Bash','input':{'command':'offline-self-command'}}]}})
+                send({'type':'control_request','request_id':'self-approval','request':{'subtype':'can_use_tool','tool_name':'Bash','tool_use_id':'self-command-tool','input':{'command':'offline-self-command'}}})
+                response = read()['response']['response']
+                if response['behavior'] == 'allow':
+                    (root / 'self-effect').write_text('one')
+                send({'type':'user','session_id':session,'message':{'content':[{'type':'tool_result','tool_use_id':'self-command-tool','content':'done'}]}})
+            send({'type':'assistant','session_id':session,'parent_tool_use_id':None,
+                'message':{'id':'self-progress','content':[{'type':'text','text':'self-started progress'},
+                    {'type':'tool_use','id':'self-tool','name':'Read','input':{}}]}})
+            send({'type':'user','session_id':session,'message':{'content':[{'type':'tool_result','tool_use_id':'self-tool','content':'done'}]}})
+            send({'type':'assistant','session_id':session,'parent_tool_use_id':None,
+                'message':{'id':'self-answer','content':[{'type':'text','text':'self-started report'}]}})
+            own = {'type':'result','subtype':'success','is_error':False,'result':'self-started report',
+                'session_id':session,'usage':usage,
+                'modelUsage':{'main':{'inputTokens':10*n,'outputTokens':7*n,'cacheReadInputTokens':3*n,'cacheCreationInputTokens':4*n},
+                    'subagent':{'inputTokens':20*n,'outputTokens':10*n,'cacheReadInputTokens':0,'cacheCreationInputTokens':0}}}
+            if self_mode == 'self_peer':
+                own['origin'] = {'kind':'peer','from':'uds:/tmp/cc-socks/3165.sock','verifiedPeerPid':3165,
+                    'verifiedLocal':True,'msg_id':'peer-message-one','name':'work-6a','fromMode':'prompting','body':'Peer says hello'}
+            if self_mode == 'self_unknown':
+                own['origin'] = {'kind':'channel','server':'elsewhere'}
+            send(own)
+            send({'type':'command_lifecycle','command_uuid':'self-command','state':'completed','session_id':session})
             send({'type':'system','subtype':'session_state_changed','state':'idle','session_id':session})
         if not continuous or mode == 'exit':
             break
@@ -478,7 +540,7 @@ else:
         answer(request, {'session_id':session, 'tools':[{'name':tool['name'], 'model_name':tool['name'].replace('.', '_')} for tool in tools], 'generic_tools':request['params']['generic_tools'], 'applies':'next_turn'})
         request = read()
     turn = request['params']['turn_id']
-    if mode in ('octos_files', 'octos_files_revoke', 'octos_files_cancel', 'octos_files_traversal', 'octos_room', 'octos_progress'):
+    if mode in ('octos_files', 'octos_files_revoke', 'octos_files_cancel', 'octos_files_traversal', 'octos_room', 'octos_progress', 'octos_shell'):
         (root / 'turn-input').write_text(request['params']['input'][0]['text'])
     answer(request, {'accepted': True})
     seq = 0
@@ -554,6 +616,14 @@ else:
             assert request['method'] == 'peer/tool/result' and request['params']['call_id'] == 'file-1'
             (root / 'file-result').write_text(json.dumps(request['params']))
             answer(request, {'call_id':'file-1', 'accepted':True})
+    if mode == 'octos_shell':
+        assert any(tool['name'] == 'hagency.shell' for tool in tools)
+        notify('peer/tool/call', {'session_id':session, 'turn_id':turn, 'call_id':'shell-1',
+            'name':'hagency.shell', 'args':{'command':'pwd; echo made > made.txt', 'timeout_secs':10}})
+        request = read()
+        assert request['method'] == 'peer/tool/result' and request['params']['call_id'] == 'shell-1'
+        (root / 'shell-result').write_text(json.dumps(request['params']))
+        answer(request, {'call_id':'shell-1', 'accepted':True})
     if mode in ('approval', 'cancel', 'hold'):
         envelope('tool_start', {'tool_call_id': 'tool-1', 'name': 'shell'})
         notify('approval/requested', {'session_id': session, 'approval_id': 'approval-1', 'turn_id': turn, 'tool_name': 'shell', 'title': 'Run a command', 'body': 'offline', 'approval_kind': 'command', 'risk': 'high', 'typed_details': {'kind': 'command', 'command': {'command_line': 'offline', 'cwd': str(root / 'outside'), 'tool_call_id': 'tool-1'}}})
@@ -573,14 +643,18 @@ else:
         envelope('assistant_delta', {'text':'offline ', 'assistant_segment_id':'segment-1'})
         envelope('assistant_delta', {'text':'reply', 'assistant_segment_id':'segment-1'})
     envelope('assistant_persisted', {'text': 'offline reply', 'assistant_segment_id':'segment-1'})
-    tokens = {} if mode in ('unknown', 'octos_missing_with_totals') else {'token_usage': {'input_tokens': 10, 'output_tokens': 7, 'cache_read_tokens': 3, 'cache_write_tokens': 4, 'reasoning_tokens': 2}}
-    envelope('turn_terminal', {'outcome': 'interrupted' if interrupted else ('errored' if mode == 'failed' else 'completed'), **tokens})
+    count_file = root / 'count'
+    # Octos as it handles a stop: the stopped turn ends without a report and
+    # its session record leaves the turn out.
+    stopped = mode == 'octos_stop_then_next' and (int(count_file.read_text()) if count_file.exists() else 0) == 1
+    tokens = {} if mode in ('unknown', 'octos_missing_with_totals') or stopped else {'token_usage': {'input_tokens': 10, 'output_tokens': 7, 'cache_read_tokens': 3, 'cache_write_tokens': 4, 'reasoning_tokens': 2}}
+    envelope('turn_terminal', {'outcome': 'interrupted' if interrupted or stopped else ('errored' if mode == 'failed' else 'completed'), **tokens})
     notify('session/orchestration', {'session_id': session, 'active': False})
     request = read()
-    count_file = root / 'count'
     count = int(count_file.read_text()) + 1 if count_file.exists() else 1
     count_file.write_text(str(count))
-    totals = {} if mode == 'unknown' or (mode == 'mixed_usage' and count == 1) else {'input_tokens': 10 * count, 'output_tokens': 7 * count, 'cached_input_tokens': 3 * count, 'cache_write_input_tokens': 4 * count}
+    recorded = count - 1 if mode == 'octos_stop_then_next' and count > 1 else count
+    totals = {} if mode == 'unknown' or (mode == 'mixed_usage' and count == 1) else {'input_tokens': 10 * recorded, 'output_tokens': 7 * recorded, 'cached_input_tokens': 3 * recorded, 'cache_write_input_tokens': 4 * recorded}
     answer(request, {'usage': totals})
 # Keep the pipe alive until the host drops/stops the original child.
 sys.stdin.read()

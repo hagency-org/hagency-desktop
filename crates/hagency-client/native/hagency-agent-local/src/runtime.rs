@@ -1,7 +1,7 @@
 //! Desktop runtime bridge. Native sessions may span many independently admitted
 //! calls. Accounts remain provider-owned; each call has its own ledger and approvals.
 use crate::codex::{self, ApprovalQueue, BudgetMode, Completed, Error, Profile, Result, TurnStatus};
-use crate::{Ledger, Reservation, Scope, ToolPolicy, ToolProposal, Usage};
+use crate::{Ledger, RequestPolicy, Reservation, Scope, ToolPolicy, ToolProposal, Usage};
 use hagency_runtime::{claude, octos};
 use serde_json::Value;
 use std::{
@@ -10,9 +10,12 @@ use std::{
 };
 mod claude_controls;
 pub mod claude_turn;
+use claude_turn::OctosCounters;
 pub mod octos_turn;
 #[cfg(unix)]
 mod octos_files;
+#[cfg(target_os = "macos")]
+mod octos_shell;
 
 type Claude = hagency_runtime::owned::OwnedClaudeSession;
 type Octos = hagency_runtime::owned::OwnedOctosSession;
@@ -207,7 +210,31 @@ pub enum Session {
         context: String,
         room: Option<hagency_runtime::room_tools::RoomTools>,
         files: Option<OctosHostFiles>,
+        shell: OctosShellHost,
     },
+}
+
+/// What the owner's local Octos Agent needs to start its confined shell.
+pub struct OctosShellHost {
+    #[cfg(target_os = "macos")]
+    guardian: std::path::PathBuf,
+    /// This Agent's commands across its turns: one whose stop was not proven
+    /// keeps every later command refused.
+    #[cfg(target_os = "macos")]
+    pending: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+}
+impl OctosShellHost {
+    fn new(guardian: &Path) -> Self {
+        #[cfg(target_os = "macos")]
+        {
+            Self { guardian: guardian.to_path_buf(), pending: Default::default() }
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            let _ = guardian;
+            Self {}
+        }
+    }
 }
 
 /// Owner-selected workspace capability, bound to this Octos process only.
@@ -389,9 +416,10 @@ async fn spawn_inner(
                 command.env("CLAUDE_CONFIG_DIR", &profile.codex_home);
             }
             command.args(
-                claude::interactive_arguments(&profile.model, &profile.effort)
+                claude::local_interactive_arguments(&profile.model, &profile.effort)
                     .map_err(|_| Error::Profile("Claude model or effort"))?,
             );
+            command.args(["--append-system-prompt", CLAUDE_ROOM_NOTE]);
             // The Agent's web search switch, as a shared Claude run reads it.
             if !profile.web_search {
                 command.args(["--disallowedTools", "WebSearch,WebFetch"]);
@@ -516,6 +544,7 @@ async fn spawn_inner(
             context: context_profile(profile, reference)?,
             room: None,
             files: None,
+            shell: OctosShellHost::new(&guardian),
         },
         Kind::Codex => unreachable!(),
     };
@@ -525,6 +554,46 @@ async fn spawn_inner(
     })
 }
 
+/// The Claude tools that set, list and remove timers for the session's own
+/// later turns: one wake-up, and the schedules of the same session.
+const SELF_TIMER_TOOLS: [&str; 4] = [
+    "claude.ScheduleWakeup",
+    "claude.CronCreate",
+    "claude.CronList",
+    "claude.CronDelete",
+];
+/// Added to the CLI's own instructions for a local Agent. Without it a model
+/// asked to do something later waits inside the turn (a `sleep` command):
+/// that asks the owner for a command and keeps the Agent busy meanwhile.
+/// The risk named on a tool request of a turn that holds a peer session's
+/// message; see `claude_turn::Host::outside_input`.
+pub const PEER_SESSION_RISK: &str = "peer_session";
+/// The CLI may offer its timer tools by name only; the model then loads one
+/// with `ToolSearch` before it can set a timer (seen live on 2.1.323,
+/// 2026-11-17: the owner was asked for `select:ScheduleWakeup`). Loading the
+/// description of a timer tool does nothing; any other lookup is asked for
+/// like every tool.
+fn timer_tool_lookup(tool: &str, arguments: &Value) -> bool {
+    tool == "claude.ToolSearch"
+        && arguments["query"]
+            .as_str()
+            .and_then(|query| query.strip_prefix("select:"))
+            .is_some_and(|names| {
+                names.split(',').all(|name| {
+                    let name = name.trim();
+                    SELF_TIMER_TOOLS
+                        .iter()
+                        .any(|timer| timer.strip_prefix("claude.") == Some(name))
+                        || name
+                            .strip_prefix("mcp__hagency_matrix__")
+                            .is_some_and(hagency_runtime::room_tools::host_kept)
+                })
+            })
+}
+const CLAUDE_ROOM_NOTE: &str = "You answer in a chat room through Hagency. To do something later, or to report on a schedule, set a timer with the schedule_wakeup tool of the hagency_matrix server (mcp__hagency_matrix__schedule_wakeup) and end your answer. When the timer fires you run again, and what you answer then is posted to the same chat by itself. That timer is kept by Hagency and survives a restart; ScheduleWakeup lives only as long as this process, so use it only when you are asked for it by name. Do not pass time with sleep or another waiting command. A role or standing instructions that a person gives you for the room are forgotten by the next conversation unless you save them with set_room_role of the same server (mcp__hagency_matrix__set_room_role).";
+/// How long the confirmation recorded for a self-started turn lasts: the
+/// longest a confirmation may last, which is also the longest a turn may run.
+const SELF_STARTED_CONFIRMED_SECS: i64 = 3600;
 fn now() -> i64 {
     time::OffsetDateTime::now_utc().unix_timestamp()
 }
@@ -643,6 +712,31 @@ impl Session {
             Self::Octos { .. } => false,
         }
     }
+    /// Look, without waiting, at what a retained idle Claude process wrote
+    /// since its last turn. `true`: the CLI started a turn by itself (a timer
+    /// the session set, a message from a peer session) and that turn is now
+    /// open. The caller runs it with `run_self_started` or stops the process;
+    /// until then the session can neither continue nor be looked at again.
+    /// An error means the process can no longer be reused. Codex and Octos
+    /// sessions have nothing to look at here.
+    pub async fn poll_self_started(&mut self) -> Result<bool> {
+        match self {
+            Self::Claude { wire, reusable, .. } => {
+                if !*reusable || !wire.can_followup() {
+                    return Err(Error::Protocol("native session cannot continue"));
+                }
+                let started = wire
+                    .poll_idle(claude::session::Limits::default())
+                    .await
+                    .map_err(|_| Error::Protocol("retained Claude process unavailable"))?;
+                if started {
+                    *reusable = false;
+                }
+                Ok(started)
+            }
+            _ => Ok(false),
+        }
+    }
     /// Revalidate durable scope and the retained native process before a new
     /// reservation. A failed probe has not transmitted this turn's model input.
     pub async fn continue_context(
@@ -747,12 +841,95 @@ impl Session {
         started: Option<tokio::sync::oneshot::Sender<()>>,
         observer: Option<&(dyn Fn(&Usage) + Send + Sync)>,
     ) -> Result<Completed> {
+        self.run_admitted(
+            ledger, owner, scope, call, dispatch, Some(input), mode, queue, started, observer,
+        )
+        .await
+    }
+    /// Run the turn `poll_self_started` found open. It is charged and settled
+    /// exactly like a requested turn, under `call` and a `dispatch` identity
+    /// of the host's own. It continues a conversation that was already
+    /// admitted, so nobody is asked: where the scope's requests need the
+    /// owner's confirmation, that confirmation is recorded here. A scope that
+    /// denies requests, or a spent budget, still refuses it, and a refusal
+    /// leaves the caller to stop the process. Its tool requests go through
+    /// `queue` like any other turn's.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_self_started(
+        &mut self,
+        ledger: &mut Ledger,
+        owner: &str,
+        scope: &Scope,
+        call: &str,
+        dispatch: &str,
+        mode: BudgetMode,
+        queue: &ApprovalQueue,
+        observer: Option<&(dyn Fn(&Usage) + Send + Sync)>,
+    ) -> Result<Completed> {
+        if !matches!(self, Self::Claude { wire, .. } if wire.self_started_turn()) {
+            return Err(Error::Protocol("no self-started turn is open"));
+        }
+        if ledger.request_disposition(scope, dispatch)? == RequestPolicy::AskOwner {
+            let now = now();
+            ledger.approve_request(owner, scope, dispatch, now + SELF_STARTED_CONFIRMED_SECS, now)?;
+        }
+        self.run_admitted(
+            ledger, owner, scope, call, dispatch, None, mode, queue, None, observer,
+        )
+        .await
+    }
+    /// Run a turn the host starts for a timer the conversation's Agent set
+    /// with the host (`schedule_wakeup`). Like a turn the CLI started by
+    /// itself it continues a conversation that was already admitted: where
+    /// the scope's requests need the owner's confirmation, it is recorded
+    /// here, and a denying scope or a spent budget refuses the turn. Every
+    /// runtime can run one; `input` is what the host tells the model.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn run_host_started(
+        &mut self,
+        ledger: &mut Ledger,
+        owner: &str,
+        scope: &Scope,
+        call: &str,
+        dispatch: &str,
+        input: &str,
+        mode: BudgetMode,
+        queue: &ApprovalQueue,
+        observer: Option<&(dyn Fn(&Usage) + Send + Sync)>,
+    ) -> Result<Completed> {
+        if ledger.request_disposition(scope, dispatch)? == RequestPolicy::AskOwner {
+            let now = now();
+            ledger.approve_request(owner, scope, dispatch, now + SELF_STARTED_CONFIRMED_SECS, now)?;
+        }
+        self.run_admitted(
+            ledger, owner, scope, call, dispatch, Some(input), mode, queue, None, observer,
+        )
+        .await
+    }
+    #[allow(clippy::too_many_arguments)]
+    async fn run_admitted(
+        &mut self,
+        ledger: &mut Ledger,
+        owner: &str,
+        scope: &Scope,
+        call: &str,
+        dispatch: &str,
+        input: Option<&str>,
+        mode: BudgetMode,
+        queue: &ApprovalQueue,
+        started: Option<tokio::sync::oneshot::Sender<()>>,
+        observer: Option<&(dyn Fn(&Usage) + Send + Sync)>,
+    ) -> Result<Completed> {
         if let Self::Codex(session) = self {
+            let input = input.ok_or(Error::Protocol("no self-started turn is open"))?;
             return session
                 .run_with_started_observed(
                     ledger, owner, scope, call, dispatch, input, mode, queue, started, observer,
                 )
                 .await;
+        }
+        if input.is_none() && !matches!(self, Self::Claude { .. }) {
+            return Err(Error::Protocol("no self-started turn is open"));
         }
         ledger.owner(owner)?;
         let bound = match self {
@@ -762,7 +939,7 @@ impl Session {
         if bound != Some(scope) {
             return Err(Error::Protocol("run scope differs from opened context"));
         }
-        if input.is_empty() || input.len() > 65536 {
+        if input.is_some_and(|input| input.is_empty() || input.len() > 65536) {
             return Err(Error::Profile("input size"));
         }
         let controls = queue
@@ -807,7 +984,7 @@ impl Session {
                 .await
             }
             Self::Octos {
-                wire, profile, id, room, files, ..
+                wire, profile, id, room, files, shell, ..
             } => {
                 run_octos(
                     wire,
@@ -818,12 +995,14 @@ impl Session {
                     scope,
                     call,
                     dispatch,
-                    input,
+                    // Only a Claude session reaches here without an input.
+                    input.unwrap_or_default(),
                     queue,
                     started,
                     controls,
                     *room,
                     files.as_mut(),
+                    shell,
                 )
                 .await
             }
@@ -837,6 +1016,7 @@ impl Session {
             returns,
             cumulative,
             late_failure,
+            octos,
         } = result?;
         if late_failure.is_some() {
             // The native stream failed after this answer was read. The charge
@@ -852,7 +1032,6 @@ impl Session {
                 late_failure,
             });
         }
-        let is_claude = matches!(self, Self::Claude { .. });
         let (context, session) = match self {
             Self::Claude { wire, context, .. } => {
                 (context.as_str(), wire.session_id().ok_or(Error::Unknown)?)
@@ -862,11 +1041,9 @@ impl Session {
             }
             _ => unreachable!(),
         };
-        // Claude projects UUID-deduplicated native result deltas for this
-        // admitted turn. Octos retains its distinct session counter contract.
-        let counters = if usage.is_reported() {
+        let saved = || -> Result<Option<String>> {
             use rusqlite::OptionalExtension;
-            let baseline: Option<(String, String)> = charge
+            let saved: Option<(String, String)> = charge
                 .ledger
                 .db
                 .query_row(
@@ -876,61 +1053,36 @@ impl Session {
                 )
                 .optional()
                 .map_err(crate::Error::from)?;
-            if baseline.as_ref().is_some_and(|(prior, _)| prior != session) {
-                return Err(Error::Protocol("resumed native session identity differs"));
+            match saved {
+                Some((prior, _)) if prior != session => {
+                    Err(Error::Protocol("resumed native session identity differs"))
+                }
+                saved => Ok(saved.map(|(_, counters)| counters)),
             }
-            let baseline = if is_claude {
-                None
-            } else {
-                baseline.map(|(_, counters)| counters)
+        };
+        // Claude projects UUID-deduplicated native result deltas for this
+        // admitted turn. Octos retains its distinct session counter contract.
+        let counters = if let Some(octos) = &octos {
+            let kept = match saved()? {
+                None => None,
+                Some(counters) if counters.is_empty() || counters == "null" => Some(None),
+                Some(counters) => Some(Some(serde_json::from_str(&counters)?)),
             };
-            let baseline_missing = baseline
-                .as_deref()
-                .is_some_and(|s| s.is_empty() || s == "null");
-            let prior: Option<Usage> = baseline
-                .filter(|s| !s.is_empty() && s != "null")
-                .map(|s| serde_json::from_str(&s))
-                .transpose()?;
+            let (charged, next) = octos_charge(octos, kept);
+            usage = charged;
+            match next {
+                Some(next) => serde_json::to_string(&next)?,
+                None => "null".into(),
+            }
+        } else if usage.is_reported() {
+            // Claude: its per-turn deltas are charged as reported. Main-loop
+            // counters exclude subagents, so they cannot establish a
+            // whole-session baseline for a future modelUsage.
+            saved()?;
             if cumulative {
-                let absolute = serde_json::to_string(&usage)?;
-                if baseline_missing {
-                    usage = crate::unreported_usage();
-                } else if let Some(prior) = prior {
-                    // A backwards native counter makes the charge unknown,
-                    // not the already completed answer unavailable.
-                    usage = usage_delta(&usage, &prior).unwrap_or_else(crate::unreported_usage);
-                }
-                absolute
+                serde_json::to_string(&usage)?
             } else {
-                // Claude main-loop counters exclude subagents, so they cannot
-                // establish a whole-session baseline for a future modelUsage.
-                if is_claude || baseline_missing {
-                    "null".into()
-                } else {
-                    let mut absolute = usage.clone();
-                    if let Some(prior) = prior {
-                        absolute.input = absolute
-                            .input
-                            .checked_add(prior.input)
-                            .ok_or(Error::Unknown)?;
-                        absolute.output = absolute
-                            .output
-                            .checked_add(prior.output)
-                            .ok_or(Error::Unknown)?;
-                        absolute.cached_input = absolute
-                            .cached_input
-                            .checked_add(prior.cached_input)
-                            .ok_or(Error::Unknown)?;
-                        absolute.cache_write_input =
-                            match (absolute.cache_write_input, prior.cache_write_input) {
-                                (Some(current), Some(prior)) => {
-                                    Some(current.checked_add(prior).ok_or(Error::Unknown)?)
-                                }
-                                _ => None,
-                            };
-                    }
-                    serde_json::to_string(&absolute)?
-                }
+                "null".into()
             }
         } else {
             String::new()
@@ -960,6 +1112,77 @@ impl Session {
     }
 }
 
+/// What one Octos dispatch is charged, and the session counters kept for the
+/// next one. Octos starts a process per dispatch, but its own record covers
+/// the whole session: the charge is how much that record grew since the
+/// counters kept last time, when the growth covers this dispatch's own turn
+/// reports. Octos keeps no record of a stopped or failed turn, so when the
+/// growth falls short the turn reports are charged instead. A turn that ended
+/// without any report leaves the charge unknown. The record is kept either
+/// way, so the next dispatch is charged exactly. `kept` is `None` before the
+/// first dispatch and `Some(None)` when the last one left no counters.
+fn octos_charge(counters: &OctosCounters, kept: Option<Option<Usage>>) -> (Usage, Option<Usage>) {
+    let Some(session) = &counters.session else {
+        // Without a session record (an Octos with no usage ledger) the turn
+        // reports accumulate in its place.
+        let next = match (&counters.turns, kept) {
+            (Some(turns), None) => Some(turns.clone()),
+            (Some(turns), Some(Some(prior))) => usage_sum(turns, &prior),
+            _ => None,
+        };
+        let charged = counters.turns.clone().unwrap_or_else(crate::unreported_usage);
+        return (charged, next);
+    };
+    let growth = match kept {
+        None => Some(session.clone()),
+        Some(None) => None,
+        // A record that went backwards gives no growth.
+        Some(Some(prior)) => usage_delta(session, &prior),
+    };
+    let charged = match (growth, &counters.turns) {
+        (Some(growth), Some(turns)) if usage_covers(&growth, turns) => growth,
+        (_, Some(turns)) => turns.clone(),
+        (_, None) => crate::unreported_usage(),
+    };
+    (charged, Some(session.clone()))
+}
+fn usage_covers(total: &Usage, part: &Usage) -> bool {
+    total.input >= part.input
+        && total.output >= part.output
+        && total.cached_input >= part.cached_input
+        && match (total.cache_write_input, part.cache_write_input) {
+            (Some(total), Some(part)) => total >= part,
+            (_, None) => true,
+            (None, Some(_)) => false,
+        }
+}
+fn usage_sum(a: &Usage, b: &Usage) -> Option<Usage> {
+    let mut sum = a.clone();
+    sum.input = a.input.checked_add(b.input)?;
+    sum.output = a.output.checked_add(b.output)?;
+    sum.cached_input = a.cached_input.checked_add(b.cached_input)?;
+    sum.cache_write_input = match (a.cache_write_input, b.cache_write_input) {
+        (Some(a), Some(b)) => Some(a.checked_add(b)?),
+        _ => None,
+    };
+    Some(sum)
+}
+/// Octos counts fresh input apart from cache reads and writes; the ledger's
+/// input includes both.
+fn octos_usage(usage: octos::Usage) -> Result<Usage> {
+    Ok(Usage {
+        input: usage
+            .input
+            .checked_add(usage.cache_read)
+            .and_then(|v| v.checked_add(usage.cache_write))
+            .ok_or(Error::Unknown)?,
+        output: usage.output,
+        cached_input: usage.cache_read,
+        cache_write_input: Some(usage.cache_write),
+        reasoning_output: 0,
+        accounting_version: "octos-reported-v1".into(),
+    })
+}
 fn usage_delta(current: &Usage, prior: &Usage) -> Option<Usage> {
     let mut delta = current.clone();
     delta.input = current.input.checked_sub(prior.input)?;
@@ -1005,6 +1228,26 @@ async fn permission(
     cwd: &Path,
     queue: &ApprovalQueue,
 ) -> claude_turn::ToolAnswer {
+    permission_within(ledger, owner, scope, dispatch, tool, arguments, cwd, queue, 280, false)
+        .await
+}
+/// The owner's policy for one tool request, asking the owner when the policy
+/// says so and waiting at most `wait_secs` for the answer.
+#[allow(clippy::too_many_arguments)]
+async fn permission_within(
+    ledger: &mut Ledger,
+    owner: &str,
+    scope: &Scope,
+    dispatch: &str,
+    tool: String,
+    arguments: Value,
+    cwd: &Path,
+    queue: &ApprovalQueue,
+    wait_secs: u64,
+    // Saved rules and full trust do not answer for this request: where they
+    // would allow it, the owner is asked. A denying rule still denies.
+    ask_where_allowed: bool,
+) -> claude_turn::ToolAnswer {
     use claude_turn::ToolAnswer;
     let Ok(versions) = ledger.policy_snapshot(scope) else {
         return ToolAnswer::Deny;
@@ -1015,11 +1258,17 @@ async fn permission(
         tool,
         arguments,
         canonical_directory: cwd.to_string_lossy().into(),
-        risk: "high".into(),
+        // The owner is shown where the request comes from: a card that
+        // looks like their own conversation's request gets approved.
+        risk: if ask_where_allowed { PEER_SESSION_RISK } else { "high" }.into(),
         policy_revision: versions.map(|v| v.revision),
-        expires: now() + 280,
+        expires: now() + wait_secs as i64,
     };
-    match ledger.tool_disposition(&proposal, now()) {
+    let disposition = match ledger.tool_disposition(&proposal, now()) {
+        Ok(ToolPolicy::AllowWithRules { .. }) if ask_where_allowed => Ok(ToolPolicy::AskOwner),
+        other => other,
+    };
+    match disposition {
         Ok(ToolPolicy::AllowWithRules { .. }) => {
             ToolAnswer::allowed(ledger.authorize_tool(&proposal, now()).is_ok())
         }
@@ -1028,7 +1277,7 @@ async fn permission(
             if !queue.offer(pending) {
                 return ToolAnswer::Deny;
             }
-            match tokio::time::timeout(Duration::from_secs(280), decision).await {
+            match tokio::time::timeout(Duration::from_secs(wait_secs), decision).await {
                 // The owner never answered: nobody refused.
                 Err(_) => ToolAnswer::Unanswered,
                 Ok(Ok(true)) => ToolAnswer::allowed(
@@ -1037,6 +1286,8 @@ async fn permission(
                         .and_then(|_| ledger.authorize_tool(&proposal, now()))
                         .is_ok(),
                 ),
+                // Let go by the host once it expired: still nobody answered.
+                Ok(Err(_)) if now() >= proposal.expires => ToolAnswer::Unanswered,
                 Ok(_) => ToolAnswer::Deny,
             }
         }
@@ -1062,9 +1313,21 @@ struct PersonalClaudeHost<'a> {
     context: &'a str,
     dispatch: &'a str,
     queue: &'a ApprovalQueue,
+    /// The CLI started this turn by itself; there is no input to write.
+    self_started: bool,
+    /// The turn holds a message of a peer session (`outside_input`).
+    outside: bool,
 }
 impl claude_turn::Host for PersonalClaudeHost<'_> {
     async fn start(&mut self, process: &mut Claude, input: &str) -> Result<()> {
+        if self.self_started {
+            // The driver already holds the turn open (`poll_self_started`).
+            return if process.self_started_turn() {
+                Ok(())
+            } else {
+                Err(Error::Protocol("Claude self-started turn"))
+            };
+        }
         // The owner's own slash command runs as one. Anyone else's text, and
         // any text the host wrapped, is a prompt and can never be a command.
         let written = if owner_command(self.owner, self.scope, input) {
@@ -1119,7 +1382,21 @@ impl claude_turn::Host for PersonalClaudeHost<'_> {
         arguments: Value,
         directory: &Path,
     ) -> claude_turn::ToolAnswer {
-        permission(
+        // The owner's tool rules decide what a tool may do on this computer.
+        // A timer for the session's own later turn does nothing here and
+        // reaches nobody, so nobody is asked for it.
+        if !self.outside
+            && (SELF_TIMER_TOOLS.iter().any(|timer| *timer == tool)
+                || timer_tool_lookup(&tool, &arguments))
+        {
+            return claude_turn::ToolAnswer::Allow;
+        }
+        // A turn that holds a peer session's message acts on text from
+        // outside the room. The trust saved for the people of this
+        // conversation, the owner's full trust included, was not given to
+        // that text: every tool of such a turn is put to the owner, a timer
+        // too, since its later turn would run as the session's own.
+        permission_within(
             self.ledger,
             self.owner,
             self.scope,
@@ -1128,8 +1405,13 @@ impl claude_turn::Host for PersonalClaudeHost<'_> {
             arguments,
             directory,
             self.queue,
+            280,
+            self.outside,
         )
         .await
+    }
+    fn outside_input(&mut self) {
+        self.outside = true;
     }
 }
 // Personal accounting is retained by its original session ledger and native
@@ -1163,7 +1445,7 @@ async fn run_claude(
     call: &str,
     context: &str,
     dispatch: &str,
-    input: &str,
+    input: Option<&str>,
     queue: &ApprovalQueue,
     started: Option<tokio::sync::oneshot::Sender<()>>,
     stream: Option<crate::run_controls::Stream>,
@@ -1176,13 +1458,15 @@ async fn run_claude(
         context,
         dispatch,
         queue,
+        self_started: input.is_none(),
+        outside: false,
     };
     claude_turn::run(
         wire,
         profile,
         scope,
         dispatch,
-        input,
+        input.unwrap_or(""),
         queue,
         started,
         stream,
@@ -1231,11 +1515,28 @@ async fn octos_wait<F: std::future::Future + ?Sized>(
         }
     };
     tokio::pin!(selected);
-    match wire.next_or_control(selected.as_mut()).await
-        .map_err(|_| Error::Protocol("Octos event wait"))? {
+    match wire.next_or_control(selected.as_mut()).await.map_err(|error| octos_wait_failure(&error))? {
         octos::session::ControlUpdate::Event(event) => Ok(OctosWait::Event(event)),
         octos::session::ControlUpdate::Control(value) => Ok(value),
     }
+}
+
+/// Why waiting on Octos failed, as a fixed label: the cause carries no private
+/// text, and the owner's log needs it to tell a stall from an exit.
+fn octos_wait_failure(error: &octos::session::Error) -> Error {
+    use octos::session::Error as E;
+    Error::Protocol(match error {
+        E::Timeout => "Octos event wait: deadline",
+        E::Capacity => "Octos event wait: capacity",
+        E::PeerEof => "Octos event wait: Octos exited",
+        E::Io(_) => "Octos event wait: I/O",
+        E::Protocol(_) => "Octos event wait: protocol",
+        E::Identity => "Octos event wait: identity",
+        E::Cancelled => "Octos event wait: cancelled",
+        E::State => "Octos event wait: state",
+        E::Closed | E::HostClosed => "Octos event wait: closed",
+        E::Configuration | E::Refused(_) | E::PermissionUnavailable => "Octos event wait",
+    })
 }
 
 /// Keep processing the original turn while a host tool waits on an owner or
@@ -1356,11 +1657,14 @@ async fn run_octos(
     mut controls: Option<crate::run_controls::Stream>,
     room_tools: Option<hagency_runtime::room_tools::RoomTools>,
     files: Option<&mut OctosHostFiles>,
+    shell: &OctosShellHost,
 ) -> Result<TurnResult> {
     #[cfg(unix)]
     let mut files = files;
     #[cfg(not(unix))]
     let _ = (execution, files);
+    #[cfg(not(target_os = "macos"))]
+    let _ = shell;
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|_| Error::Unknown)?;
     let hex = random
@@ -1402,6 +1706,14 @@ async fn run_octos(
     if let Some(files) = files.as_ref() {
         host_tools.extend(octos_files::definitions(files)?);
     }
+    // Commands run confined to the folder the owner gave this Agent, and only
+    // while this turn runs: the guard ends the shell when the turn returns.
+    #[cfg(target_os = "macos")]
+    let shell_turn = files.as_deref().map(|files| octos_shell::Turn::start(shell, files));
+    #[cfg(target_os = "macos")]
+    if shell_turn.is_some() {
+        host_tools.push(octos_shell::definition());
+    }
     if queue.live_text.as_ref().is_some_and(|output| output.has_messages()) {
         host_tools.push(octos_progress_tool());
     }
@@ -1430,6 +1742,10 @@ async fn run_octos(
         } else {
             hints.push("For this Room's authorized files, discover and use hagency_file_list, hagency_file_read and hagency_file_create via run_tool. File actions remain subject to owner policy and approval.");
         }
+    }
+    #[cfg(target_os = "macos")]
+    if shell_turn.is_some() {
+        hints.push("To run a command in this workspace, discover and use hagency_shell via run_tool. Commands have no network access and cannot read private configuration; each command remains subject to owner policy and approval.");
     }
     let prompt = if !hints.is_empty() && input.len() <= 48 * 1024 {
         format!("Hagency context: {}\n\nCurrent request:\n{input}", hints.join(" "))
@@ -1609,28 +1925,15 @@ async fn run_octos(
                 let octos::session::ObservationKind::Idle(evidence) = observation.kind() else {
                     return Err(Error::Unknown);
                 };
-                let usage = match (
-                    evidence.input(),
-                    evidence.cache_read(),
-                    evidence.cache_write(),
-                    evidence.output(),
-                ) {
-                    (Some(input), Some(cache), Some(write), Some(output)) => Usage {
-                        input: input
-                            .checked_add(cache)
-                            .and_then(|v| v.checked_add(write))
-                            .ok_or(Error::Unknown)?,
-                        output,
-                        cached_input: cache,
-                        cache_write_input: Some(write),
-                        reasoning_output: 0,
-                        accounting_version: "octos-reported-v1".into(),
-                    },
-                    _ => crate::unreported_usage(),
+                // Charged by `octos_charge` once the counters kept after the
+                // previous dispatch are read.
+                let counters = OctosCounters {
+                    turns: evidence.turn_sums().map(octos_usage).transpose()?,
+                    session: evidence.session_totals().map(octos_usage).transpose()?,
                 };
                 return Ok(TurnResult {
                     text: idle.reply.unwrap_or_default(),
-                    usage,
+                    usage: crate::unreported_usage(),
                     status: match idle.outcome {
                         octos::Outcome::Completed => TurnStatus::Completed,
                         octos::Outcome::Interrupted => TurnStatus::Interrupted,
@@ -1638,8 +1941,9 @@ async fn run_octos(
                     },
                     requests: requests.len(),
                     returns: returns.len(),
-                    cumulative: evidence.coverage() == octos::session::UsageCoverage::Session,
+                    cumulative: false,
                     late_failure: None,
+                    octos: Some(counters),
                 });
             }
             octos::session::Event::ToolCall { params } => {
@@ -1654,6 +1958,20 @@ async fn run_octos(
                     let reply = octos_progress(&call, queue.live_text.as_ref());
                     wire.host_tool_result(&call.call_id, reply).await
                         .map_err(|_| Error::Protocol("Octos progress response"))?;
+                    continue;
+                }
+                #[cfg(target_os = "macos")]
+                if call.name == octos_shell::TOOL {
+                    match shell_turn.as_ref().zip(files.as_deref()) {
+                        Some(((_, shell), files)) => {
+                            octos_shell::handle(wire, shell, files, ledger, owner, scope, execution, dispatch,
+                                &call, queue, &mut controls, &mut buffered, &mut stopping, &mut steers).await?;
+                        }
+                        None => {
+                            wire.host_tool_result(&call.call_id, Err("host_shell_disabled".into())).await
+                                .map_err(|_| Error::Protocol("Octos tool response"))?;
+                        }
+                    }
                     continue;
                 }
                 #[cfg(unix)]
@@ -2000,6 +2318,65 @@ fn approval_directory(cwd: &Path, arguments: &Value) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Session records and turn reports, as `run_octos` passes them on.
+    fn octos(input: u64, output: u64) -> Usage {
+        octos_usage(octos::Usage { input, output, reasoning: 0, cache_read: 10, cache_write: 0 }).unwrap()
+    }
+    fn record(turns: Option<Usage>, session: Option<Usage>) -> OctosCounters {
+        OctosCounters { turns, session }
+    }
+    fn sum(a: &Usage, b: &Usage) -> Usage {
+        usage_sum(a, b).unwrap()
+    }
+    #[test]
+    fn a_stopped_octos_turn_leaves_the_next_one_charged_exactly() {
+        let (first, stopped, next) = (octos(100, 20), octos(40, 5), octos(70, 9));
+        // The first dispatch: Octos's session record is that turn.
+        let (charged, kept) = octos_charge(&record(Some(first.clone()), Some(first.clone())), None);
+        assert_eq!((charged, kept.clone()), (first.clone(), Some(first.clone())));
+        // A stop today: the turn ends without a report and Octos records none
+        // of it. Its charge is unknown, but the session record is kept.
+        let (charged, kept) = octos_charge(&record(None, Some(first.clone())), Some(kept));
+        assert!(!charged.is_reported());
+        assert_eq!(kept, Some(first.clone()));
+        // The next dispatch was unknown as well before; now it is its own growth.
+        let total = sum(&first, &next);
+        let (charged, kept) = octos_charge(&record(Some(next.clone()), Some(total.clone())), Some(kept));
+        assert_eq!((charged, kept), (next.clone(), Some(total.clone())));
+        // A stop that reports its own usage, which Octos's record leaves out:
+        // the report is charged, and the record stays the baseline.
+        let (charged, kept) =
+            octos_charge(&record(Some(stopped.clone()), Some(total.clone())), Some(Some(total.clone())));
+        assert_eq!((charged, kept), (stopped.clone(), Some(total.clone())));
+        // Recorded there too, it is charged once, from the record.
+        let after = sum(&total, &stopped);
+        let (charged, _) = octos_charge(&record(Some(stopped.clone()), Some(after.clone())), Some(Some(total.clone())));
+        assert_eq!(charged, stopped);
+        // Sub-agents' work is in the record only: growth beyond the turn
+        // reports is charged.
+        let (charged, _) = octos_charge(&record(Some(next.clone()), Some(after.clone())), Some(Some(first.clone())));
+        assert_eq!(charged, usage_delta(&after, &first).unwrap());
+    }
+    #[test]
+    fn octos_counters_left_unknown_by_an_earlier_version_recover_at_once() {
+        let (earlier, next) = (octos(500, 50), octos(70, 9));
+        let total = sum(&earlier, &next);
+        // A stop used to store no counters; the next dispatch's own report is
+        // charged and the record becomes the baseline again.
+        let (charged, kept) = octos_charge(&record(Some(next.clone()), Some(total.clone())), Some(None));
+        assert_eq!((charged, kept), (next.clone(), Some(total.clone())));
+        // A record that went backwards (Octos's ledger was reset) gives no
+        // growth: the turn reports are charged.
+        let (charged, kept) = octos_charge(&record(Some(next.clone()), Some(next.clone())), Some(Some(total)));
+        assert_eq!((charged, kept), (next.clone(), Some(next.clone())));
+        // Without a session record the turn reports accumulate, as before.
+        let (charged, kept) = octos_charge(&record(Some(next.clone()), None), Some(Some(earlier.clone())));
+        assert_eq!((charged, kept), (next.clone(), Some(sum(&next, &earlier))));
+        let (charged, kept) = octos_charge(&record(None, None), Some(Some(earlier)));
+        assert!(!charged.is_reported());
+        assert_eq!(kept, None);
+    }
 
     #[test]
     fn octos_progress_uses_the_host_call_identity_and_cannot_choose_a_room() {

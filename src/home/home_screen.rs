@@ -113,7 +113,7 @@ script_mod! {
             shadow_offset: vec2(1.0, 0.0)
         }
 
-        CachedWidget {
+        AccountCachedWidget {
             root_spaces_bar := mod.widgets.SpacesBar {}
         }
 
@@ -139,8 +139,8 @@ script_mod! {
     // It adapts to both desktop and mobile layouts.
     mod.widgets.HomeScreen = #(HomeScreen::register_widget(vm)) {
         main_adaptive_view := AdaptiveView {
-            // NOTE: within each of these sub views, we used `CachedWidget` wrappers
-            //       to ensure that there is only a single global instance of each
+            // NOTE: within each of these sub views, we use `AccountCachedWidget` wrappers
+            //       to ensure that there is only a single instance per session of each
             //       of those widgets, which means they maintain their state
             //       across transitions between the Desktop and Mobile variant.
             Desktop := SolidView {
@@ -155,7 +155,7 @@ script_mod! {
                     color: (COLOR_SECONDARY)
                 }
 
-                CachedWidget {
+                AccountCachedWidget {
                     navigation_tab_bar := mod.widgets.NavigationTabBar {}
                 }
 
@@ -195,7 +195,7 @@ script_mod! {
                             border_radius: 4.0
                         }
 
-                        CachedWidget {
+                        AccountCachedWidget {
                             settings_screen := mod.widgets.SettingsScreen {}
                         }
                     }
@@ -210,7 +210,7 @@ script_mod! {
                             border_radius: 4.0
                         }
 
-                        CachedWidget {
+                        AccountCachedWidget {
                             add_room_screen := mod.widgets.AddRoomScreen {}
                         }
                     }
@@ -219,7 +219,7 @@ script_mod! {
                 // Mini apps open here, beside the chat (or over it when the
                 // window is too narrow for both). The same instance moves to
                 // the Mobile layout, so its tabs survive a layout switch.
-                CachedWidget {
+                AccountCachedWidget {
                     mini_apps_side := mod.widgets.MiniAppsSideRegion {}
                 }
             }
@@ -265,7 +265,7 @@ script_mod! {
                             settings_page := View {
                                 width: Fill, height: Fill
 
-                                CachedWidget {
+                                AccountCachedWidget {
                                     settings_screen := mod.widgets.SettingsScreen {}
                                 }
                             }
@@ -273,7 +273,7 @@ script_mod! {
                             add_room_page := View {
                                 width: Fill, height: Fill
 
-                                CachedWidget {
+                                AccountCachedWidget {
                                     add_room_screen := mod.widgets.AddRoomScreen {}
                                 }
                             }
@@ -283,14 +283,14 @@ script_mod! {
                         // layouts. Mobile membership navigation now lives inside Chats.
                         mobile_spaces_navigation := View {
                             width: Fill height: Fit visible: false
-                            CachedWidget {
+                            AccountCachedWidget {
                                 spaces_bar_wrapper := mod.widgets.SpacesBarWrapper {}
                             }
                         }
 
                         mobile_navigation := View {
                             width: Fill height: Fit
-                            CachedWidget {navigation_tab_bar := mod.widgets.NavigationTabBar {}}
+                            AccountCachedWidget {navigation_tab_bar := mod.widgets.NavigationTabBar {}}
                         }
                     }
 
@@ -337,7 +337,7 @@ script_mod! {
                     }
                 }
 
-                CachedWidget {
+                AccountCachedWidget {
                     mini_apps_side := mod.widgets.MiniAppsSideRegion {}
                 }
             }
@@ -1478,14 +1478,14 @@ mod mini_apps_side_tests {
         let region = side(&mut cx, &home);
         region.open(&mut cx, &MiniAppsAction::OpenAgent);
         let surface = region.surface(&mut cx, region.selected().unwrap());
-        let setup = View { execution: Some(Ok(Execution::Setup(SetupReason::NotEnrolled))), service: None, job: None, generation: 1 };
+        let setup = View { execution: Some(Ok(Execution::Setup(SetupReason::NotEnrolled))), service: None, job: None, containers: None, generation: 1 };
         surface.owner_fixture_hosting(&mut cx, &setup, true);
         frame(&mut cx, &mut home, &mut state, 1440.0);
         assert_eq!(surface.hosting_state(&mut cx), Some(true), "the Hosting tab is in front");
         let visible = |cx: &Cx, path: &[LiveId]| surface.widget(cx, path).visible();
         assert!(visible(&cx, ids!(owner_host.dashboard.od_setup_page)));
         assert!(!visible(&cx, ids!(owner_host.dashboard.od_overview)));
-        let hosted = View { execution: Some(Ok(Execution::Daemon { home: "/h".into() })), service: None, job: None, generation: 2 };
+        let hosted = View { execution: Some(Ok(Execution::Daemon { home: "/h".into() })), service: None, job: None, containers: None, generation: 2 };
         surface.owner_fixture_hosting(&mut cx, &hosted, true);
         surface.update_owner_fixture(&mut cx, owner_dashboard::fixtures::ordinary(owner_dashboard::dto::HostingState::Running));
         frame(&mut cx, &mut home, &mut state, 1440.0);

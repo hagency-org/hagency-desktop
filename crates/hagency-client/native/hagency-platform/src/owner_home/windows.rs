@@ -20,7 +20,9 @@ use windows_sys::Win32::{
     UI::Shell::GetUserProfileDirectoryW,
 };
 
-pub fn owner_home() -> io::Result<PathBuf> {
+/// Locate the profile for the current process token. Use `owner_home` when
+/// the profile must also satisfy Hagency's private-state ownership checks.
+pub fn current_user_profile_dir() -> io::Result<PathBuf> {
     let mut raw = ptr::null_mut();
     // SAFETY: Current process pseudo-handle; initialized owned token output.
     if unsafe { OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &mut raw) } == 0 {
@@ -54,9 +56,15 @@ pub fn owner_home() -> io::Result<PathBuf> {
         return Err(io::Error::other("OS owner profile malformed"));
     }
     let path = PathBuf::from(std::ffi::OsString::from_wide(&buffer[..size as usize - 1]));
-    if !path.is_absolute()
-        || std::fs::symlink_metadata(&path)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-    {
+    if !path.is_absolute() {
+        return Err(io::Error::other("OS owner profile mismatch"));
+    }
+    Ok(path)
+}
+
+pub fn owner_home() -> io::Result<PathBuf> {
+    let path = current_user_profile_dir()?;
+    if std::fs::symlink_metadata(&path)?.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(io::Error::other("OS owner profile mismatch"));
     }
     let retained = OpenOptions::new()

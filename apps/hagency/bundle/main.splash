@@ -2277,7 +2277,7 @@ A.server_status=fn(c){
     if cap.id==c.id && (cap.state=="ready" || cap.state=="missing") {return {text:A.t("Not published","未发布") tone:"waiting" step:3}}
     return {text:A.t("Connected","已连接") tone:"elsewhere" step:3}
 }
-A.server_runtime=fn(runtime){if runtime=="codex" {return "Codex"} if runtime=="claude" {return "Claude"} return ""+runtime}
+A.server_runtime=fn(runtime){if runtime=="codex" {return "Codex"} if runtime=="claude" {return "Claude"} if runtime=="octos" {return "Octos"} return ""+runtime}
 A.server_caps=fn(caps){let acc={text:""} for cap in caps {acc.text=acc.text+(if acc.text=="" {""} else {"、"})+A.capability_label(cap)} return acc.text}
 // Publishing happens on the pool page, where the per-request limit is set.
 A.server_publish=fn(c){
@@ -6400,6 +6400,8 @@ A.pool_grant_error=fn(code){
     if code=="pool_grant_device_required" {return A.t("This computer can’t publish now. Open This Computer at the bottom of Resource Pools, or use the computer that published before.","这台电脑现在不能发布。请在「资源池」底部的「这台电脑」里处理，或在原来发布的电脑上操作。")}
     if code=="owner_grant_prior_intent_required" {return A.readmission_error(code)}
     if code=="current_profile_required" || code=="management_outcome_unknown" || code=="onboarding_unavailable" {return A.onboarding_reason(code)}
+    if code=="octos_profile_changed" {return A.t("The Octos profile this pool uses changed after the pool was created. Put the profile’s model and settings back in Octos, then publish again.","此资源池使用的 Octos 配置在创建后有变化。请在 Octos 中恢复该配置的模型和设置，然后重新发布。")}
+    if code=="octos_pool_platform_unsupported" {return A.t("Octos pools can be published only from a Mac.","Octos 资源池只能从 Mac 发布。")}
     return A.error_text(code)
 }
 // A busy request whose callback also sees failures, for pages that explain them inline.
@@ -8872,6 +8874,7 @@ A.pool_amount=fn(value){return if H.entry_role=="owner" {A.tokens(value)+" token
 A.load_pools=fn(after){A.request("hagency.pools.list",{after:after},fn(v){H.pool_rows=v.items H.pool_after=v.nextAfter if after==nil && H.entry_role=="manager" {A.load_pool_agents(nil)}})}
 A.load_pool_agents=fn(after){
     if H.entry_role=="manager" && H.page=="pool_agents" && after==nil {A.load_local_list()}
+    if !A.pool_enabled() {return}
     H.owner.requestAfter=after
     let args={after:after needsMyAction:H.page=="inbox" && H.entry_role=="owner" && H.needs_action}
     let pool=if H.entry_role=="owner"{H.owner.poolId}else{""}
@@ -9528,6 +9531,41 @@ A.render_page = fn(){
 
     if H.ready && (H.page=="pools" || H.page=="pool_apply" || H.page=="pool_agents" || H.page=="pool_agent") {
 
+    if H.entry_role=="manager" && H.page=="pool_agents" {View{width:Fill height:Fit flow:Down spacing:6
+        mod.widgets.HagencyLargeTitle{text:A.t("My Agents","我的 Agent")}
+        let local_here=A.local_here()
+        let local_some=H.local_list!=nil && H.local_list.len()>0
+        if local_here || local_some {View{width:Fill height:Fit flow:Down spacing:6
+        mod.widgets.HagencyListLabel{text:A.t("LOCAL AGENTS","本地 Agent")}
+        mod.widgets.HagencyList{
+            if H.local_list==nil {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("Loading…","正在读取…")}}}}
+            if local_here && H.local_list!=nil && H.local_list.len()==0 {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("No local agents yet","还没有本地 Agent")}}}}
+            if H.local_list!=nil {for index row in H.local_list {View{width:Fill height:Fit flow:Down
+                if index>0 {mod.widgets.HagencyListDivider{margin:Inset{left:66}}}
+                mod.widgets.HagencyListTall{
+                    local_agent_open := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.open_personal_agent(row.id)}
+                    mod.widgets.HagencyListBody{
+                        mod.widgets.HagencyAvatarSmall{mod.widgets.HagencyAvatarSmallGlyph{}}
+                        mod.widgets.HagencyListText{
+                            mod.widgets.HagencyListTitle{text:row.displayName}
+                            mod.widgets.HagencyListSubtitle{text:if row.local==nil {A.t("Checking…","正在检查…")} else if row.local.service.state=="no_host" {A.local_state_text("no_host")} else if row.local.here {A.local_state_text(row.local.service.state)+A.t(" · This device"," · 本机")} else {A.local_state_text("elsewhere")}}
+                        }
+                        if row.local!=nil {mod.widgets.HagencyPillDot{draw_bg.color:A.local_tone_fg(row.local.service.state)}}
+                        mod.widgets.HagencyChevron{}
+                    }
+                }
+            }}}
+            if local_here && H.local_list!=nil {View{width:Fill height:Fit flow:Down
+                mod.widgets.HagencyListDivider{margin:Inset{left:14}}
+                mod.widgets.HagencyListRow{
+                    local_add := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.native_open("local_agents")}
+                    mod.widgets.HagencyListBody{mod.widgets.HagencyAccentText{text:A.t("Add Local Agent","添加本地 Agent")}}
+                }
+            }}
+        }
+        local_list_note := mod.widgets.HagencyListNote{text:if local_here {A.t("Run on your own device with your own model account.","在你自己的设备上运行，使用你自己的模型账号。")} else {A.local_need_text()}}
+        }}
+    }}
     if !A.pool_enabled(){mod.widgets.HagencyCard{
         mod.widgets.HagencyTitle{text:A.t("Resource pools","资源池")}
         mod.widgets.HagencyCopy{text:A.t("This server needs the resource-pool Agent update before accepting new requests.","此服务器需要更新资源池 Agent 流程后才能接受新申请。")}
@@ -9656,41 +9694,8 @@ A.render_page = fn(){
     }
     if H.page=="pool_agents"{
         if H.entry_role=="owner"{mod.widgets.HagencyTitle{text:A.t("Agent requests","Agent 申请")}}
-        else {mod.widgets.HagencyLargeTitle{text:A.t("My Agents","我的 Agent")}}
         if H.entry_role=="owner"{mod.widgets.HagencyHint{text:A.t("Review capacity requests for resources you own.","审核使用你所拥有资源的容量申请。")}}
         if H.entry_role=="manager" && H.page=="pool_agents"{View{width:Fill height:Fit flow:Down spacing:6
-            let local_here=A.local_here()
-            let local_some=H.local_list!=nil && H.local_list.len()>0
-            if local_here || local_some {View{width:Fill height:Fit flow:Down spacing:6
-            mod.widgets.HagencyListLabel{text:A.t("LOCAL AGENTS","本地 Agent")}
-            mod.widgets.HagencyList{
-                if H.local_list==nil {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("Loading…","正在读取…")}}}}
-                if local_here && H.local_list!=nil && H.local_list.len()==0 {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("No local agents yet","还没有本地 Agent")}}}}
-                if H.local_list!=nil {for index row in H.local_list {View{width:Fill height:Fit flow:Down
-                    if index>0 {mod.widgets.HagencyListDivider{margin:Inset{left:66}}}
-                    mod.widgets.HagencyListTall{
-                        local_agent_open := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.open_personal_agent(row.id)}
-                        mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyAvatarSmall{mod.widgets.HagencyAvatarSmallGlyph{}}
-                            mod.widgets.HagencyListText{
-                                mod.widgets.HagencyListTitle{text:row.displayName}
-                                mod.widgets.HagencyListSubtitle{text:if row.local==nil {A.t("Checking…","正在检查…")} else if row.local.service.state=="no_host" {A.local_state_text("no_host")} else if row.local.here {A.local_state_text(row.local.service.state)+A.t(" · This device"," · 本机")} else {A.local_state_text("elsewhere")}}
-                            }
-                            if row.local!=nil {mod.widgets.HagencyPillDot{draw_bg.color:A.local_tone_fg(row.local.service.state)}}
-                            mod.widgets.HagencyChevron{}
-                        }
-                    }
-                }}}
-                if local_here && H.local_list!=nil {View{width:Fill height:Fit flow:Down
-                    mod.widgets.HagencyListDivider{margin:Inset{left:14}}
-                    mod.widgets.HagencyListRow{
-                        local_add := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.native_open("local_agents")}
-                        mod.widgets.HagencyListBody{mod.widgets.HagencyAccentText{text:A.t("Add Local Agent","添加本地 Agent")}}
-                    }
-                }}
-            }
-            local_list_note := mod.widgets.HagencyListNote{text:if local_here {A.t("Run on your own device with your own model account.","在你自己的设备上运行，使用你自己的模型账号。")} else {A.local_need_text()}}
-            }}
             mod.widgets.HagencyListLabel{text:A.t("PROJECT AGENTS","项目 Agent · 组织资源池")}
             mod.widgets.HagencyList{
                 if A.pool_agent_rows().len()==0 {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:if H.busy{A.t("Loading…","正在读取…")}else if !H.ux.inboxReady{A.t("Couldn’t load project Agents","项目 Agent 暂时无法加载")}else{A.t("No project Agents yet","还没有项目 Agent")}}}}}

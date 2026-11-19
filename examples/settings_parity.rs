@@ -23,7 +23,8 @@ script_mod! {
                     }
                     // Keep the production tree instantiated, including inactive pages.
                     production := RinxContent {visible: false
-                        overlay_container +: {home_screen_view.visible: true login_screen_view.visible: false}
+                        overlay_container +: {home_screen_view.visible: true}
+                        login_screen_view.visible: false
                     }
                     fixture_theme_studio_modal := Modal {can_dismiss: false content := ThemeStudio {}}
                 }

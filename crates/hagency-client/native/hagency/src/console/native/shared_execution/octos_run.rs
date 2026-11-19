@@ -190,6 +190,16 @@ async fn work(
         let (b, _, _) = live.proof().await?;
         super::history::Reader::new(&live.io, &b, &work, plaintext_input.as_ref()).await
     }).await?;
+    // Octos trims its messages to the model's window before each call and
+    // reports no context samples, so a fixed byte allowance would never refill
+    // and would strand earlier history: bound each page instead, as for Claude.
+    // Each request also starts a fresh Octos session. One sent while the
+    // request before it was being answered comes before that answer in the
+    // room, so also read what was sent after it.
+    if let Some(reader) = &mut history {
+        reader.use_native_compaction();
+        reader.include_later();
+    }
     let input = active.wait(cancel, async {
         let (b, _, _) = live.proof().await?;
         if work.encrypted {
@@ -260,7 +270,11 @@ async fn work(
             let mut start_seen = false;
             loop { tokio::select! { biased;
                 value=&mut began, if !start_seen => { start_seen=true; if value.is_ok() { turn.started(); } },
-                result=&mut native => return result.map_err(|_| failure(409, "shared_execution_event_unknown")),
+                result=&mut native => return result.map_err(|error| {
+                    // The cause is a protocol label or an I/O error; it carries no message text.
+                    tracing::warn!(%error, "Shared Octos turn ended with an error");
+                    failure(409, "shared_execution_event_unknown")
+                }),
             }}
         };
         tokio::pin!(native);

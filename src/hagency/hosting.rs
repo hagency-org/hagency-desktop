@@ -95,9 +95,7 @@ pub fn sign_in_root(locations: &Locations, data_dir: &Path, origin: &str, owner:
 fn sign_in_root_with(locations: &Locations, data_dir: &Path, origin: &str, owner: &str, delegated: bool) -> Result<PathBuf, String> {
     #[cfg(unix)]
     if delegated {
-        return Ok(locations.roots.lookup(origin, owner).map_err(root_code)?
-            .unwrap_or_else(||locations.roots.base().join(::hagency::owner_roots::OWNERS)
-                .join(::hagency::owner_roots::key(origin, owner))));
+        return locations.roots.management_root(origin, owner).map_err(root_code);
     }
     let _ = delegated;
     select_root(locations, data_dir, origin, owner)
@@ -479,6 +477,10 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
     };
     let home = locations.daemon_home().as_os_str();
     let (origin, owner) = (account.origin.as_str(), account.owner.as_str());
+    let account_home = match ::hagency::daemon::accounts::home(locations.daemon_home(), origin, owner) {
+        Ok(home) => home,
+        Err(_) => return Progress::Failed("daemon_home_unavailable"),
+    };
     if kind == JobKind::Uninstall {
         return match run(command(&exe, &[OsStr::new("uninstall")]), Duration::from_secs(30), cancel, false, || {}) {
             Ok(_) => Progress::Done,
@@ -486,10 +488,11 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
             Err(failure) => failed(failure),
         };
     }
-    if kind == JobKind::Setup && installed_service() == Service::OtherProgram {
-        // A service of the former Hosting app would otherwise enroll and sign
-        // out with its own code over the socket. Remove it and wait until its
-        // daemon has released the home; the install below replaces it.
+    if kind == JobKind::Setup && (installed_service() == Service::OtherProgram
+        || (account_home != locations.daemon_home() && daemon::requires_upgrade(&account_home)))
+    {
+        // Replace the old single-account executable before enrolling another
+        // account. A running multi-account service keeps its existing workers.
         match run(command(&exe, &[OsStr::new("uninstall")]), Duration::from_secs(30), &helper::Cancellation::default(), false, || {}) {
             Ok(_) => {}
             Err(Failure::Code("setup_failed")) => return Progress::Failed("service_remove_failed"),
@@ -521,7 +524,7 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
         if stale {
             // The enrollment names another root: revoke its executor first, so
             // enrolling the registered root never leaves a second executor.
-            let sign_out = command(&exe, &[OsStr::new("sign-out"), OsStr::new("--home"), home]);
+            let sign_out = command(&exe, &[OsStr::new("sign-out"), OsStr::new("--home"), home, OsStr::new("--server"), OsStr::new(origin), OsStr::new("--owner"), OsStr::new(owner)]);
             if let Err(failure) = run(sign_out, Duration::from_secs(60), &helper::Cancellation::default(), false, || {}) {
                 return failed(failure);
             }
@@ -543,14 +546,16 @@ fn run_job(kind: JobKind, account: &Account, data_dir: &Path, cancel: &helper::C
         }
     }
     report(Progress::Enabling);
-    let install = command(&exe, &[OsStr::new("install"), OsStr::new("--home"), home]);
-    match run(install, Duration::from_secs(30), &helper::Cancellation::default(), false, || {}) {
-        Ok(_) => {}
-        Err(Failure::Code("setup_failed")) => return Progress::Failed("service_start_failed"),
-        Err(failure) => return failed(failure),
+    if installed_service() != Service::ThisApp || daemon::hello(locations.daemon_home(), Duration::from_secs(3)).is_none() {
+        let install = command(&exe, &[OsStr::new("install"), OsStr::new("--home"), home]);
+        match run(install, Duration::from_secs(30), &helper::Cancellation::default(), false, || {}) {
+            Ok(_) => {}
+            Err(Failure::Code("setup_failed")) => return Progress::Failed("service_start_failed"),
+            Err(failure) => return failed(failure),
+        }
     }
     report(Progress::Confirming);
-    let result = confirm(locations.daemon_home(), owner, Duration::from_secs(45), cancel);
+    let result = confirm(&account_home, owner, Duration::from_secs(45), cancel);
     match (result, registration_pending) {
         (Progress::Unconfirmed, Some(code)) => Progress::Failed(code),
         (result, _) => result,
@@ -570,10 +575,21 @@ mod daemon {
     use owner_dashboard::transport::{OutcomeState, TransportError};
     use std::{path::Path, time::Duration};
 
+    fn hello_request() -> Request {
+        Request { version: API_VERSION, request_id: new_request_id("odq"), owner_id: None, expected_revision: None, command: Command::Hello }
+    }
+
+    pub fn requires_upgrade(scoped_home: &Path) -> bool {
+        let Ok(mut connection) = DaemonConnection::connect(&DaemonEndpoint::new(scoped_home)) else { return false };
+        // Older daemons reject the accountScope field. A current daemon
+        // explicitly reports an unknown account when the directory is new.
+        connection.call(&hello_request(), Duration::from_secs(3)).ok()
+            .and_then(|reply| reply.error).is_some_and(|error| error.code == "invalid_request")
+    }
+
     pub fn hello(home: &Path, timeout: Duration) -> Option<(DaemonConnection, Hello)> {
         let mut connection = DaemonConnection::connect(&DaemonEndpoint::new(home)).ok()?;
-        let request = Request { version: API_VERSION, request_id: new_request_id("odq"), owner_id: None, expected_revision: None, command: Command::Hello };
-        let hello = connection.call(&request, timeout.min(READ_TIMEOUT)).ok()?.hello().ok()?;
+        let hello = connection.call(&hello_request(), timeout.min(READ_TIMEOUT)).ok()?.hello().ok()?;
         Some((connection, hello))
     }
 
@@ -624,23 +640,26 @@ mod daemon {
 
 /// Pause hosting of `owner` before Desktop exits; see the daemon module.
 /// Blocking, bounded by `timeout`. True when Desktop paused it.
-pub fn pause_for_quit(owner: &str, timeout: std::time::Duration) -> bool {
+pub fn pause_for_quit(origin: &str, owner: &str, timeout: std::time::Duration) -> bool {
     #[cfg(target_os = "macos")]
-    if let Ok(home) = ::hagency::service::default_daemon_dir() {
+    if let Ok(base) = ::hagency::service::default_daemon_dir()
+        && let Ok(home) = ::hagency::daemon::accounts::home(&base, origin, owner) {
         return daemon::pause_for_quit(&home, owner, timeout);
     }
-    let _ = (owner, timeout);
+    let _ = (origin, owner, timeout);
     false
 }
 
 /// Resume hosting that Desktop paused at its last quit. Blocking. False asks
 /// the caller to retry later.
-pub fn resume_after_start(owner: &str) -> bool {
+pub fn resume_after_start(origin: &str, owner: &str, legacy: bool) -> bool {
     #[cfg(target_os = "macos")]
-    if let Ok(home) = ::hagency::service::default_daemon_dir() {
+    if let Ok(base) = ::hagency::service::default_daemon_dir()
+        && let Ok(home) = ::hagency::daemon::accounts::home(&base, origin, owner) {
+        if legacy && home != base { return true; }
         return daemon::resume_after_start(&home, owner);
     }
-    let _ = owner;
+    let _ = (origin, owner, legacy);
     true
 }
 
@@ -654,6 +673,9 @@ pub struct View {
     pub service: Option<Service>,
     /// The running job, or the last finished one, for this account.
     pub job: Option<(JobKind, Progress)>,
+    /// Which pools' Claude Agents run in containers on this computer; `None`
+    /// until read, and where this computer cannot run them.
+    pub containers: Option<owner_dashboard::ContainerChoices>,
     /// Changes whenever anything above changes.
     pub generation: u64,
 }
@@ -664,6 +686,9 @@ struct Shared {
     view: View,
     reading: bool,
     read_at: Option<std::time::Instant>,
+    /// A pool's container change is running (one at a time); it, not a
+    /// read, decides.
+    containers_running: bool,
     /// One job at a time, whichever account started it.
     #[cfg(unix)]
     running: bool,
@@ -701,14 +726,19 @@ pub fn view(account: &Account) -> View {
         let spawned = std::thread::Builder::new().name("owner-hosting-status".into()).spawn(move || {
             let execution = Locations::system().and_then(|l| execution(&l, &account.origin, &account.owner));
             let service = installed_service();
+            let read = read_containers(&account);
             let mut state = shared();
             state.reading = false;
             state.read_at = Some(std::time::Instant::now());
+            let containers = merged_containers(state.view.containers.as_ref(), read, state.containers_running);
             if state.account.as_ref() == Some(&account)
-                && (state.view.execution.as_ref() != Some(&execution) || state.view.service != Some(service))
+                && (state.view.execution.as_ref() != Some(&execution)
+                    || state.view.service != Some(service)
+                    || state.view.containers != containers)
             {
                 state.view.execution = Some(execution);
                 state.view.service = Some(service);
+                state.view.containers = containers;
                 state.view.generation += 1;
                 drop(state);
                 makepad_widgets::SignalToUI::set_ui_signal();
@@ -780,6 +810,135 @@ pub fn start(kind: JobKind, account: &Account) -> bool {
     }
 }
 
+/// Run `pool`'s Claude Agents in containers (finding the runtime and
+/// preparing the image, minutes the first time) or back in the sandbox. The
+/// choice is kept in this computer's daemon home and applies from each of
+/// the pool's Agents' next run. Refused while a change runs.
+pub fn set_containers(pool: String, on: bool) -> bool {
+    use owner_dashboard::{ContainerProblem, PoolContainers};
+    #[cfg(unix)]
+    {
+        let mut guard = shared();
+        let state = &mut *guard;
+        if state.containers_running {
+            return false;
+        }
+        let Some(account) = state.account.clone() else { return false };
+        state.containers_running = true;
+        let choices = state.view.containers.get_or_insert_with(Default::default);
+        choices.pools.insert(pool.clone(), if on { PoolContainers::TurningOn } else { PoolContainers::Off });
+        state.view.generation += 1;
+        drop(guard);
+        let changing = pool.clone();
+        let worker_account = account.clone();
+        let spawned = std::thread::Builder::new().name("owner-hosting-containers".into()).spawn(move || {
+            let result = change_containers(&worker_account, &changing, on);
+            finish_containers(&worker_account, changing, result);
+        });
+        if spawned.is_err() {
+            finish_containers(&account, pool, PoolContainers::Failed(ContainerProblem::Other));
+        }
+        true
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (pool, on, ContainerProblem::Other, PoolContainers::Off);
+        false
+    }
+}
+
+#[cfg(unix)]
+fn finish_containers(account: &Account, pool: String, result: owner_dashboard::PoolContainers) {
+    let mut guard = shared();
+    let state = &mut *guard;
+    state.containers_running = false;
+    if state.account.as_ref() != Some(account) { return; }
+    state.view.containers.get_or_insert_with(Default::default).pools.insert(pool, result);
+    state.view.generation += 1;
+    drop(guard);
+    makepad_widgets::SignalToUI::set_ui_signal();
+}
+
+#[cfg(unix)]
+fn change_containers(account: &Account, pool: &str, on: bool) -> owner_dashboard::PoolContainers {
+    use ::hagency::pool_containers::{self, Error, ProbeError};
+    use owner_dashboard::{ContainerProblem, PoolContainers};
+    let Some(daemon_home) = container_home(account) else {
+        return PoolContainers::Failed(ContainerProblem::Other);
+    };
+    if !on {
+        return match pool_containers::turn_off(&daemon_home, pool) {
+            Ok(()) => PoolContainers::Off,
+            // Whatever is saved.
+            Err(_) => read_containers(account).map(|choices| choices.of(pool)).unwrap_or_default(),
+        };
+    }
+    let Some(home) = std::env::var_os("HOME").filter(|home| !home.is_empty()) else {
+        return PoolContainers::Failed(ContainerProblem::Other);
+    };
+    match pool_containers::turn_on(&daemon_home, std::path::Path::new(&home), pool) {
+        Ok(_) => PoolContainers::On,
+        Err(error) => {
+            makepad_widgets::warning!("A pool's containers did not turn on: {error:?}");
+            PoolContainers::Failed(match error {
+                Error::Probe(ProbeError::NoClient) => ContainerProblem::NoRuntime,
+                Error::Probe(ProbeError::EngineUnavailable) => ContainerProblem::EngineStopped,
+                Error::Probe(ProbeError::BuildFailed) => ContainerProblem::BuildFailed,
+                _ => ContainerProblem::Other,
+            })
+        }
+    }
+}
+
+#[cfg(unix)]
+fn container_home(account: &Account) -> Option<PathBuf> {
+    let base = ::hagency::service::default_daemon_dir().ok()?;
+    ::hagency::daemon::accounts::home(&base, &account.origin, &account.owner).ok()
+}
+
+/// The saved choices; reads one small file. `None` where this computer
+/// cannot run containers.
+fn read_containers(account: &Account) -> Option<owner_dashboard::ContainerChoices> {
+    use owner_dashboard::{ContainerChoices, PoolContainers};
+    #[cfg(unix)]
+    {
+        let daemon_home = container_home(account)?;
+        Some(match ::hagency::pool_containers::load(&daemon_home) {
+            Ok(None) => ContainerChoices::default(),
+            Ok(Some(setting)) => {
+                let state = if setting.cli.is_file() { PoolContainers::On } else { PoolContainers::Unavailable };
+                ContainerChoices { pools: setting.pools.into_iter().map(|pool| (pool, state)).collect(), unreadable: false }
+            }
+            Err(_) => ContainerChoices { unreadable: true, ..Default::default() },
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (account, ContainerChoices::default(), PoolContainers::Off);
+        None
+    }
+}
+
+/// A running change decides, and a pool's failure stays shown until the
+/// owner changes that pool's switch again.
+fn merged_containers(
+    current: Option<&owner_dashboard::ContainerChoices>,
+    read: Option<owner_dashboard::ContainerChoices>,
+    running: bool,
+) -> Option<owner_dashboard::ContainerChoices> {
+    use owner_dashboard::PoolContainers;
+    if running {
+        return current.cloned();
+    }
+    let mut read = read?;
+    for (pool, state) in current.map(|c| &c.pools).into_iter().flatten() {
+        if matches!(state, PoolContainers::Failed(_)) && read.of(pool) == PoolContainers::Off {
+            read.pools.insert(pool.clone(), *state);
+        }
+    }
+    Some(read)
+}
+
 /// Cancel the running setup's browser sign-in.
 pub fn cancel() {
     #[cfg(unix)]
@@ -794,6 +953,86 @@ mod tests {
     use ::hagency::daemon::enrollment::Enrollment;
     use ::hagency::native_owner::NativeOwner;
     use std::os::unix::fs::PermissionsExt;
+
+    #[test]
+    fn a_running_container_change_decides_and_a_failure_waits_for_the_owner() {
+        use owner_dashboard::{ContainerChoices, ContainerProblem, PoolContainers as P};
+        let choices = |pools: &[(&str, P)]| ContainerChoices {
+            pools: pools.iter().map(|(pool, state)| (pool.to_string(), *state)).collect(),
+            unreadable: false,
+        };
+        let failed = P::Failed(ContainerProblem::EngineStopped);
+        // Not offered on this computer: no switch.
+        assert_eq!(merged_containers(None, None, false), None);
+        assert_eq!(merged_containers(None, Some(choices(&[])), false), Some(choices(&[])));
+        // A running change decides over a read.
+        let turning = choices(&[("a", P::TurningOn)]);
+        assert_eq!(merged_containers(Some(&turning), Some(choices(&[])), true), Some(turning.clone()));
+        // A pool's failure waits for its owner; other pools follow the read.
+        let current = choices(&[("a", failed), ("b", P::On)]);
+        assert_eq!(merged_containers(Some(&current), Some(choices(&[])), false), Some(choices(&[("a", failed)])));
+        // A choice saved since, by this app or another, replaces the failure.
+        let on = choices(&[("a", P::On)]);
+        assert_eq!(merged_containers(Some(&current), Some(on.clone()), false), Some(on.clone()));
+        let gone = choices(&[("a", P::Unavailable)]);
+        assert_eq!(merged_containers(Some(&on), Some(gone.clone()), false), Some(gone));
+        // Choices that cannot be read stop every Claude pool, failed or not.
+        let unreadable = ContainerChoices { unreadable: true, ..Default::default() };
+        let merged = merged_containers(Some(&current), Some(unreadable), false).unwrap();
+        assert_eq!((merged.of("a"), merged.of("c")), (P::Unavailable, P::Unavailable));
+    }
+
+    /// The switch end to end with a real engine, in the daemon home that
+    /// `HAGENCY_OWNER_DAEMON_HOME` names (an empty folder, never the real
+    /// one): turning a pool on finds the client and its engine, prepares the
+    /// image and saves a choice its launches can run, while other pools keep
+    /// the sandbox; turning the last pool off removes the choice.
+    #[test]
+    #[ignore = "explicit Docker-compatible engine and an empty HAGENCY_OWNER_DAEMON_HOME"]
+    fn the_container_switch_turns_on_and_off_with_a_real_engine() {
+        use ::hagency::pool_containers::isolation;
+        use owner_dashboard::PoolContainers;
+        assert!(std::env::var_os("HAGENCY_OWNER_DAEMON_HOME").is_some_and(|h| !h.is_empty()));
+        let daemon = ::hagency::service::default_daemon_dir().unwrap();
+        assert_eq!(std::fs::read_dir(&daemon).unwrap().count(), 0, "an empty daemon home");
+        let account = Account { origin: ORIGIN.into(), owner: OWNER.into() };
+        shared().account = Some(account.clone());
+        let daemon = container_home(&account).unwrap();
+        private(&daemon);
+        let settled = |pool: &str| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1200);
+            loop {
+                let state = shared();
+                if !state.containers_running {
+                    return state.view.containers.as_ref().map(|c| c.of(pool));
+                }
+                drop(state);
+                assert!(std::time::Instant::now() < deadline, "the change ended");
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        };
+        assert!(set_containers("resource_a".into(), true));
+        // (the change runs the client at least twice: far longer than this call)
+        assert!(!set_containers("resource_b".into(), true), "refused while a change runs");
+        assert_eq!(settled("resource_a"), Some(PoolContainers::On));
+        assert!(set_containers("resource_b".into(), true));
+        assert_eq!(settled("resource_b"), Some(PoolContainers::On));
+        let saved = read_containers(&account).unwrap();
+        assert_eq!(
+            (saved.of("resource_a"), saved.of("resource_b"), saved.of("resource_c")),
+            (PoolContainers::On, PoolContainers::On, PoolContainers::Off),
+        );
+        assert!(isolation(&daemon, "resource_a").unwrap().is_some());
+        assert!(isolation(&daemon, "resource_c").unwrap().is_none(), "other pools keep the sandbox");
+        assert!(set_containers("resource_a".into(), false));
+        assert_eq!(settled("resource_a"), Some(PoolContainers::Off));
+        assert!(isolation(&daemon, "resource_a").unwrap().is_none());
+        assert!(isolation(&daemon, "resource_b").unwrap().is_some(), "the other pool keeps its choice");
+        assert!(set_containers("resource_b".into(), false));
+        assert_eq!(settled("resource_b"), Some(PoolContainers::Off));
+        assert_eq!(read_containers(&account), Some(Default::default()));
+        assert!(isolation(&daemon, "resource_b").unwrap().is_none());
+    }
 
     const ORIGIN: &str = "https://hagency.example.test/";
     const OWNER: &str = "@owner:hagency.example.test";
@@ -950,6 +1189,107 @@ mod tests {
     }
 
     #[test]
+    fn management_only_sign_in_preserves_private_canonical_parents() {
+        const CHILD: &str = "HAGENCY_PRIVATE_CANONICAL_PARENTS_TEST_CHILD";
+        if std::env::var_os(CHILD).is_none() {
+            // A shell changes only the child process's umask, never the test
+            // runner's process-wide mask while other tests may create files.
+            let name = "hagency::hosting::tests::management_only_sign_in_preserves_private_canonical_parents";
+            let result = std::process::Command::new("/bin/sh")
+                .args(["-c", "umask 022; exec \"$@\"", "private-canonical-parents"])
+                .arg(std::env::current_exe().unwrap())
+                .args(["--exact", name, "--nocapture", "--test-threads=1"])
+                .env(CHILD, "1")
+                .output()
+                .unwrap();
+            let stdout = String::from_utf8_lossy(&result.stdout);
+            assert!(result.status.success() && stdout.contains("1 passed"),
+                "{stdout}\n{}", String::from_utf8_lossy(&result.stderr));
+            return;
+        }
+        let temp = Temp::new();
+        let locations = temp.locations();
+        assert!(!locations.roots.base().exists());
+        assert!(sign_in_root_with(&locations, &temp.data_dir(), "invalid origin", OWNER, true).is_err());
+        assert!(!locations.roots.base().exists());
+        let root = sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).unwrap();
+        assert_eq!(root, canonical(&locations));
+        assert!(!root.exists());
+        assert_eq!(locations.roots.lookup(ORIGIN, OWNER).unwrap(), None);
+        assert!(!locations.roots.base().join(::hagency::owner_roots::RECORDS).exists());
+
+        // Management can open its owner host before Setup opens the canonical
+        // resource ledger. Its strict private-directory gate must still pass.
+        ::hagency::owner_host::initialize(&root).unwrap();
+        for directory in [locations.roots.base().to_owned(), root.parent().unwrap().to_owned(), root] {
+            assert_eq!(std::fs::metadata(&directory).unwrap().permissions().mode() & 0o777, 0o700,
+                "{}", directory.display());
+            hagency_platform::private_state::directory(&directory).unwrap();
+        }
+        assert_eq!(locations.roots.lookup(ORIGIN, OWNER).unwrap(), None);
+        assert!(!locations.roots.base().join("domain.sqlite3").exists());
+        assert_eq!(std::fs::read_dir(locations.daemon_home()).unwrap().count(), 0);
+    }
+
+    #[test]
+    fn management_only_sign_in_refuses_writable_canonical_parents_without_repair() {
+        for owners in [false, true] {
+            let temp = Temp::new();
+            let locations = temp.locations();
+            let path = if owners {
+                private(locations.roots.base());
+                locations.roots.base().join(::hagency::owner_roots::OWNERS)
+            } else { locations.roots.base().to_owned() };
+            private(&path);
+            let sentinel = path.join("foreign-data");
+            std::fs::write(&sentinel, b"unchanged").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o777)).unwrap();
+            assert!(sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).is_err());
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, 0o777);
+            assert_eq!(std::fs::read(sentinel).unwrap(), b"unchanged");
+            assert!(!canonical(&locations).exists());
+            assert!(!locations.roots.base().join(::hagency::owner_roots::RECORDS).exists());
+        }
+    }
+
+    #[test]
+    fn management_only_sign_in_refuses_symlink_canonical_parents() {
+        for owners in [false, true] {
+            let temp = Temp::new();
+            let locations = temp.locations();
+            let target = temp.0.join("untouched");
+            private(&target);
+            std::fs::write(target.join("sentinel"), b"unchanged").unwrap();
+            let link = if owners {
+                private(locations.roots.base());
+                locations.roots.base().join(::hagency::owner_roots::OWNERS)
+            } else { locations.roots.base().to_owned() };
+            std::os::unix::fs::symlink(&target, &link).unwrap();
+            assert!(sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).is_err());
+            assert!(std::fs::symlink_metadata(&link).unwrap().file_type().is_symlink());
+            assert_eq!(std::fs::read(target.join("sentinel")).unwrap(), b"unchanged");
+            assert_eq!(std::fs::read_dir(target).unwrap().count(), 1);
+        }
+    }
+
+    #[test]
+    fn management_only_sign_in_does_not_adopt_foreign_owner_state() {
+        let temp = Temp::new();
+        let locations = temp.locations();
+        private(locations.roots.base());
+        private(&locations.roots.base().join(::hagency::owner_roots::OWNERS));
+        let root = canonical(&locations);
+        private(&root);
+        let sentinel = root.join("foreign-state");
+        std::fs::write(&sentinel, b"unchanged").unwrap();
+        assert_eq!(sign_in_root_with(&locations, &temp.data_dir(), ORIGIN, OWNER, true).unwrap(), root);
+        assert!(::hagency::owner_host::initialize(&root).is_err());
+        assert_eq!(std::fs::read(sentinel).unwrap(), b"unchanged");
+        assert_eq!(std::fs::read_dir(&root).unwrap().count(), 1);
+        assert_eq!(locations.roots.lookup(ORIGIN, OWNER).unwrap(), None);
+    }
+
+    #[test]
     fn macos_requires_setup_and_never_runs_the_owner_in_this_process() {
         let temp = Temp::new();
         let locations = temp.locations();
@@ -962,8 +1302,8 @@ mod tests {
         // A daemon enrollment from before ADR-192 names another root: stale.
         enrolled_daemon_root(&locations, Some(true));
         assert_eq!(execution(&locations, ORIGIN, OWNER).unwrap(), setup(SetupReason::StaleRoot));
-        // The daemon hosts another account: one Mac user hosts one owner.
-        assert_eq!(execution(&locations, ORIGIN, OTHER).unwrap(), setup(SetupReason::OtherOwner));
+        // A second account can set up hosting alongside the first.
+        assert_eq!(execution(&locations, ORIGIN, OTHER).unwrap(), setup(SetupReason::NotEnrolled));
         // Enrolling the registered root hands execution to the daemon.
         Enrollment::enroll(locations.daemon_home(), ORIGIN, OWNER, None, &registered).unwrap();
         assert_eq!(execution(&locations, ORIGIN, OWNER).unwrap(), daemon(&locations));

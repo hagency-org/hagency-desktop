@@ -1318,14 +1318,14 @@ pub struct RoomScreen {
     #[rust] chat_info_icon_open: Option<bool>,
     /// The timeline currently displayed by this RoomScreen, if any.
     #[rust] timeline_kind: Option<TimelineKind>,
+    #[rust] timeline_epoch: u64,
     /// The persistent UI-relevant states for the room that this widget is currently displaying.
     #[rust] tl_state: Option<TimelineUiState>,
     /// The set of pinned events in this room.
     #[rust] pinned_events: Vec<OwnedEventId>,
     /// Whether this room has been successfully loaded (received from the homeserver).
     #[rust] is_loaded: bool,
-    /// Whether or not all rooms have been loaded (received from the homeserver).
-    #[rust] all_rooms_loaded: bool,
+    #[rust] restore: restore::RoomRestore,
     /// A flag to set key focus for the text input after it has been drawn.
     #[rust] focus_input_bar_on_show: bool,
     /// After a reply preview collapses, redraw until the list is fills the viewport.
@@ -1405,6 +1405,15 @@ impl Widget for RoomScreen {
         if self.tl_state.is_none() && self.room_name_id.is_none() {
             return;
         }
+        if self.matrix_link_ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
+            self.matrix_link_ticket = None;
+            self.pending_history_jump = None;
+            self.history_jump_started = false;
+            self.loading_pane(cx, ids!(loading_pane)).hide(cx);
+        }
+        if self.handle_room_restore(cx, event, _scope) {
+            return;
+        }
         let had_agent_status = self.has_agent_status(cx);
         let notice=self.agent_status.agent_runtime_notice(cx,ids!(agent_runtime_notice));
         if let Some(app)=_scope.data.get::<crate::app::AppState>() {
@@ -1462,12 +1471,6 @@ impl Widget for RoomScreen {
             jump_to_bottom_button,
         } = self.cached_widget_refs(cx);
 
-        if self.matrix_link_ticket.as_ref().is_some_and(|ticket| !ticket.is_current()) {
-            self.matrix_link_ticket = None;
-            self.pending_history_jump = None;
-            self.history_jump_started = false;
-            loading_pane.hide(cx);
-        }
         let is_pane_shown = loading_pane.is_currently_shown(cx)
             || user_profile_sliding_pane.is_currently_shown(cx);
         let is_popup_menu_open = room_input_popup_menu.is_open();
@@ -1686,6 +1689,17 @@ impl Widget for RoomScreen {
                     if let Some(tl)=self.tl_state.as_mut() {tl.profile_drawn_since_last_update.clear();tl.content_drawn_since_last_update.clear();}
                     self.view.redraw(cx);
                 }
+                #[cfg(feature = "agent_chat")]
+                if let Some(changed) = action.downcast_ref::<crate::agent_access::room_roster::RoomRosterChanged>()
+                    && changed.epoch == crate::account_session::epoch()
+                    && self.timeline_kind.as_ref().is_some_and(|kind| kind.room_id() == &changed.room)
+                {
+                    if let Some(tl) = self.tl_state.as_mut() {
+                        tl.profile_drawn_since_last_update.clear();
+                        tl.content_drawn_since_last_update.clear();
+                    }
+                    self.view.redraw(cx);
+                }
                 // Shared-execution requests and Agent questions arrive and resolve
                 // outside the timeline: re-populate so their cards appear, update and
                 // disappear in place.
@@ -1805,33 +1819,7 @@ impl Widget for RoomScreen {
             );
         }
 
-        // Currently, a Signal event is only used to tell this widget:
-        // 1. to check if the room has been loaded from the homeserver yet, or
-        // 2. that its timeline events have been updated in the background.
         if let Event::Signal = event {
-            if let (false, Some(room_name_id), true) = (self.is_loaded, self.room_name_id.as_ref(), cx.has_global::<RoomsListRef>()) {
-                let rooms_list_ref = cx.get_global::<RoomsListRef>();
-                if rooms_list_ref.is_room_loaded(room_name_id.room_id()) {
-                    let room_name_clone = room_name_id.clone();
-                    let thread_root_event_id = self.timeline_kind.as_ref()
-                        .and_then(|k| k.thread_root_event_id().cloned());
-                    // This room has been loaded now, so we call `set_displayed_room()`.
-                    // We first clear the `room_name_id`, otherwise that function will do nothing.
-                    self.room_name_id = None;
-                    self.set_displayed_room(cx, &room_name_clone, thread_root_event_id);
-                } else {
-                    self.all_rooms_loaded = rooms_list_ref.all_rooms_loaded();
-                    return;
-                }
-            }
-
-            // If this RoomScreen is waiting to show a thread timeline (not the main room timeline),
-            // then we need to retry showing the timeline now (upon a Signal),
-            // because the thread timeline may have been successfully created.
-            if self.tl_state.is_none() && self.timeline_kind.is_some() {
-                self.show_timeline(cx);
-            }
-
             self.process_timeline_updates(cx, &portal_list);
 
             // Ideally we would do this elsewhere on the main thread, because it's not room-specific,
@@ -2016,12 +2004,10 @@ impl Widget for RoomScreen {
         // If the room isn't loaded yet, we show the restore status label only.
         if !self.is_loaded {
             self.agent_status_drawn = false;
-            let Some(room_name) = &self.room_name_id else {
-                // No room selected yet, nothing to show.
+            if self.room_name_id.is_none() {
                 return DrawStep::done();
-            };
+            }
             let mut restore_status_view = self.view.restore_status_view(cx, ids!(restore_status_view));
-            restore_status_view.set_content(cx, self.all_rooms_loaded, room_name);
             return restore_status_view.draw(cx, scope);
         }
         if self.tl_state.is_none() {
@@ -3739,9 +3725,10 @@ impl RoomScreen {
             .expect("BUG: Timeline::show_timeline(): no timeline_kind was set.");
         let room_id = kind.room_id().clone();
         let owner = self.widget_uid();
+        self.timeline_epoch = crate::account_session::epoch();
         crate::sliding_sync::note_timeline_interest(&kind, owner, true);
 
-        let (mut tl_state, mut is_first_time_being_loaded) = match timeline_state_store::take(cx, &kind, owner) {
+        let (mut tl_state, is_first_time_being_loaded) = match timeline_state_store::take(cx, &kind, owner) {
             timeline_state_store::TakeResult::Taken(existing) => (existing, false),
             timeline_state_store::TakeResult::AlreadyTaken { owner: current_owner } => {
                 error!("RoomScreen::show_timeline(): timeline {kind} is already taken by widget {current_owner:?}");
@@ -3755,10 +3742,6 @@ impl RoomScreen {
                             thread_root_event_id: thread_root_event_id.clone(),
                         });
                         return;
-                    }
-                    if !self.is_loaded && self.all_rooms_loaded {
-                        error!("BUG: timeline {kind} is not loaded, but its RoomScreen \
-                        was not waiting for its timeline to be loaded either.");
                     }
                     return;
                 };
@@ -3827,27 +3810,11 @@ impl RoomScreen {
             }
         };
 
-        // It is possible that this room has already been loaded (received from the server)
-        // but that the RoomsList doesn't yet know about it.
-        // In that case, `is_first_time_being_loaded` will already be `true` here,
-        // so we can bypass checking the RoomsList to determine if a room is loaded.
-        //
-        // Note that we *do* still need to check the RoomsList to see whether this room is loaded
-        // in order to handle the case when we're switching between rooms within
-        // the same RoomScreen widget, as one room may be loaded while another is not.
-        if is_first_time_being_loaded {
-            self.is_loaded = true;
-        } else if cx.has_global::<RoomsListRef>() {
-            let rooms_list_ref = cx.get_global::<RoomsListRef>();
-            let is_loaded_now = rooms_list_ref.is_room_loaded(&room_id);
-            if is_loaded_now && !self.is_loaded {
-                // log!("Detected that {}} is now loaded for the first time", tl_state.kind);
-                is_first_time_being_loaded = true;
-            }
-            self.is_loaded = is_loaded_now;
-        }
-
-        self.view.restore_status_view(cx, ids!(restore_status_view)).set_visible(cx, !self.is_loaded);
+        // A retained or newly built timeline is sufficient even when the sidebar
+        // hasn't consumed its room-list update yet.
+        self.is_loaded = true;
+        self.restore.clear(cx);
+        self.view.restore_status_view(cx, ids!(restore_status_view)).set_visible(cx, false);
 
         // Kick off a back pagination request if it's the first time loading this room,
         // because we want to show the user some messages as soon as possible
@@ -4021,6 +3988,14 @@ impl RoomScreen {
     /// Invoke this when this RoomScreen/timeline is being hidden or no longer being shown.
     fn hide_timeline(&mut self) {
         let Some(timeline_kind) = self.timeline_kind.clone() else { return };
+        // A retained tab can drop after teardown, even after another account
+        // has opened the same room. Its draft and subscriptions belong to it.
+        if self.timeline_epoch != crate::account_session::epoch()
+            || (self.tl_state.is_some() && !timeline_state_store::owns(&timeline_kind, self.widget_uid()))
+        {
+            self.tl_state = None;
+            return;
+        }
         crate::sliding_sync::note_timeline_interest(&timeline_kind, self.widget_uid(), false);
         if self.tl_state.is_none() {
             crate::sliding_sync::retire_hidden_timeline(&timeline_kind);
@@ -4208,14 +4183,23 @@ impl RoomScreen {
                 });
             }
         }
-        self.view.view(cx, ids!(desktop_chat_info_panel)).set_visible(cx, show && inline);
-        self.view.view(cx, ids!(compact_chat_info_panel)).set_visible(cx, show && !inline);
+        for (panel_id, info_id, visible) in [
+            (ids!(desktop_chat_info_panel), ids!(desktop_chat_info), show && inline),
+            (ids!(compact_chat_info_panel), ids!(compact_chat_info), show && !inline),
+        ] {
+            let panel = self.view.view(cx, panel_id);
+            let was_visible = panel.visible();
+            let info = self.view.mobile_chat_info(cx, info_id);
+            if was_visible && !visible {
+                info.close_picker(cx);
+            }
+            panel.set_visible(cx, visible);
+            if visible && let Some(room) = self.room_name_id.clone() {
+                info.update_room(cx, room, !was_visible);
+            }
+        }
         let card = self.view.view(cx, ids!(compact_chat_info_card));
         if let Some(mut card) = card.borrow_mut() { card.walk.width = Size::Fixed(available.clamp(0.0, 280.0)); }
-        if show && let Some(room) = self.room_name_id.clone() {
-            let info = if inline {ids!(desktop_chat_info)} else {ids!(compact_chat_info)};
-            self.view.mobile_chat_info(cx, info).ensure_room(cx, room);
-        }
     }
 
     /// Fills in the desktop single-pane title bar, if this instance has one enabled.
@@ -4274,6 +4258,8 @@ impl RoomScreen {
             self.tl_state.is_none() && self.timeline_kind.as_ref() == Some(&timeline_kind);
         if !retrying_same_conversation {
             self.hide_timeline();
+            self.restore.clear(cx);
+            self.is_loaded = false;
         }
         // Opening or restoring a conversation gives the timeline the full width.
         // Information is shown only after an explicit click on its header icon.
@@ -4289,6 +4275,8 @@ impl RoomScreen {
 
         self.room_name_id = Some(room_name_id.clone());
         self.timeline_kind = Some(timeline_kind.clone());
+        #[cfg(feature = "agent_chat")]
+        crate::agent_access::room_roster::request(room_name_id.room_id());
         self.view.action_room_board(cx, ids!(actions_board)).select(cx,
             if matches!(timeline_kind, TimelineKind::MainRoom { .. }) { Some(room_name_id.room_id().clone()) } else { None });
         self.view.view(cx, ids!(room_screen_wrapper)).set_visible(cx, true);
@@ -4298,7 +4286,9 @@ impl RoomScreen {
         self.view.room_input_bar(cx, ids!(room_input_bar))
             .set_room_context(cx, self.widget_uid(), timeline_kind.clone(), None);
 
-        self.show_timeline(cx);
+        if !retrying_same_conversation || self.restore.status.is_none() {
+            self.begin_room_restore(cx);
+        }
     }
 
     pub fn hide_displayed_room(&mut self, cx: &mut Cx) {
@@ -4313,7 +4303,7 @@ impl RoomScreen {
         self.timeline_kind = None;
         self.pinned_events.clear();
         self.is_loaded = false;
-        self.all_rooms_loaded = false;
+        self.restore.clear(cx);
         self.view.restore_status_view(cx, ids!(restore_status_view)).set_visible(cx, false);
         self.redraw(cx);
     }
@@ -4971,6 +4961,12 @@ mod timeline_state_store {
         });
     }
 
+    pub(super) fn owns(kind: &TimelineKind, owner: WidgetUid) -> bool {
+        TIMELINE_STATES.with_borrow(|states| matches!(
+            states.get(kind), Some(StateEntry::Taken { owner: current, .. }) if *current == owner
+        ))
+    }
+
     /// Puts a timeline's UI state back into the store after a `RoomScreen` hides it,
     /// which allows a future RoomScreen to take it again.
     ///
@@ -4979,23 +4975,14 @@ mod timeline_state_store {
     pub(super) fn put_back(owner: WidgetUid, state: TimelineUiState) {
         let kind = state.kind.clone();
         TIMELINE_STATES.with_borrow_mut(|states| {
-            match states.remove(&kind) {
-                Some(StateEntry::Taken { owner: current_owner, invalidated }) if current_owner == owner => {
-                    // If it was invalidated and we (the `owner`) was the RoomScreen currently showing it,
-                    // just return here to keep it removed from the TIMELINE_STATES.
-                    if invalidated {
+            match states.get(&kind) {
+                Some(StateEntry::Taken { owner: current, invalidated }) if *current == owner => {
+                    if *invalidated {
+                        states.remove(&kind);
                         return;
                     }
                 }
-                Some(StateEntry::Taken { owner: current_owner, .. }) => {
-                    error!("RoomScreen::save_state(): timeline {kind} was put back by widget {owner:?}, but it was taken by widget {current_owner:?}");
-                }
-                Some(StateEntry::Stored(_)) => {
-                    error!("RoomScreen::save_state(): timeline {kind} was put back by widget {owner:?}, but a stored state already existed");
-                }
-                None => {
-                    log!("RoomScreen::save_state(): timeline {kind} was put back by widget {owner:?} without a taken marker");
-                }
+                _ => return,
             }
             states.insert(kind, StateEntry::Stored(state));
         });
@@ -5403,7 +5390,7 @@ fn populate_message_view(
     #[cfg(feature = "agent_chat")]
     let mut agent_chat_message: Option<ApprovalMessage> = None;
     #[cfg(feature = "agent_chat")]
-    let mut agent_presentation = AgentMessagePresentation::for_sender(event_tl_item.sender());
+    let mut agent_presentation = AgentMessagePresentation::for_sender_in_room(event_tl_item.sender(), timeline_kind.room_id());
 
     let (item, used_cached_item) = match &msg_like_content.kind {
         MsgLikeKind::Message(msg) => {
@@ -6048,9 +6035,12 @@ fn populate_message_view(
     #[cfg(feature = "agent_chat")]
     let agent_reply = agent_text.is_some()
         && event_tl_item.event_id().is_some()
-        && AgentMessagePresentation::for_sender(event_tl_item.sender()).is_some();
+        && agent_presentation.is_some();
     #[cfg(not(feature = "agent_chat"))]
     let agent_reply = false;
+    // Alternative card renderers can source their body from another event.
+    #[cfg(feature = "tsp")]
+    let tsp_body_visible = web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply;
     item.widget(cx, ids!(content.message)).set_visible(cx, web_mini_app.is_none() && forward_bundle.is_none() && !agent_reply);
     item.forward_card(cx, ids!(content.forward_card)).set_bundle(cx, forward_bundle);
     new_drawn_status.content_drawn &= item.mini_app_card(cx, ids!(content.mini_app_card)).set_app(
@@ -6184,7 +6174,7 @@ fn populate_message_view(
         use crate::agent_chat::reply::AgentReplyWidgetRefExt;
         let reply = item.agent_reply(cx, ids!(content.agent_reply));
         if let (Some((body, formatted)), Some(mut presentation), Some(event_id)) =
-            (agent_text, AgentMessagePresentation::for_sender(event_tl_item.sender()), event_tl_item.event_id())
+            (agent_text, agent_presentation.clone(), event_tl_item.event_id())
         {
             let (body, formatted) = presentation.present(usage.as_ref().map_or(body.as_str(),|u|u.answer), formatted);
             let identity = format!("{}|{}|{}", crate::sliding_sync::current_user_id().map(|id| id.to_string()).unwrap_or_default(), timeline_kind.room_id(), event_id);
@@ -6324,38 +6314,12 @@ fn populate_message_view(
     }
 
     #[cfg(feature = "tsp")] {
-        use matrix_sdk::ruma::serde::Base64;
-        use crate::tsp::{self, tsp_sign_indicator::{TspSignState, TspSignIndicatorWidgetRefExt}};
-
-        if let Some(mut tsp_sig) = event_tl_item.latest_json()
-            .and_then(|raw| raw.get_field::<serde_json::Value>("content").ok())
-            .flatten()
-            .and_then(|content_obj| content_obj.get("org.robius.tsp_signature").cloned())
-            .and_then(|tsp_sig_value| serde_json::from_value::<Base64>(tsp_sig_value).ok())
-            .map(|b64| b64.into_inner())
-        {
-            log!("Found event {:?} with TSP signature.", event_tl_item.event_id());
-            let tsp_sign_state = if let Some(sender_vid) = tsp::tsp_state_ref().lock().unwrap()
-                .get_verified_vid_for(event_tl_item.sender())
-            {
-                log!("Found verified VID for sender {}: \"{}\"", event_tl_item.sender(), sender_vid.identifier());
-                tsp_sdk::crypto::verify(&*sender_vid, &mut tsp_sig).map_or(
-                    TspSignState::WrongSignature,
-                    |(msg, msg_type)| {
-                        log!("TSP signature verified successfully!\n    Msg type: {msg_type:?}\n    Message: {:?} ({msg:X?})", std::str::from_utf8(msg));
-                        TspSignState::Verified
-                    }
-                )
-            } else {
-                TspSignState::Unknown
-            };
-
-            log!("TSP signature state for event {:?} is {:?}", event_tl_item.event_id(), tsp_sign_state);
-            item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator))
-                .show_with_state(cx, tsp_sign_state);
+        use crate::tsp::{message_signature::timeline_signature, tsp_sign_indicator::TspSignIndicatorWidgetRefExt};
+        let indicator = item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator));
+        if let Some(state) = tsp_body_visible.then(|| timeline_signature(event_tl_item, msg_like_content)).flatten() {
+            indicator.show_with_state(cx, state);
         } else {
-            // Hide the TSP indicator (in case we reused the message widget at this item index).
-            item.tsp_sign_indicator(cx, ids!(profile.tsp_sign_indicator)).hide(cx);
+            indicator.hide(cx);
         }
     }
 
@@ -8286,6 +8250,7 @@ impl MessageRef {
 pub fn clear_timeline_states(cx: &mut Cx) {
     crate::sliding_sync::clear_timeline_interest();
     timeline_state_store::clear_all(cx);
+    input_bar_focus::clear(cx);
 }
 
 /// Invalidates the UI-side cached state for a single timeline whose backend was just closed,
@@ -8310,6 +8275,8 @@ mod input_bar_focus {
     /// The timeline whose RoomScreen should focus its input bar when next shown.
     #[derive(Default)]
     struct PendingInputBarFocus(Option<TimelineKind>);
+
+    pub(super) fn clear(cx: &mut Cx) { cx.global::<PendingInputBarFocus>().0 = None; }
 
     /// Requests that the RoomScreen showing `kind` focus its input bar once it's shown.
     pub(super) fn request(cx: &mut Cx, kind: TimelineKind) {
@@ -8598,7 +8565,11 @@ mod desktop_information_columns_tests {
         assert!(input.pos.x >= center.pos.x && input.pos.x + input.size.x <= info.pos.x + 0.1);
         draw(&mut cx, &mut screen, 600.0);
         assert_eq!(screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx).size.x, 320.0);
+        let picker = screen.view.modal(&mut cx, ids!(desktop_chat_info.agent_picker_modal));
+        picker.open(&mut cx);
+        assert!(picker.is_open());
         draw(&mut cx, &mut screen, 500.0);
+        assert!(!picker.is_open(), "a hidden pane must release its picker");
         assert!(!screen.view.view(&mut cx, ids!(desktop_chat_info_panel)).visible());
         assert!(!screen.view.view(&mut cx, ids!(compact_chat_info_panel)).visible());
         let center = screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx);
@@ -8734,6 +8705,8 @@ pub(crate) mod crypto_recovery_resume_tests {
         inner.is_loaded = true;
         inner.timeline_kind = Some(TimelineKind::MainRoom {room_id: id.clone()});
         inner.room_name_id = Some(RoomNameId::empty(id));
+        inner.timeline_epoch = crate::account_session::epoch();
+        timeline_state_store::mark_taken(cx, &state.kind, inner.widget_uid());
         inner.tl_state = Some(state);
         inner.redraw(cx);
         sender
@@ -8773,6 +8746,8 @@ pub(crate) mod crypto_recovery_resume_tests {
 
 #[path = "room_screen/system_updates.rs"]
 mod system_updates;
+mod restore;
+pub(crate) use restore::RoomMembershipChanged;
 use system_updates::{system_update_ranges, is_groupable_system_update, present_system_update_group};
 
 /// Offline layout fixture using the production disclosure presentation.
@@ -8788,6 +8763,30 @@ pub(crate) fn release_cached_timeline_history(kind: &TimelineKind, channel: usiz
 #[cfg(test)]
 mod retention_ui_tests {
     use super::*;
+    #[test]
+    fn late_room_drop_cannot_restore_previous_accounts_timeline() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let (old, new) = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.RoomScreen {}});
+            (WidgetRef::script_from_value(vm, value).as_room_screen(),
+             WidgetRef::script_from_value(vm, value).as_room_screen())
+        });
+        crypto_recovery_resume_tests::prepare(&mut cx, &old);
+        let kind = old.borrow().unwrap().timeline_kind.clone().unwrap();
+        clear_timeline_states(&mut cx);
+        let retired = old.borrow_mut().unwrap().tl_state.take().unwrap();
+        timeline_state_store::put_back(old.widget_uid(), retired);
+        assert!(matches!(timeline_state_store::take(&mut cx, &kind, new.widget_uid()), timeline_state_store::TakeResult::Missing));
+        crypto_recovery_resume_tests::prepare(&mut cx, &old);
+        clear_timeline_states(&mut cx);
+        crypto_recovery_resume_tests::prepare(&mut cx, &new);
+        old.borrow_mut().unwrap().hide_timeline();
+        assert!(timeline_state_store::owns(&kind, new.widget_uid()));
+        clear_timeline_states(&mut cx);
+    }
+
     #[test]
     fn retained_timeline_ui_preserves_draft_and_reading_anchor_after_history_eviction() {
         let mut cx = Cx::new(Box::new(|_, _| {}));

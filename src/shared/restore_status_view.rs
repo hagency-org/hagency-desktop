@@ -39,6 +39,12 @@ script_mod! {
                 color: (TYPING_NOTICE_TEXT_COLOR),
             }
         }
+        restore_actions := View {
+            width: Fill, height: Fit, align: Align{x: 0.5}, spacing: 8, visible: false
+            restore_retry := Button { text: "Retry" }
+            restore_close := Button { text: "Close" }
+        }
+
     }
 }
 
@@ -78,6 +84,18 @@ impl RestoreStatusViewRef {
                     .set_text(cx, "");
             }
         }
+    }
+
+    pub(crate) fn show_room_status(&self, cx: &mut Cx, text: &str, loading: bool, retry: bool) {
+        self.set_visible(cx, true);
+        let Some(inner) = self.borrow() else { return };
+        inner.view.view(cx, ids!(restore_status_spinner)).set_visible(cx, loading);
+        inner.view.label(cx, ids!(restore_status_label)).set_text(cx, text);
+        inner.view.view(cx, ids!(restore_actions)).set_visible(cx, !loading);
+        let button = inner.view.button(cx, ids!(restore_retry));
+        button.set_visible(cx, retry);
+        button.set_text(cx, crate::i18n::tr("Retry"));
+        inner.view.button(cx, ids!(restore_close)).set_text(cx, crate::i18n::tr("Close"));
     }
 
     /// Sets the text displayed in the restore status view based on the given parameters.

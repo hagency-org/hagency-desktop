@@ -6,8 +6,8 @@
 use crate::hagency::hosting::{self, Execution, JobKind, Progress, SetupReason};
 use makepad_widgets::*;
 use owner_dashboard::{
-    CommandKind, CommandResult, ConnectionStatus, DashboardAction, HostOptions, Locale, OwnerDashboardRef,
-    OwnerDashboardWidgetExt, SetupNeed, SetupProgress, SetupView,
+    CommandKind, CommandResult, ConnectionStatus, ContainerChoices, DashboardAction, HostOptions, Locale,
+    OwnerDashboardRef, OwnerDashboardWidgetExt, SetupNeed, SetupProgress, SetupView,
     i18n::{Msg, phrase, tr},
     model::{Glyph, Status, Tone},
     transport::{ConnectorEvent, DaemonConnector, DaemonEndpoint, Job, OwnerScope},
@@ -51,7 +51,7 @@ pub enum HostingAction {
     KeepRunning(bool),
     /// A resume of hosting paused at the last quit finished. `settled` means
     /// nothing remains to resume for `owner`.
-    Resumed { owner: String, settled: bool },
+    Resumed { origin: String, owner: String, settled: bool },
 }
 
 fn locale() -> Locale {
@@ -99,6 +99,8 @@ struct Page {
     busy: bool,
     /// The installed service runs another program (an earlier Hosting app).
     foreign_service: bool,
+    /// Which pools' Claude Agents run in containers on this computer.
+    containers: Option<ContainerChoices>,
 }
 
 fn page(view: &hosting::View, last_need: SetupNeed) -> Page {
@@ -130,7 +132,8 @@ fn page(view: &hosting::View, last_need: SetupNeed) -> Page {
     let hosted = setup.is_none() && matches!(view.execution, Some(Ok(Execution::Daemon { .. })));
     let in_app = matches!(view.execution, Some(Ok(Execution::InProcess)));
     let foreign_service = view.service == Some(hosting::Service::OtherProgram);
-    Page { setup, hosted, in_app, busy, foreign_service }
+    let containers = view.containers.clone();
+    Page { setup, hosted, in_app, busy, foreign_service, containers }
 }
 
 /// A notice for a job that just changed, outside the setup page.
@@ -205,15 +208,12 @@ impl OwnerDashboardHost {
         }
         let keep_running = cx.global::<crate::settings::app_preferences::AppPreferencesGlobal>().0.keep_hosting_after_quit;
         self.options(cx, keep_running);
-        if self.page.as_ref().is_some_and(|page| page.hosted) && self.connector.is_none() {
-            self.connector = Some(DaemonConnector::spawn(DaemonEndpoint::new(self.daemon_home()), OwnerScope::Fixed(account.owner.clone()), SignalToUI::set_ui_signal));
+        if self.page.as_ref().is_some_and(|page| page.hosted) && self.connector.is_none()
+            && let Some(Ok(Execution::Daemon { home })) = &view.execution {
+            self.connector = Some(DaemonConnector::spawn(DaemonEndpoint::new(home.clone()), OwnerScope::Fixed(account.owner.clone()), SignalToUI::set_ui_signal));
             let view = dashboard.view_state(cx);
             self.submit(cx, Job::Snapshot { period: view.period, usage_filter: Some(view.usage_filter()) });
         }
-    }
-
-    fn daemon_home(&self) -> std::path::PathBuf {
-        ::hagency::service::default_daemon_dir().unwrap_or_default()
     }
 
     /// Present one hosting state: the setup page, the hosted dashboard or the
@@ -250,7 +250,12 @@ impl OwnerDashboardHost {
             _ => { self.pending_keep = None; saved }
         };
         let Some(page) = &self.page else { return };
-        let options = page.hosted.then(|| HostOptions { keep_running, busy: page.busy, foreign_service: page.foreign_service });
+        let options = page.hosted.then(|| HostOptions {
+            keep_running,
+            busy: page.busy,
+            foreign_service: page.foreign_service,
+            containers: page.containers.clone(),
+        });
         self.dashboard(cx).set_options(cx, options);
     }
 
@@ -316,6 +321,13 @@ impl OwnerDashboardHost {
             DashboardAction::KeepRunning(keep) => {
                 self.pending_keep = Some(keep);
                 cx.action(HostingAction::KeepRunning(keep));
+                None
+            }
+            DashboardAction::PoolContainers { pool, on } => {
+                // Refused while a change runs; the switch follows the state.
+                if !self.fixture { hosting::set_containers(pool, on); }
+                self.applied = None;
+                self.synchronize(cx);
                 None
             }
             DashboardAction::ReviewApprovals => {
@@ -461,7 +473,7 @@ mod tests {
     }
 
     fn state(execution: Option<Result<Execution, String>>, job: Option<(JobKind, Progress)>, generation: u64) -> hosting::View {
-        hosting::View { execution, service: Some(hosting::Service::ThisApp), job, generation }
+        hosting::View { execution, service: Some(hosting::Service::ThisApp), job, containers: None, generation }
     }
 
     #[test]
@@ -477,7 +489,7 @@ mod tests {
         let in_app = page(&state(Some(Ok(Execution::InProcess)), None, 1), SetupNeed::NotSetUp);
         assert!(in_app.in_app && !in_app.hosted && in_app.setup.is_none());
         // Before the first read nothing is decided.
-        assert_eq!(page(&state(None, None, 0), SetupNeed::NotSetUp), Page { setup: None, hosted: false, in_app: false, busy: false, foreign_service: false });
+        assert_eq!(page(&state(None, None, 0), SetupNeed::NotSetUp), Page { setup: None, hosted: false, in_app: false, busy: false, foreign_service: false, containers: None });
         // A running setup keeps its page after the enrollment flips execution.
         let confirming = page(&state(daemon(), Some((JobKind::Setup, Progress::Confirming)), 2), SetupNeed::Replace);
         assert_eq!(need(confirming.clone()), Some((SetupNeed::Replace, SetupProgress::Confirming)));
@@ -521,10 +533,10 @@ mod tests {
         assert!(!widget.button(&cx, ids!(od_setup_cancel)).visible());
         assert!(!widget.button(&cx, ids!(od_setup_start)).visible());
         assert_eq!(widget.label(&cx, ids!(od_setup_progress_text)).text(), "Signed in. Registering this Mac’s executor…");
-        // Another account hosts this Mac: an explanation without a setup button.
+        // Conflicting enrollment identity requires checking the account before setup.
         host.fixture_hosting(&mut cx, &state(Some(Ok(Execution::Setup(SetupReason::OtherOwner))), None, 3), true);
         assert!(!widget.button(&cx, ids!(od_setup_start)).visible());
-        assert!(widget.label(&cx, ids!(od_setup_body)).text().contains("one account's resource pool"));
+        assert!(widget.label(&cx, ids!(od_setup_body)).text().contains("homeserver and full Matrix ID"));
         // Running: the dashboard, Stop, and the switch on by default.
         host.fixture_hosting(&mut cx, &state(Some(Ok(Execution::Daemon { home: "/h".into() })), Some((JobKind::Setup, Progress::Done)), 4), true);
         dashboard.set_snapshot(&mut cx, fixtures::ordinary(owner_dashboard::dto::HostingState::Running));

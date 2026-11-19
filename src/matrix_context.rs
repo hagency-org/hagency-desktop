@@ -46,6 +46,8 @@ impl std::fmt::Debug for SessionPin {
     }
 }
 impl SessionPin {
+    pub(crate) fn owner(&self) -> &matrix_sdk::ruma::OwnedUserId { &self.owner }
+
     pub(crate) fn capture(client: &Client) -> Option<Self> {
         Some(Self {
             epoch: crate::account_session::epoch(),

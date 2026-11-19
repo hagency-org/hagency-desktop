@@ -351,6 +351,13 @@ pub(super) fn check_os_profile_owner(file: &File) -> Result<(), Error> {
     if !metadata.is_dir() || metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0 {
         return Err(Error::Private);
     }
+    check_current_owner(file)
+}
+
+#[path = "windows/account_repair.rs"]
+pub(super) mod account_repair;
+
+fn check_current_owner(file: &File) -> Result<(), Error> {
     let sid: Vec<_> = current_sid()?.encode_utf16().chain(Some(0)).collect();
     // SAFETY: Valid retained file and initialized output pointers. Both SID
     // buffers remain owned until EqualSid returns; no raw pointer escapes.

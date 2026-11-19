@@ -48,8 +48,8 @@ pub(crate) fn message(code: &str) -> Option<&'static str> {
             "请在 Agent → 资源托管 中为此账号设置托管。资源会在这台电脑的后台服务中运行。",
         ),
         "daemon_other_owner_enrolled" => (
-            "The hosting service on this computer serves another account. One computer user can host one account's resource pool at a time.",
-            "这台电脑上的托管服务属于另一个账号。一个电脑用户同一时间只能托管一个账号的资源池。",
+            "The hosting enrollment does not match this account. Check the homeserver and full Matrix ID in Agent → Hosting.",
+            "托管登记与当前账号不匹配。请在 Agent → 资源托管 中核对服务器地址和完整 Matrix ID。",
         ),
         "owner_root_invalid" | "owner_root_record_invalid" | "owner_root_registry_unavailable" => (
             "This computer's hosting data could not be opened safely. Check the Hagency data folders and their permissions.",
@@ -116,7 +116,7 @@ mod tests {
             assert!(!text.contains("Hagency Owner"));
         }
         let other = message("daemon_other_owner_enrolled").unwrap();
-        assert!(other.contains("one account") || other.contains("一个账号"), "{other}");
+        assert!(other.contains("Matrix ID"), "{other}");
     }
 
     #[test]

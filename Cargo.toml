@@ -10,7 +10,7 @@ license = "Apache-2.0"
 readme = "README.md"
 categories = ["gui"]
 repository = "https://github.com/hagency-org/hagency-desktop"
-version = "0.5.0-rc.9"
+version = "0.5.0-rc.14"
 metadata.makepad-auto-version = "zqpv-Yj-K7WNVK2I8h5Okhho46Q="
 
 [dependencies]
@@ -182,7 +182,15 @@ hagency = { path = "crates/hagency-client/native/hagency", features = ["test-sup
 name = "article_editor_review"
 required-features = ["onboarding-test-support"]
 
+[[test]]
+name = "owner_daemon_jit"
+harness = false
+required-features = ["onboarding-test-support"]
+
 ## For OAuth/SSO login on iOS, via `ASWebAuthenticationSession`. Ugh....
+[target.'cfg(not(target_arch = "wasm32"))'.dependencies]
+tracing-appender = "0.2.5"
+
 [target.'cfg(target_os = "ios")'.dependencies]
 robius-web-auth-session = { git = "https://github.com/project-robius/robius" }
 

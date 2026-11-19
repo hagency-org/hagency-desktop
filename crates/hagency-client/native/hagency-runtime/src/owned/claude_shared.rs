@@ -12,7 +12,17 @@ use crate::claude::{
 };
 use hagency_platform::Launch;
 use std::{path::Path, sync::Arc, time::Instant};
+pub(super) mod container;
 pub(super) mod isolation;
+
+/// Where a shared Claude run executes.
+#[derive(Clone, Copy, Debug)]
+pub enum SharedClaudeIsolation<'a> {
+    /// On this computer, in the macOS sandbox.
+    Sandbox,
+    /// In a fresh container of the owner's Docker-compatible runtime.
+    Container(&'a container::ContainerIsolation),
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SharedClaudePolicy {
@@ -144,8 +154,9 @@ pub(super) struct State {
 
 impl OwnedClaudeSession {
     /// Shared credentials and plaintext stay in one host-owned conversation
-    /// scope. The OS sandbox covers the CLI and every native tool descendant.
-    /// With a space's shared project folder, the process works there instead.
+    /// scope. The OS sandbox, or the container, covers the CLI and every
+    /// native tool descendant. With a space's shared project folder, the
+    /// process works there instead.
     #[allow(clippy::too_many_arguments)]
     pub fn spawn_shared_isolated_resuming(
         guardian: &Path,
@@ -156,6 +167,7 @@ impl OwnedClaudeSession {
         limits: Limits,
         policy: SharedClaudePolicy,
         resume: Option<&str>,
+        isolation: SharedClaudeIsolation<'_>,
     ) -> Result<Self, StartError> {
         if !policy.matches_resume(&launch, resume) {
             return Err(StartError::Settings);
@@ -163,8 +175,17 @@ impl OwnedClaudeSession {
         credential
             .inject(&mut launch)
             .map_err(|_| StartError::Settings)?;
-        isolation::confine(&mut launch, scope, project)?;
-        let mut session = Self::start_shared(guardian, &launch, limits, policy, resume)?;
+        let container = match isolation {
+            SharedClaudeIsolation::Sandbox => {
+                isolation::confine(&mut launch, scope, project)?;
+                None
+            }
+            SharedClaudeIsolation::Container(runtime) => {
+                runtime.sweep_once()?;
+                Some(container::confine(&mut launch, scope, project, runtime)?)
+            }
+        };
+        let mut session = Self::start_shared(guardian, &launch, limits, policy, resume, container)?;
         session
             .bind_shared_credential(credential.binding())
             .map_err(|_| StartError::Settings)?;
@@ -188,7 +209,7 @@ impl OwnedClaudeSession {
         if !policy.matches_resume(launch, resume) {
             return Err(StartError::Settings);
         }
-        Self::start_shared(guardian, launch, limits, policy, resume)
+        Self::start_shared(guardian, launch, limits, policy, resume, None)
     }
     fn start_shared(
         guardian: &Path,
@@ -196,8 +217,20 @@ impl OwnedClaudeSession {
         limits: Limits,
         policy: SharedClaudePolicy,
         resume: Option<&str>,
+        container: Option<container::ContainerStop>,
     ) -> Result<Self, StartError> {
-        let mut session = Self::spawn(guardian, launch, limits)?;
+        let mut session = match Self::spawn(guardian, launch, limits) {
+            Ok(session) => session,
+            Err(error) => {
+                return Err(match &container {
+                    Some(container) => container.after_failed_start(error),
+                    None => error,
+                });
+            }
+        };
+        // From here a failed start drops the session, and stopping it
+        // removes the container.
+        session.container = container;
         session.shared = Some(State {
             source: SharedTextProcessSource::new(),
             policy,

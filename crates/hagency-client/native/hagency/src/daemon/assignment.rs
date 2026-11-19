@@ -21,7 +21,7 @@ pub enum Assignment {
 pub enum SetupReason {
     /// The daemon has no completed enrollment (none, or sign-in unfinished).
     NotEnrolled,
-    /// The daemon hosts another account. One OS user hosts one owner at a time.
+    /// The selected account directory contains a different identity.
     OtherOwner,
     /// The daemon's enrollment names a root that is not this owner's
     /// registered root (a journal from before ADR-192, or no registration).
@@ -66,7 +66,8 @@ pub fn resolve_with(
     origin: &str,
     owner: &str,
 ) -> Result<Assignment, &'static str> {
-    decide(roots, home, origin, owner, cfg!(target_os = "macos"))
+    let account = super::accounts::home(home, origin, owner)?;
+    decide(roots, &account, origin, owner, cfg!(target_os = "macos"))
 }
 
 fn decide(

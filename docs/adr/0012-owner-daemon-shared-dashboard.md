@@ -18,6 +18,20 @@
   telemetry contracts. This record is canonical for this cross-repository change.
 - Implementation evidence: [acceptance record](0012-implementation-acceptance.md).
 
+## Multi-account hosting
+
+One background service per OS user accepts requests over one private control
+socket. Each account is identified by the normalized homeserver origin and full
+Matrix ID and has its own SDK device, enrollment, execution root, admission
+state and command receipts. An existing single-account installation keeps its
+original paths. The service discovers additional accounts while it is running.
+
+Desktop targets the signed-in account. For CLI operations such as
+`daemon pause`, `daemon resume` and `daemon sign-out`, specify
+`--server https://example.org --owner @alice:example.org` when multiple
+accounts are enrolled. Signing out withdraws only the selected enrollment.
+Uninstalling the shared service stops hosting for every account on this OS user.
+
 ## Problem and original foundation
 
 Before this change, resource owners needed to keep Hagency/Rinx running to host their rented

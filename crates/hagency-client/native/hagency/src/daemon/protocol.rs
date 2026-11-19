@@ -24,6 +24,8 @@ const MAX_OWNER_ID: usize = 255;
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Request {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub account_scope: Option<String>,
     pub version: u32,
     pub request_id: String,
     #[serde(default)]
@@ -301,6 +303,7 @@ pub fn valid_owner_id(id: &str) -> bool {
 impl Request {
     pub fn new(request_id: impl Into<String>, owner_id: Option<String>, command: Command) -> Self {
         Self {
+            account_scope: None,
             version: API_VERSION,
             request_id: request_id.into(),
             owner_id,
@@ -313,7 +316,8 @@ impl Request {
         if self.version != API_VERSION {
             return Err(errors::UNSUPPORTED_VERSION);
         }
-        if !valid_request_id(&self.request_id)
+        if self.account_scope.as_deref().is_some_and(|key| !hagency_metering::daemon_endpoint::valid_key(key))
+            || !valid_request_id(&self.request_id)
             || self.owner_id.as_deref().is_some_and(|o| !valid_owner_id(o))
         {
             return Err(errors::INVALID_REQUEST);

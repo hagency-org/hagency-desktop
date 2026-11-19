@@ -240,7 +240,7 @@ impl DaemonEndpoint {
         Self { home: home.into() }
     }
     pub fn socket(&self) -> PathBuf {
-        self.home.join(SOCKET)
+        hagency_metering::daemon_endpoint::endpoint(&self.home).0.join(SOCKET)
     }
 }
 
@@ -281,6 +281,7 @@ fn peer_uid(stream: &UnixStream) -> Option<u32> {
 #[cfg(unix)]
 pub fn check_private(home: &Path) -> Result<PathBuf, TransportError> {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let (home, _) = hagency_metering::daemon_endpoint::endpoint(home);
     let uid = euid();
     let dir = std::fs::symlink_metadata(home).map_err(|_| TransportError::Unavailable)?;
     if !dir.is_dir() || dir.uid() != uid || dir.mode() & 0o077 != 0 {
@@ -298,6 +299,7 @@ pub fn check_private(home: &Path) -> Result<PathBuf, TransportError> {
 #[cfg(unix)]
 pub struct DaemonConnection {
     stream: UnixStream,
+    scope: Option<String>,
 }
 
 #[cfg(unix)]
@@ -309,7 +311,7 @@ impl DaemonConnection {
             return Err(TransportError::PeerRejected);
         }
         stream.set_write_timeout(Some(WRITE_TIMEOUT)).map_err(|_| TransportError::Unavailable)?;
-        Ok(Self { stream })
+        Ok(Self { stream, scope: hagency_metering::daemon_endpoint::endpoint(&endpoint.home).1.map(str::to_owned) })
     }
 
     /// Send one request and read its reply. Any failure after the request
@@ -319,7 +321,7 @@ impl DaemonConnection {
     }
 
     fn call_guarded(&mut self, request: &Request, timeout: Duration, retired: Option<&std::sync::atomic::AtomicBool>) -> Result<Reply, TransportError> {
-        let bytes = serde_json::to_vec(request).map_err(|_| TransportError::Protocol)?;
+        let bytes = serde_json::to_vec(&hagency_metering::daemon_endpoint::RoutedRequest { account_scope: self.scope.as_deref(), request }).map_err(|_| TransportError::Protocol)?;
         if bytes.len() > MAX_FRAME {
             return Err(TransportError::Protocol);
         }

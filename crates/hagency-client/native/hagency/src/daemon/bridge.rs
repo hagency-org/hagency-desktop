@@ -224,7 +224,7 @@ impl From<crate::native_owner::NativeError> for Failure {
     }
 }
 impl Failure {
-    #[cfg(unix)]
+    #[cfg(any(unix, test))]
     fn native(self) -> crate::native_owner::NativeError {
         crate::native_owner::NativeError {
             status: self.status,
@@ -263,6 +263,7 @@ fn owner_mutation(command: &crate::native_owner::Command) -> bool {
             | Command::RoomAgents
             | Command::Bindings { .. }
             | Command::Devices
+            | Command::LocalApprovals
             | Command::AgentDetails { .. }
             | Command::AgentConfigurationStatus { .. }
             | Command::AgentOwnerDirectStatus { .. }
@@ -364,6 +365,10 @@ mod mutation_tests {
         ] {
             assert!(owner_mutation(&command), "{command:?}");
             assert!(!repeatable_owner_command(&command), "{command:?}");
+        }
+        // Reading the requests that wait is no write; deciding one is.
+        for read in [Command::LocalApprovals, local(LocalAction::Approvals)] {
+            assert!(!owner_mutation(&read), "{read:?}");
         }
     }
     #[test]

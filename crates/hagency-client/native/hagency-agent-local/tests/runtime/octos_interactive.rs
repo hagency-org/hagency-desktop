@@ -59,9 +59,7 @@ fn file_gate() -> Arc<FileGate> {
 #[tokio::test]
 async fn octos_refuses_a_kernel_that_cannot_confirm_scoped_startup() {
     let mut f = Fixture::new(Kind::Octos, "octos_scope_legacy", ToolPolicy::Deny);
-    let guardian = std::env::var_os("HAGENCY_TEST_GUARDIAN")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_hagency-local-probe")));
+    let guardian = guardian();
     let mut process = spawn_for_scope_with_guardian(
         &f.profile, &f.reference, &mut f.ledger, &f.scope, Some(&guardian),
     ).await.unwrap();
@@ -227,6 +225,71 @@ async fn octos_shared_workspace_requires_owner_and_rechecks_the_dispatch() {
             prompt.contains("hagency_file_update") && prompt.contains("hagency_read_room_history")
         );
         assert!(prompt.ends_with("write code"));
+        process.stop().await.unwrap();
+    }
+}
+
+/// The owner's local Octos Agent runs a command only once the owner allows
+/// it, confined to the folder the owner gave it; a refused command never runs.
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn octos_shell_runs_only_what_the_owner_allows_in_the_given_folder() {
+    for allow in [true, false] {
+        let mut f = Fixture::new(Kind::Octos, "octos_shell", ToolPolicy::AskOwner);
+        let workspace = shared_workspace(&f);
+        let gate = file_gate();
+        let mut process = f.process().await;
+        process
+            .session
+            .enable_host_files(workspace, gate.clone())
+            .unwrap();
+        process
+            .session
+            .open_context(&mut f.ledger, &f.scope, &f.profile)
+            .await
+            .unwrap();
+        let (queue, mut approvals) = codex::approval_queue(1).unwrap();
+        let made = f.profile.cwd.join("made.txt");
+        let run = process.session.run_with_started(
+            &mut f.ledger,
+            "@owner:test",
+            &f.scope,
+            "call",
+            "dispatch",
+            "build it",
+            BudgetMode::Postpaid,
+            &queue,
+            None,
+        );
+        let host = async {
+            let pending = approvals.recv().await.unwrap();
+            assert_eq!(pending.proposal.tool, "octos.shell");
+            assert_eq!(pending.proposal.arguments["command"], "pwd; echo made > made.txt");
+            assert!(!made.exists());
+            pending.decide(allow);
+        };
+        let (done, ()) =
+            tokio::time::timeout(Duration::from_secs(20), async { tokio::join!(run, host) })
+                .await
+                .unwrap();
+        assert_eq!(done.unwrap().text, "offline reply");
+        let result: serde_json::Value =
+            serde_json::from_slice(&fs::read(f.path("shell-result")).unwrap()).unwrap();
+        if allow {
+            assert_eq!(result["ok"], true, "{result}");
+            assert_eq!(result["data"]["exit_code"], 0, "{result}");
+            assert_eq!(
+                result["data"]["stdout"].as_str().unwrap().trim(),
+                f.profile.cwd.to_str().unwrap()
+            );
+            assert_eq!(fs::read_to_string(&made).unwrap(), "made\n");
+            assert!(gate.calls.load(Ordering::SeqCst) >= 2);
+        } else {
+            assert_eq!(result["ok"], false, "{result}");
+            assert!(!made.exists());
+        }
+        let prompt = fs::read_to_string(f.path("turn-input")).unwrap();
+        assert!(prompt.contains("hagency_shell"));
         process.stop().await.unwrap();
     }
 }

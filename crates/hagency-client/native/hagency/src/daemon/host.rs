@@ -54,56 +54,100 @@ pub async fn run(
     home: &Path,
     shutdown: hagency_matrix::CancellationToken,
 ) -> Result<(), HostError> {
-    let home = DaemonHome::open(home)?;
-    // Under the home lock and before either file is read: what an earlier
-    // Hagency version left here is discarded, not migrated.
-    if ControlStore::discard_imported_json(&home.control()) {
-        tracing::warn!("Removed the control file an earlier Hagency version left behind");
-    }
-    if Enrollment::discard_earlier_format(home.path()) {
-        tracing::warn!("Removed the enrollment an earlier Hagency version wrote; hosting must be set up again");
-    }
-    let store = ControlStore::open(&home.control()).map_err(|e| HostError::Code(e.code))?;
-    let runtime = Arc::new(OwnerRuntime::new(home.path().into()).map_err(HostError::Code)?);
-    let controller = Controller::new(store, runtime);
-    let mut server = Server::start(home.path(), controller.clone())?;
-    if super::revocation::load(home.path()).map_err(HostError::Code)?.is_none() {
-        controller.boot().await;
-    }
-    tracing::info!("Hagency owner daemon is serving its private control socket");
-    let observer = {
-        let controller = controller.clone();
-        tokio::spawn(async move {
-            loop {
-                let _ = controller.runtime().process_revocation().await;
-                controller.observe_transition();
-                tokio::time::sleep(Duration::from_secs(2)).await;
-            }
-        })
-    };
-    shutdown.cancelled().await;
-    observer.abort();
-    controller.begin_shutdown();
-    // Keep the private home lock, original task/native handles, and read-only
-    // status socket while a graceful drain needs recovery. A failed drain is
-    // never permission to release custody to another process.
+    use std::collections::HashMap;
+    use std::sync::RwLock;
+
+    let legacy = AccountHost::open(home)?;
+    crate::pool_containers::serve_from(home);
+    let accounts = Arc::new(RwLock::new(HashMap::<String, Arc<AccountHost>>::new()));
+    let routes = accounts.clone();
+    let mut server = Server::start_routed(home, legacy.controller.clone(), Arc::new(move |key| {
+        routes.read().unwrap().get(key).map(|host| host.controller.clone())
+    }))?;
+    let mut observers = tokio::task::JoinSet::new();
+    observers.spawn(legacy.clone().observe());
+    // Enrollment can finish offline. Discover durable accounts at boot and
+    // retry homes that an offline enrollment helper still holds exclusively.
+    let mut scan = tokio::time::interval(Duration::from_secs(1));
     loop {
-        let result=match controller.runtime().drain_enrollment(false).await {
-            Ok(())=>controller.shutdown().await,
-            Err(code)=>Err(code),
-        };
-        match result {
-            Ok(())=>break,
-            Err(code)=>{
-                tracing::warn!(code,"Daemon shutdown is waiting for the original drain");
-                controller.observe_transition();
-                tokio::time::sleep(Duration::from_secs(2)).await;
+        tokio::select! {
+            _ = shutdown.cancelled() => break,
+            _ = scan.tick() => {
+                match super::accounts::directories(home) {
+                    Ok(directories) => for (key, path) in directories {
+                        if accounts.read().unwrap().contains_key(&key) { continue; }
+                        match AccountHost::open(&path) {
+                            Ok(host) => {
+                                observers.spawn(host.clone().observe());
+                                accounts.write().unwrap().insert(key, host);
+                            }
+                            Err(HostError::Home(HomeError::AlreadyRunning)) => {}
+                            Err(error) => tracing::warn!(%error, "Could not open a hosting account"),
+                        }
+                    },
+                    Err(error) => tracing::warn!(%error, "Could not read the hosting account directory"),
+                }
             }
         }
     }
+    let hosts: Vec<_> = accounts.read().unwrap().values().cloned()
+        .chain(std::iter::once(legacy.clone())).collect();
+    for host in &hosts { host.controller.begin_shutdown(); }
+    observers.shutdown().await;
+    let mut drains = tokio::task::JoinSet::new();
+    for host in hosts {
+        drains.spawn(host.shutdown());
+    }
+    while let Some(result) = drains.join_next().await {
+        result.map_err(|_| HostError::Code("daemon_shutdown_failed"))?;
+    }
     server.stop().await;
-    drop(home);
     Ok(())
+}
+
+/// One controller and one custody lock for an account, in the shared process.
+struct AccountHost {
+    _home: DaemonHome,
+    controller: Arc<Controller<OwnerRuntime>>,
+    pending_revocation: bool,
+}
+
+impl AccountHost {
+    fn open(path: &Path) -> Result<Arc<Self>, HostError> {
+        let home = DaemonHome::open(path)?;
+        if ControlStore::discard_imported_json(&home.control()) {
+            tracing::warn!("Removed an earlier hosting control format");
+        }
+        if Enrollment::discard_earlier_format(path) {
+            tracing::warn!("An earlier hosting enrollment requires setup");
+        }
+        let pending = super::revocation::load(path).map_err(HostError::Code)?.is_some();
+        let store = ControlStore::open(&home.control()).map_err(|e| HostError::Code(e.code))?;
+        let runtime = Arc::new(OwnerRuntime::new(path.into()).map_err(HostError::Code)?);
+        let controller = Controller::new(store, runtime);
+        Ok(Arc::new(Self { _home: home, controller, pending_revocation: pending }))
+    }
+
+    async fn observe(self: Arc<Self>) {
+        if !self.pending_revocation { self.controller.boot().await; }
+        loop {
+            let _ = self.controller.runtime().process_revocation().await;
+            self.controller.observe_transition();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
+
+    async fn shutdown(self: Arc<Self>) {
+        loop {
+            let result = match self.controller.runtime().drain_enrollment(false).await {
+                Ok(()) => self.controller.shutdown().await,
+                Err(code) => Err(code),
+            };
+            if result.is_ok() { break; }
+            self.controller.observe_transition();
+            tokio::time::sleep(Duration::from_secs(2)).await;
+        }
+    }
 }
 
 /// Result of a probe. Desktop must not start its own executor for an owner
@@ -241,6 +285,25 @@ where
     F: FnOnce(String) -> Fut,
     Fut: std::future::Future<Output = Result<(), ()>>,
 {
+    native_origin(origin)?;
+    if !super::protocol::valid_owner_id(owner) {
+        return Err(HostError::Code("owner_identity_invalid"));
+    }
+    let base = home;
+    let account_home = super::accounts::home(base, origin, owner).map_err(HostError::Code)?;
+    let home = account_home.as_path();
+    if home != base {
+        super::accounts::provision(base, home).map_err(HostError::Code)?;
+        if matches!(probe(base).await, Presence::Running(_)) {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while !matches!(probe(home).await, Presence::Running(_)) {
+                if !control.accepting() || tokio::time::Instant::now() >= deadline {
+                    return Err(HostError::Code("daemon_account_unavailable"));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+        }
+    }
     match probe(home).await {
         Presence::Running(_) => {
             return tokio::select! {
@@ -288,6 +351,9 @@ where
         return Err(HostError::Code("daemon_logout_pending"));
     }
     let origin = native_origin(origin)?;
+    if !super::accounts::accepts(home, &origin, owner) {
+        return Err(EnrollmentError::OtherOwner.into());
+    }
     if Enrollment::load(home)?.is_some_and(|existing| {
         existing.owner != owner || !super::same_origin(&existing.origin, &origin)
     }) {
@@ -452,6 +518,68 @@ mod tests {
             .prefix("hh")
             .tempdir_in("/tmp")
             .unwrap()
+    }
+
+    async fn wait_for_owner(home: &Path, expected: Option<&str>) {
+        tokio::time::timeout(Duration::from_secs(8), async {
+            loop {
+                if let Presence::Running(hello) = probe(home).await
+                    && hello.owner_id.as_deref() == expected
+                {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        }).await.expect("account did not reach the expected state");
+    }
+
+    #[tokio::test]
+    async fn cross_server_sign_out_and_restart_preserve_the_other_enrollment() {
+        use super::super::{accounts, control::Intent, CONTROL};
+        let temp = short_home();
+        let base = temp.path().join("daemon");
+        let start = || {
+            let shutdown = hagency_matrix::CancellationToken::new();
+            let (path, token) = (base.clone(), shutdown.clone());
+            (shutdown, tokio::spawn(async move { run(&path, token).await }))
+        };
+        let register = |origin: &str, owner: &str, label: &str| {
+            let home = accounts::home(&base, origin, owner).unwrap();
+            let root = crate::owner_host::initialize(&temp.path().join(label)).unwrap();
+            accounts::provision(&base, &home).unwrap();
+            let _lock = DaemonHome::open(&home).unwrap();
+            let enrollment = Enrollment::enroll(&home, origin, owner, None, &root).unwrap();
+            (home, enrollment)
+        };
+        let (a, alice) = register("https://one.invalid/", "@admin:one.invalid", "one");
+        let (shutdown, task) = start();
+        wait_for_owner(&a, Some(&alice.owner)).await;
+        // Discover an enrollment added after the shared listener started.
+        let (b, bob) = register("https://two.invalid/", "@admin:two.invalid", "two");
+        wait_for_owner(&b, Some(&bob.owner)).await;
+        let mut other = DaemonClient::connect(&b).await.unwrap();
+        let mut first = DaemonClient::connect(&a).await.unwrap();
+        let pause = Request::new("pause", Some(alice.owner.clone()), Command::PauseHosting);
+        first.call(&pause).await.unwrap().outcome().unwrap();
+        assert_eq!(ControlStore::open(&a.join(CONTROL)).unwrap().intent(), Intent::Paused);
+        assert_eq!(ControlStore::open(&b.join(CONTROL)).unwrap().intent(), Intent::Hosting);
+        sign_out(&a).await.unwrap();
+        wait_for_owner(&a, None).await;
+        assert!(Enrollment::load(&a).unwrap().is_none());
+        // The very same connected client still serves the other account.
+        let hello = other.call(&Request::new("hello", None, Command::Hello)).await.unwrap().hello().unwrap();
+        assert_eq!(hello.owner_id.as_ref(), Some(&bob.owner));
+        assert_eq!(Enrollment::load(&b).unwrap().as_ref(), Some(&bob));
+        assert!(super::super::revocation::load(&b).unwrap().is_none());
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
+
+        let (shutdown, task) = start();
+        wait_for_owner(&b, Some(&bob.owner)).await;
+        wait_for_owner(&a, None).await;
+        assert_eq!(ControlStore::open(&b.join(CONTROL)).unwrap().intent(), Intent::Hosting);
+        shutdown.cancel();
+        task.await.unwrap().unwrap();
     }
 
     #[tokio::test]

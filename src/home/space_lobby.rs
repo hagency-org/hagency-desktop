@@ -657,6 +657,10 @@ thread_local! {
     };
 }
 
+pub(crate) fn clear_session() {
+    SPACE_LOBBY_STATES.with_borrow_mut(BTreeMap::clear);
+}
+
 /// The UI-side state of a SpaceLobbyScreen that should persist across hide/show cycles.
 #[derive(Default)]
 struct SpaceLobbyUiState {
@@ -1069,6 +1073,7 @@ pub struct SpaceLobbyScreen {
     /// Key is the space_id, value is the list of its direct children.
     #[rust] children_cache: HashMap<OwnedRoomId, Vector<SpaceRoom>>,
 
+    #[rust] session_epoch: u64,
     /// The set of space IDs that are currently expanded (showing their children).
     #[rust] expanded_spaces: HashSet<OwnedRoomId>,
 
@@ -1821,6 +1826,7 @@ impl SpaceLobbyScreen {
 
     /// Saves the current UI state to the cache. Call this when the screen is being hidden.
     pub fn save_current_state(&mut self) {
+        if self.session_epoch != crate::account_session::epoch() { return; }
         if let Some(current_space) = &self.space_name_id {
             SPACE_LOBBY_STATES.with_borrow_mut(|states| {
                 states.insert(
@@ -1894,7 +1900,9 @@ impl SpaceLobbyScreen {
         parent_name.set_text(cx, &space_name);
 
         // If this space is already being displayed, then update its name here in case it changed.
-        if self.space_name_id.as_ref().is_some_and(|sni| sni.room_id() == space_name_id.room_id()) {
+        if self.session_epoch == crate::account_session::epoch()
+            && self.space_name_id.as_ref().is_some_and(|sni| sni.room_id() == space_name_id.room_id())
+        {
             self.space_name_id = Some(space_name_id.clone());
             // If the space service wasn't running yet, start the subscriber for this space
             if self.space_request_sender.is_none() {
@@ -1906,6 +1914,7 @@ impl SpaceLobbyScreen {
         // Save the current UI state before switching to a new space
         self.save_current_state();
 
+        self.session_epoch = crate::account_session::epoch();
         self.space_name_id = Some(space_name_id.clone());
         self.can_invite = false;
         self.view.button(cx, ids!(header.parent_space_row.invite_button)).set_visible(cx, false);

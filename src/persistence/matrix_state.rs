@@ -298,6 +298,14 @@ where
                 "Database inventory contains an invalid state directory"
             ),
         }
+        let mut documents = tokio::fs::read_dir(&state).await?;
+        while let Some(entry) = documents.next_entry().await? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("session.unavailable-") || name.starts_with("retained_db.json.unavailable-") {
+                anyhow::bail!("Database inventory includes preserved, locked history");
+            }
+        }
         for (name, retained) in [("retained_db.json", true), ("session", false)] {
             let document = state.join(name);
             match tokio::fs::symlink_metadata(&document).await {
