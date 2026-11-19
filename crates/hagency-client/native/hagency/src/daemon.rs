@@ -1,7 +1,7 @@
 //! Per-user Hagency owner daemon (ADR 0012, ADR-192).
 //!
 //! On macOS the daemon is the only process that opens an owner root and the
-//! resource ledger. It hosts the owner's one registered root
+//! resource ledger. It hosts each enrolled owner's registered root
 //! ([`crate::owner_roots`]), authenticates through its own Matrix SDK OAuth
 //! session, starts the native allocation and shared-execution workers, and
 //! serves a versioned, bounded control API over a private Unix socket.
@@ -14,9 +14,13 @@
 //! | --- | --- |
 //! | `daemon.lock` | exclusive lock: one daemon per home |
 //! | `control.sock` | private control socket |
+//! | `hosting-accounts/<key>/` | private state for a server origin and full Matrix ID |
 //! | `control.sqlite3` | durable hosting intent, revision and command receipts |
 //! | `enrollment.json` | enrolled owner (origin, Matrix ID) and its registered owner-root path |
 //! | `matrix/` | the daemon's own SDK session and crypto store |
+//!
+//! Each account directory contains its own lock, control database, enrollment and
+//! Matrix session. Existing enrollments keep these files at the top level.
 //!
 //! The owner root keeps its own exclusive `.owner-client.lock`, which the
 //! native engine takes when the daemon opens the owner. A second daemon or an
@@ -31,6 +35,7 @@ pub mod dispatch;
 pub mod enrollment;
 #[cfg(unix)]
 pub mod enrollment_rpc;
+pub mod accounts;
 pub mod assignment;
 pub mod revocation;
 #[cfg(unix)]

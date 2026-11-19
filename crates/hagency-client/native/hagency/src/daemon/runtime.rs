@@ -1075,6 +1075,9 @@ impl Runtime for OwnerRuntime {
             use super::enrollment_rpc::Call;
             if let Call::Status{id}=call{return lock(&self.inner.enrollment_flow).get(&id).map_err(str::to_owned)}
             let Call::Start{origin,owner,display_name}=&call else{unreachable!()};
+            if !super::accounts::accepts(&self.inner.home, origin, owner) {
+                return Err("daemon_owner_scope_mismatch".into());
+            }
             if let Some(current)=lock(&self.inner.enrollment).as_ref()
                 && (!super::same_origin(origin,&current.origin)||owner!=&current.owner) {return Err("daemon_owner_scope_mismatch".into())}
             let (workflow,start)=lock(&self.inner.enrollment_flow).begin(&id,&call).map_err(str::to_owned)?;

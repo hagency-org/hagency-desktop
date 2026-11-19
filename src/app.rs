@@ -58,7 +58,45 @@ mod embedded_content {
         mod.widgets.RinxContent = View {
             width: Fill, height: Fill
             flow: Overlay
-            overlay_container := View {
+            overlay_container := mod.widgets.RinxOverlay {}
+            login_screen_view := View {
+                login_screen := LoginScreen {}
+            }
+            PopupList {}
+            app_tooltip := CalloutTooltip {}
+        }
+    }
+}
+
+mod account_overlay {
+    use makepad_widgets::*;
+    #[derive(Script, ScriptHook, Widget)]
+    pub struct AccountOverlay {
+        #[deref] view: View,
+    }
+
+    impl Widget for AccountOverlay {
+        fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
+            // Makepad normally forwards actions, signals and keyboard events to
+            // invisible Views. Only teardown may reach the signed-out workspace.
+            let clearing = matches!(event, Event::Actions(actions) if actions.iter().any(|action|
+                matches!(action.downcast_ref(), Some(super::LogoutAction::ClearAppState { .. }))));
+            if self.view.visible() || clearing {
+                self.view.handle_event(cx, event, scope);
+            }
+        }
+
+        fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
+            self.view.draw_walk(cx, scope, walk)
+        }
+    }
+
+    script_mod! {
+        use mod.prelude.widgets.*
+        use mod.widgets.*
+
+        mod.widgets.RinxOverlay = #(AccountOverlay::register_widget(vm)) {
+                ..mod.widgets.View
                 width: Fill, height: Fill,
                 flow: Overlay,
 
@@ -69,11 +107,6 @@ mod embedded_content {
                 join_leave_modal := Modal {
                     content := JoinLeaveRoomModal {}
                 }
-                login_screen_view := View {
-                    visible: true
-                    login_screen := LoginScreen {}
-                }
-
                 image_viewer_modal := Modal {
                     content := ImageViewer {}
                 }
@@ -179,14 +212,6 @@ mod embedded_content {
                     content := RoomHistoryPanel {}
                 }
 
-                PopupList {}
-
-                // Tooltips must be shown in front of all other UI elements,
-                // since they can be shown as a hover atop any other widget.
-                // This tooltip widget handles TooltipActions directly by itself,
-                // so we don't need to call show/hide ourselves.
-                app_tooltip := CalloutTooltip {}
-            }
         }
     }
 }
@@ -245,6 +270,7 @@ app_main!(App);
 pub struct App {
     #[rust] matrix_link_navigation: MatrixLinkController,
     #[live] ui: WidgetRef,
+    #[rust] ui_session: Option<crate::matrix_context::SessionPin>,
     /// Hosted inside OctoSense: `ui` is the window-less `RinxContent`, and the host
     /// owns the window, its geometry and menus.
     #[rust] embedded: bool,
@@ -286,25 +312,49 @@ impl ScriptHook for App {
     }
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn native_trace_writer(
+    output: impl std::io::Write + Send + 'static,
+) -> (tracing_appender::non_blocking::NonBlocking, tracing_appender::non_blocking::WorkerGuard) {
+    tracing_appender::non_blocking::NonBlockingBuilder::default()
+        .buffered_lines_limit(1024)
+        .lossy(true)
+        .finish(output)
+}
+
+pub(crate) fn init_tracing() {
+    // only init logging/tracing once.
+    //
+    // We silence a few overly noisy SDK logs:
+    // * `matrix_sdk::latest_events` emits a per-room info log whenever it skips computing a `LatestEventValue`.
+    // * the timeline warns about "No avatar changes to update" on every user's display name change.
+    // Note that this can still be overridden by setting RUST_LOG, e.g. `RUST_LOG=matrix_sdk::latest_events=info`
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
+            "info,matrix_sdk::latest_events=warn,matrix_sdk_ui::timeline::tasks=error",
+        ));
+    let subscriber = tracing_subscriber::fmt().with_env_filter(filter);
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        // The global subscriber outlives individual standalone or embedded App widgets.
+        static LOGGER: std::sync::OnceLock<Option<tracing_appender::non_blocking::WorkerGuard>> =
+            std::sync::OnceLock::new();
+        LOGGER.get_or_init(|| {
+            let (writer, guard) = native_trace_writer(std::io::stdout());
+            subscriber.with_writer(writer).try_init().ok().map(|()| guard)
+        });
+    }
+    #[cfg(target_arch = "wasm32")]
+    let _ = subscriber.try_init();
+}
+
 impl MatchEvent for App {
     fn handle_startup(&mut self, cx: &mut Cx) {
         if self.started { return; }
         self.started = true;
         self.approvals_timer = cx.start_interval(crate::hagency::pending_approvals::POLL_SECONDS);
         crate::hagency::owner_dashboard::register_host_accessibility(cx);
-        // only init logging/tracing once.
-        //
-        // We silence a few overly noisy SDK logs:
-        // * `matrix_sdk::latest_events` emits a per-room info log whenever it skips computing a `LatestEventValue`.
-        // * the timeline warns about "No avatar changes to update" on every user's display name change.
-        // Note that this can still be overridden by setting RUST_LOG, e.g. `RUST_LOG=matrix_sdk::latest_events=info`
-        let filter = tracing_subscriber::EnvFilter::try_from_default_env()
-            .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new(
-                "info,matrix_sdk::latest_events=warn,matrix_sdk_ui::timeline::tasks=error",
-            ));
-        let _ = tracing_subscriber::fmt()
-            .with_env_filter(filter)
-            .try_init();
+        init_tracing();
 
         // On iOS (and potentially other devices), there is a very low limit
         // (albeit a soft limit) on max file descriptors, as little as 256.
@@ -371,10 +421,13 @@ impl MatchEvent for App {
                     self.app_state.app_prefs.keep_hosting_after_quit = *keep;
                     self.app_state.app_prefs.on_hosting_changed(cx);
                 }
-                Some(crate::hagency::owner_dashboard::HostingAction::Resumed { owner, settled }) => {
+                Some(crate::hagency::owner_dashboard::HostingAction::Resumed { origin, owner, settled }) => {
                     self.hosting_resume = false;
-                    if *settled && current_user_id().is_some_and(|id| id.as_str() == owner) {
+                    if *settled && crate::sliding_sync::get_client().is_some_and(|client|
+                        client.user_id().is_some_and(|id| id.as_str() == owner) && client.homeserver().as_str() == origin)
+                    {
                         self.app_state.app_prefs.hosting_paused_on_quit = false;
+                        self.app_state.app_prefs.hosting_paused_origins.remove(origin);
                         self.app_state.app_prefs.on_hosting_changed(cx);
                     }
                 }
@@ -470,6 +523,7 @@ impl MatchEvent for App {
                     };
                     let already_active = target.as_ref().is_some_and(|user| current_user_id().as_ref() == Some(user));
                     if !already_active && (if matches!(action,crate::accounts::AccountAction::Reauthenticate) { crate::sliding_sync::request_reauthenticate() } else { crate::sliding_sync::request_account_change(target) }) {
+                        self.preserve_reader_session(cx);
                         self.app_state.logged_in = false;
                         self.update_login_visibility(cx);
                         cx.action(LoginAction::Status { title: crate::i18n::tr("Switching Account").into(), status: crate::i18n::tr("Finishing the previous session…").into() });
@@ -544,19 +598,20 @@ impl MatchEvent for App {
                     self.ui.redraw(cx);
                     continue;
                 }
-                Some(LogoutAction::ClearAppState { .. }) =>  {
-                    robius_speech::cancel_all();
-                    self.clear_session_ui(cx);
-                    self.update_login_visibility(cx);
-                    self.ui.redraw(cx);
-                    continue;
-                }
                 _ => {}
             }
 
-            if let Some(LoginAction::LoginSuccess) = action.downcast_ref() {
-                log!("Received LoginAction::LoginSuccess, hiding login view.");
+            if let Some(ready) = action.downcast_ref::<SessionReady>() {
+                if !ready.session.is_current() { continue; }
+                self.ui_session = Some(ready.session.clone());
+                self.app_state = ready.app_state.clone();
                 self.app_state.logged_in = true;
+                self.app_state.agent_access.normalize();
+                self.app_state.app_prefs.broadcast_all(cx);
+                cx.action(MainDesktopUiAction::LoadDockFromAppState);
+                crate::shared::recent_emojis::restore_recent_emojis(cx, ready.session.owner(), self.app_state.recent_emojis.clone());
+                cx.action(LoginAction::LoginSuccess);
+                SignalToUI::set_ui_signal();
                 // Restore only previously enabled local Room runtimes after the
                 // SDK has established this account, even when opening Chats.
                 if let Err(code) = crate::hagency::backend::Service::for_current() {
@@ -824,7 +879,7 @@ impl MatchEvent for App {
                 let expected_dimensions = new_message_context_menu.show(cx, details, &own_reactions);
                 // Use the overlay container's rect (not the window's) to correctly position
                 // the context menu relative to the body area, which excludes the caption bar.
-                let rect = self.ui.view(cx, ids!(overlay_container)).area().rect(cx);
+                let rect = self.ui.widget(cx, ids!(overlay_container)).area().rect(cx);
                 let margin = menu_position_margin(rect, abs_pos, expected_dimensions);
                 let mut main_content_view = new_message_context_menu.view(cx, ids!(main_content));
                 script_apply_eval!(cx, main_content_view, {
@@ -841,7 +896,7 @@ impl MatchEvent for App {
                 self.ui.callout_tooltip(cx, ids!(app_tooltip)).hide(cx);
                 let account_menu = self.ui.account_menu(cx, ids!(account_menu));
                 let expected_dimensions = account_menu.show(cx);
-                let rect = self.ui.view(cx, ids!(overlay_container)).area().rect(cx);
+                let rect = self.ui.widget(cx, ids!(overlay_container)).area().rect(cx);
                 let pos_x = (pos.x - rect.pos.x).min(rect.size.x - expected_dimensions.x).max(0.0);
                 let pos_y = (pos.y - expected_dimensions.y - rect.pos.y)
                     .min(rect.size.y - expected_dimensions.y)
@@ -857,7 +912,7 @@ impl MatchEvent for App {
 
             if let Some(SidebarMenuAction::Open {kind, pos}) = action.downcast_ref() {
                 self.ui.callout_tooltip(cx, ids!(app_tooltip)).hide(cx);
-                let rect = self.ui.view(cx, ids!(overlay_container)).area().rect(cx);
+                let rect = self.ui.widget(cx, ids!(overlay_container)).area().rect(cx);
                 self.ui.sidebar_action_menu(cx, ids!(sidebar_action_menu)).show(cx, *kind, *pos, rect);
                 self.ui.redraw(cx);
                 continue;
@@ -865,7 +920,7 @@ impl MatchEvent for App {
 
             if let Some(SidebarMenuAction::OpenProject {target, pos}) = action.downcast_ref() {
                 self.ui.callout_tooltip(cx, ids!(app_tooltip)).hide(cx);
-                let rect = self.ui.view(cx, ids!(overlay_container)).area().rect(cx);
+                let rect = self.ui.widget(cx, ids!(overlay_container)).area().rect(cx);
                 self.ui.sidebar_action_menu(cx, ids!(sidebar_action_menu)).show_project(cx, target.clone(), *pos, rect);
                 self.ui.redraw(cx);
                 continue;
@@ -893,7 +948,7 @@ impl MatchEvent for App {
                 let expected_dimensions = room_context_menu.show(cx, details);
                 // Use the overlay container's rect (not the window's) to correctly position
                 // the context menu relative to the body area, which excludes the caption bar.
-                let rect = self.ui.view(cx, ids!(overlay_container)).area().rect(cx);
+                let rect = self.ui.widget(cx, ids!(overlay_container)).area().rect(cx);
                 let margin = menu_position_margin(rect, pos, expected_dimensions);
                 let mut main_content_view = room_context_menu.view(cx, ids!(main_content));
                 script_apply_eval!(cx, main_content_view, {
@@ -973,28 +1028,6 @@ impl MatchEvent for App {
                             }
                         }
                     }
-                    continue;
-                }
-                Some(AppStateAction::RestoreAppStateFromPersistentState { user_id, app_state }) => {
-                    if !should_restore_app_state(
-                        self.app_state.logged_in,
-                        current_user_id().as_deref(),
-                        user_id,
-                    ) {
-                        continue;
-                    }
-                    // Ignore the `logged_in` state that was stored persistently.
-                    let logged_in_actual = self.app_state.logged_in;
-                    self.app_state = app_state.clone();
-                    self.app_state.agent_access.normalize();
-                    self.app_state.logged_in = logged_in_actual;
-                    // Broadcast the restored preferences first so listeners
-                    // (e.g. the Dock's captured `room_screen` template) are
-                    // refreshed before `LoadDockFromAppState` instantiates
-                    // any tabs from them.
-                    self.app_state.app_prefs.broadcast_all(cx);
-                    crate::shared::recent_emojis::restore_recent_emojis(cx, user_id, self.app_state.recent_emojis.clone());
-                    cx.action(MainDesktopUiAction::LoadDockFromAppState);
                     continue;
                 }
                 Some(AppStateAction::NavigateToRoom { room_to_close, destination_room }) => {
@@ -1331,6 +1364,7 @@ impl App {
     }
 
     fn clear_session_ui(&mut self, cx: &mut Cx) {
+        self.ui_session = None;
         self.matrix_link_navigation.cancel();
         {
             use crate::settings::crypto_settings::CryptoSettingsWidgetRefExt;
@@ -1381,6 +1415,34 @@ impl App {
         self.waiting_to_navigate_to_room = None;
         self.app_state.clear_for_session_end();
         self.app_state.app_prefs.broadcast_all(cx);
+        self.replace_session_views(cx);
+    }
+
+    fn replace_session_views(&mut self, cx: &mut Cx) {
+        // Keep the native window (or the host's content root). Retire the entire
+        // session subtree, including lazy pages, inactive dock tabs and popups.
+        let content = if self.embedded {
+            self.ui.as_view()
+        } else {
+            self.ui.view(cx, ids!(main_window.body.content))
+        };
+        let Some(mut root) = content.borrow_mut() else { return };
+        let Some((_, overlay)) = root.children.iter_mut().find(|(id, _)| *id == id!(overlay_container)) else { return };
+        *cx.global::<RoomsListRef>() = Default::default();
+        crate::home::rooms_sidebar::clear_session(cx);
+        *overlay = cx.with_vm(|vm| {
+            crate::shared::cached_widget::clear_session(vm);
+            let value = script_eval!(vm, {mod.widgets.RinxOverlay {}});
+            WidgetRef::script_from_value(vm, value)
+        });
+        let overlay = overlay.clone();
+        let root_uid = root.widget_uid();
+        drop(root);
+        cx.widget_tree_mark_dirty(root_uid);
+        cx.widget_tree_insert_child_deep(root_uid, id!(overlay_container), overlay.clone());
+        crate::shared::mention_popup::set_global_mention_popup(cx, &overlay);
+        cx.set_key_focus(Area::Empty);
+        cx.redraw_all();
     }
 }
 
@@ -1392,6 +1454,8 @@ fn clear_all_app_state(cx: &mut Cx) {
     crate::profile::user_verification_cache::clear_user_verification_cache(cx);
     clear_user_profile_cache(cx);
     clear_all_invited_rooms(cx);
+    crate::home::spaces_bar::clear_pending_updates();
+    crate::home::space_lobby::clear_session();
     clear_timeline_states(cx);
     clear_avatar_cache(cx);
     clear_room_preview_cache(cx);
@@ -1483,6 +1547,7 @@ pub fn register_widgets(vm: &mut ScriptVm) {
     crate::moments::script_mod(vm);
     crate::login::script_mod(vm);
     crate::logout::script_mod(vm);
+    account_overlay::script_mod(vm);
     embedded_content::script_mod(vm);
 }
 
@@ -1503,6 +1568,25 @@ impl AppMain for App {
     }
 
     fn handle_event(&mut self, cx: &mut Cx, event: &Event) {
+        if let Event::Actions(actions) = event {
+            let barriers: Vec<_> = actions.iter().filter_map(|action| match action.downcast_ref() {
+                Some(LogoutAction::ClearAppState { on_clear_appstate }) => Some(on_clear_appstate),
+                _ => None,
+            }).collect();
+            if let Some(first) = barriers.first() {
+                // Deliver cleanup to the retiring widgets only. A queued navigation
+                // or dock save in the same batch cannot populate the next session.
+                let clear = Event::Actions(vec![Box::new(LogoutAction::ClearAppState {
+                    on_clear_appstate: (*first).clone(),
+                })]);
+                cx.capture_actions(|cx| self.ui.handle_event(cx, &clear, &mut Scope::with_data(&mut self.app_state)));
+                robius_speech::cancel_all();
+                self.clear_session_ui(cx);
+                self.update_login_visibility(cx);
+                for barrier in barriers { barrier.notify_one(); }
+                return;
+            }
+        }
         crate::memory_budget::collect_images(cx);
         // Before anything is asked whether it may scroll.
         if matches!(event, Event::Scroll(_)) { crate::shared::scroll_blocks::release_undrawn(cx); }
@@ -1652,15 +1736,6 @@ impl AppMain for App {
         // Outside-click dismissal happens inside Modal, without a Hide action.
         self.sync_native_browser_overlays(cx);
         owner_dashboard::accessibility::after_event(&self.ui, cx, event);
-        // The backend may restore the next account only after every child has
-        // consumed ClearAppState, including hidden settings/room widgets.
-        if let Event::Actions(actions) = event {
-            for action in actions {
-                if let Some(LogoutAction::ClearAppState { on_clear_appstate }) = action.downcast_ref() {
-                    on_clear_appstate.notify_one();
-                }
-            }
-        }
         crate::theme::packages::after_event(cx, event);
         if matches!(event, Event::LiveEdit) {
             crate::i18n::refresh_ui(cx, &self.ui);
@@ -2024,6 +2099,11 @@ impl App {
         self.ui.widget(cx, ids!(article_window_host)).as_article_window_host()
     }
 
+    fn persistence_owner(&self) -> Option<OwnedUserId> {
+        let session = self.ui_session.as_ref()?;
+        (self.app_state.logged_in && session.is_current()).then(|| session.owner().clone())
+    }
+
     fn persist_runtime_state(&mut self, cx: &mut Cx, reason: &'static str) {
         if !self.embedded {
             let window_ref = self.ui.window(cx, ids!(main_window));
@@ -2032,8 +2112,8 @@ impl App {
             }
         }
 
-        let Some(user_id) = current_user_id() else {
-            log!("Skipping app state persistence during {reason}: no logged-in Matrix user.");
+        let Some(user_id) = self.persistence_owner() else {
+            log!("Skipping app state persistence during {reason}: no active UI session.");
             return;
         };
 
@@ -2065,14 +2145,21 @@ impl App {
     /// Resume hosting that Desktop paused at its last quit, off the UI thread.
     /// A service that is not reachable yet is retried on the next tick.
     fn resume_hosting_paused_at_quit(&mut self) {
-        if !self.app_state.app_prefs.hosting_paused_on_quit || self.hosting_resume || self.lifecycle.shutdown_started {
+        let prefs = &self.app_state.app_prefs;
+        if (prefs.hosting_paused_origins.is_empty() && !prefs.hosting_paused_on_quit)
+            || self.hosting_resume || self.lifecycle.shutdown_started
+        {
             return;
         }
-        let Some(owner) = current_user_id() else { return };
+        let Some(client) = crate::sliding_sync::get_client() else { return };
+        let Some(owner) = client.user_id() else { return };
+        let origin = client.homeserver().to_string();
+        let legacy = !prefs.hosting_paused_origins.contains(&origin);
+        if legacy && !prefs.hosting_paused_on_quit { return; }
         let owner = owner.to_string();
         self.hosting_resume = std::thread::Builder::new().name("owner-hosting-resume".into()).spawn(move || {
-            let settled = crate::hagency::hosting::resume_after_start(&owner);
-            Cx::post_action(crate::hagency::owner_dashboard::HostingAction::Resumed { owner, settled });
+            let settled = crate::hagency::hosting::resume_after_start(&origin, &owner, legacy);
+            Cx::post_action(crate::hagency::owner_dashboard::HostingAction::Resumed { origin, owner, settled });
         }).is_ok();
     }
 
@@ -2087,10 +2174,11 @@ impl App {
         // The owner chose not to keep the resource pool running after Desktop
         // quits: pause hosting now, and resume it at the next start.
         if !self.app_state.app_prefs.keep_hosting_after_quit
-            && let Some(owner) = current_user_id()
-            && crate::hagency::hosting::pause_for_quit(owner.as_str(), Duration::from_secs(10))
+            && let Some(client) = crate::sliding_sync::get_client()
+            && let Some(owner) = client.user_id()
+            && crate::hagency::hosting::pause_for_quit(client.homeserver().as_str(), owner.as_str(), Duration::from_secs(10))
         {
-            self.app_state.app_prefs.hosting_paused_on_quit = true;
+            self.app_state.app_prefs.hosting_paused_origins.insert(client.homeserver().to_string());
         }
 
         self.persist_runtime_state(cx, "shutdown");
@@ -2137,6 +2225,7 @@ impl App {
     fn update_login_visibility(&self, cx: &mut Cx) {
         let show_login = !self.app_state.logged_in;
         if show_login {
+            self.ui.callout_tooltip(cx, ids!(app_tooltip)).hide(cx);
             self.close_web_browser(cx);
         }
         if !show_login {
@@ -2145,6 +2234,7 @@ impl App {
                 .close(cx);
         }
         self.ui.view(cx, ids!(login_screen_view)).set_visible(cx, show_login);
+        self.ui.widget(cx, ids!(overlay_container)).set_visible(cx, !show_login);
         self.ui.view(cx, ids!(home_screen_view)).set_visible(cx, !show_login);
     }
 
@@ -2322,6 +2412,26 @@ pub struct AppState {
 }
 
 impl AppState {
+    pub(crate) fn retain_accessible_rooms(&mut self, membership: impl Fn(&RoomId) -> Option<RoomState>) {
+        self.saved_dock_state_per_space.retain(|id, _| membership(id) == Some(RoomState::Joined));
+        for dock in std::iter::once(&mut self.saved_dock_state_home).chain(self.saved_dock_state_per_space.values_mut()) {
+            let accessible = |room: &SelectedRoom| match membership(room.room_id()) {
+                Some(RoomState::Joined) => true,
+                Some(RoomState::Invited) => matches!(room, SelectedRoom::InvitedRoom { .. }),
+                _ => false,
+            };
+            dock.open_rooms.retain(|_, room| accessible(room));
+            dock.room_order.retain(&accessible);
+            dock.selected_room.take_if(|room| !accessible(room));
+            // Repair can reconstruct tabs from any of the three semantic fields.
+            // Also discard raw tab titles from legacy snapshots without bookkeeping.
+            let known: std::collections::HashSet<_> = dock.open_rooms.values()
+                .chain(&dock.room_order).chain(&dock.selected_room).map(SelectedRoom::tab_id).collect();
+            dock.dock_items.retain(|id, item| !matches!(item, DockItem::Tab { kind, .. }
+                if [id!(room_screen), id!(invite_screen), id!(space_lobby_screen)].contains(kind) && !known.contains(id)));
+        }
+    }
+
     fn clear_for_session_end(&mut self) {
         crate::hagency::pending_approvals::forget_identity();
         crate::hagency::pending_admissions::forget_identity();
@@ -2384,6 +2494,174 @@ mod session_state_tests {
     }
 
     #[test]
+    fn account_cleanup_replaces_the_desktop_dock_and_cached_sidebar_before_acknowledgement() {
+        use crate::home::rooms_list::RoomsListWidgetRefExt;
+        use crate::shared::mention_popup::{MentionablePopupRef, MentionablePopupWidgetRefExt};
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut app = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            register_widgets(vm);
+            let component = App::script_component(vm);
+            let value = script_eval!(vm, {
+                #(component) {ui: mod.widgets.Root {
+                    main_window := mod.widgets.Window {body +: {content := mod.widgets.RinxContent {}}}
+                }}
+            });
+            App::script_from_value(vm, value)
+        });
+        app.app_state.logged_in = true;
+        app.update_login_visibility(&mut cx);
+        let home = app.ui.widget(&cx, ids!(home_screen));
+        let dock = home.page_flip(&cx, ids!(home_screen_page_flip))
+            .set_active_page(&mut cx, id!(home_page)).unwrap().dock(&cx, ids!(dock));
+        let private = SelectedRoom::JoinedRoom {
+            room_name_id: RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Private to A".into()),
+                ruma::owned_room_id!("!private:example.org")),
+        };
+        let old_list = home.rooms_list(&cx, ids!(rooms_list));
+        assert!(!old_list.is_empty());
+        let actions = cx.capture_actions(|cx| {
+            cx.widget_action(old_list.widget_uid(), RoomsListAction::Selected(private.clone()));
+        });
+        home.handle_event(&mut cx, &Event::Actions(actions), &mut Scope::with_data(&mut app.app_state));
+        assert!(!dock.item(private.tab_id()).is_empty());
+        let search = home.text_input(&cx, ids!(room_filter_input_bar.input));
+        search.set_text(&mut cx, "Account A search");
+        let picker = app.ui.widget(&cx, ids!(login_screen));
+        let barrier = std::sync::Arc::new(tokio::sync::Notify::new());
+        let actions = cx.capture_actions(|cx| {
+            cx.action(LogoutAction::ClearAppState { on_clear_appstate: barrier.clone() });
+            cx.action(AppStateAction::RoomFocused(private.clone()));
+        });
+        AppMain::handle_event(&mut app, &mut cx, &Event::Actions(actions));
+        use futures_util::FutureExt;
+        assert!(barrier.notified().now_or_never().is_some());
+        assert!(!app.ui.widget(&cx, ids!(overlay_container)).visible());
+        assert!(app.app_state.selected_room.is_none());
+        assert_eq!(picker, app.ui.widget(&cx, ids!(login_screen)));
+        app.app_state.logged_in = true;
+        app.update_login_visibility(&mut cx);
+        let next = app.ui.widget(&cx, ids!(home_screen));
+        assert_ne!(home.widget_uid(), next.widget_uid());
+        let new_dock = next.page_flip(&cx, ids!(home_screen_page_flip))
+            .set_active_page(&mut cx, id!(home_page)).unwrap().dock(&cx, ids!(dock));
+        let new_list = next.rooms_list(&cx, ids!(rooms_list));
+        assert!(!new_list.is_empty());
+        assert_ne!(old_list.widget_uid(), new_list.widget_uid());
+        assert_eq!(cx.global::<RoomsListRef>().widget_uid(), new_list.widget_uid());
+        assert_eq!(cx.global::<MentionablePopupRef>().widget_uid(),
+            app.ui.mentionable_popup(&cx, ids!(mention_popup)).widget_uid());
+        assert_eq!(next.text_input(&cx, ids!(room_filter_input_bar.input)).text(), "");
+        assert!(new_dock.item(private.tab_id()).is_empty());
+    }
+
+    #[test]
+    fn switching_between_two_sdk_sessions_only_activates_and_saves_the_matching_ui() {
+        use crate::matrix_context::SessionPin;
+        use crate::settings::crypto_settings::test_support::{Server, install_link_client};
+        const TEST: &str = "app::session_state_tests::switching_between_two_sdk_sessions_only_activates_and_saves_the_matching_ui";
+        // The SDK client and action sender are process globals.
+        if std::env::var_os("HAGENCY_UI_SWITCH_TEST").is_none() {
+            let profile = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--test-threads=1"])
+                .env("HAGENCY_UI_SWITCH_TEST", "1")
+                .env("HAGENCY_DESKTOP_DATA_DIR", profile.path())
+                .env("HAGENCY_NATIVE_CREDENTIAL_IO", "deny")
+                .output().unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+        crate::sliding_sync::backend_runtime().block_on(async {
+            let server = Server::with_handler(false, std::sync::Arc::new(|_| None));
+            let alice = server.room().await.client();
+            let bob = matrix_sdk::Client::builder().homeserver_url(alice.homeserver())
+                .server_versions([matrix_sdk::ruma::api::MatrixVersion::V1_0]).build().await.unwrap();
+            bob.matrix_auth().restore_session(serde_json::from_value(serde_json::json!({
+                "access_token": "fixture", "user_id": "@bob:example.org", "device_id": "BOB"
+            })).unwrap(), Default::default()).await.unwrap();
+            let workspace = std::rc::Rc::new(RefCell::new(None::<App>));
+            let picker_ready = std::rc::Rc::new(std::cell::Cell::new(false));
+            let (listener, picker) = (workspace.clone(), picker_ready.clone());
+            let mut cx = Cx::new(Box::new(move |cx, event| {
+                if let Event::Actions(actions) = event {
+                    if actions.iter().any(|a| matches!(a.downcast_ref(), Some(LoginAction::AccountPickerReady))) {
+                        picker.set(true);
+                    }
+                    if let Some(app) = listener.borrow_mut().as_mut() {
+                        AppMain::handle_event(app, cx, event);
+                    }
+                }
+            }));
+            let mut app = super::back_navigation_tests::embedded_app(&mut cx);
+            let mut alice_state = AppState::default();
+            alice_state.app_prefs.send_on_enter = false;
+            let ready = |client: &matrix_sdk::Client, state: &AppState| Box::new(SessionReady {
+                session: SessionPin::capture(client).unwrap(), app_state: state.clone(),
+            }) as Action;
+            install_link_client(Some(alice.clone()));
+            app.handle_actions(&mut cx, &vec![ready(&alice, &alice_state)]);
+            assert_eq!(app.persistence_owner().as_deref(), alice.user_id());
+            assert!(!app.app_state.app_prefs.send_on_enter);
+            *workspace.borrow_mut() = Some(app);
+            crate::sliding_sync::start_matrix_tokio().unwrap();
+            tokio::time::timeout(Duration::from_secs(15), async {
+                while !picker_ready.get() {
+                    {
+                        let mut guard = workspace.borrow_mut();
+                        let app = guard.as_mut().unwrap();
+                        if app.app_state.logged_in {
+                            app.handle_actions(&mut cx, &[Box::new(crate::accounts::AccountAction::Add)]);
+                        }
+                    }
+                    cx.handle_action_receiver();
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }).await.expect("Add Account must clear the workspace and return to the picker");
+            let mut app = workspace.borrow_mut().take().unwrap();
+            assert!(!app.app_state.logged_in && app.ui_session.is_none());
+            assert!(!app.ui.widget(&cx, ids!(overlay_container)).visible());
+            let saved_alice = persistence::load_app_state(alice.user_id().unwrap()).await.unwrap().unwrap();
+            assert!(!saved_alice.app_prefs.send_on_enter);
+            install_link_client(Some(bob.clone()));
+            assert!(app.persistence_owner().is_none());
+            app.handle_actions(&mut cx, &vec![ready(&bob, &Default::default()), ready(&alice, &alice_state)]);
+            assert_eq!(app.persistence_owner().as_deref(), bob.user_id());
+            assert!(app.app_state.app_prefs.send_on_enter);
+            install_link_client(Some(alice.clone()));
+            assert!(app.persistence_owner().is_none(), "Bob's UI cannot save into Alice's directory");
+            app.handle_actions(&mut cx, &[ready(&alice, &saved_alice)]);
+            assert!(!app.app_state.app_prefs.send_on_enter);
+            install_link_client(None);
+            let _ = crate::hagency::backend::Service::stop_current().await;
+        });
+    }
+
+    #[test]
+    fn restore_omits_inaccessible_rooms_and_spaces_from_legacy_snapshots() {
+        let private = SelectedRoom::JoinedRoom { room_name_id: RoomNameId::empty(ruma::owned_room_id!("!old:example.org")) };
+        let shared = SelectedRoom::JoinedRoom { room_name_id: RoomNameId::empty(ruma::owned_room_id!("!shared:example.org")) };
+        let mut state = AppState::default();
+        let dock = &mut state.saved_dock_state_home;
+        for room in [&private, &shared] {
+            dock.open_rooms.insert(room.tab_id(), room.clone());
+            dock.room_order.push(room.clone());
+            dock.dock_items.insert(room.tab_id(), DockItem::Tab {
+                name: room.display_name(), template: id!(CloseableTab), kind: room.dock_kind(),
+            });
+        }
+        dock.selected_room = Some(private.clone());
+        state.saved_dock_state_per_space.insert(private.room_id().clone(), dock.clone());
+        state.retain_accessible_rooms(|room| (room == shared.room_id()).then_some(RoomState::Joined));
+        let dock = &state.saved_dock_state_home;
+        assert!(dock.selected_room.is_none() && state.saved_dock_state_per_space.is_empty());
+        assert_eq!(dock.room_order, [shared.clone()]);
+        assert!(dock.open_rooms.contains_key(&shared.tab_id()));
+        assert!(!dock.dock_items.contains_key(&private.tab_id()) && !dock.open_rooms.contains_key(&private.tab_id()));
+    }
+
+    #[test]
     fn expired_session_clears_state_before_another_account_logs_in() {
         let mut state = AppState::default();
         state.logged_in = true;
@@ -2403,27 +2681,11 @@ mod session_state_tests {
     }
 }
 
-fn should_restore_app_state(
-    logged_in: bool,
-    current_user: Option<&matrix_sdk::ruma::UserId>,
-    saved_user: &matrix_sdk::ruma::UserId,
-) -> bool {
-    logged_in && current_user == Some(saved_user)
-}
-
-#[cfg(test)]
-mod restore_owner_tests {
-    use super::*;
-
-    #[test]
-    fn delayed_state_from_previous_account_is_rejected() {
-        let alice = ruma::user_id!("@alice:example.org");
-        let bob = ruma::user_id!("@bob:example.org");
-        assert!(should_restore_app_state(true, Some(alice), alice));
-        assert!(!should_restore_app_state(true, Some(bob), alice));
-        assert!(!should_restore_app_state(false, Some(alice), alice));
-        assert!(!should_restore_app_state(true, None, alice));
-    }
+/// Delivered once the SDK and the matching user's saved state are both ready.
+#[derive(Debug)]
+pub(crate) struct SessionReady {
+    pub session: crate::matrix_context::SessionPin,
+    pub app_state: AppState,
 }
 
 /// A snapshot of the main dock: all state needed to restore the dock tabs/layout.
@@ -2623,9 +2885,6 @@ pub enum AppStateAction {
     ///
     /// This triggers an update to every cached copy of that room/space name.
     RoomNameUpdated(RoomNameId),
-    /// The given app state was loaded from persistent storage
-    /// and is ready to be restored.
-    RestoreAppStateFromPersistentState { user_id: OwnedUserId, app_state: AppState },
     /// The given room was successfully loaded from the homeserver
     /// and is now known to our client.
     ///
@@ -2674,7 +2933,7 @@ mod back_navigation_tests {
     use super::*;
 
     /// Rinx as OctoSense seats it: the window-less `RinxContent`, signed out.
-    fn embedded_app(cx: &mut Cx) -> App {
+    pub(super) fn embedded_app(cx: &mut Cx) -> App {
         let window = WindowHandle::new(cx);
         window.cancel_initial_create(cx);
         cx.with_vm(|vm| {
@@ -2969,5 +3228,37 @@ mod back_navigation_tests {
         assert!(!browser.overlay_occluded());
         assert_eq!(browser.browser_id(), browser_id);
         assert_eq!(browser.session().tabs.len(), 1);
+    }
+}
+
+#[cfg(all(test, not(target_arch = "wasm32")))]
+mod trace_backpressure_tests {
+    use std::{io::{self, Write}, sync::mpsc, thread, time::Duration};
+
+    #[test]
+    fn a_stalled_diagnostic_sink_cannot_park_producers() {
+        struct StalledSink(Option<mpsc::Receiver<()>>);
+        impl Write for StalledSink {
+            fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+                if let Some(release) = self.0.take() { let _ = release.recv(); }
+                Ok(bytes.len())
+            }
+            fn flush(&mut self) -> io::Result<()> { Ok(()) }
+        }
+
+        let (release, gate) = mpsc::channel();
+        let (mut writer, _guard) = super::native_trace_writer(StalledSink(Some(gate)));
+        let dropped = writer.error_counter();
+        let (done, finished) = mpsc::channel();
+        let producer = thread::spawn(move || {
+            for _ in 0..4096 { writer.write_all(b"synthetic record\n").unwrap(); }
+            done.send(()).unwrap();
+        });
+
+        let finished_before_release = finished.recv_timeout(Duration::from_secs(5)).is_ok();
+        release.send(()).unwrap();
+        producer.join().unwrap();
+        assert!(finished_before_release);
+        assert!(dropped.dropped_lines() > 0);
     }
 }

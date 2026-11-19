@@ -116,6 +116,7 @@ fn stable_ids_exist_for_the_harness() {
         assert!(!widget.label(&cx, path).is_empty(), "missing label {path:?}");
     }
     assert!(!widget.check_box(&cx, ids!(od_keep_running)).is_empty(), "missing switch");
+    assert!(!widget.check_box(&cx, ids!(od_detail_containers)).is_empty(), "missing container switch");
     assert!(widget.widget(&cx, ids!(od_open_other)).is_empty(), "no cross-app button remains");
 }
 
@@ -142,7 +143,7 @@ fn setup_page_replaces_the_dashboard_and_the_switch_follows_the_host() {
     assert!(!visible(&cx, ids!(od_setup_page)) && visible(&cx, ids!(od_overview)) && visible(&cx, ids!(od_options_card)));
     assert!(widget.check_box(&cx, ids!(od_keep_running)).active(&cx));
     assert!(widget.button(&cx, ids!(od_stop)).visible());
-    dashboard.set_options(&mut cx, Some(crate::model::HostOptions { keep_running: false, busy: false, foreign_service: false }));
+    dashboard.set_options(&mut cx, Some(crate::model::HostOptions { keep_running: false, ..Default::default() }));
     assert!(!widget.check_box(&cx, ids!(od_keep_running)).active(&cx));
     dashboard.load_state(&mut cx, fixtures::scenario("hosted-stopped").unwrap());
     assert!(widget.button(&cx, ids!(od_resume)).visible() && !widget.button(&cx, ids!(od_stop)).visible());
@@ -151,6 +152,50 @@ fn setup_page_replaces_the_dashboard_and_the_switch_follows_the_host() {
     assert_eq!(widget.label(&cx, ids!(od_uninstall_title)).text(), "Uninstall the hosting service?");
     dashboard.load_state(&mut cx, fixtures::scenario("foreign-service").unwrap());
     assert!(widget.button(&cx, ids!(od_use_this_service)).visible() && visible(&cx, ids!(od_foreign_service)));
+}
+
+#[test]
+fn a_claude_resource_page_carries_its_own_container_switch() {
+    use crate::model::{ContainerChoices, ContainerProblem, HostOptions, PoolContainers};
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    register(&mut cx, false);
+    let widget = instantiate(&mut cx);
+    let dashboard = widget.as_owner_dashboard();
+    dashboard.set_clock(&mut cx, Some(fixtures::clock()));
+    let visible = |cx: &Cx, path: &[LiveId]| widget.widget(cx, path).visible();
+    let choices = |pools: &[(&str, PoolContainers)]| Some(HostOptions {
+        keep_running: true,
+        containers: Some(ContainerChoices {
+            pools: pools.iter().map(|(pool, choice)| (pool.to_string(), *choice)).collect(),
+            unreadable: false,
+        }),
+        ..Default::default()
+    });
+    let mut state = fixtures::scenario("hosted").unwrap();
+    state.view.tab = Tab::Resources;
+    state.view.selected_resource = Some("res_sonnet".into());
+    dashboard.load_state(&mut cx, state.clone());
+    assert!(visible(&cx, ids!(od_detail)));
+    assert!(!visible(&cx, ids!(od_detail_containers_row)), "a computer that cannot run them shows none");
+    dashboard.set_options(&mut cx, choices(&[("res_terra", PoolContainers::On)]));
+    assert!(visible(&cx, ids!(od_detail_containers_row)));
+    assert!(!widget.check_box(&cx, ids!(od_detail_containers)).active(&cx), "another resource's choice is its own");
+    assert_eq!(widget.label(&cx, ids!(od_detail_containers_title)).text(), "Run this resource's Agents in containers");
+    for (choice, active) in [
+        (PoolContainers::TurningOn, true),
+        (PoolContainers::On, true),
+        (PoolContainers::Failed(ContainerProblem::EngineStopped), false),
+    ] {
+        dashboard.set_options(&mut cx, choices(&[("res_sonnet", choice)]));
+        assert_eq!(widget.check_box(&cx, ids!(od_detail_containers)).active(&cx), active, "{choice:?}");
+    }
+    assert!(widget.label(&cx, ids!(od_detail_containers_body)).text().contains("Start your container app"));
+    // The overview has no computer-wide switch, and a Codex resource none.
+    assert!(widget.widget(&cx, ids!(od_containers)).is_empty());
+    state.view.selected_resource = Some("res_terra".into());
+    dashboard.load_state(&mut cx, state);
+    dashboard.set_options(&mut cx, choices(&[("res_terra", PoolContainers::On)]));
+    assert!(visible(&cx, ids!(od_detail)) && !visible(&cx, ids!(od_detail_containers_row)));
 }
 
 #[test]

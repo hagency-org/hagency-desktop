@@ -670,8 +670,22 @@ async fn bounded_work_keeps_health_responsive() {
             other => panic!("unexpected request outcome: {other:?}"),
         }
     }
-    assert!(accepted > 0);
     assert!(busy > 0);
+    if accepted == 0 {
+        // The writer waits 100 ms for a locked database, and one input waits
+        // behind the one it holds. On a busy machine all of that is over
+        // before the lock is released above, and every input was refused.
+        // The writer is free then: it takes the next input.
+        let mut input = body();
+        input["id"] = json!("request_after_release");
+        let after = TestClient::post(format!("{BASE}/api/native/v1/custody"))
+            .add_header("host", "127.0.0.1:13300", true)
+            .bearer_auth(TOKEN)
+            .json(&input)
+            .send(&*service)
+            .await;
+        assert_eq!(after.status_code, Some(StatusCode::ACCEPTED));
+    }
     store.shutdown().await.unwrap();
 }
 

@@ -93,6 +93,11 @@ impl SecretStore for FakeStore {
 pub(crate) fn fake_service(root: &Path) -> Arc<Service> {
     Arc::new(Service::new(root.into(), Vault::new(Arc::new(FakeStore::default()))).unwrap())
 }
+pub(crate) fn install_empty_store(root: &Path) -> Arc<Service> {
+    let service = fake_service(root);
+    assert!(SERVICE.set(Ok(service.clone())).is_ok());
+    service
+}
 pub(crate) fn session_fixture() -> FullSessionPersisted {
     serde_json::from_value(serde_json::json!({
         "client_session":{"homeserver":"https://example.org","db_path":"db_original","passphrase":"DB_SECRET_MARKER"},
@@ -239,6 +244,144 @@ fn credential_migration_logout_legacy_retained_without_session_is_database_only(
             .is_err()
     );
     assert!(service.worker.shutdown(std::time::Duration::from_secs(2)));
+}
+
+#[cfg(windows)]
+pub(crate) fn leave_session_save_intent(
+    service: &Service,
+    path: &Path,
+    saved: FullSessionPersisted,
+) {
+    drop(service.prepare(path, saved, None).unwrap());
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_acl_resumes_a_prepared_session_only_with_the_original_source() {
+    const NAME: &str = "persistence::credential_state::tests::windows_acl_resumes_a_prepared_session_only_with_the_original_source";
+    if isolated_case(NAME, "HAGENCY_ACL_SESSION_JOURNAL_CHILD") {
+        return;
+    }
+    let root = crate::app_data_dir();
+    let service = fake_service(root);
+    let original = session_fixture();
+    let user = &original.user_session.meta().user_id;
+    let device = &original.user_session.meta().device_id;
+    let path = session_path(root, &original);
+    hagency_store::private::write_new(&path, &serde_json::to_vec(&original).unwrap()).unwrap();
+    let epoch = crate::account_session::epoch();
+    service.load_worker(&path, epoch, || true).unwrap();
+    let keys = service.cached(&path, epoch).unwrap();
+    let mut resumed = original.clone();
+    resumed.sync_token = Some("saved-before-crash".into());
+    let expected = keys.encode(resumed).unwrap();
+    let doc = Document::open(&path, MAX_SESSION).unwrap();
+    let source = doc.read().unwrap().unwrap();
+    let original_bytes = source.bytes().to_vec();
+    let journal = doc
+        .begin(
+            keys.key.reference().scope(),
+            Some(&source),
+            vec![
+                keys.key.reference().clone(),
+                keys.database.reference.clone(),
+                keys.revocation.reference().clone(),
+            ],
+        )
+        .unwrap();
+    let candidate = path.with_file_name(journal.candidate_name());
+    drop(doc.prepare(journal, &expected).unwrap());
+    drop(source);
+    drop(doc);
+    for object in [&path, &candidate] {
+        assert!(
+            std::process::Command::new("icacls.exe")
+                .arg(object)
+                .args(["/grant", "*S-1-1-0:(M)"])
+                .status()
+                .unwrap()
+                .success()
+        );
+    }
+    let recover = || {
+        service.recover_permissions(
+            user,
+            device.as_str(),
+            &original.client_session.homeserver,
+            epoch,
+        )
+    };
+    // Bytes which the trusted journal did not witness must stay untrusted.
+    std::fs::write(&path, b"changed after the interruption").unwrap();
+    assert!(recover().is_err());
+    assert!(hagency_store::private::open(&path, false).is_err());
+    assert!(path.with_file_name(".session.vault-journal").is_file());
+    std::fs::write(&path, original_bytes).unwrap();
+    recover().unwrap();
+    assert_eq!(std::fs::read(&path).unwrap(), expected.as_slice());
+    assert!(!path.with_file_name(".session.vault-journal").exists());
+    assert!(!candidate.exists());
+    recover().unwrap();
+    assert!(test_shutdown(&service));
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_acl_resumes_retained_migration_with_original_reference() {
+    const NAME: &str = "persistence::credential_state::tests::windows_acl_resumes_retained_migration_with_original_reference";
+    if isolated_case(NAME, "HAGENCY_ACL_RETAINED_JOURNAL_CHILD") {
+        return;
+    }
+    let root = crate::app_data_dir();
+    let service = fake_service(root);
+    let session = session_fixture();
+    let user = &session.user_session.meta().user_id;
+    let path = session_path(root, &session).with_file_name("retained_db.json");
+    let hash = service.check_account_path(&path, Some(user)).unwrap();
+    let db = &session.client_session;
+    hagency_store::private::write_new(&path, &serde_json::to_vec(&[db]).unwrap()).unwrap();
+    let installation = service.installation().unwrap();
+    let identity = RetainedIdentity::LegacyDatabase {
+        account_hash: hash.clone(),
+        homeserver: db.homeserver.clone(),
+        db_path: db.db_path.clone(),
+    };
+    let key = Vault::fresh_reference(&identity.scope(&installation).unwrap()).unwrap();
+    let scope = Scope::new(
+        &installation,
+        Purpose::Database,
+        &serde_json::to_vec(&("retained-db-v2", &hash)).unwrap(),
+    )
+    .unwrap();
+    let doc = Document::open(&path, MAX_SESSION).unwrap();
+    let source = doc.read().unwrap().unwrap();
+    drop(doc.begin(&scope, Some(&source), vec![key.clone()]).unwrap());
+    drop(source);
+    drop(doc);
+    assert!(
+        std::process::Command::new("icacls.exe")
+            .arg(&path)
+            .args(["/grant", "*S-1-1-0:(M)"])
+            .status()
+            .unwrap()
+            .success()
+    );
+    service
+        .recover_permissions(
+            user,
+            session.user_session.meta().device_id.as_str(),
+            &db.homeserver,
+            crate::account_session::epoch(),
+        )
+        .unwrap();
+    let list: Retained = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+    assert_eq!(list.databases[0].database.reference, key);
+    assert!(
+        !path
+            .with_file_name(".retained_db.json.vault-journal")
+            .exists()
+    );
+    assert!(test_shutdown(&service));
 }
 
 #[test]

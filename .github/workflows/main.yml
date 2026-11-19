@@ -19,11 +19,17 @@ env:
   RUST_BACKTRACE: 1
   # Fixtures inject SecretStore; CI must never access a runner's native vault.
   HAGENCY_NATIVE_CREDENTIAL_IO: deny
+  # No step reads this. Naming the two secrets makes GitHub mask the
+  # self-hosted machine's name wherever it would appear in this public log.
+  MASKED_IN_LOGS: ${{ secrets.CI_MASK_MACHINE_NAME_A }} ${{ secrets.CI_MASK_MACHINE_NAME_B }}
 
 jobs:
   libraries:
     name: Hagency library workspace
-    runs-on: macos-15
+    # The project's own Mac runs this job for pushes, manual runs and pull
+    # requests from this repository. A pull request from a fork stays on a
+    # GitHub machine: a fork never chooses what runs on the project's hardware.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64","hagency-mac"]') || 'macos-15' }}
     # The serial all-target and feature-enabled suites can exceed two hours.
     timeout-minutes: 180
     env:
@@ -45,8 +51,20 @@ jobs:
         with:
           toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
+        # The project's own Mac keeps its cargo home between runs, and this
+        # action would empty that home's bin folder.
+        if: runner.environment == 'github-hosted'
         with:
           workspaces: crates/hagency-client -> target
+      - name: Build with every core of the project's own Mac
+        if: runner.environment == 'self-hosted'
+        # Two test programs at a time for every three performance cores. Six
+        # was measured on the Mac with ten of them, which runs the native job
+        # beside this one; the Mac with six gets the same share, four.
+        run: |
+          echo "CARGO_BUILD_JOBS=$(sysctl -n hw.ncpu)" >> "$GITHUB_ENV"
+          fast=$(sysctl -n hw.perflevel0.physicalcpu)
+          echo "PARALLEL_TEST_JOBS=$(( fast * 2 / 3 > 2 ? fast * 2 / 3 : 2 ))" >> "$GITHUB_ENV"
       - run: brew install cmake
       - name: Check Linux qualification helper refusals without provisioning
         run: python3 native/scripts/test-qualify-linux-cgroup.py
@@ -57,8 +75,22 @@ jobs:
           echo "HAGENCY_TEST_RUNTIME_PROBE=$RUNNER_TEMP/hagency-library-runtime-probe" >> "$GITHUB_ENV"
       # These two existing qualification selectors require a live qualified
       # host; their evidence cannot be supplied by a disposable CI runner.
-      - run: cargo test --locked --workspace --all-targets --no-fail-fast -- --skip native_codex_real_app_server --skip native_two_agent_qualification_records_its_evidence
-      - run: cargo test --locked -p hagency --features shared-budget-execution,resource-adoption --lib
+      #
+      # tools/parallel-tests.py builds both selections as cargo test does and
+      # then starts every test program once, as cargo test does, several
+      # programs at a time. The tests of one program still share one process
+      # and run one after another (RUST_TEST_THREADS above). Only the unit
+      # tests of hagency-matrix, the longest program, run as several
+      # processes: none of them chooses the process's writer root, so none
+      # depends on which of them ran first.
+      - name: Library tests, several test programs at a time
+        run: >-
+          python3 ../../tools/parallel-tests.py --split hagency_matrix,hagency
+          --first _process_writer_root::is_selected_before_any_other_test --
+          --locked --workspace --all-targets --
+          --skip native_codex_real_app_server --skip native_two_agent_qualification_records_its_evidence
+          ---
+          --locked -p hagency --features shared-budget-execution,resource-adoption --lib
       # These functional checks retain the production two-second inspection
       # deadline. Concurrent debug fixture/schema construction can exhaust it.
       - name: Check bounded empty-device inventory in isolation
@@ -66,7 +98,8 @@ jobs:
           cargo test --locked -p hagency-store --features shared-budget-execution,resource-adoption --lib domain::owner_resources::adoption::empty_device::tests:: -- --test-threads=1
   native:
     name: Native build and unit tests
-    runs-on: macos-15
+    # As for the library workspace: the project's own Mac, except for forks.
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && fromJSON('["self-hosted","macOS","ARM64","hagency-mac"]') || 'macos-15' }}
     timeout-minutes: 120
     steps:
       - uses: actions/checkout@v7
@@ -78,6 +111,7 @@ jobs:
         with:
           toolchain: 1.98.0
       - uses: Swatinem/rust-cache@v2
+        if: runner.environment == 'github-hosted'
         with:
           workspaces: |
             . -> target
@@ -85,6 +119,8 @@ jobs:
             crates/owner-dashboard -> target
             crates/hagency-client -> target
       - run: brew install cmake
+      - name: Verify TSP timeline signatures
+        run: cargo test --locked --profile fast --lib --features tsp tsp::message_signature::tests
       - run: cargo test --locked --manifest-path crates/miniapp-core/Cargo.toml
       - run: cargo test --locked --manifest-path crates/miniapp-catalog/Cargo.toml
       - run: cargo test --locked --manifest-path crates/system-apps/Cargo.toml
@@ -92,8 +128,18 @@ jobs:
       - run: python3 tools/test_package_octos.py
       - run: python3 tools/check-release-icons.py
       - run: cargo test --locked --features agent_chat,octosense-module --lib
+      - name: Check how the regression gate runs its checks
+        run: python3 tools/test-hagency-regressions-runner.py
+      - name: Check how the library tests run a failed process once more
+        run: python3 tools/test-parallel-tests.py
       - name: Budget and chat regression gate
-        run: python3 tools/check-hagency-regressions.py --output .run/ci-regressions
+        # Four checks at a time on the project's own Mac, which runs the
+        # library job beside this one; one after another on GitHub's. A check
+        # whose tests failed runs once more and is named when only that run
+        # passed. The release workflow gives no second run.
+        run: >-
+          python3 tools/check-hagency-regressions.py --output .run/ci-regressions
+          --jobs ${{ runner.environment == 'self-hosted' && 4 || 1 }} --second-run
       - run: cargo build --locked --features agent_chat
       - run: cargo check --locked --no-default-features --features agent_chat
       - run: python3 tools/wechat-ux/check_i18n.py

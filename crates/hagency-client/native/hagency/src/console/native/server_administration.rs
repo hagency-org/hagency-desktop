@@ -60,6 +60,9 @@ mod tests {
     /// The fixture opens process-wide owner state, so it runs in a child.
     #[test]
     fn pooled_owner_runs_local_agent_commands_and_keeps_login_and_creation_closed() {
+        // The child looks for a Codex CLI here and nowhere else, so it never
+        // finds or starts the one this machine may have.
+        let providers = tempfile::tempdir().unwrap();
         let result = std::process::Command::new(std::env::current_exe().unwrap())
             .args([
                 "console::native::server_administration::tests::pooled_owner_local_commands_process_child",
@@ -67,6 +70,7 @@ mod tests {
                 "--nocapture",
             ])
             .env("HAGENCY_POOLED_LOCAL_FIXTURE", "1")
+            .env("HAGENCY_CODEX_BINARY", providers.path().join("no-codex"))
             .output()
             .unwrap();
         assert!(
@@ -132,19 +136,21 @@ mod tests {
             f.owner.restore_runtime_intents().await.unwrap(),
             json!({"recoveries": []})
         );
-        // A local command runs end to end, past admission and authorization.
-        // Whether this machine has a Codex CLI is not what is checked here:
-        // with none, the command gets as far as looking for it.
+        // A local command runs end to end, past admission and authorization,
+        // as far as looking for the Codex CLI. The parent test points that
+        // search at a missing file, so the outcome is the same on a machine
+        // with a current Codex CLI, an old one or none.
         let status = f
             .owner
             .execute(Command::Provider {
                 action: ProviderAction::Status,
             })
             .await;
-        match &status {
-            Ok(status) => assert!(status["state"].is_string(), "{status:?}"),
-            Err(error) => assert_eq!(error.code, "codex_binary_unavailable", "{status:?}"),
-        }
+        assert_eq!(
+            status.as_ref().unwrap_err().code,
+            "codex_binary_unavailable",
+            "{status:?}"
+        );
         f.owner.shutdown().await;
         registry.shutdown().await.unwrap();
     }

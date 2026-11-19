@@ -529,6 +529,19 @@ script_mod! {
                     od_detail_title := mod.widgets.OdTitle {}
                     od_detail_line := mod.widgets.OdCaption {}
                     od_detail_status := StatusRow {}
+                    od_detail_containers_row := View {
+                        visible: false width: Fill height: Fit flow: Down spacing: 10
+                        mod.widgets.OdSeparator {}
+                        View {
+                            width: Fill height: Fit flow: Right spacing: 12 align: Align{y: 0.5}
+                            View {
+                                width: Fill height: Fit flow: Down spacing: 3
+                                od_detail_containers_title := mod.widgets.OdText {}
+                                od_detail_containers_body := mod.widgets.OdCaption {}
+                            }
+                            od_detail_containers := mod.widgets.OdSwitch {}
+                        }
+                    }
                     mod.widgets.OdSeparator {}
                     od_detail_tokens := OdList {Line := KeyValue {}}
                     od_detail_ratio := KeyValue {}
@@ -1058,6 +1071,14 @@ impl OwnerDashboard {
         if let Some(keep) = self.view.check_box(cx, ids!(od_keep_running)).changed(actions) {
             self.emit(cx, DashboardAction::KeepRunning(keep));
         }
+        if let Some(on) = self.view.check_box(cx, ids!(od_detail_containers)).changed(actions) {
+            let changing = self.state.options.as_ref().and_then(|o| o.containers.as_ref()).is_none_or(|c| c.changing());
+            match self.state.view.selected_resource.clone() {
+                Some(pool) if !changing => self.emit(cx, DashboardAction::PoolContainers { pool, on }),
+                // The host is still changing a pool: the switch goes back.
+                _ => self.changed(cx),
+            }
+        }
         if self.clicked(cx, ids!(od_use_this_service), actions) {
             self.emit(cx, DashboardAction::StartService);
         }
@@ -1552,6 +1573,15 @@ impl OwnerDashboard {
             let status = self.view.view(cx, ids!(od_detail_status));
             status.od_glyph(cx, ids!(glyph)).set(cx, d.row.status.tone, d.row.status.glyph);
             status.label(cx, ids!(text)).set_text(cx, &d.row.status.text);
+            self.show(cx, ids!(od_detail_containers_row), d.containers.is_some());
+            if let Some(containers) = &d.containers {
+                self.label(cx, ids!(od_detail_containers_title), containers.title);
+                self.label(cx, ids!(od_detail_containers_body), containers.body);
+                let switch = self.view.check_box(cx, ids!(od_detail_containers));
+                if switch.active(cx) != containers.on {
+                    switch.set_active(cx, containers.on, Animate::No);
+                }
+            }
             let wanted: Vec<_> = d.tokens.iter().map(|l| (l.label.to_string(), id!(Line))).collect();
             let lines = self.view.od_list(cx, ids!(od_detail_tokens)).sync(cx, &wanted);
             for (row, line) in lines.iter().zip(&d.tokens) {

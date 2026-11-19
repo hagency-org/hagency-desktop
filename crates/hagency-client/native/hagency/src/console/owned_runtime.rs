@@ -1,12 +1,15 @@
 //! Explicit owner-started, chat-only Codex host. No legacy execution fallback.
 mod drain;
+mod idle_turns;
 pub(in crate::console) mod messages;
 pub(in crate::console) mod e2ee;
 mod provider_custody;
 pub(in crate::console) mod questions;
+mod roles;
 mod room_tools;
 pub(in crate::console) mod run_controls;
 mod service;
+mod wakeups;
 #[cfg(unix)]
 mod working_directory;
 use super::lifecycle::{RetainedTask, TaskCustody};
@@ -1902,6 +1905,9 @@ async fn execution_loop_with_gate<T: Transport>(
 ) -> Result<(), RuntimeError> {
     let mut reported = BTreeSet::new();
     let mut sessions = provider_custody::Sessions::default();
+    // Runs that hold reports of a turn the native CLI started by itself.
+    let mut undelivered = idle_turns::recover(console, lease, ledger, owner, config);
+    let mut timers = wakeups::Clock::new();
     let mut reply_cursor = String::new();
     let mut finish_cursors = [String::new(), String::new(), String::new()];
     loop {
@@ -1993,6 +1999,21 @@ async fn execution_loop_with_gate<T: Transport>(
         if console.supports_group_crypto() {
             e2ee::pump_candidates(console, lease, config, cancel).await?;
         }
+        // A parked session may have started a turn by itself (a timer, a peer
+        // message). It runs before the next request is taken, so a request
+        // never meets a session that is in the middle of such a turn.
+        idle_turns::pump(
+            console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
+        )
+        .await?;
+        // A timer the Agent set with the host is due: its turn runs here,
+        // between requests, like the turn above.
+        wakeups::pump(
+            console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
+            &mut timers,
+        )
+        .await?;
+        idle_turns::deliver(console, lease, config, cancel, &mut undelivered).await?;
         let events = match operation(
             console,
             cancel,
@@ -2333,6 +2354,48 @@ async fn fresh_running<T: Transport>(
         );
         tokio::select! {biased; _=canceled(cancel)=>return false, _=tokio::time::sleep(Duration::from_secs(2))=>{}}
     }
+}
+
+/// Legacy run messages still require the original running dispatch. A new
+/// report instead obtains fresh delivery-only authority for its exact route;
+/// that proof cannot start or extend the model's work.
+async fn send_personal_message<T: Transport>(
+    transport: &T,
+    lease: &LeaseRef,
+    dispatch: &inbox::Dispatch,
+    execution: &str,
+    messages: &messages::Outbox,
+    device: &e2ee::AgentDevice,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<bool, ()> {
+    let Some(pending) = messages.next()? else { return Ok(false); };
+    let encrypted = messages.request_encrypted(dispatch);
+    if !pending.is_report() {
+        if !fresh_running(transport, lease, dispatch, execution, cancel).await { return Err(()); }
+        return messages.send_next(device, encrypted, None, Some(pending.sequence)).await;
+    }
+    // A report that stays in custody says at which step it was held. The
+    // step is the host's own word; nothing of the report is logged.
+    let held = |stage: &'static str| {
+        tracing::warn!(code = "agent_report_held", stage,
+            "A report of an Agent's own turn was not sent at this step; it stays in custody");
+    };
+    let host = transport.approval_host().ok_or(())?;
+    let puppet = device.approval_client().user_id().ok_or(())?.to_string();
+    let response = operation(transport, cancel, Op::AuthorizeMessage {
+        lease: lease.clone(), binding_id: dispatch.binding_id.clone(),
+        binding_generation: dispatch.binding_generation, room_id: dispatch.room_id.clone(),
+        puppet_mxid: puppet.clone(),
+    }).await.map_err(|error| {
+        if !matches!(error, RuntimeError::Stopped) { held("authority_request"); }
+    })?;
+    let Response::MessageAuthorized(proof) = response else { held("authority_answer"); return Err(()); };
+    let permit = messages::PersonalReportPermit::new(
+        &proof, lease, dispatch, execution, host.pin.generation, &puppet, wall_ms(),
+    ).inspect_err(|_| held("authority_proof"))?;
+    if *cancel.borrow() { return Err(()); }
+    messages.send_next(device, encrypted, Some(&permit), Some(pending.sequence)).await
+        .inspect_err(|_| if !*cancel.borrow() { held(if encrypted { "send_encrypted" } else { "send" }) })
 }
 struct LiveToolGate {
     console: PinnedConsole,
@@ -2706,7 +2769,7 @@ async fn run_turn<T: Transport>(
             let room_folder = working_directory::for_room_files(&config.profile, &profile, owner, &scope, config.shared_workspace)?;
             #[cfg(not(unix))]
             let room_folder = profile.cwd.clone();
-            let host = room_tools::Host::new(gate, config, &room_folder)?;
+            let host = room_tools::Host::new(gate, config, &room_folder)?.for_owner(owner);
             let (channel, receiver) = hagency_agent_local::room_tools::room_queue(&scope, &prepared.dispatch.id)
                 .map_err(|_| RuntimeError::Profile)?;
             queue = queue.with_room_tools(channel);
@@ -2753,11 +2816,19 @@ async fn run_turn<T: Transport>(
                 provider.session.continue_context(ledger, &scope, &profile).await
             }) => result.unwrap_or(Err(codex::Error::Timeout)),
         };
-        if prepared.is_ok() { Some(provider) } else {
-            // No new model input or reservation has been sent. A dead cached
-            // process may be replaced for this newly admitted dispatch only.
-            provider.stop().await.map_err(|_| RuntimeError::Provider)?;
-            None
+        match prepared {
+            Ok(()) => Some(provider),
+            Err(error) => {
+                // Includes a turn the native CLI started by itself while parked
+                // (a peer message, a timer): ADR 0013 admits none of those yet.
+                let (kind, detail) = error.diagnostic();
+                tracing::warn!(code = "agent_retained_session_replaced", kind, detail,
+                    event = error.diagnostic_event(), "A retained native session failed its reuse check");
+                // No new model input or reservation has been sent. A dead cached
+                // process may be replaced for this newly admitted dispatch only.
+                provider.stop().await.map_err(|_| RuntimeError::Provider)?;
+                None
+            }
         }
     } else { None };
     let retained = cached.is_some();
@@ -2826,7 +2897,7 @@ async fn run_turn<T: Transport>(
     });
     let binding = hagency_metering::dashboard::ledger::ExecutionBinding {
         execution_id: prepared.execution_id.clone(),
-        resource_id: format!("personal-agent:{}", config.agent_id),
+        resource_id: hagency_metering::dashboard::personal_resource_id(&config.agent_id),
         account_id: None,
         allocation_id: None,
         agent_id: Some(config.agent_id.clone()),
@@ -2864,7 +2935,7 @@ async fn run_turn<T: Transport>(
             provider.session.verify_host_environment().await.inspect_err(|error|{provider_failure("provider_environment", error);})?;
             provider.session.require_local_account().await.inspect_err(|error|{provider_failure("provider_account", error);})?;
             if room_tools {
-                provider.session.enable_room_tools(hagency_runtime::room_tools::RoomTools::history_and_files()).await
+                provider.session.enable_room_tools(hagency_runtime::room_tools::RoomTools::history_and_files().with_timers().with_roles()).await
                     .inspect_err(|error|{provider_failure("provider_room_tools", error);})?;
             }
             provider.session.open_context(ledger,&scope,&profile).await.inspect_err(|error|{provider_failure("provider_context", error);})?;
@@ -2966,7 +3037,12 @@ async fn run_turn<T: Transport>(
         &prepared.execution_id,
         reply,
     ))?;
-    if retain { sessions.retain(session_key, provider); }
+    if retain {
+        sessions.retain(session_key, provider, provider_custody::Anchor {
+            dispatch: prepared.dispatch.clone(),
+            execution: prepared.execution_id.clone(),
+        });
+    }
     Ok(None)
 }
 
@@ -2986,7 +3062,11 @@ async fn flush_record_messages<T: Transport>(
         let Some(route) = messages::Route::personal(&record.dispatch, execution) else { return Ok(true) };
         let root = e2ee::message_root(console, lease, config)?;
         if messages::Outbox::exists_for_route(&root, &route) {
-            let messages = messages::Outbox::open_route(&root, route).map_err(|_| RuntimeError::Profile)?;
+            let mut messages = messages::Outbox::open_route(&root, route).map_err(|_| RuntimeError::Profile)?;
+            // A failed or unknown run's settled record has lost its body by now.
+            if !record.request_encrypted {
+                messages.request_came_in_clear();
+            }
             if messages.next().map_err(|_| RuntimeError::Profile)?.is_some() {
                 let device = match e2ee::device(console, lease, config, cancel).await {
                     Ok(device) => device,
@@ -2994,8 +3074,8 @@ async fn flush_record_messages<T: Transport>(
                     Err(_) => return Ok(false),
                 };
                 while messages.next().map_err(|_| RuntimeError::Profile)?.is_some() {
-                    if !fresh_running(console, lease, &record.dispatch, execution, cancel).await
-                        || messages.send_next(&device, record.dispatch.body.is_empty()).await.is_err()
+                    if send_personal_message(console, lease, &record.dispatch, execution,
+                        &messages, &device, cancel).await.is_err()
                     {
                         tracing::warn!(code = "agent_message_delivery_pending", "Native message awaits its original room authority");
                         return Ok(false);

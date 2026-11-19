@@ -27,8 +27,11 @@ use sha2::{Digest, Sha256};
 mod history;
 mod documents;
 mod files;
+mod earlier_devices;
 pub(in crate::console) use documents::RoomFile;
-pub(in crate::console) use history::HistoryBatch;
+pub(in crate::console) use history::{HistoryBatch, ReportScan};
+#[cfg(test)]
+pub(in crate::console) use history::{ReportContent, ReportTrace};
 use std::{
     collections::HashMap,
     path::Path,
@@ -69,6 +72,9 @@ pub(in crate::console) struct AgentDevice {
     pub(in crate::console) question_records: std::path::PathBuf,
     run_controls: crate::agent_questions::Inbox,
     pub(in crate::console) run_records: std::path::PathBuf,
+    /// The Agent's private directory: this device's store, and the stores of
+    /// its earlier devices on this computer.
+    root: std::path::PathBuf,
     revoked: Arc<AtomicBool>,
     sync: tokio::task::AbortHandle,
 }
@@ -467,6 +473,7 @@ impl AgentDevice {
             question_records: root.join("question-cards.json"),
             run_controls,
             run_records: root.join("run-cards.json"),
+            root,
             revoked,
             sync,
         })
@@ -570,6 +577,30 @@ impl AgentDevice {
     pub(in crate::console) async fn send_room_message_checked(
         &self, room: &str, txn: &str, content: serde_json::Value, require_encrypted: bool,
     ) -> Result<String, RuntimeError> {
+        self.send_room_message_guarded(room, txn, content, require_encrypted, None).await
+    }
+
+    /// Observe room encryption before recording a message attempt. The SDK
+    /// checks it again when sending, so this observation alone cannot pin the
+    /// event type if the room enables encryption concurrently.
+    pub(in crate::console) async fn room_encrypted(&self, room: &str) -> Result<bool, RuntimeError> {
+        let room_id = OwnedRoomId::try_from(room).map_err(|_| RuntimeError::Request)?;
+        let room = self.client.get_room(&room_id).ok_or(RuntimeError::Transport)?;
+        let security = room.latest_encryption_state().await.map_err(|_| RuntimeError::Transport)?;
+        if security.is_unknown() { return Err(RuntimeError::Transport); }
+        Ok(security.is_encrypted())
+    }
+
+    pub(in crate::console) async fn send_room_message_if_state_matches(
+        &self, room: &str, txn: &str, content: serde_json::Value, encrypted: bool,
+    ) -> Result<String, RuntimeError> {
+        self.send_room_message_guarded(room, txn, content, encrypted, Some(encrypted)).await
+    }
+
+    async fn send_room_message_guarded(
+        &self, room: &str, txn: &str, content: serde_json::Value,
+        require_encrypted: bool, expected_encrypted: Option<bool>,
+    ) -> Result<String, RuntimeError> {
         let room_id = OwnedRoomId::try_from(room).map_err(|_| RuntimeError::Request)?;
         let room = self
             .client
@@ -579,7 +610,9 @@ impl AgentDevice {
             .latest_encryption_state()
             .await
             .map_err(|_| RuntimeError::Transport)?;
-        if security.is_unknown() || (require_encrypted && !security.is_encrypted()) {
+        if security.is_unknown() || (require_encrypted && !security.is_encrypted())
+            || expected_encrypted.is_some_and(|expected| security.is_encrypted() != expected)
+        {
             return Err(RuntimeError::Transport);
         }
         let txn: OwnedTransactionId = txn.into();

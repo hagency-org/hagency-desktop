@@ -268,7 +268,6 @@ impl TspVerificationModal {
         details: TspVerificationDetails,
         wallet_db: AsyncSecureStore,
     ) {
-        log!("Initializing TSP verification modal with: {:?}", details);
         let prompt_text = format!("Matrix User \"{}\" is requesting to verify your identity via TSP.\n\
             Their TSP identity is: \"{}\".\n\n\
             They want to verify your TSP identity \"{}\" associated with Matrix User ID \"{}\".\n\n\

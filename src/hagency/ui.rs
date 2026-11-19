@@ -124,7 +124,7 @@ pub(crate) fn no_local_host_text(host: super::backend::LocalAgentHost) -> Option
     use super::backend::LocalAgentHost::*;
     match host {
         Here => None,
-        OtherAccount => Some("This computer hosts another account. Local Agents run only on a computer that hosts your own account, with your own model sign-in. To use the resources of this computer, request an Agent from its resource pool."),
+        OtherAccount => Some("The hosting enrollment does not match this account. Check the homeserver and full Matrix ID in Agent → Hosting."),
         HostingNotSetUp => Some("Set up resource hosting on this computer first. Local Agents run through it."),
     }
 }
@@ -745,6 +745,7 @@ script_mod! {
                         requests := Select {labels: [#(crate::i18n::tr("Allow requests")) #(crate::i18n::tr("Deny requests")) #(crate::i18n::tr("Ask owner per request"))] i18n_labels: ["Allow requests" "Deny requests" "Ask owner per request"]}
                         Text {text: #(crate::i18n::tr("High-risk tools")) i18n_text: "High-risk tools"}
                         tool_risk := Select {labels: [#(crate::i18n::tr("Deny high-risk tools")) #(crate::i18n::tr("Ask owner per tool")) #(crate::i18n::tr("Allow only exact tools/directories")) #(crate::i18n::tr("Full trust (unrestricted)"))] i18n_labels: ["Deny high-risk tools" "Ask owner per tool" "Allow only exact tools/directories" "Full trust (unrestricted)"]}
+                        tool_risk_deny_note := Text {visible: false text: #(crate::i18n::tr("With Deny selected, the device blocks tool requests such as commands and file changes before they reach your approval queue.")) i18n_text: "With Deny selected, the device blocks tool requests such as commands and file changes before they reach your approval queue." draw_text.color: mod.widgets.RINX_MUTED}
                         tool_risk_follows := Text {visible: false text: #(crate::i18n::tr("Not saved for this scope: high-risk tools follow Entire Agent until you save here.")) i18n_text: "Not saved for this scope: high-risk tools follow Entire Agent until you save here." draw_text.color: mod.widgets.RINX_MUTED}
                         tool_risk_owner_only := Text {visible: false text: #(crate::i18n::tr("Not saved for this scope: Full trust on Entire Agent covers only your own messages here, and anyone else's high-risk tools are denied.")) i18n_text: "Not saved for this scope: Full trust on Entire Agent covers only your own messages here, and anyone else's high-risk tools are denied." draw_text.color: mod.widgets.RINX_MUTED}
                         full_trust_note := Text {visible: false text: #(crate::i18n::tr("Full trust: the Agent runs commands, changes files and uses the network on this computer without asking you, and outside its work folder. Set on Entire Agent, it covers your own messages in every Room. Anyone else gets it only in a Room where you also save Full trust on that Room and on them. A Room or member with its own saved setting keeps that setting.")) i18n_text: "Full trust: the Agent runs commands, changes files and uses the network on this computer without asking you, and outside its work folder. Set on Entire Agent, it covers your own messages in every Room. Anyone else gets it only in a Room where you also save Full trust on that Room and on them. A Room or member with its own saved setting keeps that setting." draw_text.color: mod.widgets.RINX_WARNING_FG}
@@ -2227,7 +2228,7 @@ impl HagencyPanel {
             .drop_down(cx, ids!(policy_layer))
             .selected_item()
             .min(2);
-        for id in [ids!(tool_risk_follows), ids!(tool_risk_owner_only)] {
+        for id in [ids!(tool_risk_follows), ids!(tool_risk_owner_only), ids!(tool_risk_deny_note)] {
             self.view.label(cx, id).set_visible(cx, false);
         }
         let p = &self.policy["policies"][layer]["policy"];
@@ -2320,6 +2321,9 @@ impl HagencyPanel {
     /// full trust; neither shows under another choice.
     fn show_tool_risk(&self, cx: &mut Cx) {
         let choice = self.view.drop_down(cx, ids!(tool_risk)).selected_item();
+        self.view
+            .label(cx, ids!(tool_risk_deny_note))
+            .set_visible(cx, choice == 0);
         self.view
             .view(cx, ids!(allowed_tools_holder))
             .set_visible(cx, choice == 2);
@@ -4893,6 +4897,7 @@ mod tests {
             panel.policy=json!({"policies":[{"policy":{"budget":{"limit":"Unlimited","period":"Lifetime"},"requests":"Allow","high_risk":rule}}]});
             panel.render_policy(&mut cx);
             assert_eq!(panel.view.drop_down(&mut cx,ids!(tool_risk)).selected_item(),choice);
+            assert_eq!(panel.view.label(&mut cx,ids!(tool_risk_deny_note)).visible(),choice==0);
             assert_eq!(panel.view.label(&mut cx,ids!(full_trust_note)).visible(),choice==3);
             assert_eq!(panel.view.view(&mut cx,ids!(allowed_tools_holder)).visible(),choice==2);
             assert_eq!(panel.view.view(&mut cx,ids!(allowed_directories_holder)).visible(),choice==2);
@@ -5854,7 +5859,7 @@ mod tests {
         for (host, offered, text) in [
             (None, true, "Configure this account's local agents, their models, rooms and execution permissions."),
             (Some(LocalAgentHost::Here), true, "Configure this account's local agents, their models, rooms and execution permissions."),
-            (Some(LocalAgentHost::OtherAccount), false, "This computer hosts another account. Local Agents run only on a computer that hosts your own account, with your own model sign-in. To use the resources of this computer, request an Agent from its resource pool."),
+            (Some(LocalAgentHost::OtherAccount), false, "The hosting enrollment does not match this account. Check the homeserver and full Matrix ID in Agent → Hosting."),
             (Some(LocalAgentHost::HostingNotSetUp), false, "Set up resource hosting on this computer first. Local Agents run through it."),
         ] {
             panel.local_host = host;

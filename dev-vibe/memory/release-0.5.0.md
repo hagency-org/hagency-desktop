@@ -1,6 +1,61 @@
 # Desktop 0.5.0 发布
 
-更新：2026-11-15。
+更新：2026-11-19。
+
+## 2026-11-19 rc.13 发布
+
+用户要求基于最新合入的 PR 发布新的 RC；由 Claude 执行。
+
+- [v0.5.0-rc.13](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.13) 于 2026-11-19 04:40:58 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `5d9933a9d04577d0637723e35f369abe5f1c6e61` 构建：rc.12 之后合入了按资源池选择让 Claude 池 Agent 在容器中运行的 PR #156（默认关闭）、托管管理库关闭顺序的一行修正（在 PR #159 中），以及版本和发布说明 PR #164；其余是只改 CI 的 PR #154、#158、#159。Makepad 与 rc.12 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 44445855545](https://github.com/hagency-org/hagency-desktop/actions/runs/44445855545) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过，从触发到公开 2 小时 02 分。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,884,184 字节）和 `hagency-desktop-windows-amd64.exe`（122,505,475 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过，两份构建报告都写明上述提交和版本 0.5.0-rc.13。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：第一次运行通过，随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，没有资源错误。Windows 安装包没有在实机上运行。
+- 容器模式在 PR #156 合入前由其作者在一台 Mac 上对两个版本各跑通过一次；发布执行者本人没有运行容器模式，发布说明中这一节依据 PR 的说明写成，并由 PR 作者对照合入的代码核对过。
+- 这次发布没有部署服务端。
+
+## 2026-11-18 rc.12 发布
+
+用户要求合并当时已通过检查的五个 PR 并通过 CI 发布；由 Claude 执行。
+
+- [v0.5.0-rc.12](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.12) 于 2026-11-18 21:54:22 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `94a0cfa4f25b123807a618c83b539da9587b9cb8` 构建：rc.11 之后合入了 Agent 标记对齐和账号设置页排版 PR #146、日志阻塞时发送不受影响并不再把消息正文写入诊断日志 PR #148、按所显示的内容校验 TSP 签名 PR #150、切换账号时隔离聊天状态 PR #151、Windows 登录后修复账号目录权限 PR #153，以及版本和发布说明 PR #155。Makepad 与 rc.11 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 44384185477](https://github.com/hagency-org/hagency-desktop/actions/runs/44384185477) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（170,010,421 字节）和 `hagency-desktop-windows-amd64.exe`（122,292,158 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：第二次运行通过，随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，没有资源错误。第一次运行在 37 秒时失败：那台 Mac 负载很高，刚拷贝出的内核首次启动超过了检查脚本对 `octos --version` 的 20 秒限制，与安装包无关。Windows 安装包没有在实机上运行。
+- 合入五个 PR 之前，在它们与 main 合并后的代码上做了 JIT 类型检查，并在一台 Mac 上用隐藏窗口向加密房间里的本地 Agent 发了一条消息并收到回复。没有运行的：#153 的 Windows 路径、#150 的 TSP 构建、#151 的真实账号切换。
+- 这次发布没有部署服务端。
+
+## 2026-11-18 rc.11 发布
+
+用户要求把两个登录修复（PR #139、#141）一并放进 rc.11；由 Claude 执行。
+
+- [v0.5.0-rc.11](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.11) 于 2026-11-18 06:38:44 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `bc42284ea2199d24f096452012f5b19321b94914` 构建：rc.10 之后合入了房间角色 PR #142、Windows 凭据目录检查和登录错误提示 PR #141、已保存密钥缺失时完成登录 PR #139、自有 macOS CI 机器 PR #143，以及版本和发布说明 PR #144。Makepad 与 rc.10 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 44238330452](https://github.com/hagency-org/hagency-desktop/actions/runs/44238330452) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,762,543 字节）和 `hagency-desktop-windows-amd64.exe`（122,121,464 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：检查通过。随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，没有资源错误。Windows 安装包没有在实机上运行。
+- 合入 #139、#141 之前，在两者与 main 合并后的代码上做了 JIT 类型检查和登录、凭据相关测试；并在一台 Mac 上不经浏览器完成了一次真实登录：新账号注册并登录，重启后恢复，移走已保存的密钥后重启提示 `credential_missing`，再次登录成功并保留了原来的会话文件和聊天数据库。
+- 这次发布没有部署服务端。
+
+## 2026-11-18 rc.10 发布
+
+用户要求现在出版本；由 Claude 执行。
+
+- [v0.5.0-rc.10](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.10) 于 2026-11-18 05:19:39 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `3693d969342db6b8faf0f17ce6b38e6a9e0791f6` 构建：版本和发布说明 PR #140 合入 main 后的提交，包含本地 Agent 的定时器和自发消息（PR #132、#135、#137）、把新建的本地 Agent 加入空间房间（PR #136）、睡眠或断网后本地 Agent 服务自动恢复（PR #130）、Octos 资源池（PR #122、#126）。Makepad 与 rc.9 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 44224852825](https://github.com/hagency-org/hagency-desktop/actions/runs/44224852825) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过。两个 macOS 任务等了三十多分钟才分到 runner：组织的 macOS 名额被其他 PR 的检查占用。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,616,622 字节）和 `hagency-desktop-windows-amd64.exe`（122,074,852 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过；`SHA256SUMS-windows-amd64.txt` 仍是 CRLF 行尾。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：检查通过。随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，包目录为 `../Resources`，包内标志已绘制，没有资源错误。
+- 房间角色修复（PR #142）不在 rc.10 中，在 rc.11 中。
+- 这次发布没有部署服务端。
+
+## 2026-11-15 rc.9 发布
+
+用户要求推送明文消息修复并发布新的 RC；由 Claude 执行。
+
+- [v0.5.0-rc.9](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.9) 于 2026-11-15 10:21:19 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `d6a85c05e55021a746d8c2842c85537ede698f28` 构建：明文消息修复 PR #114 与版本和发布说明的 PR #115 合入 main 后的提交。Makepad 与 rc.8 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- [release.yml run 43691540832](https://github.com/hagency-org/hagency-desktop/actions/runs/43691540832) 使用 publish=true、macos-arm64-windows，第一次尝试中回归门禁、两平台安装包检查和发布全部通过。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,031,496 字节）和 `hagency-desktop-windows-amd64.exe`（121,925,030 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过；`SHA256SUMS-windows-amd64.txt` 仍是 CRLF 行尾。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：检查通过。随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，包目录为 `../Resources`，包内标志已绘制，没有资源错误。
+- 为了把 macOS runner 让给发布，取消了 #114、#115 和 main 上的 CI，发布后重跑了 main 的 Desktop CI（run 43691524389）和 Build CI（run 43691524382），两个都通过。
+- 这次发布没有部署服务端。
 
 ## 2026-11-14 rc.8 发布
 

@@ -49,6 +49,12 @@ pub trait Host: Send {
         arguments: Value,
         directory: &Path,
     ) -> impl Future<Output = ToolAnswer> + Send;
+    /// The open turn holds a message of a peer session on this computer:
+    /// input from outside the conversation. Told before the permission of
+    /// each later tool request of that turn. A host that gives the
+    /// conversation's participants standing trust must not extend it to
+    /// such a turn.
+    fn outside_input(&mut self) {}
 }
 
 /// The original owned stream is attached immediately after system/init. Every
@@ -445,6 +451,10 @@ async fn drive<H: Host, C: Capture>(
                 } else {
                     None
                 };
+                let outside = wire.outside_input();
+                if outside {
+                    host.outside_input();
+                }
                 let question_id = request_id.clone();
                 let question_deadline = wire
                     .approval_deadline(&request_id)
@@ -455,12 +465,28 @@ async fn drive<H: Host, C: Capture>(
                     // this dispatch's room authority. External MCP tools still
                     // use the owner's ordinary permission policy below.
                     if let Some(name) = tool_name.strip_prefix("mcp__hagency_matrix__") {
-                        return Decision::Tool(ToolAnswer::allowed(
-                            queue.room.is_some()
-                                && hagency_runtime::room_tools::RoomTools::history_and_files()
-                                    .parse(name, &input)
-                                    .is_ok(),
-                        ));
+                        use hagency_runtime::room_tools::{RoomOperation, RoomRoleOperation, RoomTimerOperation, RoomTools};
+                        let operation = RoomTools::history_and_files()
+                            .with_timers()
+                            .with_roles()
+                            .parse(name, &input);
+                        // A timer set or removed on the word of a peer
+                        // session would later act as the session's own, and
+                        // a role saved on its word would be handed to every
+                        // later conversation of the room: in such a turn
+                        // each is the owner's to decide, below.
+                        let peer_timer = outside
+                            && match &operation {
+                                Ok(RoomOperation::Timer(timer)) => !matches!(timer,
+                                    RoomTimerOperation::ListWakeups {} | RoomTimerOperation::Invalid { .. }),
+                                Ok(RoomOperation::Role(role)) => matches!(role, RoomRoleOperation::Set { .. }),
+                                _ => false,
+                            };
+                        if !peer_timer {
+                            return Decision::Tool(ToolAnswer::allowed(
+                                queue.room.is_some() && operation.is_ok(),
+                            ));
+                        }
                     }
                     if let Some(questions) = questions {
                         return Decision::Question(match &queue.questions {

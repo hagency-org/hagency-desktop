@@ -37,7 +37,7 @@ fn setup_replaces_the_dashboard_and_only_offers_what_applies() {
         assert!(p.banner.is_none() && p.empty_page.is_none() && p.options.is_none());
     }
     let other = state.present(clock()).setup_page.unwrap();
-    assert!(other.body.contains("one account's resource pool"), "{}", other.body);
+    assert!(other.body.contains("homeserver and full Matrix ID"), "{}", other.body);
     state.set_setup(Some(SetupView { need: SetupNeed::NotSetUp, progress: SetupProgress::SigningIn }));
     let page = state.present(clock()).setup_page.unwrap();
     assert!(page.busy && page.can_cancel && page.start.is_none());
@@ -63,11 +63,68 @@ fn setup_replaces_the_dashboard_and_only_offers_what_applies() {
 }
 
 #[test]
+fn a_claude_resource_has_its_own_container_switch_that_says_what_happens_next() {
+    let mut state = running();
+    state.select_resource(Some("res_sonnet".into()));
+    let switch = |state: &DashboardState| state.present(clock()).detail.unwrap().containers;
+    // Only for a hosted owner on a computer that can run containers.
+    assert!(switch(&state).is_none(), "hosts without options show none");
+    state.set_options(Some(HostOptions { keep_running: true, ..Default::default() }));
+    assert!(switch(&state).is_none(), "a computer that cannot run them shows none");
+    let mut with = |pools: &[(&str, PoolContainers)], unreadable: bool| {
+        let pools = pools.iter().map(|(pool, choice)| (pool.to_string(), *choice)).collect();
+        state.set_options(Some(HostOptions { containers: Some(ContainerChoices { pools, unreadable }), ..Default::default() }));
+        switch(&state).unwrap()
+    };
+    let off = with(&[], false);
+    assert!(!off.on && !off.busy);
+    assert_eq!(off.title, "Run this resource's Agents in containers");
+    assert!(off.body.contains("sandbox"));
+    assert!(!with(&[("res_terra", PoolContainers::On)], false).on, "another resource's choice is its own");
+    let turning = with(&[("res_sonnet", PoolContainers::TurningOn)], false);
+    assert!(turning.on && turning.busy);
+    assert!(turning.body.contains("few minutes"));
+    let on = with(&[("res_sonnet", PoolContainers::On)], false);
+    assert!(on.on && !on.busy && on.body.contains("next run"));
+    let gone = with(&[("res_sonnet", PoolContainers::Unavailable)], false);
+    assert!(gone.on && gone.body.contains("cannot start"));
+    // Choices that cannot be read stop every Claude resource until one is
+    // turned off.
+    let unreadable = with(&[], true);
+    assert!(unreadable.on && unreadable.body.contains("cannot start"));
+    // A failure leaves the switch off and names the next step.
+    for (problem, step) in [
+        (ContainerProblem::NoRuntime, "Install and start"),
+        (ContainerProblem::EngineStopped, "Start your container app"),
+        (ContainerProblem::BuildFailed, "reach the internet"),
+        (ContainerProblem::Other, "keep running in the sandbox"),
+    ] {
+        let failed = with(&[("res_sonnet", PoolContainers::Failed(problem))], false);
+        assert!(!failed.on && !failed.busy);
+        assert!(failed.body.contains(step), "{problem:?}: {}", failed.body);
+    }
+    // Codex, Octos and departed resources have none, and neither has a
+    // personal Agent's usage row, even when that Agent runs Claude.
+    let snapshot = state.snapshot.as_mut().unwrap();
+    let mut personal = snapshot.resources.iter().find(|r| r.id == "res_sonnet").unwrap().clone();
+    personal.id = crate::dto::personal_resource_id("agent_one");
+    personal.name = "Personal Agent".into();
+    snapshot.resources.push(personal);
+    for other in ["res_terra", "res_astra", "res_gone", "personal-agent:agent_one"] {
+        state.select_resource(Some(other.into()));
+        assert!(switch(&state).is_none(), "{other}");
+    }
+    state.select_resource(Some("res_sonnet".into()));
+    state.locale = Locale::ZhHans;
+    assert_eq!(switch(&state).unwrap().title, "在容器中运行此资源的 Agent");
+}
+
+#[test]
 fn a_hosted_owner_gets_the_switch_and_a_confirmed_uninstall() {
     let mut state = running();
     assert!(state.present(clock()).options.is_none(), "hosts without options show none");
     assert!(!state.request_uninstall());
-    state.set_options(Some(HostOptions { keep_running: true, busy: false, foreign_service: false }));
+    state.set_options(Some(HostOptions { keep_running: true, ..Default::default() }));
     let options = state.present(clock()).options.unwrap();
     assert!(options.keep_running && !options.uninstall_confirm && options.foreign_service.is_none());
     assert_eq!(options.keep_running_title, "Keep the resource pool running after Desktop quits");
@@ -84,7 +141,7 @@ fn a_hosted_owner_gets_the_switch_and_a_confirmed_uninstall() {
     assert!(!state.confirm_uninstall);
     // Busy service work closes the confirmation and refuses another.
     assert!(state.request_uninstall());
-    state.set_options(Some(HostOptions { keep_running: false, busy: true, foreign_service: true }));
+    state.set_options(Some(HostOptions { keep_running: false, busy: true, foreign_service: true, ..Default::default() }));
     assert!(!state.confirm_uninstall && !state.request_uninstall());
     let options = state.present(clock()).options.unwrap();
     assert!(!options.keep_running && options.busy && options.foreign_service.is_some());

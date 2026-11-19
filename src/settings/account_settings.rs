@@ -3,6 +3,9 @@ use super::crypto_settings::CryptoSettingsWidgetExt;
 #[cfg(test)]
 #[path = "account_settings/profile_retry_tests.rs"]
 mod profile_retry_tests;
+#[cfg(test)]
+#[path = "account_settings/layout_tests.rs"]
+mod layout_tests;
 use std::cell::RefCell;
 
 use makepad_widgets::{text::selection::Cursor, *};
@@ -18,7 +21,7 @@ script_mod! {
 
     // The view containing all user account-related settings.
     mod.widgets.AccountSettings = #(AccountSettings::register_widget(vm)) {
-        width: Fill, height: Fit
+        width: Fill{max: mod.widgets.RINX_READING_WIDTH}, height: Fit
         flow: Down
 
         TitleLabel {
@@ -28,7 +31,7 @@ script_mod! {
         // Verification banners. Both stay hidden until we know the state.
         verification_banner_verified := RoundedView {
             visible: false
-            width: Fill {max: 450},
+            width: Fill,
             height: Fit
             flow: Right
             align: Align {y: 0.5}
@@ -54,7 +57,7 @@ script_mod! {
 
         verification_banner_unverified := RoundedView {
             visible: false
-            width: Fill {max: 478},
+            width: Fill,
             height: Fit
             flow: Down,
             align: Align {y: 0.5}
@@ -98,9 +101,17 @@ script_mod! {
                 }
                 text: #(crate::i18n::tr("Or verify it from another client using this info:")) i18n_text: "Or verify it from another client using this info:"
             }
+        }
 
-            // Filled in from Rust with the session name + device ID.
-            unverified_device_info_label := Label {
+        current_device_section := View {
+            visible: false
+            width: Fill, height: Fit
+            flow: Down
+            spacing: 5
+            SubsectionLabel {
+                text: #(crate::i18n::tr("This device")) i18n_text: "This device"
+            }
+            current_device_info := Label {
                 width: Fill, height: Fit
                 padding: Inset{left: 8}
                 flow: Flow.Right{wrap: true}
@@ -109,6 +120,14 @@ script_mod! {
                     text_style: theme.font_regular { font_size: (11.5 * mod.widgets.RINX_TEXT_SCALE) },
                 }
                 text: ""
+            }
+            copy_device_id_button := RobrixNeutralIconButton {
+                width: Fit, height: mod.widgets.SETTINGS_BUTTON_HEIGHT
+                margin: Inset{left: 5}
+                padding: 10
+                draw_icon.svg: (ICON_COPY)
+                icon_walk: Walk{width: 16, height: 16}
+                text: #(crate::i18n::tr("Copy Device ID")) i18n_text: "Copy Device ID"
             }
         }
 
@@ -350,14 +369,13 @@ impl ScriptHook for AccountSettings {
     ) {
         // After apply, the DSL fields will be reset to their defaults,
         // so we need to re-populate everything.
-        if let Some(client) = get_client() {
+        let client = get_client();
+        if let Some(client) = &client {
             self.verification_state = client.encryption().verification_state().get();
-        }
-        if self.own_device.is_none() && !apply.is_script_reapply() {
-            submit_async_request(MatrixRequest::GetOwnDevice);
         }
         let cx = vm.cx_mut();
         self.update_verification_banner(cx);
+        self.update_current_device(cx, client.as_ref().and_then(|c| c.session_meta()));
 
         // Restore user_id inline so the DSL placeholder never flashes.
         // Anything that goes through `cx.with_vm` (button colors, avatar)
@@ -463,6 +481,7 @@ impl MatchEvent for AccountSettings {
                 self.name_changed_while_loading = false;
                 self.avatar_changed_while_loading = false;
                 self.own_device = None;
+                self.update_current_device(cx, None);
                 self.verification_state = VerificationState::Unknown;
                 self.account_management_url = AccountManagementUrl::Unknown;
                 self.view.widget(cx, ids!(upload_avatar_spinner)).set_visible(cx, false);
@@ -574,7 +593,7 @@ impl MatchEvent for AccountSettings {
                 }
                 Some(AccountDataAction::OwnDeviceFetched(device)) => {
                     self.own_device = device.as_deref().cloned();
-                    self.update_verification_banner(cx);
+                    self.update_current_device(cx, get_client().as_ref().and_then(|c| c.session_meta()));
                     continue;
                 }
                 Some(AccountDataAction::AccountManagementUrlFetched(url)) => {
@@ -620,6 +639,13 @@ impl MatchEvent for AccountSettings {
         // avatar lookup is unavailable. Only profile editing needs that cache.
         if self.view.button(cx, ids!(logout_button)).clicked(actions) {
             cx.action(LogoutConfirmModalAction::Open);
+        }
+        if self.view.button(cx, ids!(copy_device_id_button)).clicked(actions)
+            && let Some(client) = get_client()
+            && let Some(id) = client.device_id()
+        {
+            cx.copy_to_clipboard(id.as_str());
+            enqueue_popup_notification(crate::i18n::tr("Device ID copied."), PopupKind::Success, Some(3.0));
         }
 
         let Some(own_profile) = &self.own_profile else { return };
@@ -743,6 +769,11 @@ impl AccountSettings {
     /// `set_text`s `display_name_input`, which would wipe any in-progress edit.
     /// Use [`Self::restore_after_reapply`] for that path.
     pub fn populate(&mut self, cx: &mut Cx, new_profile: Option<UserProfile>) {
+        let client = get_client();
+        self.update_current_device(cx, client.as_ref().and_then(|c| c.session_meta()));
+        if client.is_some() {
+            submit_async_request(MatrixRequest::GetOwnDevice);
+        }
         if let Some(new_profile) = new_profile {
             self.awaiting_profile = crate::profile::user_profile_cache::with_user_profile(
                 cx, new_profile.user_id.clone(), None, false, |_, _| (),
@@ -864,16 +895,25 @@ impl AccountSettings {
         self.view.view(cx, ids!(verification_banner_verified)).set_visible(cx, verified);
         self.view.view(cx, ids!(verification_banner_unverified)).set_visible(cx, unverified);
 
-        // Refill the session info even if the banner is hidden, so it's
-        // already right if it shows up later.
-        let info_text = match self.own_device.as_ref() {
-            Some(device) => match device.display_name() {
-                Some(name) => crate::i18n::format("Session: \"{name}\",  Device ID: {0}", &[("name", (name).to_string()), ("0", (device.device_id()).to_string())]),
-                None       => crate::i18n::format("Device ID: {0}", &[("0", (device.device_id()).to_string())]),
-            },
+        self.view.redraw(cx);
+    }
+
+    fn update_current_device(&mut self, cx: &mut Cx, session: Option<&matrix_sdk::SessionMeta>) {
+        let info_text = match session {
+            Some(session) => {
+                let name = self.own_device.as_ref()
+                    .filter(|d| d.user_id() == &*session.user_id && d.device_id() == &*session.device_id)
+                    .and_then(|d| d.display_name());
+                let id = session.device_id.to_string();
+                match name {
+                    Some(name) => crate::i18n::format("Session: \"{name}\",  Device ID: {0}", &[("name", name.to_owned()), ("0", id)]),
+                    None => crate::i18n::format("Device ID: {0}", &[("0", id)]),
+                }
+            }
             None => String::new(),
         };
-        self.view.label(cx, ids!(unverified_device_info_label)).set_text(cx, &info_text);
+        self.view.label(cx, ids!(current_device_info)).set_text(cx, &info_text);
+        self.view.view(cx, ids!(current_device_section)).set_visible(cx, session.is_some());
         self.view.redraw(cx);
     }
 
