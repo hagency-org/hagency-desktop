@@ -533,10 +533,10 @@ mod tests {
         assert!(!widget.button(&cx, ids!(od_setup_cancel)).visible());
         assert!(!widget.button(&cx, ids!(od_setup_start)).visible());
         assert_eq!(widget.label(&cx, ids!(od_setup_progress_text)).text(), "Signed in. Registering this Mac’s executor…");
-        // Another account hosts this Mac: an explanation without a setup button.
+        // Conflicting enrollment identity requires checking the account before setup.
         host.fixture_hosting(&mut cx, &state(Some(Ok(Execution::Setup(SetupReason::OtherOwner))), None, 3), true);
         assert!(!widget.button(&cx, ids!(od_setup_start)).visible());
-        assert!(widget.label(&cx, ids!(od_setup_body)).text().contains("one account's resource pool"));
+        assert!(widget.label(&cx, ids!(od_setup_body)).text().contains("homeserver and full Matrix ID"));
         // Running: the dashboard, Stop, and the switch on by default.
         host.fixture_hosting(&mut cx, &state(Some(Ok(Execution::Daemon { home: "/h".into() })), Some((JobKind::Setup, Progress::Done)), 4), true);
         dashboard.set_snapshot(&mut cx, fixtures::ordinary(owner_dashboard::dto::HostingState::Running));
