@@ -86,6 +86,17 @@ impl SharedExecutionTransport {
         after: Option<String>,
         launch: Option<super::super::managed_runtime::PreparedLaunch>,
     ) -> Result<SharedDemandPoll, NativeError> {
+        let reply = self.fetch_demand(after).await?;
+        let outcome = match reply.value.demand {
+            Some(s) => self.consume_demand(r, s, reply.observed, launch).await,
+            None => Ok(SharedDemandProgress::Idle),
+        };
+        Ok(SharedDemandPoll {
+            next_after: reply.value.next_after,
+            outcome,
+        })
+    }
+    async fn fetch_demand(&self, after: Option<String>) -> Result<Timed<demand_io::PollReply>, NativeError> {
         enabled()?;
         let b = self.io.bound().await?;
         demand_io::require_pair(&b).await?;
@@ -102,15 +113,14 @@ impl SharedExecutionTransport {
         if let Some(id) = &reply.value.next_after {
             super::super::key(id)?;
         }
-        let outcome = match reply.value.demand {
-            Some(s) => self.consume_demand(r, s, reply.observed, launch).await,
-            None => Ok(SharedDemandProgress::Idle),
-        };
-        Ok(SharedDemandPoll {
-            next_after: reply.value.next_after,
-            outcome,
-        })
+        Ok(reply)
     }
+
+    pub(in crate::console::native) async fn discover_demand(&self, after: Option<String>) -> Result<(Option<String>, Option<(String,String)>), NativeError> {
+        let reply = self.fetch_demand(after).await?.value;
+        Ok((reply.next_after, reply.demand.map(|s| (s.offer.demand_id,s.demand_digest))))
+    }
+
     /// Recover only an immutable original offer. No new demand/start identity is
     /// selected, even when the original POST or its reply was lost.
     pub async fn resume_next_demand(
@@ -148,30 +158,33 @@ impl SharedExecutionTransport {
         };
         let id = saved.intent().offer().demand_id.clone();
         let expected = saved.intent().offer().digest().map_err(store)?;
-        let outcome = async {
-            let reply: Timed<demand_io::RecoverReply> = b
-                .request(
-                    DemandAction::Recover {
-                        id: id.clone(),
-                        digest: expected.clone(),
-                        retries: demand_io::retries(&b).await?,
-                    }
-                    .into(),
-                    false,
-                )
-                .await?;
-            let s = reply.value.demand.ok_or_else(invalid)?;
-            if s.offer.demand_id != id || s.demand_digest != expected {
-                return Err(invalid());
-            }
-            self.consume_demand(r, s, reply.observed, None).await
-        }
-        .await;
+        let outcome = self.consume_demand_ref(r, &id, &expected).await;
         Ok(Some(SharedDemandResume {
             demand_id: id,
             outcome,
         }))
     }
+    pub(in crate::console::native) async fn consume_demand_ref(&self, r: &OwnerResourceRegistry, id: &str, expected: &str) -> Result<SharedDemandProgress, NativeError> {
+        let b = self.io.bound().await?;
+
+        let reply: Timed<demand_io::RecoverReply> = b
+            .request(
+                DemandAction::Recover {
+                    id: id.to_owned(),
+                    digest: expected.to_owned(),
+                    retries: demand_io::retries(&b).await?,
+                }
+                .into(),
+                false,
+            )
+            .await?;
+        let s = reply.value.demand.ok_or_else(invalid)?;
+        if s.offer.demand_id != id || s.demand_digest != expected {
+            return Err(invalid());
+        }
+        self.consume_demand(r, s, reply.observed, None).await
+    }
+
     async fn consume_demand(
         &self,
         r: &OwnerResourceRegistry,

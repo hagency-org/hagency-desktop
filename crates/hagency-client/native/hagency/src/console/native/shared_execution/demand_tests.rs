@@ -449,6 +449,22 @@ async fn native_demand_inspects_provider_before_ticket_and_runs_one_turn() {
 
 #[tokio::test]
 #[ignore = "requires explicitly built offline supervised probe"]
+async fn discovered_offer_rechecks_original_after_owner_control_changes() {
+    let (f, t, _) = fixture_budget(1000).await;
+    offer(&f, 1);
+    let before = count_methods(&f, "turn/start");
+    let (_, reference) = t.discover_demand(None).await.unwrap();
+    let (id, digest) = reference.unwrap();
+    assert_eq!(count_methods(&f, "turn/start"), before);
+    f.state.lock().unwrap().shared.demands.status = "cancelled".into();
+    let result = t.consume_demand_ref(&f.registry, &id, &digest).await.unwrap();
+    assert!(matches!(result, SharedDemandProgress::Historical {status, ..} if status == "cancelled"));
+    assert_eq!(count_methods(&f, "turn/start"), before);
+    f.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
 async fn native_demand_lost_start_reopens_original_and_never_generic_start() {
     let (mut f, t, _) = fixture_budget(1000).await;
     offer(&f, 1);
