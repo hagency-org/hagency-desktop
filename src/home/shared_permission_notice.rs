@@ -318,6 +318,17 @@ impl SharedPermissionNoticeRef {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn original_pool_request_requires_a_current_block_and_a_known_role() {
+        let mut row = serde_json::json!({"reason":"budget_blocked","resourceRecovery":{"requestId":"request_1","role":"manager"}});
+        assert_eq!(super::pool_request(&row), Some(("request_1".into(), "manager".into())));
+        row["resourceRecovery"]["role"] = "admin".into();
+        assert!(super::pool_request(&row).is_none());
+        row["resourceRecovery"]["role"] = "owner".into();
+        row["reason"] = serde_json::Value::Null;
+        assert!(super::pool_request(&row).is_none());
+    }
+
     use super::*;
     use serde_json::json;
     #[test]
