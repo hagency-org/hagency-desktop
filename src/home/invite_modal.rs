@@ -495,11 +495,16 @@ impl InviteModal {
         spawn_async_task(async move {
             let me = client.user_id().map(ToOwned::to_owned);
             let present: Vec<OwnedUserId> = match client.get_room(&room) {
-                Some(target) => target
-                    .members_no_sync(matrix_sdk::RoomMemberships::JOIN | matrix_sdk::RoomMemberships::INVITE)
-                    .await
-                    .map(|members| members.iter().map(|m| m.user_id().to_owned()).collect())
-                    .unwrap_or_default(),
+                Some(target) => {
+                    // A person removed from the room must be offered again, so the
+                    // stored list is not taken as it is.
+                    crate::room_members::reload(&target).await;
+                    target
+                        .members_no_sync(matrix_sdk::RoomMemberships::JOIN | matrix_sdk::RoomMemberships::INVITE)
+                        .await
+                        .map(|members| members.iter().map(|m| m.user_id().to_owned()).collect())
+                        .unwrap_or_default()
+                }
                 None => Vec::new(),
             };
             let mut people: Vec<Person> = Vec::new();
