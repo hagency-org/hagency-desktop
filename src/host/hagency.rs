@@ -740,7 +740,7 @@ enum ResourceCall {
 fn central_command(service: &str, args: Value) -> Result<Option<ManagementCommand>, String> {
     if service=="hagency.shared_approvals.list" {
         #[derive(Deserialize)] #[serde(rename_all="camelCase",deny_unknown_fields)] struct Query {room_id:Option<String>}
-        let a:Query=parse(args)?;return Ok(Some(ManagementCommand::SharedApprovals{room_id:a.room_id}));
+        let a:Query=parse(args)?;return Ok(Some(ManagementCommand::SharedApprovals{room_id:a.room_id,execution_thread:None}));
     }
     if service=="hagency.shared_approvals.decide" {
         #[derive(Deserialize)] #[serde(rename_all="camelCase",deny_unknown_fields)] struct Decision {id:String,digest:String,decision:String}

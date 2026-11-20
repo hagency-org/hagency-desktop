@@ -80,7 +80,7 @@ impl SurfaceKey {
     pub fn for_action(action: &MiniAppsAction) -> Option<Self> {
         match action {
             MiniAppsAction::Open => Some(Self::Catalog),
-            MiniAppsAction::OpenAgent | MiniAppsAction::OpenPalpo(_) | MiniAppsAction::ReviewOwnerApprovals { .. } => Some(Self::App(super::palpo::APP_ID.to_owned())),
+            MiniAppsAction::OpenAgent | MiniAppsAction::OpenPalpo(_) | MiniAppsAction::ReviewOwnerApprovals { .. } | MiniAppsAction::ReviewPoolRequest { .. } => Some(Self::App(super::palpo::APP_ID.to_owned())),
             _ => None,
         }
     }
@@ -251,7 +251,7 @@ impl MiniAppsSurface {
             return;
         }
         match action {
-            MiniAppsAction::ReviewOwnerApprovals { .. } => { self.agent_surface = true; self.owner_page = false; },
+            MiniAppsAction::ReviewOwnerApprovals { .. } | MiniAppsAction::ReviewPoolRequest { .. } => { self.agent_surface = true; self.owner_page = false; },
             MiniAppsAction::OpenAgent | MiniAppsAction::OpenPalpo(_) => self.agent_surface = true,
             MiniAppsAction::Open | MiniAppsAction::OpenReviewed => { self.agent_surface = false; self.owner_page = false; },
             _ => {},
