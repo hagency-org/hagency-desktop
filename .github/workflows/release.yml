@@ -36,6 +36,11 @@ on:
         type: choice
         options: [own-mac, github]
         default: own-mac
+      mac_installer:
+        description: "Where the Apple Silicon installer is built: own-mac is the project's release machine; choose github for a machine of GitHub's, which takes about five times as long"
+        type: choice
+        options: [own-mac, github]
+        default: own-mac
 
 permissions:
   contents: read
@@ -190,11 +195,23 @@ jobs:
           python3 tools/wechat-ux/check_i18n.py
           cargo test --locked -p octosense-app-contract --lib
           cargo test --locked --features agent_chat --lib
+  # The Apple Silicon installer is built on the project's release machine: a
+  # Mac that runs this job and no other. Its runner has the label below and
+  # none of the labels the checks use, and a hook on the machine refuses every
+  # job that is not this workflow on the main branch or on a version tag, so
+  # no pull request and no other workflow runs code there. The machine keeps
+  # its compiler and packaging tools between runs and nothing else: the job
+  # removes what it built. A signed release is still built on GitHub's
+  # machine, where the signing certificate has always been used.
   package:
     needs: plan
     name: Installer (${{ matrix.platform }}-${{ matrix.arch }})
-    runs-on: ${{ matrix.runner }}
+    runs-on: ${{ (matrix.platform == 'macos' && matrix.arch == 'arm64' && inputs.mac_installer != 'github' && vars.MACOS_SIGNED_RELEASE != 'true') && 'hagency-release' || matrix.runner }}
     timeout-minutes: 180
+    env:
+      # No step reads this. Naming the secret makes GitHub mask the release
+      # machine's name wherever it would appear in this public log.
+      MASKED_IN_LOGS: ${{ secrets.CI_MASK_MACHINE_NAME_D }}
     strategy:
       fail-fast: false
       matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
@@ -209,6 +226,15 @@ jobs:
         shell: bash
         working-directory: ${{ github.workspace }}
         run: if [ -f .jit/sources.sh ]; then bash .jit/sources.sh; fi
+      - name: Check the release machine has room
+        if: runner.environment == 'self-hosted'
+        run: |
+          free=$(df -g "$GITHUB_WORKSPACE" | awk 'NR==2 {print $4}')
+          echo "Free disk: ${free} GB"
+          if [ "$free" -lt 45 ]; then
+            echo "::error::The release machine has ${free} GB of free disk and a build needs 45. Free some, or run again with mac_installer=github."
+            exit 1
+          fi
       - uses: dtolnay/rust-toolchain@master
         with:
           toolchain: 1.98.0
@@ -240,8 +266,9 @@ jobs:
           sudo apt-get install -y libssl-dev libsqlite3-dev pkg-config cmake clang libclang-dev \
             libxcursor-dev libx11-dev libasound2-dev libpulse-dev libwayland-dev \
             libxkbcommon-dev libdrm-dev libegl1 libva2 libva-drm2 libfuse2 patchelf
+      # The release machine has its own cmake, apart from the machine's packages.
       - name: macOS dependencies
-        if: runner.os == 'macOS'
+        if: runner.os == 'macOS' && runner.environment == 'github-hosted'
         run: brew install cmake
       - name: Windows installer tools
         if: runner.os == 'Windows'
@@ -249,12 +276,14 @@ jobs:
       # The Desktop tests are the job "Desktop tests" above; this job holds
       # the packaging tools and the optimized build, under a cache key of its own.
       - name: Restore optimized build cache
+        if: runner.environment == 'github-hosted'
         uses: Swatinem/rust-cache@v2
         with:
           key: release-${{ matrix.platform }}-${{ matrix.arch }}
           cache-on-failure: true
       - name: Install pinned packaging tools
         run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then unset CARGO_BUILD_JOBS; fi
           cargo install cargo-packager --version 0.10.1 --locked
           cargo install robius-packaging-commands --version 0.4.1 --locked
       # The engine has no test that this workflow runs for start-up on a software
@@ -264,8 +293,16 @@ jobs:
       # checked by "Install and start the packaged Desktop on Windows" below, which
       # requires three rendered sign-in frames from the installer.
       - uses: actions/setup-python@v6
+        if: runner.environment == 'github-hosted'
         with:
           python-version: '3.12'
+      # The release machine has Python 3.12 of its own. What this job installs
+      # with pip goes into a folder that is gone when the job ends.
+      - name: Python packages of this job on the release machine
+        if: runner.environment == 'self-hosted'
+        run: |
+          python3 -m venv "$RUNNER_TEMP/python"
+          echo "$RUNNER_TEMP/python/bin" >> "$GITHUB_PATH"
       - name: Prepare rendered installer checks
         run: |
           python3 -m pip install -r tools/release-smoke-requirements.txt
@@ -281,7 +318,7 @@ jobs:
         continue-on-error: true
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          RUNNER_KIND: ${{ matrix.runner }}
+          RUNNER_KIND: ${{ runner.environment == 'self-hosted' && 'hagency-release' || matrix.runner }}
         run: python3 tools/release-kernel.py find --runner "$RUNNER_KIND"
       - name: Download the kernel that was found
         if: steps.kernel.outputs.artifact_id != ''
@@ -296,7 +333,7 @@ jobs:
         if: steps.kernel.outputs.artifact_id != ''
         continue-on-error: true
         env:
-          RUNNER_KIND: ${{ matrix.runner }}
+          RUNNER_KIND: ${{ runner.environment == 'self-hosted' && 'hagency-release' || matrix.runner }}
           FROM_RUN: ${{ steps.kernel.outputs.run_id }}
         run: python3 tools/release-kernel.py accept --runner "$RUNNER_KIND" --dir .run/octos-kernel --from-run "$FROM_RUN"
       - name: Import Apple certificate for configured signed releases
@@ -321,12 +358,16 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1
         # An absolute output directory avoids cargo-packager 0.10.1 resolving
         # generated scripts twice when it changes the working directory.
-        run: cargo packager --manifest-path Cargo.toml --verbose --release --out-dir "$PWD/dist" --formats "$FORMATS"
+        # The two build jobs this workflow sets are for GitHub's runners; the
+        # release machine builds with every core.
+        run: |
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then unset CARGO_BUILD_JOBS; fi
+          cargo packager --manifest-path Cargo.toml --verbose --release --out-dir "$PWD/dist" --formats "$FORMATS"
       - name: Set aside the Octos kernel this job built
         id: built_kernel
         continue-on-error: true
         env:
-          RUNNER_KIND: ${{ matrix.runner }}
+          RUNNER_KIND: ${{ runner.environment == 'self-hosted' && 'hagency-release' || matrix.runner }}
         run: python3 tools/release-kernel.py keep --runner "$RUNNER_KIND" --out .run/octos-kernel-built
       - name: Keep that kernel for later release runs
         if: steps.built_kernel.outputs.name != ''
@@ -364,8 +405,14 @@ jobs:
           retention-days: 14
       - name: Start the packaged Desktop on macOS
         if: runner.os == 'macOS'
+        # On the release machine the started app gets a hosting folder of its
+        # own, so it reads and writes nothing of the machine's account.
         run: |
           package=$(find dist -maxdepth 1 -name '*.dmg' -print -quit)
+          if [ "$RUNNER_ENVIRONMENT" = self-hosted ]; then
+            unset CARGO_BUILD_JOBS
+            export HAGENCY_OWNER_DAEMON_HOME="$RUNNER_TEMP/smoke-daemon-home"
+          fi
           python3 tools/release-desktop-smoke.py --package "$package" --output .run/release-desktop-smoke
       - name: Install and start the packaged Desktop on Windows
         if: runner.os == 'Windows'
@@ -390,6 +437,13 @@ jobs:
           path: release-assets/*
           if-no-files-found: error
           retention-days: 14
+      # About 40 GB of build output. The next job would remove it when it
+      # starts; between two releases the machine's disk is for its other work.
+      - name: Leave no build output on the release machine
+        if: always() && runner.environment == 'self-hosted'
+        run: |
+          git -C "$GITHUB_WORKSPACE" clean -ffdxq
+          df -g "$GITHUB_WORKSPACE" | awk 'NR==2 {print "Free disk after the job: " $4 " GB"}'
 
   release:
     name: Publish complete release
