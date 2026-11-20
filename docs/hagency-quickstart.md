@@ -5,6 +5,18 @@
 This guide describes the current Projects/Agents pages. The Palpo mini-app,
 Fleet/engagement/resource requests and coordinator approvals are retired.
 
+## Find the Agent entry
+
+Open **Agent → Agent manager → My Agents**. A local Agent is offered only when
+this computer hosts the current account. If hosting is not set up, open
+**Hosting** in the panel header and check its setup and account first. Once the
+local section is available, **Add Local Agent** opens the native creation page
+described below. No Project is required for a personal Agent.
+
+To use someone else's capacity, choose **Browse resource pools** instead. Pool
+requests require compatible Server capability settings; a missing capability can
+mean configuration is disabled, not just that the Server needs an upgrade.
+
 ## Sign in once
 
 Enter a Hagency server address on the login page, then finish Pasion sign-in and
@@ -19,9 +31,12 @@ an account**. This opens Pasion registration in your browser with OAuth
 in to Desktop. A server that disables registration hides this option.
 
 Saved accounts are available on the login page and under **Settings → Account**.
-Switching accounts stops the current owner's local Agent runtime and clears its
-active permissions. The previous account's separate data remains; Agent ownership
-never transfers with a switch.
+Switching accounts clears private UI state and retires its old management leases.
+On current main, background hosting has separate enrollment and runtime state per
+account; switching the visible account is not a stop-all-hosting control. Check
+Hosting and use its explicit controls to stop supply. The previous account's
+separate data remains; Agent ownership never transfers with a switch. This newer
+account-aware hosting must not be assumed to exist in the rc.13 installer.
 
 ## Create a space or room
 
@@ -55,7 +70,8 @@ resume the owner's paused bindings. Ordinary members cannot write these settings
 
 ## Create a global Agent
 
-Open **Agents → New Agent**, enter its display name and create it. This allocates
+In the native page opened by **Add Local Agent**, choose **New Agent**, enter its
+display name and create it. This allocates
 a permanent owner-bound puppet identity and assigns the current authorized device.
 It does not allocate a Project or discussion Room. Wait for provisioning to finish.
 The owner-private-chat setup preserves its original creation request on retry.
