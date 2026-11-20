@@ -42,8 +42,28 @@ The regression gate runs on the project's own Mac, four checks at a time and
 without the second run the main workflow gives a failed check. The Apple
 Silicon Desktop tests run there too. When that Mac cannot take them, dispatch
 with `mac_checks=github`: GitHub's Mac runs the gate's checks one after
-another and takes about an hour longer, when GitHub has a Mac free. Every
-installer is built on a runner of GitHub's.
+another and takes about an hour longer, when GitHub has a Mac free.
+
+The Apple Silicon installer is built on the project's release machine, a Mac
+that runs this one job and no other. Its runner has the label
+`hagency-release` and none of the labels the checks use, and a hook on the
+machine refuses every job that is not `release.yml` of this repository on the
+`main` branch or on a version tag: no pull request and no other workflow runs
+code there. The machine keeps its compiler, Python, cmake and the packaging
+tools between runs; the job starts from a clean checkout, installs its Python
+packages into a folder of its own, gives the app it starts a home and a
+hosting folder of its own, and removes what it built when it ends. It needs
+45 GB of free disk and says so when there is less. The job takes about 20
+minutes there, kernel included; on GitHub's three-core Mac it took 105 to 113.
+Dispatch with `mac_installer=github` to build on GitHub's Mac instead. A
+signed release (`MACOS_SIGNED_RELEASE`) is always built on GitHub's Mac, as
+are the Windows installer and the installers of every other platform.
+
+The two machines give the same app: the same minimum macOS version (11.0), the
+same SDK and the same list of linked libraries. The Octos kernel differs in
+one respect. Built on GitHub's Mac it loads the system's `libbz2` and
+`liblzma`; the release machine has no `pkg-config`, so there the two are
+compiled into the kernel from the sources its crates carry.
 
 An installer job does not build the pinned Octos kernel again when an earlier
 release run has kept it. `tools/release-kernel.py` names a kept kernel after

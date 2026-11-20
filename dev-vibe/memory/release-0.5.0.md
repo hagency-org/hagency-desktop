@@ -2,6 +2,18 @@
 
 更新：2026-11-19。
 
+## 2026-11-20 rc.14 发布
+
+用户要求发布 rc.14，并缩短发布流程；由 Claude 执行。
+
+- [v0.5.0-rc.14](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.14) 于 2026-11-20 00:31:54 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `71d6e9adba17b15dcb33c15732320c4286c45735` 构建：rc.13 之后合入了产品改动 PR #157、#160、#161、#162、#165、#167、#170、#172 和 #168（经 PR #173 合入，一台电脑为多个账号托管 Agent），版本和发布说明 PR #177，以及只改 CI、测试和打包工具的 PR #163、#169、#175、#176、#178。Makepad 与 rc.13 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- 第一次发布运行 [44608655460](https://github.com/hagency-org/hagency-desktop/actions/runs/44608655460) 在发布提交 `7b737c5b` 上触发，回归门禁等了 15 分钟没有等到 GitHub 的 Mac，被 GitHub 取消，因此没有发布。之后把缩短发布流程的改动（PR #178：门禁和 Apple Silicon 桌面测试改在项目自己的 Mac 上运行，桌面测试与打包并行，随包 Octos 内核按固定版本留存复用）提前合入，先在分支上用一次不发布的运行 [44611946100](https://github.com/hagency-org/hagency-desktop/actions/runs/44611946100) 完整走通，再从 main 触发 [44627576533](https://github.com/hagency-org/hagency-desktop/actions/runs/44627576533)（publish=true、macos-arm64-windows），第一次尝试全部通过并发布。因此标签不在发布提交上，而在其后只多了 PR #178 的合并提交上；两者的产品代码相同。
+- 用时：从触发到公开 132 分钟。门禁 17 分钟（此前在 GitHub 的 Mac 上 82 至 96 分钟），macOS 安装包 113 分钟，Windows 安装包 131 分钟。内核复用在这次运行中没有生效：这是 main 上第一次留存内核的运行，两个平台的内核都从源码构建并留存。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（169,898,512 字节）和 `hagency-desktop-windows-amd64.exe`（122,534,555 字节）。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过，两份构建报告都写明上述提交和版本 0.5.0-rc.14，并新增了内核一项（固定版本、校验和、构建它的运行）。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：第一次运行通过，随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，没有资源错误。Windows 安装包没有在实机上运行。
+- 发布前没有在真实账号上手动运行 rc.14 的任何新功能，包括 PR #168 对托管服务的改动；发布说明末尾列出了没有实跑的内容。
+- 这次发布没有部署服务端。
+
 ## 2026-11-19 rc.13 发布
 
 用户要求基于最新合入的 PR 发布新的 RC；由 Claude 执行。

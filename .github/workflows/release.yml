@@ -144,7 +144,7 @@ jobs:
   # These tests ran inside each installer job, ahead of its build, for a
   # quarter of an hour. Here they run beside it; nothing is published unless
   # they pass. The Apple Silicon ones run on the project's own Mac, like the
-  # gate; every installer is still built on a runner of GitHub's.
+  # gate.
   desktop-tests:
     needs: plan
     name: Desktop tests (${{ matrix.platform }}-${{ matrix.arch }})
