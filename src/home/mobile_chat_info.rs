@@ -46,7 +46,7 @@ script_mod! {
             }
             badge := RoundedView {visible: false width: 16 height: 16 align: Align{x: 0.5 y: 0.5}
                 draw_bg +: {color: mod.widgets.RINX_DANGER_FG border_radius: 8.0}
-                SolidView {width: 8 height: 2 draw_bg.color: #fff}
+                SolidView {width: 8 height: 2 draw_bg.color: mod.widgets.RINX_ON_ACCENT}
             }
         }
         name := Label {width: Fill height: Fit padding: 0 align: Align{x: 0.5} max_lines: 1 text_overflow: Ellipsis
