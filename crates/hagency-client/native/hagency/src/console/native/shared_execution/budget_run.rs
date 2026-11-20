@@ -21,6 +21,12 @@ pub(super) async fn upload_process(
 ) -> Result<(SharedRuntimeAcknowledgement, u64, Instant), NativeError> {
     receipt.validate_for(&d.command).map_err(store)?;
     let started = Instant::now();
+    if receipt.state == "qualified" {
+        tracing::info!(command_id=%d.command.command_id,
+            lease_until_ms=d.lease_until_ms, command_expires_at_ms=d.command.expires_at_ms,
+            upload_remaining_ms=until.saturating_duration_since(started).as_millis() as u64,
+            "Shared Agent submitting ready receipt");
+    }
     let ack: Timed<SharedRuntimeAcknowledgement> = b
         .upload(
             AttemptAction::Result {
@@ -43,6 +49,11 @@ pub(super) async fn upload_process(
         )
     {
         return Err(invalid());
+    }
+    if receipt.state == "qualified" {
+        tracing::info!(command_id=%d.command.command_id, server_observed_ms=ack.observed,
+            round_trip_ms=started.elapsed().as_millis() as u64,
+            "Shared Agent ready receipt acknowledged");
     }
     Ok((ack.value, ack.observed, started))
 }
