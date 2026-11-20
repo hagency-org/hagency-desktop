@@ -63,6 +63,67 @@ pub fn directory_identity(file: &File) -> io::Result<DirectoryIdentity> {
     ))
 }
 
+/// Identity stored in the canonical owner registry across process and OS restarts.
+/// Other callers still compare their live directory handles using `directory_identity`.
+pub fn registry_directory_identity(file: &File) -> io::Result<DirectoryIdentity> {
+    let identity = directory_identity(file)?;
+    #[cfg(target_os = "macos")]
+    if let Some(uuid) = volume_uuid(file)? {
+        return Ok(DirectoryIdentity {
+            platform: "macos-volume-uuid-v1".into(),
+            volume: format!("{:032x}", u128::from_be_bytes(uuid)),
+            object: identity.object,
+        });
+    }
+    Ok(identity)
+}
+
+#[cfg(target_os = "macos")]
+fn volume_uuid(file: &File) -> io::Result<Option<[u8; 16]>> {
+    use std::os::fd::AsRawFd;
+
+    let mut attrs = libc::attrlist {
+        bitmapcount: libc::ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: 0,
+        volattr: libc::ATTR_VOL_INFO | libc::ATTR_VOL_UUID,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: 0,
+    };
+    // getattrlist packs a native-endian u32 length followed by the requested uuid_t.
+    let mut result = [0u8; 20];
+    // SAFETY: the descriptor remains open; both buffers live through the call and
+    // the kernel receives the exact writable result size.
+    let status = unsafe {
+        libc::fgetattrlist(
+            file.as_raw_fd(),
+            (&raw mut attrs).cast(),
+            result.as_mut_ptr().cast(),
+            result.len(),
+            0,
+        )
+    };
+    if status != 0 {
+        let error = io::Error::last_os_error();
+        // Some filesystems have no UUID or only expose volume attributes at
+        // the mount root. Keep their previous, mount-scoped identity.
+        return match error.raw_os_error() {
+            Some(libc::ENOTSUP | libc::EINVAL | libc::ENOTTY) => Ok(None),
+            _ => Err(error),
+        };
+    }
+    let (length, uuid) = result.split_at(4);
+    if u32::from_ne_bytes(length.try_into().unwrap()) != result.len() as u32 {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "invalid volume UUID record",
+        ));
+    }
+    let uuid: [u8; 16] = uuid.try_into().unwrap();
+    Ok((uuid != [0; 16]).then_some(uuid))
+}
+
 pub fn same_directory(left: &File, right: &File) -> io::Result<bool> {
     Ok(directory_identity(left)? == directory_identity(right)?)
 }
@@ -94,5 +155,34 @@ mod tests {
             same_directory(&first, &file).unwrap_err().kind(),
             io::ErrorKind::InvalidInput
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn registry_uses_volume_uuid_and_directory_inode_when_available() {
+        use std::os::unix::fs::MetadataExt;
+
+        let root = tempfile::tempdir().unwrap();
+        let directory = open(root.path());
+        let actual = registry_directory_identity(&directory).unwrap();
+        if let Some(uuid) = volume_uuid(&directory).unwrap() {
+            assert_eq!(actual.platform, "macos-volume-uuid-v1");
+            assert_eq!(actual.volume, format!("{:032x}", u128::from_be_bytes(uuid)));
+            assert_eq!(
+                actual.object,
+                u128::from(directory.metadata().unwrap().ino()).to_be_bytes()
+            );
+        } else {
+            assert_eq!(actual, directory_identity(&directory).unwrap());
+        }
+        assert_eq!(
+            actual,
+            registry_directory_identity(&open(root.path())).unwrap()
+        );
+        let child = root.path().join("child");
+        std::fs::create_dir(&child).unwrap();
+        let other = registry_directory_identity(&open(&child)).unwrap();
+        assert_eq!(actual.volume, other.volume);
+        assert_ne!(actual.object, other.object);
     }
 }

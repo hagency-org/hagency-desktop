@@ -595,10 +595,10 @@ fn authorize_resource(db: &Connection, profile: &ProfileAuthority, id: &str) -> 
 
 impl DomainRepository {
     fn bind_owner_registry(&mut self, root: &Path) -> Result<String, Error> {
-        let directory = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
-        let identity = serde_json::to_string(&hagency_platform::directory_identity(
-            &directory.into_std_file(),
-        )?)?;
+        let directory =
+            cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?.into_std_file();
+        let identity =
+            serde_json::to_string(&hagency_platform::registry_directory_identity(&directory)?)?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -618,6 +618,21 @@ impl DomainRepository {
             .optional()?;
         let id = match stored {
             Some((id, old)) if old == identity => id,
+            #[cfg(target_os = "macos")]
+            Some((id, old))
+                if old
+                    == serde_json::to_string(&hagency_platform::directory_identity(
+                        &directory,
+                    )?)? =>
+            {
+                // Upgrade only while the full legacy identity still matches
+                // the same open directory. An inode alone is not sufficient.
+                tx.execute(
+                    "UPDATE owner_resource_identity SET root_identity=?1 WHERE singleton=1",
+                    [&identity],
+                )?;
+                id
+            }
             Some(_) => return Err(Error::Private),
             None => {
                 let mut bytes = [0; 32];
