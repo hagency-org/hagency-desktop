@@ -1,5 +1,11 @@
 //! Explicit native successor control. Ordinary polls never create start intents.
 use super::*;
+pub(super) struct DemandPreparation {
+    pub submission: SharedDemandSubmission,
+    pub original_digest: String,
+    pub inspected: bool,
+}
+
 impl SharedExecutionTransport {
     /// Called once for an accepted native startup/explicit start. Restart finds
     /// the same original intent before considering a new request identifier.
@@ -53,6 +59,7 @@ impl SharedExecutionTransport {
             None,
             None,
             caller_gate,
+            None,
         )
         .await
     }
@@ -125,6 +132,7 @@ impl SharedExecutionTransport {
             None,
             Some(launch::Launch::Claude(launch)),
             None,
+            None,
         )
         .await
     }
@@ -137,7 +145,7 @@ impl SharedExecutionTransport {
         let resource = r.resource(&b.scope.profile, resource_id).await.map_err(store)?;
         let launch = launch::OctosLaunch::fixture(r.clone(), b.scope.profile, &resource, home, root, profile_id);
         self.process_attempt_scoped(r, attempt_io::AttemptAction::Poll { after: None }, None,
-            Some(launch::Launch::Octos(launch)), None).await
+            Some(launch::Launch::Octos(launch)), None, None).await
     }
     pub(super) async fn process_attempt(
         &self,
@@ -146,16 +154,17 @@ impl SharedExecutionTransport {
         historical: Option<(String, String, Option<String>)>,
         prepared: Option<super::super::managed_runtime::PreparedLaunch>,
     ) -> Result<SharedExecutionProgress, NativeError> {
-        self.process_attempt_scoped(r, action, historical, prepared.map(Into::into), None)
+        self.process_attempt_scoped(r, action, historical, prepared.map(Into::into), None, None)
             .await
     }
-    async fn process_attempt_scoped(
+    pub(super) async fn process_attempt_scoped(
         &self,
         r: &OwnerResourceRegistry,
         action: attempt_io::AttemptAction,
         historical: Option<(String, String, Option<String>)>,
         prepared: Option<launch::Launch>,
         caller_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
+        demand: Option<DemandPreparation>,
     ) -> Result<SharedExecutionProgress, NativeError> {
         if !cfg!(feature = "shared-successors") {
             return Err(failure(409, "shared_execution_disabled"));
@@ -165,7 +174,11 @@ impl SharedExecutionTransport {
             attempt_io::AttemptAction::DemandStart { input, .. } => Some(input.start.clone()),
             _ => None,
         };
+        let entered = Instant::now();
         let b = self.io.bound().await?;
+        if let Some(preflight) = &demand {
+            preflight.submission.check().map_err(store)?;
+        }
         let started = Instant::now();
         // The package gate covers the initial POST and its asynchronous result,
         // not the accepted process lifetime or original background reconciliation.
@@ -210,6 +223,14 @@ impl SharedExecutionTransport {
         {
             return Err(invalid());
         }
+        let inspected = demand.as_ref().is_some_and(|p| p.inspected);
+        if let Some(plan) = &demand
+            && (plan.original_digest != digest(&d.command.original_runtime_command)?
+                || plan.submission.input().start.web_search != d.command.web_search
+                || digest(&plan.submission.input().start.tool_policy)? != digest(&d.command.tool_policy)?)
+        {
+            return Err(invalid());
+        }
         let until = io::window(
             &d.token,
             d.lease_until_ms,
@@ -218,6 +239,25 @@ impl SharedExecutionTransport {
             &b.scope,
         )?;
         let c = &d.command;
+        let executable = d.execution_allowed;
+        let command_id = c.command_id.clone();
+        let mut previous = started;
+        let mut checkpoint = |stage: &'static str| {
+            let now = Instant::now();
+            if executable {
+                tracing::info!(%command_id, stage, phase_ms = (now - previous).as_millis() as u64,
+                    elapsed_ms = (now - entered).as_millis() as u64,
+                    lease_left_ms = until.saturating_duration_since(now).as_millis() as u64,
+                    "Shared attempt preclaim");
+            }
+            previous = now;
+        };
+        if executable {
+            tracing::info!(%command_id, h1_observed_ms = reply.observed, h1_lease_until_ms = d.lease_until_ms,
+                command_issued_ms = c.issued_at_ms, command_until_ms = c.expires_at_ms,
+                bind_ms = (started - entered).as_millis() as u64, "Shared attempt delivery");
+        }
+        checkpoint("request_and_validate");
         if let Some(saved) = &d.recorded {
             saved.validate_for(c).map_err(store)?;
             if historical
@@ -275,13 +315,20 @@ impl SharedExecutionTransport {
                 });
             };
             authority
+        } else if d.execution_allowed && let Some(plan) = demand.filter(|p| p.submission.check().is_ok()) {
+            plan.submission.into_attempt_cleanup(r, c).await.map_err(store)?
         } else {
             b.cleanup(r, &c.original_runtime_command).await?
         };
+        // All three reads concern the same command and original reservation.
+        // Share only their cleanup authority. Each store read checks its live
+        // gate and original custody; actual issuance still needs fresh enrollment.
+        let a = Arc::new(a);
+        checkpoint("recover_authority");
         // An unclaimed fenced attempt already yields its not_started receipt.
         let mut local = r
             .recover_shared_attempt_process(
-                a,
+                a.clone(),
                 c.clone(),
                 historical.as_ref().and_then(|v| v.2.clone()),
             )
@@ -304,7 +351,12 @@ impl SharedExecutionTransport {
         {
             local = Some(timeout);
         }
-        b.transport.check_scope(&b.scope, false).await?;
+        // On a fresh, unclaimed start the very next authority boundary is an
+        // authenticated enrollment request, with scope checks before and after.
+        if local.is_some() || !d.execution_allowed {
+            b.transport.check_scope(&b.scope, false).await?;
+        }
+        checkpoint("recover_local_and_check_scope");
         if let Some(saved) = &d.recorded {
             if let Some(latest) = &local {
                 if latest.ledger_revision > saved.ledger_revision && latest.reason.is_some() {
@@ -394,8 +446,8 @@ impl SharedExecutionTransport {
         let proof =
             VerifiedSharedAttemptDelivery::new(e, c.clone(), d.command_digest.clone(), true, until)
                 .map_err(store)?;
-        let a = b.cleanup(r, &c.original_runtime_command).await?;
-        if r.shared_successor_history(a, c.clone())
+        checkpoint("execution_enrollment");
+        if r.shared_successor_history(a.clone(), c.clone())
             .await
             .map_err(store)?
             .is_some()
@@ -404,7 +456,7 @@ impl SharedExecutionTransport {
                 command_id: c.command_id.clone(),
             });
         }
-        let a = b.cleanup(r, &c.original_runtime_command).await?;
+        checkpoint("successor_history");
         if !r
             .require_shared_attempt_start(a, c.clone())
             .await
@@ -414,21 +466,48 @@ impl SharedExecutionTransport {
                 command_id: c.command_id.clone(),
             });
         }
-        let resource = r
-            .resource(
-                &b.scope.profile,
-                c.original_runtime_command
-                    .reserve_command
-                    .resource_id
-                    .clone(),
-            )
+        checkpoint("start_intent");
+        let launch = if inspected {
+            Self::attempt_resource(r, &b, &c.original_runtime_command).await?;
+            prepared.ok_or_else(invalid)?
+        } else {
+            self.select_attempt_launch(r, &b, &c.original_runtime_command, c.web_search,
+                c.tool_policy.as_ref().map(|p| p.mode.as_str()), prepared).await?
+        };
+        let process_io = launch.io(&self.io);
+        let check = b.preparation_check(&process_io, c.original_runtime_command.clone());
+        checkpoint("resource_and_launch_selection");
+        let launch = if inspected { launch } else { launch.prepare(&self.manager, until, check.clone()).await? };
+        checkpoint("provider_prepare");
+        check().await?;
+        checkpoint("final_scope");
+        self.manager
+            .owner
+            .0
+            .shared_execution
+            .start_attempt(
+                r.clone(),
+                proof,
+                launch,
+                process_io,
+                d,
+                reply.observed,
+                started,
+                until,
+            )?
             .await
-            .map_err(store)?;
-        if resource.framework != c.original_runtime_command.runtime().map_err(store)?
-            || resource.revision != c.original_runtime_command.reserve_command.resource_revision
-        {
-            return Err(failure(409, "shared_execution_resource_changed"));
-        }
+            .map_err(|_| failure(409, "shared_execution_outcome_unknown"))?
+    }
+    pub(super) async fn select_attempt_launch(
+        &self,
+        r: &OwnerResourceRegistry,
+        b: &Bound,
+        original: &SharedRuntimeCommand,
+        web: bool,
+        tool_mode: Option<&str>,
+        prepared: Option<launch::Launch>,
+    ) -> Result<launch::Launch, NativeError> {
+        let resource = Self::attempt_resource(r, b, original).await?;
         let launch = if let Some(prepared) = prepared {
             prepared
         } else {
@@ -451,35 +530,29 @@ impl SharedExecutionTransport {
             )
             .await?
         };
-        let launch = launch.with_live_web(c.web_search)?.with_agent_tools(
-            &c.original_runtime_command.reserve_command.proposed_agent_id,
-            c.tool_policy.as_ref().map(|p| p.mode.as_str()),
-        )?;
-        let process_io = launch.io(&self.io);
-        let io = process_io.clone();
-        let command = c.clone();
-        let check: super::super::managed_runtime::LiveCheck = Arc::new(move || {
-            let io = io.clone();
-            let c = command.clone();
-            Box::pin(async move { io.check(&c.original_runtime_command).await })
-        });
-        let launch = launch.prepare(&self.manager, until, check).await?;
-        b.transport.check_scope(&b.scope, false).await?;
-        self.manager
-            .owner
-            .0
-            .shared_execution
-            .start_attempt(
-                r.clone(),
-                proof,
-                launch,
-                process_io,
-                d,
-                reply.observed,
-                started,
-                until,
-            )?
+        launch.with_live_web(web)?.with_agent_tools(
+            &original.reserve_command.proposed_agent_id,
+            tool_mode,
+        )
+    }
+    async fn attempt_resource(
+        r: &OwnerResourceRegistry, b: &Bound, original: &SharedRuntimeCommand,
+    ) -> Result<hagency_store::management::ResourceSummary, NativeError> {
+        let resource = r
+            .resource(
+                &b.scope.profile,
+                original
+                    .reserve_command
+                    .resource_id
+                    .clone(),
+            )
             .await
-            .map_err(|_| failure(409, "shared_execution_outcome_unknown"))?
+            .map_err(store)?;
+        if resource.framework != original.runtime().map_err(store)?
+            || resource.revision != original.reserve_command.resource_revision
+        {
+            return Err(failure(409, "shared_execution_resource_changed"));
+        }
+        Ok(resource)
     }
 }

@@ -366,6 +366,9 @@ impl Manager {
                     let _ = sender.send(Err(error));
                     return Ok(());
                 }
+                tracing::info!(command_id = %delivery.command.command_id,
+                    remaining_ms = proof.deadline().saturating_duration_since(Instant::now()).as_millis() as u64,
+                    "Shared attempt at claim gate");
                 if let Err(error) = room_to_start(proof.deadline()) {
                     let _ = sender.send(Err(error));
                     return Ok(()); // No claim was attempted.

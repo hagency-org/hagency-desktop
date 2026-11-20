@@ -12,6 +12,7 @@ pub(super) struct State {
     revision: u64,
     paused: bool,
     lose_start: bool,
+    inspection_before_start: Option<(std::path::PathBuf, usize, usize)>,
     lose_stop: bool,
     invalid_binding: bool,
     lose_binding: bool,
@@ -118,6 +119,11 @@ pub(super) fn management(
             return Some(Some(json!({"demand":status(s),"observedAtMs":at})));
         }
         if path.ends_with("/start") {
+            if let Some((file, reads, turns)) = s.shared.demands.inspection_before_start.take() {
+                let methods = std::fs::read_to_string(file).unwrap();
+                assert!(methods.lines().filter(|m| *m == "config/read").count() > reads);
+                assert_eq!(methods.lines().filter(|m| *m == "turn/start").count(), turns);
+            }
             let input: SharedDemandStartInput = serde_json::from_value(body.clone()).unwrap();
             input.validate_for(&o).unwrap();
             let id = input.start.start_intent_id.clone();
@@ -425,12 +431,30 @@ async fn native_demand_two_events_keep_original_assignment_and_charges() {
 }
 #[tokio::test]
 #[ignore = "requires explicitly built offline supervised probe"]
+async fn native_demand_inspects_provider_before_ticket_and_runs_one_turn() {
+    let (f, t, _) = fixture_budget(1000).await;
+    offer(&f, 1);
+    f.state.lock().unwrap().shared.demands.inspection_before_start = Some((
+        f._root.path().join("shared-probe/methods"), count_methods(&f, "config/read"),
+        count_methods(&f, "turn/start"),
+    ));
+    let p = t.poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage").shared_fixture()))
+        .await.unwrap().outcome.unwrap();
+    assert!(matches!(p, SharedDemandProgress::Execution { progress: SharedExecutionProgress::Running { .. }, .. }));
+    wait_attempt(&f).await;
+    assert!(f.state.lock().unwrap().shared.demands.inspection_before_start.is_none());
+    assert_eq!(count_methods(&f, "turn/start"), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
 async fn native_demand_lost_start_reopens_original_and_never_generic_start() {
     let (mut f, t, _) = fixture_budget(1000).await;
     offer(&f, 1);
     f.state.lock().unwrap().shared.demands.lose_start = true;
     assert!(
-        t.poll_demand(&f.registry, None)
+        t.poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage")))
             .await
             .unwrap()
             .outcome
@@ -1135,7 +1159,7 @@ async fn native_demand_never_started_attempt_retries_same_event_exactly_once() {
         offer(&f, 1);
         // Start accepted, reply lost; this executor never claims the attempt.
         f.state.lock().unwrap().shared.demands.lose_start = true;
-        assert!(t.poll_demand(&f.registry, None).await.unwrap().outcome.is_err());
+        assert!(t.poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage"))).await.unwrap().outcome.is_err());
         let lost = f.state.lock().unwrap().shared.attempts.command.clone().unwrap();
         f.state.lock().unwrap().shared.cleanup = true;
         let outcome = t.poll_successor(&f.registry, None).await.unwrap();
@@ -1190,7 +1214,7 @@ async fn native_demand_never_started_attempt_retries_same_event_exactly_once() {
             f.stop().await;
             continue;
         }
-        assert!(t.poll_demand(&f.registry, None).await.unwrap().outcome.is_err());
+        assert!(t.poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage"))).await.unwrap().outcome.is_err());
         let retried = f.state.lock().unwrap().shared.attempts.command.clone().unwrap();
         assert_eq!(retried.predecessor.command_id, lost.command_id);
         assert!(retried.predecessor.process_digest.is_empty());
