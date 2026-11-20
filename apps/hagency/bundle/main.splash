@@ -3814,22 +3814,33 @@ A.owner_review_finish=fn(accepted){
 A.owner_review_open=fn(){
     let pending=H.owner_review_pending
     if pending==nil || H.session==nil {return}
-    if pending.owner!=H.session.account || !A.entry_allowed("owner") || !A.nav_free() || H.command!=nil || A.local_leaving("owner_approvals") {
+    let role=pending.role
+    let page=if pending.request=="" {"owner_approvals"} else {"pool_agent"}
+    if pending.owner!=H.session.account || !A.entry_allowed(role) || !A.nav_free() || H.command!=nil || A.local_leaving(page) {
         A.owner_review_finish(false) return
     }
     A.read_cancel()
-    H.entry_role="owner" H.entry_choosing=false
+    H.entry_role=role H.entry_choosing=false
+    if pending.request!="" {
+        H.pool_detail=nil H.reqs.result=nil
+        A.open_pool_agent(pending.request)
+        A.owner_review_finish(true) return
+    }
     H.page="owner_approvals" H.notice="" H.ux.origin="" H.confirm=""
     A.redraw()
     A.owner_review_finish(true)
 }
-let on_owner_approvals_requested=fn(owner,nonce){
+A.request_review_landing=fn(owner,nonce,request,role){
     if H.owner_review_pending!=nil {A.owner_review_finish(false)}
-    H.owner_review_pending={owner:owner nonce:nonce}
+    H.owner_review_pending={owner:owner nonce:nonce request:request role:role}
     start_timeout(55,||{
         if H.owner_review_pending!=nil && H.owner_review_pending.nonce==nonce {A.owner_review_finish(false)}
     })
     A.owner_review_open()
+}
+let on_owner_approvals_requested=fn(owner,nonce){A.request_review_landing(owner,nonce,"","owner")}
+let on_pool_request_requested=fn(owner,nonce,id,role){
+    if id!="" && (role=="manager" || role=="owner"){A.request_review_landing(owner,nonce,id,role)}
 }
 let on_owner_approvals_cancelled=fn(nonce){
     if H.owner_review_pending!=nil && H.owner_review_pending.nonce==nonce {H.owner_review_pending=nil}
