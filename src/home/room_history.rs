@@ -1,5 +1,6 @@
 //! Room-scoped search and attachment browsing over SDK-decrypted history.
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, Mutex};
 use futures_util::future::{AbortHandle, Abortable};
 use makepad_widgets::*;
 use matrix_sdk::{deserialized_responses::TimelineEvent, media::MediaFormat, room::MessagesOptions};
@@ -370,6 +371,14 @@ pub struct RoomHistoryPanel {
     request: u64,
     #[rust]
     abort: Option<AbortHandle>,
+    /// Pages a load has fetched and this panel has not yet taken.
+    ///
+    /// A load leaves its pages here and only wakes the UI. An action would reach the
+    /// panel once or never: a room's screen, which shows this panel over its timeline,
+    /// keeps events from its children while it restores the room, and a page lost that
+    /// way left the panel "searching" for good.
+    #[rust]
+    inbox: Arc<Mutex<Vec<HistoryPage>>>,
     #[rust]
     error: Option<String>,
     #[rust]
@@ -421,6 +430,11 @@ impl RoomHistoryPanel {
         let mut cursor = self.cursor.clone();
         let (abort, registration) = AbortHandle::new_pair();
         self.abort = Some(abort);
+        let inbox = self.inbox.clone();
+        let deliver = move |page: HistoryPage| {
+            inbox.lock().unwrap_or_else(|e| e.into_inner()).push(page);
+            SignalToUI::set_ui_signal();
+        };
         spawn_async_task(async move {
             let _ = Abortable::new(
                 async move {
@@ -451,7 +465,7 @@ impl RoomHistoryPanel {
                                         }
                                     }
                                 }
-                                Cx::post_action(HistoryPage {
+                                deliver(HistoryPage {
                                     owner: owner.clone(),
                                     request,
                                     result: Ok((response.chunk, names, cursor.clone(), done)),
@@ -462,7 +476,7 @@ impl RoomHistoryPanel {
                                 }
                             }
                             Err(error) => {
-                                Cx::post_action(HistoryPage {
+                                deliver(HistoryPage {
                                     owner: owner.clone(),
                                     request,
                                     result: Err(error.to_string()),
@@ -571,6 +585,35 @@ impl RoomHistoryPanel {
         self.detail = Some(message);
         self.refresh(cx, false);
     }
+    /// Takes the pages the current load has fetched since the last look. Pages of a load
+    /// that was cancelled, or of another account, are dropped.
+    fn take_pages(&mut self, cx: &mut Cx) {
+        let pages = std::mem::take(&mut *self.inbox.lock().unwrap_or_else(|e| e.into_inner()));
+        let mut taken = false;
+        for page in pages {
+            if self.owner.as_ref() != Some(&page.owner) || self.request != page.request {
+                continue;
+            }
+            match page.result {
+                Ok((events, names, cursor, exhausted)) => {
+                    for event in &events {
+                        self.index.insert(event, &names);
+                    }
+                    self.cursor = cursor;
+                    self.exhausted = exhausted;
+                }
+                Err(error) => self.error = Some(error),
+            }
+            if page.last {
+                self.busy = false;
+                self.abort = None;
+            }
+            taken = true;
+        }
+        if taken {
+            self.refresh(cx, false);
+        }
+    }
     /// Asks whoever shows this panel to close it.
     fn request_close(&mut self, cx: &mut Cx) {
         self.close_requested = true;
@@ -640,28 +683,9 @@ impl Widget for RoomHistoryPanel {
         if matches!(event, Event::Signal) {
             self.redraw(cx);
         }
+        self.take_pages(cx);
         if let Event::Actions(actions) = event {
             for action in actions {
-                if let Some(page) = action.downcast_ref::<HistoryPage>() {
-                    if self.owner.as_ref() != Some(&page.owner) || self.request != page.request {
-                        continue;
-                    }
-                    match &page.result {
-                        Ok((events, names, cursor, exhausted)) => {
-                            for event in events {
-                                self.index.insert(event, names);
-                            }
-                            self.cursor = cursor.clone();
-                            self.exhausted = *exhausted;
-                        }
-                        Err(error) => self.error = Some(error.clone()),
-                    }
-                    if page.last {
-                        self.busy = false;
-                        self.abort = None;
-                    }
-                    self.refresh(cx, false);
-                }
                 if action
                     .downcast_ref::<super::chat_actions::ChatVisibilityChanged>()
                     .is_some()
@@ -768,6 +792,8 @@ impl Widget for RoomHistoryPanel {
             self.reset();
             return DrawStep::done();
         }
+        // The wake-up of a fetched page may not have reached this panel as an event.
+        self.take_pages(cx);
         if let Some(message) = self.detail.clone() {
             let preview = self.text_or_image(cx, ids!(preview));
             preview.set_visible(cx, matches!(message.content, MessageType::Image(_)));
@@ -870,6 +896,48 @@ impl RoomHistoryPanelRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_fetched_page_waits_for_the_panel_which_takes_it_at_its_next_look() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut panel = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.RoomHistoryPanel {}});
+            let panel = RoomHistoryPanel::script_from_value(vm, value);
+            assert!(vm.take_errors().is_empty());
+            panel
+        });
+        let owner = OwnedUserId::try_from("@me:server").unwrap();
+        let page = |request: u64, cursor: &str| HistoryPage {
+            owner: owner.clone(),
+            request,
+            result: Ok((Vec::new(), BTreeMap::new(), Some(cursor.into()), false)),
+            last: true,
+        };
+        panel.owner = Some(owner.clone());
+        panel.request = 7;
+        panel.busy = true;
+        // No event told the panel of the page: it is still there when the panel next looks.
+        panel.inbox.lock().unwrap().push(page(7, "older"));
+        assert!(panel.busy && panel.cursor.is_none());
+        panel.take_pages(&mut cx);
+        assert!(!panel.busy, "the load has ended");
+        assert_eq!(panel.cursor.as_deref(), Some("older"));
+        assert!(panel.inbox.lock().unwrap().is_empty());
+
+        // The page of a load that was cancelled since, or of another account, is dropped.
+        panel.busy = true;
+        panel.inbox.lock().unwrap().push(page(6, "stale"));
+        let mut foreign = page(7, "foreign");
+        foreign.owner = OwnedUserId::try_from("@other:server").unwrap();
+        panel.inbox.lock().unwrap().push(foreign);
+        panel.take_pages(&mut cx);
+        assert!(panel.busy);
+        assert_eq!(panel.cursor.as_deref(), Some("older"));
+        assert!(panel.inbox.lock().unwrap().is_empty());
+        cx.with_vm(|vm| assert!(vm.take_errors().is_empty()));
+    }
     #[test]
     fn on_a_desktop_the_open_rooms_own_screen_shows_a_history_asked_for_elsewhere() {
         use crate::app::SelectedRoom;

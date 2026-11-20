@@ -8646,6 +8646,21 @@ mod desktop_information_columns_tests {
         assert_eq!(screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx).size.x, 840.0);
     }
     #[test]
+    fn a_room_that_can_no_longer_be_shown_closes_its_history() {
+        use super::super::room_history::HistoryFilter;
+        let (mut cx, mut screen) = screen();
+        let room = RoomNameId::empty(matrix_sdk::ruma::room_id!("!current:server").to_owned());
+        screen.room_name_id = Some(room.clone());
+        draw(&mut cx, &mut screen, 840.0);
+        let overlay = screen.view.view(&mut cx, ids!(history_overlay));
+        screen.open_room_history(&mut cx, &room, HistoryFilter::Messages);
+        assert!(overlay.visible());
+        // The person was removed from the room while its history was open.
+        screen.set_restore_status(&mut cx, restore::Status::Left);
+        assert!(!overlay.visible());
+        assert!(screen.restore.status.is_some());
+    }
+    #[test]
     fn the_rooms_history_opens_over_its_timeline_and_closes_only_at_its_own_panels_word() {
         use super::super::room_history::{HistoryFilter, RoomHistoryAction, RoomHistoryPanelWidgetExt};
         let (mut cx, mut screen) = screen();

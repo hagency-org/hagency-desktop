@@ -82,7 +82,10 @@ struct ProbeResult {
 pub(crate) struct RoomMembershipChanged(pub u64);
 
 impl RoomScreen {
-    fn set_restore_status(&mut self, cx: &mut Cx, status: Status) {
+    pub(super) fn set_restore_status(&mut self, cx: &mut Cx, status: Status) {
+        // While it restores a room this screen keeps events from its children, and a
+        // history left open over the status page would cover it and answer nothing.
+        self.close_room_history(cx);
         if status == Status::TimedOut {
             // The one-shot timer fired. A slower access check can still give
             // this attempt a definitive answer before the SDK request times out.
