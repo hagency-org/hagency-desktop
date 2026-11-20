@@ -10,6 +10,14 @@ fn execution_row<'a>(value:&'a Value,room:&str,thread:&str)->Option<&'a Value> {
     value["executions"].as_array()?.iter().find(|r|
         r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread))
 }
+fn pool_request(row: &Value) -> Option<(String, String)> {
+    if row["reason"] != "budget_blocked" { return None; }
+    let link = &row["resourceRecovery"];
+    let id = link["requestId"].as_str()?;
+    let role = link["role"].as_str()?;
+    if id.is_empty() || id.len() > 256 || !matches!(role, "manager" | "owner") { return None; }
+    Some((id.to_owned(), role.to_owned()))
+}
 fn execution_busy(value:&Value,room:&str,thread:&str)->bool {
     execution_row(value,room,thread).is_some_and(|row|
         row["reason"]!="budget_blocked" && matches!(row["state"].as_str(),Some("started"|"pending"|"queued"|"acknowledged"|"bound"|"reply_pending")))
@@ -67,6 +75,7 @@ script_mod! {
             session := Button {width: Fill text: #(crate::i18n::tr("Always approve for this session")) i18n_text: "Always approve for this session"}
             deny := Button {width: Fill text: #(crate::i18n::tr("Deny")) i18n_text: "Deny"}
         }
+        allowance := Button {text: #(crate::i18n::tr("View original pool request")) i18n_text: "View original pool request" visible: false}
         next := Button {text: #(crate::i18n::tr("Next request")) i18n_text: "Next request" visible: false}
     }
 }
@@ -104,6 +113,7 @@ pub struct SharedPermissionNotice {
     #[rust] execution_thread_filter:bool,
     #[rust] rows:Vec<Value>,
     #[rust] selected:usize,
+    #[rust] original_request:Option<(String,String)>,
     #[rust] execution_text:String,
     #[rust] execution_busy:bool,
     #[rust] waiting:bool,
@@ -205,6 +215,7 @@ impl SharedPermissionNotice {
             button.set_enabled(cx,offered);
         }
         self.view.widget(cx,ids!(actions)).set_visible(cx,shown.once || shown.session || shown.deny);
+        self.view.widget(cx,ids!(allowance)).set_visible(cx,self.original_request.is_some() && self.rows.is_empty() && self.error.is_empty());
         self.view.widget(cx,ids!(next)).set_visible(cx,shown.next);
         self.view.redraw(cx);
     }
@@ -212,6 +223,7 @@ impl SharedPermissionNotice {
     /// says whether a message's run card shows its run stopped.
     fn read_status(&mut self,value:&Value,stopped:impl Fn(&str)->bool) {
         self.error.clear();
+        self.original_request=execution_row(value,&self.room,&self.thread).and_then(pool_request);
         self.execution_thread_filter = value["executionThreadFilter"] == true;
         self.execution_busy=execution_busy(value,&self.room,&self.thread);
         // The run the last decision belonged to has ended: a later run must
@@ -280,6 +292,13 @@ impl Widget for SharedPermissionNotice {
             for (id,decision) in [(ids!(once),"approve_once"),(ids!(session),"approve_session"),(ids!(deny),"deny")] {
                 if self.view.button(cx,id).clicked(actions){self.decide(cx,decision);}
             }
+            if self.view.button(cx,ids!(allowance)).clicked(actions) && self.active && self.error.is_empty() && self.rows.is_empty()
+                && let Some((request_id,role))=&self.original_request
+                && let Some(account)=crate::sliding_sync::current_user_id() {
+                cx.action(crate::miniapps::MiniAppsAction::ReviewPoolRequest {
+                    owner:account.to_string(), request_id:request_id.clone(), role:role.clone(),
+                });
+            }
             if self.view.button(cx,ids!(next)).clicked(actions) && !self.rows.is_empty(){self.selected=(self.selected+1)%self.rows.len();self.render(cx);}
         }
         self.view.handle_event(cx,event,scope);
@@ -292,7 +311,7 @@ impl SharedPermissionNoticeRef {
         let Some(mut this)=self.borrow_mut()else{return};
         let identity=Service::for_current().map(|s|s.identity()).unwrap_or_default();
         if this.identity!=identity || this.room!=room || this.thread!=thread {
-            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.execution_thread_filter=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
+            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.original_request=None;this.execution_thread_filter=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
         }else if this.active && !this.loading && this.timer.is_empty(){this.poll(cx);}
     }
 }

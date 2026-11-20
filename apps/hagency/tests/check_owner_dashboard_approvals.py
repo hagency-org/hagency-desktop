@@ -79,6 +79,16 @@ let {poolId=nil}=calls[0].args
 assert(poolId==nil)
 // Every request above is read-only or navigation; no decision is submitted.
 assert(H.command==nil)
+// Exact original request, by read only; account mismatch cannot navigate.
+calls.clear() H.page="overview" H.busy=false H.command=nil
+on_pool_request_requested("@other:test","invalid","original","manager")
+assert(H.page=="overview")
+calls.clear()
+A.request=fn(service,args,done){calls.push({service:service args:args})}
+on_pool_request_requested("@owner:test","recover","original","manager")
+assert(H.page=="pool_agent" && H.entry_role=="manager" && H.reqs.agent=="original")
+assert(calls.len()==2 && calls[0].service=="hagency.pools.agents.get" && calls[0].args.id=="original")
+assert(calls[1].args.requestId=="recover")
 '''
 
 def main():
