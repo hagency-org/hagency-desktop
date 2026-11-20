@@ -4754,6 +4754,7 @@ dependencies = [
  "hagency-runtime",
  "hagency-store",
  "http-body-util",
+ "httpdate",
  "hyper",
  "hyper-util",
  "lopdf",

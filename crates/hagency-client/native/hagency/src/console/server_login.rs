@@ -10,12 +10,16 @@ use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 pub(super) mod matrix_creations;
 mod profiles;
+mod proof_clock;
+use proof_clock::ProofClock;
 mod sdk_resume;
 mod shared_matrix;
 mod room_binding;
@@ -610,20 +614,6 @@ fn invalidate(session: &mut RemoteSession) {
     session.refresh_token = None;
     session.token.clear();
 }
-fn deadline(value: &Value) -> Result<Instant, &'static str> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "invalid_local_clock")?
-        .as_millis() as u64;
-    let until = value["validUntilMs"]
-        .as_u64()
-        .ok_or("invalid_server_response")?;
-    let remaining = until
-        .checked_sub(now)
-        .filter(|ms| *ms > 0 && *ms <= 31_000)
-        .ok_or("sign_in_required")?;
-    Ok(Instant::now() + Duration::from_millis(remaining))
-}
 fn oauth_credentials(tokens: &Value) -> Result<(String, Option<String>, Duration), &'static str> {
     if tokens["token_type"]
         .as_str()
@@ -744,6 +734,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             return Err(Error::Unauthorized);
         }
     }
+    let request_started = Instant::now();
     let renewal_response = client
         .post(
             server
@@ -764,8 +755,8 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             renewal_response.status().as_u16()
         );
     }
-    let renewed = response(renewal_response).await.map_err(renewal_error)?;
-    let mut until = deadline(&renewed).map_err(|_| Error::Unavailable)?;
+    let (renewed, clock) = proof_response(request_started, renewal_response).await.map_err(renewal_error)?;
+    let mut until = clock.deadline(&renewed).map_err(|_| Error::Unavailable)?;
     if until <= Instant::now() + Duration::from_secs(20)
         && let Some(source) = &session.matrix_source
     {
@@ -783,6 +774,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
         if refreshed.client_id != session.binding.client_id || refreshed.access_token.is_empty() {
             return Err(Error::Unauthorized);
         }
+        let request_started = Instant::now();
         let response = client
             .post(
                 server
@@ -800,13 +792,13 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 response.status().as_u16()
             );
         }
-        let refreshed = self::response(response).await.map_err(renewal_error)?;
-        until = deadline(&refreshed).map_err(|_| Error::Unavailable)?;
+        let (refreshed, clock) = proof_response(request_started, response).await.map_err(renewal_error)?;
+        until = clock.deadline(&refreshed).map_err(|_| Error::Unavailable)?;
     }
-    let identity = get(
+    let (identity, clock) = get_identity(
         &client,
-        server.join("/hagency/api/v1/identity").unwrap(),
-        Some(&session.token),
+        &server,
+        &session.token,
     )
     .await
     .map_err(|code| {
@@ -816,7 +808,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     if !identity_matches(&identity, &session.binding) || identity["userId"] != session.user_id {
         return Err(Error::Unauthorized);
     }
-    let identity_until = deadline(&identity).map_err(|_| Error::Unavailable)?;
+    let identity_until = clock.deadline(&identity).map_err(|_| Error::Unavailable)?;
     if let Some(source) = &session.matrix_source {
         let after = source.access_token().await.map_err(|error| {
             let code = super::native::sdk_source_failure(error);
@@ -902,12 +894,15 @@ async fn response(response: reqwest::Response) -> Result<Value, &'static str> {
     }
     Ok(value)
 }
-async fn get(client: &Client, url: Url, token: Option<&str>) -> Result<Value, &'static str> {
-    let mut request = client.get(url);
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    response(request.send().await.map_err(|_| "server_unavailable")?).await
+async fn proof_response(started: Instant, reply: reqwest::Response) -> Result<(Value, ProofClock), &'static str> {
+    let clock = ProofClock::new(started, reply.headers());
+    Ok((response(reply).await?, clock))
+}
+async fn get_identity(client: &Client, server: &Url, token: &str) -> Result<(Value, ProofClock), &'static str> {
+    let started = Instant::now();
+    let reply = client.get(server.join("/hagency/api/v1/identity").unwrap())
+        .bearer_auth(token).send().await.map_err(|_| "server_unavailable")?;
+    proof_response(started, reply).await
 }
 fn cookie(req: &Request, name: &str) -> Option<String> {
     req.headers()
@@ -1263,7 +1258,8 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
     let (token, refresh_token, oauth_lifetime) = oauth_credentials(&tokens)?;
     let mut issued_session = String::new();
     let completed = async {
-        let grant = response(
+        let (grant, grant_clock) = proof_response(
+            Instant::now(),
             client
                 .post(server.join("/hagency/api/v1/sessions/pasion").unwrap())
                 .json(&json!({"accessToken":token}))
@@ -1278,13 +1274,8 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
             .ok_or("invalid_server_response")?;
         issued_session = session_token.to_owned();
         let verified = async {
-            let identity = get(
-                &client,
-                server.join("/hagency/api/v1/identity").unwrap(),
-                Some(session_token),
-            )
-            .await?;
-            let authorized_until = deadline(&grant)?.min(deadline(&identity)?);
+            let (identity, identity_clock) = get_identity(&client, &server, session_token).await?;
+            let authorized_until = grant_clock.deadline(&grant)?.min(identity_clock.deadline(&identity)?);
             identity["userId"]
                 .as_str()
                 .filter(|v| !v.is_empty() && v.len() <= 128)
@@ -1443,7 +1434,8 @@ async fn register_device(
     binding: &Binding,
     user_id: &str,
 ) -> Result<(Value, AuthorizedDevice), &'static str> {
-    let value = response(
+    let (value, clock) = proof_response(
+        Instant::now(),
         client
             .post(server.join("/hagency/api/v1/devices").unwrap())
             .bearer_auth(token)
@@ -1475,7 +1467,7 @@ async fn register_device(
             issuer: format!("{}auth/", binding.origin),
             subject: binding.subject.clone().ok_or("invalid_server_response")?,
             user_id: user_id.into(),
-            valid_until: deadline(&value)?,
+            valid_until: clock.deadline(&value)?,
             revoked: std::sync::Arc::new(AtomicBool::new(false)),
             stopped: std::sync::Arc::new(AtomicBool::new(false)),
         },

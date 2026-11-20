@@ -115,6 +115,7 @@ fn recovery_error_code(code: &str) -> &'static str {
         "device_transport_unavailable" => "device_transport_unavailable",
         "matrix_account_changed" => "matrix_account_changed",
         "matrix_authorization_unavailable" => "matrix_authorization_unavailable",
+        "authorization_time_window_unavailable" => "authorization_time_window_unavailable",
         "matrix_authorization_required" => "matrix_authorization_required",
         "matrix_oauth_sign_in_required" => "matrix_oauth_sign_in_required",
         "runtime_recovery_state_unavailable" => "runtime_recovery_state_unavailable",

@@ -1487,6 +1487,7 @@
   "Copied Hagency version.": "已复制 Hagency 版本。",
   "No chats yet. Use the Chats menu to start a conversation.": "还没有聊天。请从“聊天”菜单开始新的会话。",
   "No matching chats": "没有匹配的聊天",
+  "The server authorization is outside its time window. Check the device and server clocks, then retry.": "服务器授权不在有效时间内。请核对本机和服务器的时钟后重试。",
   "Sign in again to restore Projects for this account": "重新登录以恢复此账号的项目",
   "Hagency Projects could not be loaded. Retrying…": "无法加载 Hagency 项目，正在重试…",
   "Loading Hagency Projects…": "正在加载 Hagency 项目…",
