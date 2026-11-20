@@ -9536,6 +9536,11 @@ A.render_page = fn(){
         mod.widgets.HagencyLargeTitle{text:A.t("My Agents","我的 Agent")}
         let local_here=A.local_here()
         let local_some=H.local_list!=nil && H.local_list.len()>0
+        if !local_here && !local_some {mod.widgets.HagencyCard{
+            mod.widgets.HagencySectionTitle{text:A.t("Run a local Agent","运行本地 Agent")}
+            mod.widgets.HagencyCopy{text:A.local_need_text()}
+            mod.widgets.HagencyHint{text:A.t("Open Hosting at the top of this panel to check this computer’s setup and account. Once this account is hosted here, return to My Agents and choose Add Local Agent.","点击面板顶部的「Hosting／资源托管」，检查本机设置与托管账号。当前账号在本机完成托管后，返回「我的 Agent」并选择「添加本地 Agent」。")}
+        }}
         if local_here || local_some {View{width:Fill height:Fit flow:Down spacing:6
         mod.widgets.HagencyListLabel{text:A.t("LOCAL AGENTS","本地 Agent")}
         mod.widgets.HagencyList{
@@ -9569,7 +9574,7 @@ A.render_page = fn(){
     }}
     if !A.pool_enabled(){mod.widgets.HagencyCard{
         mod.widgets.HagencyTitle{text:A.t("Resource pools","资源池")}
-        mod.widgets.HagencyCopy{text:A.t("This server needs the resource-pool Agent update before accepting new requests.","此服务器需要更新资源池 Agent 流程后才能接受新申请。")}
+        mod.widgets.HagencyCopy{text:A.t("Compatible resource-pool requests are not enabled on this server. Ask its administrator to check the resource-pool settings and supported server version.","此服务器未启用兼容的资源池 Agent 申请。请管理员检查资源池配置与支持的服务器版本。")}
     }} else {
     if H.page=="pools"{View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{bottom:28} mod.widgets.HagencyColumn{
         mod.widgets.HagencyLargeTitle{text:A.t("Resource Pools","资源池")}
