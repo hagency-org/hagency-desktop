@@ -669,21 +669,15 @@ impl MatchEvent for App {
                 let modal = self.ui.modal(cx, ids!(agent_ops_modal));
                 self.ui.agent_ops_panel(cx, ids!(agent_ops_modal.content)).action(cx, modal, action);
             }
-            // Open, share or close a Matrix web mini-app card.
-            // On desktop, Moments opens in its own window; on mobile, in a full-screen modal.
+            // Desktop Moments is routed by HomeScreen into the chat dock.
+            // Mobile keeps its full-screen navigation surface.
             if let Some(action) = action.downcast_ref::<MomentsAction>() {
                 let modal = self.ui.modal(cx, ids!(moments_modal));
-                let window_host = self.moments_window_host(cx);
                 if matches!(action, MomentsAction::Close) {
                     self.ui.moments_panel(cx, ids!(moments_modal.content)).action(cx, Some(&modal), action);
-                    window_host.close(cx);
+                    self.moments_window_host(cx).close(cx);
                     self.close_hosted_window(cx, HostedWindow::Moments, true);
-                } else if !self.embedded && crate::home::home_screen::effective_is_desktop(cx) {
-                    window_host.action(cx, action);
-                } else if let Some(panel) = self.hosted_window(cx, HostedWindow::Moments) {
-                    use crate::moments::ui::MomentsPanelWidgetRefExt;
-                    panel.as_moments_panel().action(cx, None, action);
-                } else {
+                } else if !crate::home::home_screen::effective_is_desktop(cx) {
                     self.ui.moments_panel(cx, ids!(moments_modal.content)).action(cx, Some(&modal), action);
                 }
             }
@@ -1544,7 +1538,6 @@ pub fn register_widgets(vm: &mut ScriptVm) {
     crate::miniapps::side::script_mod(vm);
     crate::miniapps::window::script_mod(vm);
     crate::home::script_mod(vm);
-    crate::moments::script_mod(vm);
     crate::login::script_mod(vm);
     crate::logout::script_mod(vm);
     account_overlay::script_mod(vm);

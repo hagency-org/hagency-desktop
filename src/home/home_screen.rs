@@ -523,6 +523,14 @@ impl Widget for HomeScreen {
                 }
             }
             for action in actions {
+                if let Some(action) = action.downcast_ref::<crate::moments::ui::MomentsAction>()
+                    && !matches!(action, crate::moments::ui::MomentsAction::Close)
+                    && effective_is_desktop(cx)
+                {
+                    // Make the chat dock available before it receives this action.
+                    self.switch_to_tab(cx, app_state, SelectedTab::Home);
+                    self.view.mini_apps_side_region(cx, ids!(mini_apps_side)).reveal_chat(cx);
+                }
                 if let Some(crate::matrix_links::LinkAction::EnterHome(navigation)) = action.downcast_ref() {
                     if navigation.is_current() {
                         self.switch_to_tab(cx, app_state, SelectedTab::Home);
