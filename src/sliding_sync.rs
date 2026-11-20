@@ -4052,11 +4052,15 @@ async fn start_matrix_client_login_and_sync(rt: Handle) {
         match restore_previous_login(specified_username.or(most_recent_user_id)).await {
             Ok(session) => Some(session),
             Err(e) => {
-                let status_err = "Could not restore previous user session.\n\nPlease login again.";
+                let status_err = if crate::login::homeserver::discovery_unavailable(&e) {
+                    crate::i18n::tr("The sign-in server is temporarily unavailable. Select your saved account to retry.")
+                } else {
+                    "Could not restore previous user session.\n\nPlease login again."
+                };
                 log!("{status_err} Error: {e:?}");
                 Cx::post_action(LoginAction::LoginFailure(status_err.to_string()));
 
-                if let Ok(cli) = &cli_parse_result {
+                if cli_has_valid_username_password && let Ok(cli) = &cli_parse_result {
                     log!("Attempting auto-login from CLI arguments as user '{}'...", cli.user_id);
                     Cx::post_action(LoginAction::CliAutoLogin {
                         user_id: cli.user_id.clone(),

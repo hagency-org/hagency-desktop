@@ -93,15 +93,19 @@ pub struct LoginMethods {
 
 pub(crate) async fn require_hagency(client: &Client) -> Result<()> {
     hagency::server_admission::discover(client.homeserver().as_str())
-        .await.map_err(|e| anyhow::anyhow!("{}", crate::i18n::tr(e.message())))?;
+        .await.map_err(|e| anyhow::Error::new(e).context(crate::i18n::tr(e.message()).to_owned()))?;
     Ok(())
 }
 
 pub async fn login_methods(client: &Client) -> Result<LoginMethods> {
     require_hagency(client).await?;
+    oauth_login_methods(client).await
+}
+
+async fn oauth_login_methods(client: &Client) -> Result<LoginMethods> {
     let metadata = tokio::time::timeout(
         std::time::Duration::from_secs(10), client.oauth().server_metadata(),
-    ).await.map_err(|_| anyhow::anyhow!("Pasion sign-in is temporarily unavailable. Please retry."))??;
+    ).await.map_err(|e| anyhow::Error::new(e).context("Pasion sign-in is temporarily unavailable. Please retry."))??;
     validate_oauth_metadata(&metadata)?;
     if metadata.issuer != client.homeserver().join("auth/")? {
         bail!("This server advertised an unexpected Pasion issuer");
@@ -114,6 +118,49 @@ pub async fn login_methods(client: &Client) -> Result<LoginMethods> {
         ),
         providers: Vec::new(),
     })
+}
+
+pub(crate) fn discovery_unavailable(error: &anyhow::Error) -> bool {
+    use hagency::server_admission::AdmissionError;
+    use matrix_sdk::authentication::oauth::error::OAuthDiscoveryError;
+    error.downcast_ref::<AdmissionError>() == Some(&AdmissionError::Unavailable)
+        || error.is::<tokio::time::error::Elapsed>()
+        || matches!(error.downcast_ref::<OAuthDiscoveryError>(),
+            Some(OAuthDiscoveryError::Http(matrix_sdk::HttpError::Reqwest(e))) if e.is_connect() || e.is_timeout())
+}
+
+/// Retry only the public GET that failed. Neither a rejected server nor an
+/// attempt to install/refresh SDK credentials belongs in this loop.
+async fn retry_saved_discovery<T, F: Future<Output = Result<T>>>(
+    stage: &str,
+    mut probe: impl FnMut() -> F,
+) -> Result<T> {
+    use tokio::time::{Duration, Instant, sleep, timeout_at};
+    let deadline = Instant::now() + Duration::from_secs(35);
+    let mut result = probe().await;
+    for (i, delay_ms) in [500, 1000, 2000, 4000, 8000].into_iter().enumerate() {
+        let Err(error) = &result else { break };
+        if !discovery_unavailable(error) {
+            break;
+        }
+        let delay = Duration::from_millis(delay_ms);
+        if Instant::now() + delay >= deadline {
+            break;
+        }
+        makepad_widgets::log!("Saved account discovery retry stage={} attempt={}", stage, i + 2);
+        sleep(delay).await;
+        match timeout_at(deadline, probe()).await {
+            Ok(next) => result = next,
+            Err(_) => break, // Keep the last concrete failure for the caller.
+        }
+    }
+    result
+}
+
+pub(crate) async fn check_saved_account_server(client: &Client) -> Result<()> {
+    retry_saved_discovery("hagency_discovery", || require_hagency(client)).await?;
+    retry_saved_discovery("oauth_metadata", || oauth_login_methods(client)).await?;
+    Ok(())
 }
 
 pub(crate) fn validate_oauth_origin(origin: &Url) -> Result<()> {
