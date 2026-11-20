@@ -8996,6 +8996,14 @@ A.pool_cadence=fn(c){
 }
 A.pool_renewal=fn(r){if A.recipient_optional(r,"renewalMode")!="automatic" && A.recipient_optional(r,"renewalMode")!="owner" {return A.t("Owner renewal · legacy pool","资源 owner 手动续期 · 历史资源池")} return if A.recipient_optional(r,"renewalMode")=="automatic" {A.t("Automatic renewal","自动续期")} else {A.t("Resource owner renews","资源 owner 手动续期")}}
 A.pool_period=fn(r){return A.recipient_optional(r,"currentPeriod")}
+A.pool_allowance_notice=fn(r){
+    let n=A.recipient_optional(r,"allowanceNotice")
+    if n==nil{return ""}
+    if n.state=="exhausted"{return A.t("An Agent message could not start because its allowance was used up.","一条 Agent 消息因额度已用完而未能启动。")}
+    if n.state=="usage_unresolved"{return A.t("An Agent message is waiting for previous usage to settle.","一条 Agent 消息正在等待上次用量结算。")}
+    if n.state=="unavailable"{return A.t("An Agent message could not start with the available allowance.","一条 Agent 消息因可用额度不足而未能启动。")}
+    return ""
+}
 A.pool_period_state=fn(r){
     let request_state=A.recipient_optional(r,"state")
     if request_state=="rejected" {return A.t("Request declined","申请已拒绝")}
@@ -9724,7 +9732,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_INFO_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.color:mod.widgets.RINX_INFO_FG}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyListTitle{text:r.definition.name}
-                                mod.widgets.HagencyListSubtitle{text:A.local_pool_state(r)}
+                                mod.widgets.HagencyListSubtitle{text:if A.pool_allowance_notice(r)!=""{A.pool_allowance_notice(r)}else{A.local_pool_state(r)}}
                             }
                             mod.widgets.HagencyListValue{text:A.local_tokens(r.requestedTokens)+A.t(" tokens"," token")}
                             mod.widgets.HagencyChevron{}
@@ -9832,6 +9840,9 @@ A.render_page = fn(){
                     pool_authority_detail := mod.widgets.HagencyWrapSubtitle{text:A.pool_reason(r.blockingReason)}
                 }
             }}}
+            if A.pool_allowance_notice(r)!="" {
+                mod.widgets.HagencyHint{text:A.pool_allowance_notice(r)}
+            }
             if A.pool_reinvite_notice(r)!="" {mod.widgets.HagencyList{mod.widgets.HagencySwitchRow{
                 mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                 mod.widgets.HagencyListText{
