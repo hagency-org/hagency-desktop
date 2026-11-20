@@ -6,6 +6,7 @@ use std::sync::Mutex;
 pub(super) struct Offer {
     result: Result<(String, String), NativeError>,
     handled: tokio::sync::oneshot::Sender<()>,
+    observed: std::time::Instant,
 }
 
 pub(super) type Inbox = Mutex<Option<Offer>>;
@@ -45,7 +46,13 @@ async fn discover_loop<Fut>(
     live: &(impl Fn() -> bool + Sync),
     step: Step,
     mut discover: impl FnMut(Option<String>) -> Fut + Send,
-) where Fut: Future<Output = Result<(Option<String>, Option<(String, String)>), NativeError>> + Send {
+) where
+    Fut: Future<Output = Result<(Option<String>, Option<(String, String)>), NativeError>> + Send,
+{
+    // Notify registers this future at creation for notify_waiters. Check the
+    // retired bit afterwards as retirement can precede this producer.
+    let retiring = control.retiring.notified();
+    tokio::pin!(retiring);
     let mut after = None;
     while live() {
         if let Some(guard) = admission.enter() {
@@ -67,20 +74,28 @@ async fn discover_loop<Fut>(
                 && live()
             {
                 let (handled, mut ack) = tokio::sync::oneshot::channel();
-                *inbox.lock().unwrap_or_else(|p| p.into_inner()) = Some(Offer { result, handled });
+                *inbox.lock().unwrap_or_else(|p| p.into_inner()) = Some(Offer {
+                    result,
+                    handled,
+                    observed: std::time::Instant::now(),
+                });
                 control.wake.notify_one();
                 // Leave the server queue authoritative while admission is paused
                 // or this worker is retired. Never collect a backlog of tickets.
                 while live() {
                     tokio::select! {
                         _ = &mut ack => break,
+                        _ = &mut retiring => return,
                         _ = tokio::time::sleep(Duration::from_secs(1)) => {}
                     }
                 }
             }
         }
         if live() {
-            tokio::time::sleep(Duration::from_secs(5)).await;
+            tokio::select! {
+                _ = &mut retiring => return,
+                _ = tokio::time::sleep(Duration::from_secs(5)) => {}
+            }
         }
     }
 }
@@ -115,10 +130,20 @@ impl PassIo for Consumer<'_> {
         };
         let offer = inbox.lock().unwrap_or_else(|p| p.into_inner()).take();
         Box::pin(async move {
-            let Some(Offer { result, handled }) = offer else {
+            let Some(Offer {
+                result,
+                handled,
+                observed,
+            }) = offer
+            else {
                 return Ok(Advance::default());
             };
             let (id, digest) = result?;
+            tracing::debug!(
+                ?step,
+                handoff_wait_ms = observed.elapsed().as_millis() as u64,
+                "Owner daemon picked up a discovered demand"
+            );
             let outcome = self
                 .executor
                 .consume_for_worker(step == Step::BudgetDemand, &id, &digest)
@@ -135,6 +160,50 @@ impl PassIo for Consumer<'_> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn retiring_wakes_both_idle_discovery_lanes() {
+        let worker = Worker::default();
+        let admission = Admission::default();
+        admission.open();
+        let ordinary = Inbox::default();
+        let budget = Inbox::default();
+        let live = || !worker.retired();
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let empty = |cursor| {
+            calls.fetch_add(1, Ordering::SeqCst);
+            std::future::ready(Ok((cursor, None)))
+        };
+        let retire = async {
+            while calls.load(Ordering::SeqCst) < 2 {
+                tokio::task::yield_now().await;
+            }
+            worker.retire();
+        };
+        tokio::time::timeout(Duration::from_secs(1), async {
+            tokio::join!(
+                discover_loop(
+                    &ordinary,
+                    &admission,
+                    &worker.control,
+                    &live,
+                    Step::IntakeDemand,
+                    empty
+                ),
+                discover_loop(
+                    &budget,
+                    &admission,
+                    &worker.control,
+                    &live,
+                    Step::BudgetDemand,
+                    empty
+                ),
+                retire
+            );
+        })
+        .await
+        .unwrap();
+    }
 
     #[tokio::test]
     async fn discovery_runs_while_maintenance_is_waiting_and_keeps_one_unclaimed_reference() {
