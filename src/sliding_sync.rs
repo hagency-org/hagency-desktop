@@ -3590,6 +3590,19 @@ impl JoinedRoomDetails {
     }
 }
 
+/// Tells the open timelines of a room that its stored member list was loaded again,
+/// so that each one reads the list anew.
+pub(crate) fn room_members_reloaded(room_id: &RoomId) {
+    let senders = ALL_JOINED_ROOMS.lock().unwrap().get(room_id)
+        .map(JoinedRoomDetails::all_timeline_update_senders)
+        .unwrap_or_default();
+    if senders.is_empty() { return; }
+    for sender in &senders {
+        let _ = sender.send(TimelineUpdate::RoomMembersSynced);
+    }
+    SignalToUI::set_ui_signal();
+}
+
 
 /// A const-compatible hasher, used for `static` items containing `HashMap`s or `HashSet`s.
 type ConstHasher = BuildHasherDefault<DefaultHasher>;

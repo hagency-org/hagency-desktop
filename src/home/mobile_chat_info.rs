@@ -535,8 +535,11 @@ impl MobileChatInfo {
                 let room = client
                     .get_room(room.room_id())
                     .ok_or(crate::i18n::tr("This chat is no longer available."))?;
+                // The stored list can keep a person who has left: ask the homeserver
+                // each time, and show the stored list when it can't be asked.
+                crate::room_members::reload(&room).await;
                 let members = room
-                    .members(RoomMemberships::JOIN | RoomMemberships::BAN)
+                    .members_no_sync(RoomMemberships::JOIN | RoomMemberships::BAN)
                     .await
                     .map_err(|e| e.to_string())?;
                 let banned_members = members.iter().filter(|m| *m.membership() == ruma::events::room::member::MembershipState::Ban)
