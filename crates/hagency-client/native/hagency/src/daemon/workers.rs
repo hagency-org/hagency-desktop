@@ -222,6 +222,7 @@ pub async fn pass(
 pub struct Control {
     pub retired: AtomicBool,
     pub wake: tokio::sync::Notify,
+    retiring: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -233,6 +234,7 @@ pub struct Worker {
 impl Worker {
     pub fn retire(&self) {
         self.control.retired.store(true, Ordering::Release);
+        self.control.retiring.notify_waiters();
         self.control.wake.notify_one();
     }
     pub fn retired(&self) -> bool {
