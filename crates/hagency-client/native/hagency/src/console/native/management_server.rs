@@ -25,6 +25,8 @@ pub enum ManagementCommand {
         room_id: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         execution_thread: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        room_allowance_after: Option<String>,
     },
     SharedApprovalGet {id:String},
     SharedApprovalDecide {id:String,digest:String,decision:String},
@@ -368,9 +370,15 @@ impl ServerOperation {
         use reqwest::Method;
         let key = |value: &str| super::key(value);
         let (method, suffix, input) = match command {
-            ManagementCommand::SharedApprovals { room_id, execution_thread } => {
+            ManagementCommand::SharedApprovals { room_id, execution_thread, room_allowance_after } => {
                 if room_id.as_ref().is_some_and(|s|s.len()>255||!s.starts_with('!')) {return Err(failure(400,"invalid_room"));}
                 let mut input = json!({"roomId":room_id});
+                if let Some(cursor) = room_allowance_after {
+                    if room_id.is_none() || cursor.len()>255 || cursor.chars().any(char::is_control) {
+                        return Err(failure(400, "invalid_room_allowance_cursor"));
+                    }
+                    input["roomAllowanceAfter"]=json!(cursor);
+                }
                 if let Some(thread) = execution_thread {
                     if room_id.is_none() || !thread.starts_with('$') || thread.len() < 2 || thread.len() > 255 || thread.chars().any(char::is_control) {
                         return Err(failure(400, "invalid_execution_thread"));
@@ -1116,6 +1124,7 @@ mod execution_thread_tests {
         for thread in [None, Some("$original")] {
             let op = ServerOperation::prepare(&ManagementCommand::SharedApprovals {
                 room_id: Some("!room".into()), execution_thread: thread.map(str::to_owned),
+                room_allowance_after: None,
             }, None).unwrap();
             let input = op.input.unwrap();
             assert_eq!(input["roomId"], "!room");
