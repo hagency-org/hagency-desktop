@@ -983,7 +983,7 @@ async fn read_dashboard(manager: &crate::native_owner::NativeManagement, owner: 
     let requests = pages(manager, |after| C::PoolAgents { after, pool_id: None, needs_my_action: false }).await;
     let decisions = pages(manager, |after| C::PoolAgents { after, pool_id: None, needs_my_action: true }).await;
     let approvals = manager
-        .central(C::SharedApprovals { room_id: None })
+        .central(C::SharedApprovals { room_id: None, execution_thread: None })
         .await
         .ok()
         .and_then(|v| v["approvals"].as_array().map(|rows| rows.iter().filter(|r| r["canDecide"] == true).count() as u64));

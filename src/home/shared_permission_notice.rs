@@ -101,6 +101,7 @@ pub struct SharedPermissionNotice {
     #[rust] loading:bool,
     #[rust] timer:Timer,
     #[rust] active:bool,
+    #[rust] execution_thread_filter:bool,
     #[rust] rows:Vec<Value>,
     #[rust] selected:usize,
     #[rust] execution_text:String,
@@ -211,6 +212,7 @@ impl SharedPermissionNotice {
     /// says whether a message's run card shows its run stopped.
     fn read_status(&mut self,value:&Value,stopped:impl Fn(&str)->bool) {
         self.error.clear();
+        self.execution_thread_filter = value["executionThreadFilter"] == true;
         self.execution_busy=execution_busy(value,&self.room,&self.thread);
         // The run the last decision belonged to has ended: a later run must
         // not show it as its own last or previous request.
@@ -226,8 +228,9 @@ impl SharedPermissionNotice {
         if service.identity()!=self.identity{return;}
         self.loading=true;self.nonce=self.nonce.wrapping_add(1);
         let identity=self.identity.clone();let room=self.room.clone();let thread=self.thread.clone();let nonce=self.nonce;
+        let execution_thread = (self.execution_thread_filter && !thread.is_empty()).then(|| thread.clone());
         crate::sliding_sync::spawn_async_task(async move {
-            let value=service.shared_permissions(ManagementCommand::SharedApprovals{room_id:Some(room.clone())}).await;
+            let value=service.shared_permissions(ManagementCommand::SharedApprovals{room_id:Some(room.clone()),execution_thread}).await;
             Cx::post_action(PermissionResult{identity,room,thread,nonce,value});
         });
     }
@@ -261,7 +264,7 @@ impl Widget for SharedPermissionNotice {
                             if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){cx.action(PendingApprovalsChanged);}
                             self.render(cx);
                         },
-                        Err(_)=>{self.error="Could not confirm permission status; retrying.".into();self.render(cx);},
+                        Err(_)=>{self.execution_thread_filter=false;self.error="Could not confirm permission status; retrying.".into();self.render(cx);},
                     }
                     if self.active{self.timer=cx.start_timeout(2.0);}
                 }
@@ -289,7 +292,7 @@ impl SharedPermissionNoticeRef {
         let Some(mut this)=self.borrow_mut()else{return};
         let identity=Service::for_current().map(|s|s.identity()).unwrap_or_default();
         if this.identity!=identity || this.room!=room || this.thread!=thread {
-            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
+            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.execution_thread_filter=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
         }else if this.active && !this.loading && this.timer.is_empty(){this.poll(cx);}
     }
 }
