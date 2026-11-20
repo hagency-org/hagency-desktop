@@ -92,6 +92,8 @@ pub fn script_mod(vm: &mut ScriptVm) {
     rooms_sidebar::script_mod(vm);
     welcome_screen::script_mod(vm);
     light_themed_dock::script_mod(vm);
+    // Moments uses MobileAvatar and is also a template in the desktop chat dock.
+    crate::moments::script_mod(vm);
     main_desktop_ui::script_mod(vm);
     spaces_bar::script_mod(vm);
     // `account_menu` only depends on base + shared widgets; it must precede the rail.
