@@ -4,6 +4,27 @@ use crate::console::native::{
     SharedDemandPoll, SharedDemandResume, SharedDemandStopReceipt, SharedDemandStopResume,
 };
 impl CurrentSharedExecutor {
+    pub(crate) async fn discover_for_worker(&self, budget: bool, after: Option<String>) -> Result<(Option<String>,Option<(String,String)>),NativeError> {
+        self.selection.check_executor_owner(&self.owner).await?;
+        if budget {
+            #[cfg(feature="shared-budget-execution")]
+            return self.transport.discover_budget_demand(after).await;
+            #[cfg(not(feature="shared-budget-execution"))]
+            return Err(failure(409,"shared_budget_execution_disabled"));
+        }
+        self.transport.discover_demand(after).await
+    }
+
+    pub(crate) async fn consume_for_worker(&self,budget:bool,id:&str,digest:&str)->Result<crate::console::native::SharedDemandProgress,NativeError>{
+        self.selection.check_executor_owner(&self.owner).await?;
+        if budget {
+            #[cfg(feature="shared-budget-execution")]
+            return self.transport.consume_budget_ref(&self.selection.registry,id,digest).await;
+            #[cfg(not(feature="shared-budget-execution"))]
+            return Err(failure(409,"shared_budget_execution_disabled"));
+        }
+        self.transport.consume_demand_ref(&self.selection.registry,id,digest).await
+    }
     pub async fn poll_demand(
         &self,
         after: Option<String>,
