@@ -470,6 +470,11 @@ pub struct MobileChatInfo {
     source: ScriptObjectRef,
     #[deref]
     view: View,
+    /// Set by a room's screen that shows the room's history itself, over its timeline:
+    /// a request for the history then goes to that screen, not to the app, whose view of
+    /// it covers the whole window.
+    #[live]
+    history_in_room: bool,
     #[rust]
     owner: Option<OwnedUserId>,
     #[rust]
@@ -1163,7 +1168,8 @@ impl Widget for MobileChatInfo {
             }
             if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) || self.view.navigation_bar_button(cx, ids!(history_media)).clicked(actions) {
                 if self.pin_is_current() && let Some(data) = self.data.as_ref() {
-                    cx.action(super::room_history::RoomHistoryAction::Open {room: data.room.clone(), filter: if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) {super::room_history::HistoryFilter::Messages} else {super::room_history::HistoryFilter::Media}});
+                    let request = super::room_history::RoomHistoryAction::Open {room: data.room.clone(), filter: if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) {super::room_history::HistoryFilter::Messages} else {super::room_history::HistoryFilter::Media}};
+                    if self.history_in_room {cx.widget_action(self.widget_uid(), request);} else {cx.action(request);}
                 }
                 return;
             }
@@ -1867,6 +1873,31 @@ mod information_target_tests {
         info.removing=true;
         info.clear();
         assert!(!info.adding && !info.removing && info.agent_command.is_none());
+    }
+    #[test]
+    fn a_panel_inside_a_rooms_screen_asks_that_screen_for_the_history_and_not_the_app() {
+        use super::super::room_history::{HistoryFilter, RoomHistoryAction};
+        use crate::shared::navigation_bar_button::NavigationBarButtonAction;
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=new_panel(&mut cx);
+        let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),matrix_sdk::ruma::room_id!("!a:server").to_owned());
+        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:String::new(),members:vec![],banned_members:HashSet::new(),removable:HashSet::new(),can_rename:false,mode:None,can_invite:true});
+        #[cfg(feature = "onboarding-test-support")]
+        {info.review_mode=true;}
+        if !info.pin_is_current() {return;}
+        let uid=info.widget_uid();
+        for (id,filter) in [(ids!(history_search),HistoryFilter::Messages),(ids!(history_media),HistoryFilter::Media)] {
+            let button=info.view.navigation_bar_button(&mut cx,id).widget_uid();
+            for in_room in [false,true] {
+                info.history_in_room=in_room;
+                let click=cx.capture_actions(|cx|cx.widget_action(button,NavigationBarButtonAction::Clicked));
+                let out=cx.capture_actions(|cx|info.handle_event(cx,&Event::Actions(click),&mut Scope::empty()));
+                let to_app=out.iter().any(|action|matches!(action.downcast_ref(),Some(RoomHistoryAction::Open{filter:actual,..}) if *actual==filter));
+                let to_screen=out.iter().filter_map(|action|action.as_widget_action()).any(|action|action.widget_uid==uid
+                    && matches!(action.action.downcast_ref(),Some(RoomHistoryAction::Open{filter:actual,..}) if *actual==filter));
+                assert_eq!((to_app,to_screen),(!in_room,in_room),"{filter:?} in a room's screen: {in_room}");
+            }
+        }
     }
     #[test]
     fn the_room_is_shown_by_its_name_which_only_those_allowed_can_change() {

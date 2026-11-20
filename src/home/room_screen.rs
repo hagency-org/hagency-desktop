@@ -1133,13 +1133,18 @@ script_mod! {
                 }
                 desktop_chat_info_panel := SolidView {visible: false width: 280 height: Fill flow: Right draw_bg.color: mod.widgets.RINX_BORDER
                     View {width: 1 height: Fill}
-                    desktop_chat_info_card := View {width: Fill height: Fill desktop_chat_info := MobileChatInfo {summary.summary_details.visible: false}}
+                    desktop_chat_info_card := View {width: Fill height: Fill desktop_chat_info := MobileChatInfo {history_in_room: true summary.summary_details.visible: false}}
                 }
             }
             compact_chat_info_panel := View {visible: false width: Fill height: Fill flow: Right align: Align{x: 1.0}
                 compact_chat_info_card := SolidView {width: 280 height: Fill draw_bg.color: mod.widgets.RINX_SURFACE
-                    compact_chat_info := MobileChatInfo {summary.summary_details.visible: false}
+                    compact_chat_info := MobileChatInfo {history_in_room: true summary.summary_details.visible: false}
                 }
+            }
+            // The room's history on a desktop: over the room's own timeline, so that the
+            // room list beside it stays in view. Its cursor keeps presses off the timeline.
+            history_overlay := View {visible: false width: Fill height: Fill cursor: MouseCursor.Default
+                history_panel := RoomHistoryPanel {padding: Inset{top: 0 bottom: 0}}
             }
         }
     }
@@ -4106,20 +4111,60 @@ impl RoomScreen {
         );
     }
 
+    /// The request for the room's history that this screen's own controls made: the
+    /// buttons of its header, or one of its two information panels, which say so with an
+    /// action of their own that the app doesn't hear.
+    fn room_history_request(&mut self, cx: &mut Cx, actions: &Actions) -> Option<(RoomNameId, super::room_history::HistoryFilter)> {
+        use super::room_history::{HistoryFilter, RoomHistoryAction};
+        let search = self.view.navigation_bar_button(cx, ids!(desktop_history_search)).clicked(actions);
+        let media = self.view.navigation_bar_button(cx, ids!(desktop_history_media)).clicked(actions);
+        if search || media {
+            return Some((self.room_name_id.clone()?, if search {HistoryFilter::Messages} else {HistoryFilter::Media}));
+        }
+        let panels = [
+            self.view.widget(cx, ids!(desktop_chat_info)).widget_uid(),
+            self.view.widget(cx, ids!(compact_chat_info)).widget_uid(),
+        ];
+        actions.iter()
+            .filter_map(|action| action.as_widget_action())
+            .filter(|action| panels.contains(&action.widget_uid))
+            .find_map(|action| match action.action.downcast_ref() {
+                Some(RoomHistoryAction::Open {room, filter}) => Some((room.clone(), *filter)),
+                _ => None,
+            })
+    }
+
+    /// Shows the room's history over this screen's timeline: on a desktop the view that
+    /// covers the whole window would also cover the room list beside the chat.
+    fn open_room_history(&mut self, cx: &mut Cx, room: &RoomNameId, filter: super::room_history::HistoryFilter) {
+        use super::room_history::RoomHistoryPanelWidgetExt;
+        self.view.room_history_panel(cx, ids!(history_overlay.history_panel)).open_in_place(cx, room, filter);
+        self.view.view(cx, ids!(history_overlay)).set_visible(cx, true);
+        self.view.redraw(cx);
+    }
+
+    /// Takes the room's history off this screen and drops what it had loaded.
+    fn close_room_history(&mut self, cx: &mut Cx) {
+        use super::room_history::RoomHistoryPanelWidgetExt;
+        let overlay = self.view.view(cx, ids!(history_overlay));
+        if !overlay.visible() { return }
+        self.view.room_history_panel(cx, ids!(history_overlay.history_panel)).close_in_place();
+        overlay.set_visible(cx, false);
+        self.view.redraw(cx);
+    }
+
     /// Sets this `RoomScreen` widget to display the timeline for the given room.
     /// Opens, closes or dismisses the desktop chat info panel.
     fn handle_desktop_chat_info(&mut self, cx: &mut Cx, event: &Event) {
         if !self.view.view(cx, ids!(desktop_chat_header)).visible() { return; }
         if let Event::Actions(actions) = event {
-            let search = self.view.navigation_bar_button(cx, ids!(desktop_history_search)).clicked(actions);
-            let media = self.view.navigation_bar_button(cx, ids!(desktop_history_media)).clicked(actions);
-            if search || media {
-                if let Some(room) = self.room_name_id.clone() {
-                    cx.action(super::room_history::RoomHistoryAction::Open {
-                        room,
-                        filter: if search {super::room_history::HistoryFilter::Messages} else {super::room_history::HistoryFilter::Media},
-                    });
-                }
+            use super::room_history::RoomHistoryPanelWidgetExt;
+            // Only the panel of this screen closes this screen's history.
+            if self.view.room_history_panel(cx, ids!(history_overlay.history_panel)).take_close_request() {
+                self.close_room_history(cx);
+            }
+            if let Some((room, filter)) = self.room_history_request(cx, actions) {
+                self.open_room_history(cx, &room, filter);
                 return;
             }
         }
@@ -4246,6 +4291,8 @@ impl RoomScreen {
             self.room_name_id = Some(room_name_id.clone());
             return;
         }
+        // Another room's history has no place over this one.
+        self.close_room_history(cx);
 
         self.view.typing_notice(cx, ids!(typing_notice)).clear(cx);
         self.view.identity_reset_banner(cx, ids!(identity_reset_banner)).show_or_hide(cx, None);
@@ -4292,6 +4339,7 @@ impl RoomScreen {
     }
 
     pub fn hide_displayed_room(&mut self, cx: &mut Cx) {
+        self.close_room_history(cx);
         crate::memory_budget::release_tree(cx, &self.child_by_path(ids!(timeline.list)));
         self.view.typing_notice(cx, ids!(typing_notice)).clear(cx);
         self.view.identity_reset_banner(cx, ids!(identity_reset_banner)).show_or_hide(cx, None);
@@ -8585,6 +8633,66 @@ mod desktop_information_columns_tests {
         assert_eq!(screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx).size.x, 840.0);
     }
     #[test]
+    fn the_rooms_history_opens_over_its_timeline_and_closes_only_at_its_own_panels_word() {
+        use super::super::room_history::{HistoryFilter, RoomHistoryAction, RoomHistoryPanelWidgetExt};
+        let (mut cx, mut screen) = screen();
+        let room = RoomNameId::empty(matrix_sdk::ruma::room_id!("!current:server").to_owned());
+        screen.room_name_id = Some(room.clone());
+        draw(&mut cx, &mut screen, 840.0);
+        let overlay = screen.view.view(&mut cx, ids!(history_overlay));
+        assert!(!overlay.visible());
+        let request = RoomHistoryAction::Open {room: room.clone(), filter: HistoryFilter::Media};
+
+        // What the app hears, as from the room list's menu, is for the view that covers the window.
+        let heard_by_app = cx.capture_actions(|cx| cx.action(request.clone()));
+        screen.handle_desktop_chat_info(&mut cx, &Event::Actions(heard_by_app));
+        assert!(!overlay.visible());
+        // Nor does this screen take the word of a widget that isn't one of its information panels.
+        let stranger = screen.view.navigation_bar_button(&mut cx, ids!(desktop_chat_info_button)).widget_uid();
+        let from_stranger = cx.capture_actions(|cx| cx.widget_action(stranger, request.clone()));
+        screen.handle_desktop_chat_info(&mut cx, &Event::Actions(from_stranger));
+        assert!(!overlay.visible());
+
+        for panel in [ids!(desktop_chat_info), ids!(compact_chat_info)] {
+            let info = screen.view.widget(&mut cx, panel).widget_uid();
+            let asked = cx.capture_actions(|cx| cx.widget_action(info, request.clone()));
+            assert_eq!(screen.room_history_request(&mut cx, &asked).map(|(room, filter)| (room.room_id().clone(), filter)), Some((room.room_id().clone(), HistoryFilter::Media)));
+            screen.handle_desktop_chat_info(&mut cx, &Event::Actions(asked));
+            assert!(overlay.visible());
+            screen.close_room_history(&mut cx);
+            assert!(!overlay.visible());
+        }
+
+        screen.open_room_history(&mut cx, &room, HistoryFilter::Messages);
+        draw(&mut cx, &mut screen, 840.0);
+        // The history lies within the room's screen, under the header that names the room.
+        // (A panel draws for the account that is signed in, and a test has none: its place is the overlay's.)
+        let header = screen.view.view(&mut cx, ids!(desktop_chat_header)).area().rect(&cx);
+        let wrapper = screen.view.view(&mut cx, ids!(room_screen_wrapper)).area().rect(&cx);
+        let place = overlay.area().rect(&cx);
+        assert!(header.size.y > 0.0 && place.pos.y >= header.pos.y + header.size.y - 1.0, "{header:?} {place:?}");
+        assert!(place.size.x > 0.0 && place.size.y > 0.0);
+        assert!((place.pos.x - wrapper.pos.x).abs() < 1.0 && (place.size.x - wrapper.size.x).abs() < 1.0, "{wrapper:?} {place:?}");
+
+        // A close that another room's panel asked for is not this one's.
+        let other = cx.capture_actions(|cx| cx.action(RoomHistoryAction::Close));
+        screen.handle_desktop_chat_info(&mut cx, &Event::Actions(other));
+        assert!(overlay.visible());
+        let panel = screen.view.room_history_panel(&mut cx, ids!(history_overlay.history_panel));
+        let own = cx.capture_actions(|cx| panel.ask_to_close(cx));
+        assert!(own.iter().any(|action| matches!(action.downcast_ref(), Some(RoomHistoryAction::Close))), "the view that covers the window closes on the same action");
+        screen.handle_desktop_chat_info(&mut cx, &Event::Actions(own));
+        assert!(!overlay.visible());
+        assert!(!panel.take_close_request(), "a closed panel has nothing left to ask");
+
+        // A screen that goes on to show another room leaves the history behind.
+        screen.open_room_history(&mut cx, &room, HistoryFilter::Messages);
+        assert!(overlay.visible());
+        screen.hide_displayed_room(&mut cx);
+        assert!(!overlay.visible());
+        cx.with_vm(|vm| assert!(vm.take_errors().is_empty()));
+    }
+    #[test]
     fn sidebar_toggle_opens_and_closes_only_the_current_room_information_pane() {
         let (mut cx,mut screen)=screen();
         screen.room_name_id=Some(RoomNameId::empty(matrix_sdk::ruma::room_id!("!current:server").to_owned()));
@@ -8600,12 +8708,17 @@ mod desktop_information_columns_tests {
         assert!(media.size.x>0.0 && media.pos.x+media.size.x<=toggle.pos.x);
         assert!(!screen.view.view(&mut cx,ids!(desktop_chat_info.summary_details)).visible());
         assert!(!screen.view.view(&mut cx,ids!(compact_chat_info.summary_details)).visible());
-        for (id,filter) in [(ids!(desktop_history_search),super::super::room_history::HistoryFilter::Messages),(ids!(desktop_history_media),super::super::room_history::HistoryFilter::Media)] {
+        // The header's history controls open the history in this screen, not over the whole window.
+        let overlay=screen.view.view(&mut cx,ids!(history_overlay));
+        for id in [ids!(desktop_history_search),ids!(desktop_history_media)] {
             let history=screen.view.navigation_bar_button(&mut cx,id);
             let actions=cx.capture_actions(|cx|cx.widget_action(history.widget_uid(),crate::shared::navigation_bar_button::NavigationBarButtonAction::Clicked));
+            assert!(!overlay.visible());
             let output=cx.capture_actions(|cx|screen.handle_desktop_chat_info(cx,&Event::Actions(actions)));
-            assert!(output.iter().any(|action| matches!(action.downcast_ref::<super::super::room_history::RoomHistoryAction>(),Some(super::super::room_history::RoomHistoryAction::Open {room,filter:actual}) if room.room_id()==screen.room_name_id.as_ref().unwrap().room_id() && *actual==filter)));
+            assert!(overlay.visible());
+            assert!(!output.iter().any(|action|action.downcast_ref::<super::super::room_history::RoomHistoryAction>().is_some()),"the app's view of the history stays closed");
             assert!(!screen.chat_info_requested,"history controls work while sidebar is closed");
+            screen.close_room_history(&mut cx);
         }
         let actions=cx.capture_actions(|cx|cx.widget_action(button.widget_uid(),crate::shared::navigation_bar_button::NavigationBarButtonAction::Clicked));
         screen.handle_desktop_chat_info(&mut cx,&Event::Actions(actions));

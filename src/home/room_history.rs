@@ -338,6 +338,10 @@ pub struct RoomHistoryPanel {
     view: View,
     #[rust]
     owner: Option<OwnedUserId>,
+    /// Set when this panel itself asked to be closed, for a room's screen to tell its own
+    /// panel's request from that of another room's.
+    #[rust]
+    close_requested: bool,
     #[rust]
     room: Option<RoomNameId>,
     #[rust]
@@ -559,11 +563,28 @@ impl RoomHistoryPanel {
         self.detail = Some(message);
         self.refresh(cx, false);
     }
+    /// Asks whoever shows this panel to close it.
+    fn request_close(&mut self, cx: &mut Cx) {
+        self.close_requested = true;
+        cx.action(RoomHistoryAction::Close);
+    }
+    /// Starts on `room`'s history from nothing.
+    fn open(&mut self, cx: &mut Cx, room: &RoomNameId, filter: HistoryFilter) {
+        self.reset();
+        self.close_requested = false;
+        self.owner = current_user_id();
+        self.room = Some(room.clone());
+        self.filter = filter;
+        self.media = Some(MediaCache::new(None));
+        self.text_input(cx, ids!(history_query)).set_text(cx, "");
+        self.label(cx, ids!(room_name)).set_text(cx, &room.display());
+        self.refresh(cx, true);
+    }
     fn back(&mut self, cx: &mut Cx) {
         if self.detail.take().is_some() {
             self.refresh(cx, false);
         } else {
-            cx.action(RoomHistoryAction::Close);
+            self.request_close(cx);
         }
     }
 }
@@ -580,7 +601,7 @@ impl Widget for RoomHistoryPanel {
         }
         if self.owner != current_user_id() {
             self.reset();
-            cx.action(RoomHistoryAction::Close);
+            self.request_close(cx);
             return;
         }
         if event.back_pressed()
@@ -636,18 +657,15 @@ impl Widget for RoomHistoryPanel {
             }
             if self.detail.is_some() {
                 if self.button(cx, ids!(post_text_to_moments)).clicked(actions) {
-                    if let Some(message) = &self.detail {
-                        cx.action(RoomHistoryAction::Close);
-                        cx.action(crate::moments::ui::MomentsAction::Compose {text: message.content.body().to_owned()});
+                    if let Some(text) = self.detail.as_ref().map(|message| message.content.body().to_owned()) {
+                        self.request_close(cx);
+                        cx.action(crate::moments::ui::MomentsAction::Compose {text});
                     }
                 }
                 if self.button(cx, ids!(view_in_chat)).clicked(actions) {
-                    if let (Some(room), Some(message)) = (&self.room, &self.detail) {
-                        cx.action(RoomHistoryAction::Jump {
-                            room: room.clone(),
-                            event: message.id.clone(),
-                        });
-                        cx.action(RoomHistoryAction::Close);
+                    if let (Some(room), Some(event)) = (self.room.clone(), self.detail.as_ref().map(|message| message.id.clone())) {
+                        cx.action(RoomHistoryAction::Jump {room, event});
+                        self.request_close(cx);
                     }
                 }
                 if let Some(attachment) = self.detail.as_ref().and_then(|m| m.attachment()) {
@@ -786,6 +804,7 @@ impl Widget for RoomHistoryPanel {
     }
 }
 impl RoomHistoryPanelRef {
+    /// For the panel that covers the whole window, in `modal`.
     pub fn action(&self, cx: &mut Cx, modal: ModalRef, action: &RoomHistoryAction) {
         let Some(mut inner) = self.borrow_mut() else {
             return;
@@ -793,24 +812,38 @@ impl RoomHistoryPanelRef {
         match action {
             RoomHistoryAction::Close => {
                 inner.reset();
+                inner.close_requested = false;
                 modal.close(cx);
             }
             RoomHistoryAction::Open { room, filter } => {
-                inner.reset();
-                inner.owner = current_user_id();
-                inner.room = Some(room.clone());
-                inner.filter = *filter;
-                inner.media = Some(MediaCache::new(None));
-                inner.text_input(cx, ids!(history_query)).set_text(cx, "");
-                inner
-                    .label(cx, ids!(room_name))
-                    .set_text(cx, &room.display());
-                inner.refresh(cx, true);
+                inner.open(cx, room, *filter);
                 modal.open(cx);
                 inner.load(cx, 1);
             }
             RoomHistoryAction::Jump { .. } => (),
         }
+    }
+    /// For a panel that a room's screen shows over its own timeline: starts on `room`'s history.
+    pub fn open_in_place(&self, cx: &mut Cx, room: &RoomNameId, filter: HistoryFilter) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.open(cx, room, filter);
+        inner.load(cx, 1);
+    }
+    /// Drops what a panel shown in place had loaded.
+    pub fn close_in_place(&self) {
+        let Some(mut inner) = self.borrow_mut() else { return };
+        inner.reset();
+        inner.close_requested = false;
+    }
+    #[cfg(test)]
+    pub(crate) fn ask_to_close(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.request_close(cx);
+        }
+    }
+    /// Whether this panel asked to be closed since it was last opened or closed.
+    pub fn take_close_request(&self) -> bool {
+        self.borrow_mut().is_some_and(|mut inner| std::mem::take(&mut inner.close_requested))
     }
 }
 
