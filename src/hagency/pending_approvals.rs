@@ -231,7 +231,7 @@ pub fn poll() {
     }
     crate::sliding_sync::spawn_async_task(async move {
         let result = service
-            .shared_permissions(ManagementCommand::SharedApprovals { room_id: None })
+            .shared_permissions(ManagementCommand::SharedApprovals { room_id: None, execution_thread: None })
             .await;
         Cx::post_action(PendingApprovalsUpdate { identity, result });
     });

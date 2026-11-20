@@ -21,7 +21,11 @@ use serde_json::{Value, json};
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(tag = "operation", rename_all = "snake_case", deny_unknown_fields)]
 pub enum ManagementCommand {
-    SharedApprovals {room_id:Option<String>},
+    SharedApprovals {
+        room_id: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        execution_thread: Option<String>,
+    },
     SharedApprovalGet {id:String},
     SharedApprovalDecide {id:String,digest:String,decision:String},
     Pools { after: Option<String>, capability: Option<String> },
@@ -364,9 +368,16 @@ impl ServerOperation {
         use reqwest::Method;
         let key = |value: &str| super::key(value);
         let (method, suffix, input) = match command {
-            ManagementCommand::SharedApprovals{room_id}=>{
+            ManagementCommand::SharedApprovals { room_id, execution_thread } => {
                 if room_id.as_ref().is_some_and(|s|s.len()>255||!s.starts_with('!')) {return Err(failure(400,"invalid_room"));}
-                (Method::POST,"shared-execution/approvals/query".into(),Some(json!({"roomId":room_id})))
+                let mut input = json!({"roomId":room_id});
+                if let Some(thread) = execution_thread {
+                    if room_id.is_none() || !thread.starts_with('$') || thread.len() < 2 || thread.len() > 255 || thread.chars().any(char::is_control) {
+                        return Err(failure(400, "invalid_execution_thread"));
+                    }
+                    input["executionThread"] = json!(thread);
+                }
+                (Method::POST, "shared-execution/approvals/query".into(), Some(input))
             },
             ManagementCommand::SharedApprovalGet{id}=>{key(id)?;(Method::POST,"shared-execution/approvals/get".into(),Some(json!({"id":id})))},
             ManagementCommand::SharedApprovalDecide{id,digest,decision}=>{
@@ -1095,3 +1106,20 @@ mod tests {
 #[cfg(test)]
 #[path = "management_server/resource_offer_tests.rs"]
 mod resource_offer_tests;
+
+#[cfg(test)]
+mod execution_thread_tests {
+    use super::*;
+
+    #[test]
+    fn shared_approval_thread_filter_preserves_legacy_requests() {
+        for thread in [None, Some("$original")] {
+            let op = ServerOperation::prepare(&ManagementCommand::SharedApprovals {
+                room_id: Some("!room".into()), execution_thread: thread.map(str::to_owned),
+            }, None).unwrap();
+            let input = op.input.unwrap();
+            assert_eq!(input["roomId"], "!room");
+            assert_eq!(input.get("executionThread").and_then(Value::as_str), thread);
+        }
+    }
+}
