@@ -6,6 +6,48 @@ use ::hagency::native_owner::ManagementCommand;
 
 #[derive(Debug)]
 struct PermissionResult {identity:String,room:String,thread:String,nonce:u64,value:Result<Value,String>}
+#[derive(Default)]
+struct RoomAllowances {
+    supported: bool,
+    requested: bool,
+    cursor: String,
+    next: Option<String>,
+    checked: Option<std::time::Instant>,
+    text: String,
+}
+impl RoomAllowances {
+    fn request(&mut self) -> Option<String> {
+        self.requested=self.supported && self.checked.is_none_or(|t| t.elapsed()>=std::time::Duration::from_secs(30));
+        self.requested.then(|| self.cursor.clone())
+    }
+    fn receive(&mut self, value:&Value) {
+        if value["roomAllowanceSupported"]!=true { *self=Self::default(); return; }
+        self.supported=true;
+        if !self.requested { return; }
+        self.requested=false;
+        self.checked=Some(std::time::Instant::now());
+        let page=&value["roomAllowancePage"];
+        self.next=page["next"].as_str().filter(|s| !s.is_empty() && s.len()<=255).map(str::to_owned);
+        let rows=page["items"].as_array().into_iter().flatten();
+        self.text=rows.filter_map(|r|{
+            let agent=r["agentMxid"].as_str().filter(|id| id.starts_with('@') && id.len()<=255 && !id.chars().any(char::is_control))?;
+            let msg=match r["state"].as_str()? {
+                "exhausted"=>"{agent}: allowance used up.",
+                "usage_unresolved"=>"{agent}: waiting for usage to settle.",
+                "renewal_waiting_capacity"=>"{agent}: waiting for pool capacity to renew.",
+                "unavailable"=>"{agent}: allowance currently unavailable.",
+                _=>return None,
+            };
+            Some(crate::i18n::format(msg,&[("agent",agent.to_owned())]))
+        }).take(8).collect::<Vec<_>>().join("\n");
+        if self.next.is_none() && self.text.is_empty() { self.cursor.clear(); }
+    }
+    fn turn_page(&mut self) {
+        self.cursor=self.next.take().unwrap_or_default();
+        self.text.clear();
+        self.checked=None;
+    }
+}
 fn execution_row<'a>(value:&'a Value,room:&str,thread:&str)->Option<&'a Value> {
     value["executions"].as_array()?.iter().find(|r|
         r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread))
@@ -66,6 +108,8 @@ script_mod! {
             title := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_INK}
         }
         context := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
+        room_allowances := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_INK visible: false}
+        allowance_page := Button {text: #(crate::i18n::tr("Other room Agents")) i18n_text: "Other room Agents" visible: false}
         request_details := ScrollYView {width: Fill height: Fit{max: FitBound.Abs(130.0)}
             details := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_INK}
         }
@@ -113,6 +157,7 @@ pub struct SharedPermissionNotice {
     #[rust] execution_thread_filter:bool,
     #[rust] rows:Vec<Value>,
     #[rust] selected:usize,
+    #[rust] room_allowances:RoomAllowances,
     #[rust] original_request:Option<(String,String)>,
     #[rust] execution_text:String,
     #[rust] execution_busy:bool,
@@ -199,7 +244,12 @@ impl SharedPermissionNotice {
         let shown=self.display();
         self.waiting=shown.waiting;
         self.sync_animation(cx);
-        self.view.set_visible(cx,shown.visible);
+        let notices=&self.room_allowances;
+        let has_page=notices.next.is_some() || !notices.cursor.is_empty();
+        self.view.set_visible(cx,shown.visible || !notices.text.is_empty() || has_page);
+        self.view.label(cx,ids!(room_allowances)).set_text(cx,&notices.text);
+        self.view.widget(cx,ids!(room_allowances)).set_visible(cx,!notices.text.is_empty());
+        self.view.widget(cx,ids!(allowance_page)).set_visible(cx,has_page);
         self.view.label(cx,ids!(title)).set_text(cx,&shown.title);
         for (id,text) in [(ids!(context),&shown.context),(ids!(details),&shown.details),(ids!(hint),&shown.hint)] {
             self.view.label(cx,id).set_text(cx,text);
@@ -223,6 +273,7 @@ impl SharedPermissionNotice {
     /// says whether a message's run card shows its run stopped.
     fn read_status(&mut self,value:&Value,stopped:impl Fn(&str)->bool) {
         self.error.clear();
+        if self.active {self.room_allowances.receive(value);}
         self.original_request=execution_row(value,&self.room,&self.thread).and_then(pool_request);
         self.execution_thread_filter = value["executionThreadFilter"] == true;
         self.execution_busy=execution_busy(value,&self.room,&self.thread);
@@ -240,9 +291,10 @@ impl SharedPermissionNotice {
         if service.identity()!=self.identity{return;}
         self.loading=true;self.nonce=self.nonce.wrapping_add(1);
         let identity=self.identity.clone();let room=self.room.clone();let thread=self.thread.clone();let nonce=self.nonce;
+        let room_allowance_after=self.room_allowances.request();
         let execution_thread = (self.execution_thread_filter && !thread.is_empty()).then(|| thread.clone());
         crate::sliding_sync::spawn_async_task(async move {
-            let value=service.shared_permissions(ManagementCommand::SharedApprovals{room_id:Some(room.clone()),execution_thread}).await;
+            let value=service.shared_permissions(ManagementCommand::SharedApprovals{room_id:Some(room.clone()),execution_thread,room_allowance_after}).await;
             Cx::post_action(PermissionResult{identity,room,thread,nonce,value});
         });
     }
@@ -262,7 +314,7 @@ impl SharedPermissionNotice {
 impl Widget for SharedPermissionNotice {
     fn handle_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope) {
         use crate::hagency::pending_approvals::{PendingApprovalDecided,PendingApprovalsChanged};
-        if !Service::for_current().is_ok_and(|s|s.identity()==self.identity){self.execution_busy=false;self.waiting=false;self.sync_animation(cx);self.view.set_visible(cx,false);self.rows.clear();return;}
+        if !Service::for_current().is_ok_and(|s|s.identity()==self.identity){self.execution_busy=false;self.waiting=false;self.sync_animation(cx);self.room_allowances=RoomAllowances::default();self.view.set_visible(cx,false);self.rows.clear();return;}
         if self.timer.is_event(event).is_some(){self.timer=Timer::default();self.poll(cx);}
         if let Event::Actions(actions)=event {
             for action in actions {
@@ -276,7 +328,7 @@ impl Widget for SharedPermissionNotice {
                             if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){cx.action(PendingApprovalsChanged);}
                             self.render(cx);
                         },
-                        Err(_)=>{self.execution_thread_filter=false;self.error="Could not confirm permission status; retrying.".into();self.render(cx);},
+                        Err(_)=>{self.room_allowances=RoomAllowances::default();self.execution_thread_filter=false;self.error="Could not confirm permission status; retrying.".into();self.render(cx);},
                     }
                     if self.active{self.timer=cx.start_timeout(2.0);}
                 }
@@ -292,6 +344,9 @@ impl Widget for SharedPermissionNotice {
             for (id,decision) in [(ids!(once),"approve_once"),(ids!(session),"approve_session"),(ids!(deny),"deny")] {
                 if self.view.button(cx,id).clicked(actions){self.decide(cx,decision);}
             }
+            if self.view.button(cx,ids!(allowance_page)).clicked(actions) && self.active && !self.loading {
+                self.room_allowances.turn_page();self.render(cx);self.poll(cx);
+            }
             if self.view.button(cx,ids!(allowance)).clicked(actions) && self.active && self.error.is_empty() && self.rows.is_empty()
                 && let Some((request_id,role))=&self.original_request
                 && let Some(account)=crate::sliding_sync::current_user_id() {
@@ -306,18 +361,35 @@ impl Widget for SharedPermissionNotice {
     fn draw_walk(&mut self,cx:&mut Cx2d,scope:&mut Scope,walk:Walk)->DrawStep{self.view.draw_walk(cx,scope,walk)}
 }
 impl SharedPermissionNoticeRef {
-    pub fn set_active(&self,cx:&mut Cx,active:bool){if let Some(mut this)=self.borrow_mut(){if this.active!=active{this.active=active;this.sync_animation(cx);}if !active{cx.stop_timer(this.timer);this.timer=Timer::default();}}}
+    pub fn set_active(&self,cx:&mut Cx,active:bool){if let Some(mut this)=self.borrow_mut(){if this.active!=active{this.active=active;this.sync_animation(cx);}if !active{this.room_allowances=RoomAllowances::default();this.render(cx);cx.stop_timer(this.timer);this.timer=Timer::default();}}}
     pub fn set_room(&self,cx:&mut Cx,room:&str,thread:&str){
         let Some(mut this)=self.borrow_mut()else{return};
         let identity=Service::for_current().map(|s|s.identity()).unwrap_or_default();
         if this.identity!=identity || this.room!=room || this.thread!=thread {
-            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.original_request=None;this.execution_thread_filter=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
+            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_thread_filter=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
         }else if this.active && !this.loading && this.timer.is_empty(){this.poll(cx);}
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn room_allowance_updates_are_optional_scoped_and_replaced_on_refresh() {
+        let mut state=super::RoomAllowances::default();
+        assert!(state.request().is_none());
+        state.receive(&serde_json::json!({"roomAllowanceSupported":true}));
+        assert_eq!(state.request().as_deref(),Some(""));
+        state.receive(&serde_json::json!({"roomAllowanceSupported":true,"roomAllowancePage":{
+            "items":[{"agentMxid":"@agent:example","state":"exhausted"}],"next":"next_page"}}));
+        assert!(state.text.contains("@agent:example"));
+        assert!(state.request().is_none());
+        state.turn_page();
+        assert_eq!(state.request().as_deref(),Some("next_page"));
+        state.receive(&serde_json::json!({"roomAllowanceSupported":true,"roomAllowancePage":{"items":[],"next":null}}));
+        assert!(state.text.is_empty() && state.cursor.is_empty());
+        state.receive(&serde_json::json!({}));
+        assert!(!state.supported && state.next.is_none());
+    }
     #[test]
     fn original_pool_request_requires_a_current_block_and_a_known_role() {
         let mut row = serde_json::json!({"reason":"budget_blocked","resourceRecovery":{"requestId":"request_1","role":"manager"}});
