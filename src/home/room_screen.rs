@@ -1098,6 +1098,14 @@ script_mod! {
             // The top space should be displayed as an overlay at the top of the timeline.
             top_space := mod.widgets.TopSpace { }
 
+            // The room's history on a desktop: over the room's own timeline and input bar,
+            // so that the room list on one side and the room's information on the other
+            // stay in view. Its cursor keeps presses off the timeline. A member's profile
+            // and the panes after it lie on top of it.
+            history_overlay := View {visible: false width: Fill height: Fill cursor: MouseCursor.Default
+                history_panel := RoomHistoryPanel {padding: Inset{top: 0 bottom: 0}}
+            }
+
             // The user profile sliding pane should be displayed on top of other "static" subviews
             // (on top of all other views that are always visible).
             user_profile_sliding_pane := mod.widgets.UserProfileSlidingPane { }
@@ -1140,11 +1148,6 @@ script_mod! {
                 compact_chat_info_card := SolidView {width: 280 height: Fill draw_bg.color: mod.widgets.RINX_SURFACE
                     compact_chat_info := MobileChatInfo {history_in_room: true summary.summary_details.visible: false}
                 }
-            }
-            // The room's history on a desktop: over the room's own timeline, so that the
-            // room list beside it stays in view. Its cursor keeps presses off the timeline.
-            history_overlay := View {visible: false width: Fill height: Fill cursor: MouseCursor.Default
-                history_panel := RoomHistoryPanel {padding: Inset{top: 0 bottom: 0}}
             }
         }
     }
@@ -4111,9 +4114,10 @@ impl RoomScreen {
         );
     }
 
-    /// The request for the room's history that this screen's own controls made: the
-    /// buttons of its header, or one of its two information panels, which say so with an
-    /// action of their own that the app doesn't hear.
+    /// The request for the room's history that is this screen's to answer: one its own
+    /// controls made (the buttons of its header, or one of its two information panels,
+    /// which say so with an action of their own that the app doesn't hear), or one made
+    /// elsewhere for the room whose own timeline this screen shows.
     fn room_history_request(&mut self, cx: &mut Cx, actions: &Actions) -> Option<(RoomNameId, super::room_history::HistoryFilter)> {
         use super::room_history::{HistoryFilter, RoomHistoryAction};
         let search = self.view.navigation_bar_button(cx, ids!(desktop_history_search)).clicked(actions);
@@ -4125,13 +4129,21 @@ impl RoomScreen {
             self.view.widget(cx, ids!(desktop_chat_info)).widget_uid(),
             self.view.widget(cx, ids!(compact_chat_info)).widget_uid(),
         ];
-        actions.iter()
-            .filter_map(|action| action.as_widget_action())
-            .filter(|action| panels.contains(&action.widget_uid))
-            .find_map(|action| match action.action.downcast_ref() {
+        let own_room = match &self.timeline_kind {
+            Some(TimelineKind::MainRoom {room_id}) => Some(room_id),
+            _ => None,
+        };
+        actions.iter().find_map(|action| match action.as_widget_action() {
+            Some(action) if panels.contains(&action.widget_uid) => match action.action.downcast_ref() {
                 Some(RoomHistoryAction::Open {room, filter}) => Some((room.clone(), *filter)),
                 _ => None,
-            })
+            },
+            Some(_) => None,
+            None => match action.downcast_ref() {
+                Some(RoomHistoryAction::OpenInRoom {room, filter}) if own_room == Some(room.room_id()) => Some((room.clone(), *filter)),
+                _ => None,
+            },
+        })
     }
 
     /// Shows the room's history over this screen's timeline: on a desktop the view that
@@ -4156,7 +4168,7 @@ impl RoomScreen {
     /// Sets this `RoomScreen` widget to display the timeline for the given room.
     /// Opens, closes or dismisses the desktop chat info panel.
     fn handle_desktop_chat_info(&mut self, cx: &mut Cx, event: &Event) {
-        if !self.view.view(cx, ids!(desktop_chat_header)).visible() { return; }
+        // The room's history is this screen's to show with or without the desktop header.
         if let Event::Actions(actions) = event {
             use super::room_history::RoomHistoryPanelWidgetExt;
             // Only the panel of this screen closes this screen's history.
@@ -4168,6 +4180,7 @@ impl RoomScreen {
                 return;
             }
         }
+        if !self.view.view(cx, ids!(desktop_chat_header)).visible() { return; }
         if let Event::Actions(actions) = event
             && self.view.navigation_bar_button(cx, ids!(desktop_chat_info_button)).clicked(actions) {
             self.set_desktop_chat_info_visible(cx, !self.chat_info_requested);
@@ -8653,6 +8666,25 @@ mod desktop_information_columns_tests {
         screen.handle_desktop_chat_info(&mut cx, &Event::Actions(from_stranger));
         assert!(!overlay.visible());
 
+        // A request made elsewhere, as from the room list's menu, is for the screen that
+        // shows the room's own timeline: not for another room's, not for a thread's.
+        let elsewhere = RoomHistoryAction::OpenInRoom {room: room.clone(), filter: HistoryFilter::Messages};
+        for kind in [
+            None,
+            Some(TimelineKind::MainRoom {room_id: matrix_sdk::ruma::room_id!("!other:server").to_owned()}),
+            Some(TimelineKind::Thread {room_id: room.room_id().clone(), thread_root_event_id: matrix_sdk::ruma::event_id!("$root:server").to_owned()}),
+        ] {
+            screen.timeline_kind = kind;
+            let asked = cx.capture_actions(|cx| cx.action(elsewhere.clone()));
+            screen.handle_desktop_chat_info(&mut cx, &Event::Actions(asked));
+            assert!(!overlay.visible(), "{:?}", screen.timeline_kind);
+        }
+        screen.timeline_kind = Some(TimelineKind::MainRoom {room_id: room.room_id().clone()});
+        let asked = cx.capture_actions(|cx| cx.action(elsewhere.clone()));
+        screen.handle_desktop_chat_info(&mut cx, &Event::Actions(asked));
+        assert!(overlay.visible());
+        screen.close_room_history(&mut cx);
+
         for panel in [ids!(desktop_chat_info), ids!(compact_chat_info)] {
             let info = screen.view.widget(&mut cx, panel).widget_uid();
             let asked = cx.capture_actions(|cx| cx.widget_action(info, request.clone()));
@@ -8665,14 +8697,25 @@ mod desktop_information_columns_tests {
 
         screen.open_room_history(&mut cx, &room, HistoryFilter::Messages);
         draw(&mut cx, &mut screen, 840.0);
-        // The history lies within the room's screen, under the header that names the room.
+        // The history lies over the chat, under the header that names the room.
         // (A panel draws for the account that is signed in, and a test has none: its place is the overlay's.)
         let header = screen.view.view(&mut cx, ids!(desktop_chat_header)).area().rect(&cx);
-        let wrapper = screen.view.view(&mut cx, ids!(room_screen_wrapper)).area().rect(&cx);
+        let chat = screen.view.view(&mut cx, ids!(chat_center)).area().rect(&cx);
         let place = overlay.area().rect(&cx);
         assert!(header.size.y > 0.0 && place.pos.y >= header.pos.y + header.size.y - 1.0, "{header:?} {place:?}");
-        assert!(place.size.x > 0.0 && place.size.y > 0.0);
-        assert!((place.pos.x - wrapper.pos.x).abs() < 1.0 && (place.size.x - wrapper.size.x).abs() < 1.0, "{wrapper:?} {place:?}");
+        assert!(place.size.y > 0.0 && (place.size.x - 840.0).abs() < 1.0, "{place:?}");
+        assert!((place.pos.x - chat.pos.x).abs() < 1.0 && (place.size.x - chat.size.x).abs() < 1.0, "{chat:?} {place:?}");
+        // The room's information opens beside the history, not under it.
+        screen.chat_info_requested = true;
+        draw(&mut cx, &mut screen, 840.0);
+        assert!(overlay.visible());
+        let information = screen.view.view(&mut cx, ids!(desktop_chat_info_panel));
+        assert!(information.visible());
+        let (place, information) = (overlay.area().rect(&cx), information.area().rect(&cx));
+        assert!(information.size.x >= 280.0 - 1.0 && place.size.x > 0.0, "{place:?} {information:?}");
+        assert!(place.pos.x + place.size.x <= information.pos.x + 1.0, "the history must leave the information in view: {place:?} {information:?}");
+        screen.chat_info_requested = false;
+        draw(&mut cx, &mut screen, 840.0);
 
         // A close that another room's panel asked for is not this one's.
         let other = cx.capture_actions(|cx| cx.action(RoomHistoryAction::Close));

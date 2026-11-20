@@ -34,7 +34,15 @@ pub enum HistoryFilter {
 
 #[derive(Clone, Debug)]
 pub enum RoomHistoryAction {
+    /// A request for the view of a room's history that covers the whole window.
     Open {
+        room: RoomNameId,
+        filter: HistoryFilter,
+    },
+    /// A request made outside a room's screen, as from the room list's menu, for the room
+    /// that is open on a desktop: that room's own screen shows the history over its
+    /// timeline, so that the room list stays in view. See [`opens_in_room`].
+    OpenInRoom {
         room: RoomNameId,
         filter: HistoryFilter,
     },
@@ -589,6 +597,17 @@ impl RoomHistoryPanel {
     }
 }
 
+/// Whether a request for `room`'s history, made outside the room's screen, is for that
+/// screen to show (`RoomHistoryAction::OpenInRoom`) and not for the view over the whole
+/// window.
+///
+/// That is so on a desktop for the room whose own timeline is on show. A phone has no
+/// room list beside the chat; a room that isn't open has no screen to show its history;
+/// and with a thread on show the room's own screen is out of sight.
+pub fn opens_in_room(is_desktop: bool, selected: Option<&crate::app::SelectedRoom>, room: &RoomNameId) -> bool {
+    is_desktop && matches!(selected, Some(crate::app::SelectedRoom::JoinedRoom {room_name_id}) if room_name_id.room_id() == room.room_id())
+}
+
 fn next_request() -> u64 {
     static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
     NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
@@ -820,7 +839,8 @@ impl RoomHistoryPanelRef {
                 modal.open(cx);
                 inner.load(cx, 1);
             }
-            RoomHistoryAction::Jump { .. } => (),
+            // The room's own screen answers this one.
+            RoomHistoryAction::Jump { .. } | RoomHistoryAction::OpenInRoom { .. } => (),
         }
     }
     /// For a panel that a room's screen shows over its own timeline: starts on `room`'s history.
@@ -850,6 +870,26 @@ impl RoomHistoryPanelRef {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn on_a_desktop_the_open_rooms_own_screen_shows_a_history_asked_for_elsewhere() {
+        use crate::app::SelectedRoom;
+        let room = |id: &str| RoomNameId::empty(matrix_sdk::ruma::OwnedRoomId::try_from(id).unwrap());
+        let open = SelectedRoom::JoinedRoom {room_name_id: room("!open:server")};
+        assert!(opens_in_room(true, Some(&open), &room("!open:server")));
+        // A phone shows one view at a time: the history takes the whole of it.
+        assert!(!opens_in_room(false, Some(&open), &room("!open:server")));
+        // A room that isn't open has no screen to show its history.
+        assert!(!opens_in_room(true, Some(&open), &room("!other:server")));
+        assert!(!opens_in_room(true, None, &room("!open:server")));
+        // With a thread on show the room's own screen is out of sight.
+        let thread = SelectedRoom::Thread {
+            room_name_id: room("!open:server"),
+            thread_root_event_id: matrix_sdk::ruma::event_id!("$root:server").to_owned(),
+        };
+        assert!(!opens_in_room(true, Some(&thread), &room("!open:server")));
+        let invited = SelectedRoom::InvitedRoom {room_name_id: room("!open:server")};
+        assert!(!opens_in_room(true, Some(&invited), &room("!open:server")));
+    }
     fn message(id: &str, body: &str, time: u64) -> serde_json::Value {
         serde_json::json!({"type":"m.room.message", "event_id":id, "sender":"@alice:example.org", "origin_server_ts":time, "content":{"msgtype":"m.text", "body":body}})
     }

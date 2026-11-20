@@ -236,9 +236,18 @@ impl WidgetMatchEvent for RoomContextMenu {
         else if self.button(cx, ids!(search_history_button)).clicked(actions)
             || self.button(cx, ids!(shared_attachments_button)).clicked(actions)
         {
-            cx.action(super::room_history::RoomHistoryAction::Open {
-                room: details.room_name_id.clone(),
-                filter: if self.button(cx, ids!(search_history_button)).clicked(actions) {super::room_history::HistoryFilter::Messages} else {super::room_history::HistoryFilter::Media},
+            let room = details.room_name_id.clone();
+            let filter = if self.button(cx, ids!(search_history_button)).clicked(actions) {super::room_history::HistoryFilter::Messages} else {super::room_history::HistoryFilter::Media};
+            // The room that is open shows its history itself, beside this list.
+            let in_room = super::room_history::opens_in_room(
+                super::home_screen::effective_is_desktop(cx),
+                _scope.data.get::<crate::app::AppState>().and_then(|app| app.selected_room.as_ref()),
+                &room,
+            );
+            cx.action(if in_room {
+                super::room_history::RoomHistoryAction::OpenInRoom {room, filter}
+            } else {
+                super::room_history::RoomHistoryAction::Open {room, filter}
             });
             close_menu = true;
         }
