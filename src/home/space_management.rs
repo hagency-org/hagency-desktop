@@ -332,6 +332,45 @@ async fn add_existing_room(client: &Client, parent: &RoomId, child: &RoomId) -> 
     Ok(message)
 }
 
+// The SDK store belongs to this Matrix account. Only the room ID and the
+// requested folder are needed to resume adoption of an already-created space.
+fn setup_key(space: &RoomId) -> String {
+    format!("hagency.pending-project.v1/{space}")
+}
+
+async fn adopt_existing_space(client: &Client, space: &RoomId, folder: Option<String>) -> Result<String> {
+    matrix_context::ensure_current(client)?;
+    if let Some(name) = &folder {
+        ensure!(crate::hagency::model::valid_project_folder_name(name), "invalid_project_folder");
+    }
+    let key = setup_key(space);
+    client.state_store().set_custom_value(key.as_bytes(), serde_json::to_vec(&folder)?).await?;
+    matrix_context::ensure_current(client)?;
+    let service = crate::hagency::backend::Service::for_current().map_err(|e| anyhow!(e))?;
+    let reply = service.execute(crate::hagency::model::Command::AdoptProject {
+        space_id: space.to_string(),
+        project_folder: folder.clone(),
+    }).await.map_err(|e| anyhow!(e))?;
+    matrix_context::ensure_current(client)?;
+    if client.state_store().remove_custom_value(key.as_bytes()).await.is_err() {
+        warning!("Could not clear completed project setup");
+    }
+    let mut message = crate::i18n::tr("Project registered.").to_owned();
+    if let Some(id) = reply["project"]["id"].as_str() {
+        message = crate::i18n::format("Registered project: {id}", &[("id", id.into())]);
+    }
+    if folder.is_some() {
+        message.push('\n');
+        let confirmed = reply["projectFolder"].as_str().or_else(|| reply["project"]["projectFolder"].as_str());
+        if let Some(name) = confirmed.filter(|_| reply["projectFolderUnsupported"] != true) {
+            message.push_str(&crate::i18n::format("Server-confirmed shared folder: {folder}", &[("folder", name.into())]));
+        } else {
+            message.push_str(crate::i18n::tr(folder_note(&reply)));
+        }
+    }
+    Ok(message)
+}
+
 async fn finish_creation(
     client: &Client,
     name: RoomNameId,
@@ -340,32 +379,22 @@ async fn finish_creation(
     project: Option<String>,
     project_folder: Option<String>,
 ) -> (String, Option<RoomNameId>, bool) {
-    let result: Result<Option<&'static str>> = async {
+    let result: Result<Option<String>> = async {
         let mut note = None;
         matrix_context::ensure_current(client)?;
         if let Some(parent) = &config.parent {
             link(client, parent, name.room_id(), true).await?;
         }
-        if agent_space || project.is_some() {
+        if agent_space {
+            note = Some(adopt_existing_space(client, name.room_id(), project_folder).await?);
+        } else if let Some(project_id) = project {
             matrix_context::ensure_current(client)?;
             let service =
                 crate::hagency::backend::Service::for_current().map_err(|e| anyhow!(e))?;
-            let command = if agent_space {
-                crate::hagency::model::Command::AdoptProject {
-                    space_id: name.room_id().to_string(),
-                    project_folder: project_folder.clone(),
-                }
-            } else {
-                crate::hagency::model::Command::AdoptRoom {
-                    project_id: project.unwrap(),
-                    room_id: name.room_id().to_string(),
-                }
-            };
-            matrix_context::ensure_current(client)?;
-            let reply = service.execute(command).await.map_err(|e| anyhow!(e))?;
-            if agent_space && project_folder.is_some() {
-                note = Some(folder_note(&reply));
-            }
+            service.execute(crate::hagency::model::Command::AdoptRoom {
+                project_id,
+                room_id: name.room_id().to_string(),
+            }).await.map_err(|e| anyhow!(e))?;
         }
         matrix_context::ensure_current(client)?;
         Ok(note)
@@ -377,7 +406,7 @@ async fn finish_creation(
                 Some(note) => format!(
                     "{}\n{}",
                     crate::i18n::tr("Created. Continue with the next step below."),
-                    crate::i18n::tr(note)
+                    note
                 ),
                 None => crate::i18n::tr("Created. Continue with the next step below.").to_owned(),
             },
@@ -429,6 +458,9 @@ struct SpaceChoice {
 #[derive(Clone, Debug, Default)]
 struct Snapshot {
     projects_known: bool,
+    can_register_project: bool,
+    pending_folder: Option<String>,
+    confirmed_folder: Option<String>,
     spaces: Vec<SpaceChoice>,
     rooms: Vec<RoomNameId>,
     children: HashSet<OwnedRoomId>,
@@ -492,6 +524,20 @@ async fn snapshot(client: &Client, parent: Option<&OwnedRoomId>) -> Result<Snaps
                 matrix_sdk::RoomDisplayName::Named(id.to_string()),
                 id.clone(),
             ));
+        }
+    }
+    if let Some(space) = data.spaces.iter().find(|space| parent == Some(space.name.room_id()))
+        && let Some(rows) = projects.as_ref().and_then(|v| v["projects"].as_array())
+    {
+        let id = space.name.room_id();
+        let registration = rows.iter().find(|row| row["spaceId"] == id.as_str());
+        data.can_register_project = space.can_edit && registration.is_none();
+        if data.can_register_project {
+            if let Some(raw) = client.state_store().get_custom_value(setup_key(id).as_bytes()).await? {
+                data.pending_folder = serde_json::from_slice(&raw)?;
+            }
+        } else if let Some(row) = registration.filter(|row| row["active"] == true) {
+            data.confirmed_folder = row["projectFolder"].as_str().map(str::to_owned);
         }
     }
     if let Some(project) = data.spaces.iter().find(|space| parent == Some(space.name.room_id())).and_then(|space| space.project_id.as_deref()) {
@@ -771,6 +817,13 @@ script_mod! {
                 space_name := Input {empty_text: #(crate::i18n::tr("Space name")) i18n_empty_text: "Space name"}
                 space_topic := Input {empty_text: #(crate::i18n::tr("Topic")) i18n_empty_text: "Topic"}
                 save := Primary {text: #(crate::i18n::tr("Save space details")) i18n_text: "Save space details"}
+                existing_setup := Section {visible: false spacing: 8
+                    Text {text: #(crate::i18n::tr("Register this space as an Agent project")) i18n_text: "Register this space as an Agent project"}
+                    existing_folder := Input {empty_text: #(crate::i18n::tr("Shared project folder (optional)")) i18n_empty_text: "Shared project folder (optional)"}
+                    existing_folder_error := Hint {visible: false text: #(crate::i18n::tr("Use up to 64 characters, with no slashes or colons, not starting with a dot.")) i18n_text: "Use up to 64 characters, with no slashes or colons, not starting with a dot."}
+                    finish_space_setup := Primary {text: #(crate::i18n::tr("Finish setup")) i18n_text: "Finish setup"}
+                }
+                registered_folder := Hint {visible: false}
                 search := Input {empty_text: #(crate::i18n::tr("Filter rooms")) i18n_empty_text: "Filter rooms"}
                 rooms := PortalList {width: Fill height: Fill
                     Row := View {width: Fill height: Fit flow: Down padding: 8 spacing: 4
@@ -1001,6 +1054,16 @@ impl SpaceManagementPanel {
         }
         self.view.view(cx, ids!(create_form)).set_visible(cx, !self.manage);
         self.view.view(cx, ids!(manage_form)).set_visible(cx, self.manage);
+        self.view.view(cx, ids!(existing_setup)).set_visible(cx, self.manage && self.data.can_register_project);
+        let input = self.view.text_input(cx, ids!(existing_folder)).text();
+        let valid = input.trim().is_empty() || crate::hagency::model::valid_project_folder_name(input.trim());
+        self.view.label(cx, ids!(existing_folder_error)).set_visible(cx, !valid);
+        self.view.button(cx, ids!(finish_space_setup)).set_enabled(cx, self.data.can_register_project && !self.busy && valid);
+        let label = self.view.label(cx, ids!(registered_folder));
+        label.set_visible(cx, self.data.confirmed_folder.is_some());
+        if let Some(folder) = &self.data.confirmed_folder {
+            label.set_text(cx, &crate::i18n::format("Server-confirmed shared folder: {folder}", &[("folder", folder.clone())]));
+        }
         self.view.button(cx, ids!(save)).set_enabled(cx, !self.busy && self.choice().is_some_and(|c| c.can_edit));
         self.view.button(cx, ids!(created)).set_visible(cx, self.created.is_some());
         self.filtered = self.data.rooms.iter().filter(|room| {
@@ -1114,6 +1177,7 @@ impl Widget for SpaceManagementPanel {
                 match &loaded.result {
                     Ok(data) => {
                         self.data = data.clone();
+                        self.view.text_input(cx, ids!(existing_folder)).set_text(cx, data.pending_folder.as_deref().unwrap_or(""));
                         let labels = std::iter::once(crate::i18n::tr("No parent space").to_owned())
                             .chain(self.data.spaces.iter().map(|space| {
                                 format!(
@@ -1255,6 +1319,8 @@ impl Widget for SpaceManagementPanel {
                 .map(|s| s.name.room_id().clone());
             self.data.children.clear();
             self.data.registered_rooms = None;
+            self.data.can_register_project = false;
+            self.data.confirmed_folder = None;
             self.load(cx);
         }
         if self.view.check_box(cx, ids!(public)).changed(actions) == Some(true) {
@@ -1270,6 +1336,7 @@ impl Widget for SpaceManagementPanel {
             self.view.text_input(cx, ids!(folder_name)).set_text(cx, &suggested);
         }
         if self.view.text_input(cx, ids!(name)).changed(actions).is_some()
+            || self.view.text_input(cx, ids!(existing_folder)).changed(actions).is_some()
             || self.view.text_input(cx, ids!(topic)).changed(actions).is_some()
             || self.view.text_input(cx, ids!(folder_name)).changed(actions).is_some()
             || self.view.check_box(cx, ids!(shared_folder)).changed(actions).is_some() {
@@ -1328,6 +1395,18 @@ impl Widget for SpaceManagementPanel {
             return;
         }
         let Some(client) = get_client() else { return };
+        if self.view.button(cx, ids!(finish_space_setup)).clicked(actions)
+            && self.manage && self.data.can_register_project
+            && let Some(space) = self.parent.clone()
+        {
+            let input = self.view.text_input(cx, ids!(existing_folder)).text();
+            let folder = (!input.trim().is_empty()).then(|| input.trim().to_owned());
+            self.run(cx, async move {
+                let message = adopt_existing_space(&client, &space, folder).await?;
+                Ok((message, None, false))
+            });
+            return;
+        }
         if self.view.button(cx, ids!(create)).clicked(actions) && self.created.is_none() {
             let config = CreateRoomConfig {
                 name: self.view.text_input(cx, ids!(name)).text(),
@@ -1947,6 +2026,28 @@ mod tests {
         config.name = "界".repeat(256);
         assert!(config.request().is_err());
     }
+    #[test]
+    fn reopened_space_offers_setup_without_creation_wizard_state() {
+        let (mut cx, mut panel) = panel();
+        panel.manage = true;
+        panel.data.can_register_project = true;
+        assert!(panel.created.is_none());
+        assert!(!panel.setup_pending);
+        panel.sync(&mut cx);
+        assert!(panel.view.view(&mut cx, ids!(existing_setup)).visible());
+        let folder = panel.view.text_input(&mut cx, ids!(existing_folder));
+        let finish = panel.view.button(&mut cx, ids!(finish_space_setup));
+        folder.set_text(&mut cx, "team/shared");
+        panel.sync(&mut cx);
+        assert!(!finish.borrow().unwrap().enabled());
+        folder.set_text(&mut cx, "team-shared");
+        panel.sync(&mut cx);
+        assert!(finish.borrow().unwrap().enabled());
+        panel.data.can_register_project = false;
+        panel.sync(&mut cx);
+        assert!(!panel.view.view(&mut cx, ids!(existing_setup)).visible());
+    }
+
     #[test]
     fn agent_space_offers_a_shared_project_folder_that_must_follow_the_rule() {
         let (mut cx, mut panel) = panel();
