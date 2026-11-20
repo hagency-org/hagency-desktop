@@ -13,6 +13,7 @@ struct PublicationFixtureState {
     device_posts: usize,
     #[cfg(feature = "resource-adoption")]
     connections: ConnectionFixtureState,
+    session_reads: usize,
     contribution_reads: usize,
     recover_reads: usize,
     lose_reply: bool,

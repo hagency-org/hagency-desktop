@@ -12,6 +12,13 @@ pub(super) struct AdmissionRound {
     contribution_revision: u64,
 }
 impl AdmissionRound {
+    pub(super) fn observed(reply: &ConnectionReply) -> Self {
+        Self {
+            request_id: reply.admission.contribution.request_id.clone(),
+            request_revision: reply.admission.request.revision,
+            contribution_revision: reply.admission.contribution.revision,
+        }
+    }
     pub(super) fn validate(&self) -> Result<(), NativeError> {
         super::super::key(&self.request_id)?;
         positive(self.request_revision)?;
@@ -131,12 +138,9 @@ impl OwnerGrantIntents {
         let features = self.session_features(io).await?;
         // Issuance is supported before an owner has published their first grant.
         // Project reservation discovery additionally requires available capacity.
-        let admission_bound = features.iter().any(|v| v.as_str() == Some("admission-bound-grants-v2"));
-        if !admission_bound && !features.iter().any(|v| v.as_str() == Some("project-reservations-v1")) {
-            return Err(failure(409, "management_admission_receipts_required"));
-        }
-        Ok(admission_bound)
+        admission_receipts(&features)
     }
+
     pub(super) async fn observe_grant_admission(
         &self,
         io: &NativeIo<'_>,
@@ -161,11 +165,7 @@ impl OwnerGrantIntents {
             return Err(failure(409, "management_enrollment_changed"));
         }
         enrollment::check_grant_enrollment(io, binding, &reply)?;
-        Ok(AdmissionRound {
-            request_id: c.request_id.clone(),
-            request_revision: reply.admission.request.revision,
-            contribution_revision: c.revision,
-        })
+        Ok(AdmissionRound::observed(&reply))
     }
 
     pub(super) async fn check_grant_admission(
@@ -188,4 +188,38 @@ impl OwnerGrantIntents {
         io.check().await?;
         Ok(observed)
     }
+}
+
+pub(super) fn admission_receipts(features: &[Value]) -> Result<bool, NativeError> {
+    let admission_bound = features.iter().any(|v| v.as_str() == Some("admission-bound-grants-v2"));
+    if !admission_bound && !features.iter().any(|v| v.as_str() == Some("project-reservations-v1")) {
+        return Err(failure(409, "management_admission_receipts_required"));
+    }
+    Ok(admission_bound)
+}
+
+/// An authenticated capability snapshot belongs to one confirmation only.
+pub(super) fn validate_confirmation_features(
+    features: &[Value],
+    receipt_version: u16,
+    regrant: bool,
+    successor: bool,
+) -> Result<(), NativeError> {
+    let bound = admission_receipts(features)?;
+    if receipt_version >= 2 && !bound {
+        return Err(failure(409, "management_admission_receipts_required"));
+    }
+    let requirements = [
+        (regrant, "pool-monthly-regrant-v1", "management_monthly_regrant_required"),
+        (receipt_version == 6, "pool-renewal-policy-v1", "management_pool_renewal_policy_required"),
+        (receipt_version >= 5, "pool-grant-limits-v1", "management_pool_limits_required"),
+        (receipt_version == 4, "calendar-grants-v1", "management_calendar_grants_required"),
+        (successor, "pool-grant-succession-v1", "management_grant_succession_required"),
+    ];
+    for (required, name, code) in requirements {
+        if required && !features.iter().any(|v| v.as_str() == Some(name)) {
+            return Err(failure(409, code));
+        }
+    }
+    Ok(())
 }

@@ -652,3 +652,75 @@ async fn native_owner_enrollment_rejects_invalid_persisted_admission_request_ide
     assert_eq!(f.count("owner_capacity_grants"), 0);
     f.stop().await;
 }
+
+#[tokio::test]
+async fn native_pool_click_can_confirm_identical_terms_after_display_proof_expires() {
+    let mut f = Fixture::new().await;
+    f.enable_factory().await;
+    f.publications.lock().unwrap().admission_receipts = true;
+    let until = Instant::now() + Duration::from_secs(2);
+    let displayed_proof = f.service.verified_enrollment_with(
+        &f.registry, "fixture_contribution".into(), |_| async move {
+            Ok(VerifiedProviderAccount::new("codex", "https://provider.test", "synthetic-account", until).unwrap())
+        },
+    ).await.unwrap();
+    let mut displayed = f.service.prepare(&f.registry, displayed_proof, Fixture::choices()).await.unwrap();
+    let live = Arc::new(AtomicBool::new(true));
+    let current = live.clone();
+    let access = OwnerGrantIntents::new(f.service.manager.clone()).bind_registry(f.registry.clone())
+        .await.unwrap().restrict_to_host(move || current.load(Ordering::Acquire)).unwrap();
+    access.offer_window(&mut displayed);
+    assert!(displayed.native_window.is_some());
+    tokio::time::sleep_until(until.into()).await;
+    assert!(displayed.consent.binding().is_err());
+    assert!(!displayed.expired());
+    let id = displayed.original.intent_id.clone();
+    let cookie = f.service.cookie().await.unwrap();
+    let io = f.service.io(&cookie, Permission::ConsentGrants).await.unwrap();
+    let facts = f.service.root_review_facts(&io, displayed.original.clone()).await.unwrap();
+    drop(io);
+    let proof = f.factory().await.unwrap();
+    let OwnerGrantReviewResult::Review(mut fresh) = f.service.review_existing_with(
+        &f.registry, proof, id, Some(facts.clone()),
+    ).await.unwrap() else { panic!("original must still need confirmation"); };
+    assert!(fresh.same_terms(&displayed));
+    fresh.regrant = true;
+    assert!(!fresh.same_terms(&displayed));
+    fresh.regrant = false;
+    live.store(false, Ordering::Release);
+    assert!(displayed.expired());
+    assert!(access.confirm(displayed).await.is_err());
+    assert_eq!(f.count("owner_capacity_grants"), 0);
+    // The independently observed grant with no retired presentation gate can
+    // commit the original exactly once. An expired display proof cannot write.
+    f.service.commit_review(&f.registry, *fresh, Some(facts)).await.unwrap();
+    assert_eq!(f.count("owner_capacity_grants"), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn expired_display_profile_returns_local_401_while_the_same_manager_is_authorized() {
+    let f = Fixture::new().await;
+    let cookie = f.service.cookie().await.unwrap();
+    let io = f.service.io(&cookie, Permission::ConsentGrants).await.unwrap();
+    let until = Instant::now() + Duration::from_secs(2);
+    let profile = ProfileAuthority::new(profile_digest(&io.identity).unwrap(), io.identity.owner.clone(), until).unwrap();
+    let proof = VerifiedManagementEnrollment::new(
+        profile, "fixture_enrollment".into(), "fixture_contribution".into(), f.resource.clone(),
+        f.revision.clone(), io.identity.owner.clone(), io.identity.device.clone(), io.device.generation(), io.deadline,
+    ).unwrap();
+    let review = f.service.prepare(&f.registry, proof, Fixture::choices()).await.unwrap();
+    let id = review.original.intent_id.clone();
+    drop(io);
+    tokio::time::sleep_until(until.into()).await;
+    f.service.manager.authorized().await.expect("current account still authorized");
+    let error = f.service.confirm(&f.registry, review).await.unwrap_err();
+    assert_eq!((error.status, error.code.as_str()), (401, "management_access_required"));
+    assert_eq!(f.count("owner_capacity_grants"), 0);
+    let OwnerGrantReviewResult::Review(fresh) = f.service.review_existing(
+        &f.registry, f.enrollment().await, id,
+    ).await.unwrap() else { panic!("same original must remain reviewable"); };
+    f.service.confirm(&f.registry, *fresh).await.unwrap();
+    assert_eq!(f.count("owner_capacity_grants"), 1);
+    f.stop().await;
+}

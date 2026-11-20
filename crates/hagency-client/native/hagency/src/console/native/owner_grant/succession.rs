@@ -291,6 +291,7 @@ impl OwnerGrantIntents {
         io.check().await?;
         consent.binding().map_err(storage)?;
         Ok(OwnerGrantReview {
+            native_window: None,
             manager: self.manager.clone(),
             identity: io.identity,
             original,

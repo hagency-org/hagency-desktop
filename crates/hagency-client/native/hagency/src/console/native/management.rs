@@ -489,6 +489,12 @@ impl NativeManagement {
     pub(super) async fn authorized(
         &self,
     ) -> Result<(service::HostContext, service::Session), NativeError> {
+        self.authorized_for_cookie(None).await
+    }
+
+    pub(super) async fn authorized_for_cookie(
+        &self, expected_cookie: Option<&str>,
+    ) -> Result<(service::HostContext, service::Session), NativeError> {
         if let Some(reason) = self.retired_reason() {
             return Err(authorization_failed(reason, failure(401, "management_access_required")));
         }
@@ -502,6 +508,9 @@ impl NativeManagement {
         let raw = cookie
             .strip_prefix("hagency_console=")
             .ok_or_else(|| failure(401, "owner_authorization_required"))?;
+        if expected_cookie.is_some_and(|expected| expected != raw) {
+            return Err(failure(401, "management_scope_changed"));
+        }
         self.owner
             .0
             .host
