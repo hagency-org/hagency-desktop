@@ -72,6 +72,11 @@ assert(H.calls[0].args.expectedRevision==9 && H.calls[0].args.expectedPeriodKey=
 H.entry_role="manager" A.pool_agent_renew() assert(H.calls.len()==1)
 ''',
     "recurring_wait_reasons_and_definite_refill_rejection_are_clear": '''
+assert(A.pool_allowance_notice({})=="")
+assert(A.pool_allowance_notice({allowanceNotice:{state:"unknown"}})=="")
+for state in ["exhausted","usage_unresolved","unavailable"]{
+    assert(A.pool_allowance_notice({allowanceNotice:{state:state}})!="")
+}
 for state in ["awaiting_owner","awaiting_executor","awaiting_capacity","exhausted","revoked"] {
     let label=A.pool_period_state({currentPeriod:{state:state}})
     assert(label!="")
