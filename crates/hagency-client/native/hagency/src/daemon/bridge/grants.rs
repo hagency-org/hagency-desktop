@@ -49,6 +49,7 @@ impl OwnerOperation {
     // Preparing can leave a review to reopen, but cannot reserve capacity or
     // publish. A recorded denial settled that prepare; confirmations and
     // ambiguous transport failures still require their original receipt.
+    #[cfg(any(unix, test))]
     pub(super) fn settled_prepare_denial(self, failure: &super::Failure) -> bool {
         matches!(self, Self::PrepareGrant) && failure.status == 401
             && matches!(failure.code.as_str(), "management_access_required" | "management_scope_changed")
