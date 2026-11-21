@@ -988,7 +988,7 @@ impl SpaceManagementPanel {
         } else if self.created_space {
             "Next, create a room in this space and invite its members. Space membership does not automatically join its rooms."
         } else if self.setup_project.is_some() {
-            "Invite people, then open chat information → Members → Add Agent. The Agent owner must join this space and room. In a group, everyone must @ the Agent they want to answer."
+            "Invite people, then open chat information → + → Add Agent. The Agent owner must join this space and room. In a group, everyone must @ the Agent they want to answer."
         } else {"Invite people to start chatting. This room belongs to an ordinary space; Agents are not enabled."}));
         let mut badge = self.view.view(cx, ids!(done_badge));
         let mut icon = self.view.icon(cx, ids!(done_icon));
