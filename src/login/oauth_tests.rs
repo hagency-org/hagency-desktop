@@ -28,6 +28,9 @@ impl Fixture {
         Self::with_registration(false)
     }
     fn with_registration(registration: bool) -> Self {
+        Self::with_discovery_statuses(registration, vec![])
+    }
+    fn with_discovery_statuses(registration: bool, statuses: Vec<u16>) -> Self {
         let registration = Arc::new(AtomicBool::new(registration));
         let registration_enabled = registration.clone();
         let refresh_error = Arc::new(Mutex::new(None::<String>));
@@ -49,6 +52,7 @@ impl Fixture {
         let device = Arc::new(Mutex::new(None::<String>));
         let current_device = device.clone();
         let thread = std::thread::spawn(move || {
+            let mut discovery_statuses = statuses.into_iter();
             while !done.load(Ordering::Acquire) {
                 let Ok((mut stream, _)) = socket.accept() else {
                     std::thread::sleep(std::time::Duration::from_millis(2));
@@ -180,6 +184,7 @@ impl Fixture {
                 let status = match failure.as_deref() {
                     Some("server_error") => 503,
                     Some(_) => 400,
+                    None if route.contains("/hagency/api/v1/discovery ") => discovery_statuses.next().unwrap_or(200),
                     None => 200,
                 };
                 let response = failure.map(|code| json!({"error":code,"error_description":"fixture detail must never enter diagnostics"})).unwrap_or(response);
@@ -210,6 +215,22 @@ impl Drop for Fixture {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         self.thread.take().unwrap().join().unwrap();
+    }
+}
+
+#[tokio::test]
+async fn saved_account_retries_transient_discovery_but_stops_on_rejection() {
+    for (statuses, attempts, succeeds) in [
+        (vec![503, 503, 503], 4, true),
+        (vec![503, 403], 2, false),
+        (vec![403], 1, false),
+    ] {
+        let fixture = Fixture::with_discovery_statuses(false, statuses);
+        let client = Client::builder().homeserver_url(&fixture.origin).build().await.unwrap();
+        assert_eq!(check_saved_account_server(&client).await.is_ok(), succeeds);
+        let requests = fixture.requests.lock().unwrap();
+        assert_eq!(requests.iter().filter(|(route, _)| route.contains("/hagency/api/v1/discovery ")).count(), attempts);
+        assert!(requests.iter().all(|(route, _)| !route.starts_with("POST ")));
     }
 }
 

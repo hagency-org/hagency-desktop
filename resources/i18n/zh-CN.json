@@ -1465,6 +1465,7 @@
   "Save local policy": "保存本机策略",
   "Service availability": "服务可用性",
   "Set up / retry private chat": "建立 / 重试私聊",
+  "The sign-in server is temporarily unavailable. Select your saved account to retry.": "登录服务器暂时不可用。请选择已保存的账号重试。",
   "Sign in again": "重新登录",
   "Sign in to Codex": "登录 Codex",
   "Sign out of separate Codex account": "退出独立 Codex 账号",
