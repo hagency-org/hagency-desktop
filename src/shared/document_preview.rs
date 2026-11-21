@@ -15,26 +15,45 @@ use super::attachment_download::DownloadKind;
 pub const HTML_LIMIT: u64 = 512 * 1024;
 pub const PDF_LIMIT: u64 = 24 * 1024 * 1024;
 
+/// The elements of a Matrix message, which the sanitizer's strict mode keeps by itself.
+const MESSAGE_ELEMENTS: [&str; 37] = [
+    "del", "h1", "h2", "h3", "h4", "h5", "h6", "blockquote", "p", "a", "ul", "ol", "sup", "sub",
+    "li", "b", "i", "u", "strong", "em", "s", "code", "hr", "br", "div", "table", "thead",
+    "tbody", "tr", "th", "td", "caption", "pre", "span", "img", "details", "summary",
+];
+
+/// What a previewed page keeps beside them: its own style sheet, and the usual sections and
+/// text marks of a page.
+const PAGE_ELEMENTS: [&str; 22] = [
+    "style", "article", "main", "section", "header", "footer", "figure", "figcaption", "nav",
+    "aside", "small", "mark", "dl", "dt", "dd", "tfoot", "colgroup", "col", "kbd", "abbr",
+    "time", "address",
+];
+
 fn static_html(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
     let source = String::from_utf8(bytes).map_err(|_| "HTML must contain UTF-8 text".to_owned())?;
     let html = Html::parse(source.trim_start_matches('\u{feff}'));
+    // A page is laid out by its classes, ids and inline styles, and a table by the cells that
+    // span several. None of these can run code or reach the network: the response's policy
+    // allows no script and nothing from outside the document.
+    let kept = MESSAGE_ELEMENTS.iter().chain(&PAGE_ELEMENTS).copied();
+    let attributes = kept.clone().map(|element| {
+        let properties: &[&'static str] = match element {
+            "td" | "th" => &["class", "id", "style", "colspan", "rowspan"],
+            "col" | "colgroup" => &["class", "id", "style", "span"],
+            _ => &["class", "id", "style"],
+        };
+        PropertiesNames { parent: element, properties }
+    });
+    let classes = kept.map(|element| PropertiesNames { parent: element, properties: &["*"] });
     html.sanitize_with(
         &SanitizerConfig::strict()
-            .allow_elements(
-                [
-                    "style",
-                    "article",
-                    "main",
-                    "section",
-                    "header",
-                    "footer",
-                    "div",
-                    "figure",
-                    "figcaption",
-                ],
-                ListBehavior::Add,
-            )
-            .remove_elements(["script", "iframe", "object", "embed", "svg", "math"])
+            .allow_elements(PAGE_ELEMENTS, ListBehavior::Add)
+            .allow_attributes(attributes, ListBehavior::Add)
+            .allow_classes(classes, ListBehavior::Add)
+            // Dropped with what they hold. A title names the tab of a browser and is no part
+            // of the page; a template is material for a script.
+            .remove_elements(["script", "iframe", "object", "embed", "svg", "math", "title", "template"])
             .remove_attributes([PropertiesNames {
                 parent: "a",
                 properties: &["href", "target"],
@@ -56,7 +75,7 @@ fn static_html(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
          :root{{color-scheme:light dark;font:16px/1.55 system-ui,sans-serif}}\
          body{{max-width:76ch;margin:2rem auto;padding:0 1.25rem;overflow-wrap:anywhere}}\
          pre{{overflow:auto;padding:.65rem;background:rgba(128,128,128,.12)}}\
-         table{{border-collapse:collapse}}td,th{{border:1px solid #888;padding:.35rem .55rem}}\
+         table{{border-collapse:collapse}}td,th{{border:1px solid rgba(128,128,128,.55);padding:.35rem .55rem}}\
          </style></head><body>{html}</body></html>"
     )
     .into_bytes())
@@ -285,6 +304,28 @@ mod tests {
         assert!(response.contains("<h1>Quarterly report</h1>"));
         assert!(response.contains("<td>Revenue</td>") && response.contains("Reference"));
         assert!(!response.contains("example.com") && !response.contains("alert(1)"));
+    }
+
+    #[test]
+    fn document_preview_keeps_the_look_a_page_gives_itself() {
+        let page = br#"<!doctype html><html><head><title>Tab name</title>
+            <style>.total{font-weight:bold}#sum{color:navy}</style></head>
+            <body><nav class="toc">Contents</nav>
+            <p class="total lead" id="sum" style="margin:0" onclick="alert(1)">Sum</p>
+            <table><tr><td colspan="2" rowspan="3" class="wide">Merged</td></tr></table>
+            <code class="language-rust note">let</code><template>Unused</template></body></html>"#;
+        let html = String::from_utf8(static_html(page.to_vec()).unwrap()).unwrap();
+        for kept in [
+            ".total{font-weight:bold}#sum{color:navy}", r#"<nav class="toc">Contents</nav>"#,
+            r#"class="total lead""#, r#"id="sum""#, r#"style="margin:0""#, r#"colspan="2""#,
+            r#"rowspan="3""#, r#"class="wide""#, r#"class="language-rust note""#, ">Sum</p>",
+        ] {
+            assert!(html.contains(kept), "{kept} is missing in {html}");
+        }
+        // What only a browser's tab or a script would use is no part of the page.
+        for dropped in ["Tab name", "Unused", "onclick", "alert"] {
+            assert!(!html.contains(dropped), "{dropped} is left in {html}");
+        }
     }
 
     #[test]

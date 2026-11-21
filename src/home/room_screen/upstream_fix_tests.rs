@@ -13,7 +13,7 @@ fn fixture() -> (Cx, WidgetRef) {
             text := mod.widgets.HtmlOrPlaintext {}
             attachments := mod.widgets.MessageDownloadSection {
                 visible: true
-                open_markdown_button.visible: true
+                open_attachment_button.visible: true
             }
         }});
         let root = WidgetRef::script_from_value(vm, value);
@@ -53,7 +53,7 @@ fn plaintext_room_mentions_escape_markup_and_keep_line_breaks() {
 fn attachment_actions_wrap_inside_narrow_panes_at_larger_text_sizes() {
     let (mut cx, root) = fixture();
     for font_size in [12.0, 22.0] {
-        for path in [ids!(attachments.open_markdown_button), ids!(attachments.download_button), ids!(attachments.share_button)] {
+        for path in [ids!(attachments.open_attachment_button), ids!(attachments.download_button), ids!(attachments.share_button)] {
             let mut button = root.button(&cx, path);
             script_apply_eval!(cx, button, {draw_text.text_style.font_size: #(font_size)});
         }
@@ -74,7 +74,7 @@ fn attachment_actions_wrap_inside_narrow_panes_at_larger_text_sizes() {
             cx2d.end_pass(&pass);
             drop(cx2d); drop(draw);
             let container = root.view(&cx, ids!(attachments)).area().rect(&cx);
-            for path in [ids!(attachments.open_markdown_button), ids!(attachments.download_button), ids!(attachments.share_button)] {
+            for path in [ids!(attachments.open_attachment_button), ids!(attachments.download_button), ids!(attachments.share_button)] {
                 let rect = root.button(&cx, path).area().rect(&cx);
                 assert!(rect.size.x > 0.0 && rect.size.y > 0.0);
                 assert!(rect.pos.x >= container.pos.x && rect.pos.x + rect.size.x <= width + 0.5,
