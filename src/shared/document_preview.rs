@@ -97,14 +97,12 @@ impl DocumentPreview {
             .clone()
             .try_acquire_owned()
             .map_err(|_| "Close an open attachment preview, then try again.".to_owned())?;
-        let (mime, policy_headers, bytes) = match kind {
-            DownloadKind::Html if bytes.len() as u64 <= HTML_LIMIT => (
-                "text/html; charset=utf-8",
-                "Content-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'\r\n",
-                static_html(bytes)?,
-            ),
+        let document = match kind {
+            DownloadKind::Html if bytes.len() as u64 <= HTML_LIMIT => {
+                PreviewDocument::Html(static_html(bytes)?)
+            }
             DownloadKind::Pdf if bytes.len() as u64 <= PDF_LIMIT && bytes.starts_with(b"%PDF-") => {
-                ("application/pdf", "", bytes)
+                PreviewDocument::Pdf(bytes)
             }
             _ => return Err("This file cannot be previewed.".into()),
         };
@@ -113,51 +111,35 @@ impl DocumentPreview {
         let address = listener.local_addr().map_err(|e| e.to_string())?;
         let path = format!("/{}", uuid::Uuid::new_v4());
         let host = address.to_string();
-        let url = Url::parse(&format!("http://{host}{path}")).map_err(|e| e.to_string())?;
-        let response = format!(
-            "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
-             Content-Disposition: inline\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\
-             X-Content-Type-Options: nosniff\r\nCross-Origin-Resource-Policy: same-origin\r\n\
-             X-Frame-Options: DENY\r\n{policy_headers}Connection: close\r\n\r\n",
-            bytes.len(),
-        );
+        let entry = match document {
+            PreviewDocument::Html(_) => "",
+            PreviewDocument::Pdf(_) => "/",
+        };
+        let url = Url::parse(&format!("http://{host}{path}{entry}")).map_err(|e| e.to_string())?;
         let runtime = crate::sliding_sync::backend_runtime();
         let listener = {
             let _guard = runtime.enter();
             tokio::net::TcpListener::from_std(listener).map_err(|e| e.to_string())?
         };
         let task = crate::account_session::spawn(async move {
-            while let Ok((mut stream, _)) = listener.accept().await {
-                let _ = tokio::time::timeout(Duration::from_secs(8), async {
-                    let mut request = [0; 8192];
-                    let mut read = 0;
-                    loop {
-                        let count = stream.read(&mut request[read..]).await?;
-                        if count == 0 { return Ok::<(), std::io::Error>(()); }
-                        let start = read.saturating_sub(3);
-                        read += count;
-                        if request[start..read].windows(4).any(|w| w == b"\r\n\r\n") {
-                            break;
-                        }
+            let server = Arc::new(PreviewServer {
+                host,
+                path,
+                document,
+                epoch,
+            });
+            let mut requests = tokio::task::JoinSet::new();
+            loop {
+                tokio::select! {
+                    result = listener.accept(), if requests.len() < 8 => {
+                        let Ok((stream, _)) = result else { break };
+                        let server = Arc::clone(&server);
+                        requests.spawn(async move {
+                            let _ = tokio::time::timeout(Duration::from_secs(8), server.serve(stream)).await;
+                        });
                     }
-                    let mut lines = request[..read].split(|b| *b == b'\n');
-                    let mut words = lines.next().unwrap_or_default().split(|b| b.is_ascii_whitespace());
-                    let method = words.next();
-                    let address_matches = lines.any(|line| line.len() > 5
-                        && line[..5].eq_ignore_ascii_case(b"host:")
-                        && line[5..].trim_ascii() == host.as_bytes());
-                    if matches!(method, Some(b"GET" | b"HEAD"))
-                        && words.next() == Some(path.as_bytes())
-                        && address_matches
-                        && epoch == crate::account_session::epoch()
-                    {
-                        stream.write_all(response.as_bytes()).await?;
-                        if method == Some(b"GET") { stream.write_all(&bytes).await?; }
-                    } else {
-                        stream.write_all(b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n").await?;
-                    }
-                    stream.shutdown().await
-                }).await;
+                    _ = requests.join_next(), if !requests.is_empty() => {}
+                }
             }
         });
         Ok(Self(Arc::new(Preview {
@@ -165,6 +147,100 @@ impl DocumentPreview {
             task,
             _slot: slot,
         })))
+    }
+}
+
+include!(concat!(env!("OUT_DIR"), "/pdf-preview-assets.rs"));
+
+const STATIC_HTML_POLICY: &str = "default-src 'none'; style-src 'unsafe-inline'; img-src data:; form-action 'none'; base-uri 'none'";
+const PDF_READER_POLICY: &str = concat!(
+    "default-src 'none'; script-src 'self'; worker-src 'self'; connect-src 'self'; ",
+    "style-src 'unsafe-inline'; img-src data: blob:; font-src 'self' blob: data:; ",
+    "form-action 'none'; base-uri 'none'",
+);
+
+enum PreviewDocument {
+    Html(Vec<u8>),
+    Pdf(Vec<u8>),
+}
+
+struct PreviewServer {
+    host: String,
+    path: String,
+    document: PreviewDocument,
+    epoch: u64,
+}
+
+impl PreviewServer {
+    fn response(&self, path: &[u8]) -> Option<(&str, &str, &[u8])> {
+        let resource = path.strip_prefix(self.path.as_bytes())?;
+        match (&self.document, resource) {
+            (PreviewDocument::Html(bytes), b"") => {
+                Some(("text/html; charset=utf-8", STATIC_HTML_POLICY, bytes))
+            }
+            (PreviewDocument::Pdf(bytes), b"/document.pdf") => {
+                Some(("application/octet-stream", "default-src 'none'", bytes))
+            }
+            (PreviewDocument::Pdf(_), resource) => {
+                let (mime, bytes) = pdf_preview_asset(resource)?;
+                Some((mime, PDF_READER_POLICY, bytes))
+            }
+            _ => None,
+        }
+    }
+
+    async fn serve(&self, mut stream: tokio::net::TcpStream) -> std::io::Result<()> {
+        let mut request = [0; 8192];
+        let mut read = 0;
+        let header = loop {
+            let count = stream.read(&mut request[read..]).await?;
+            if count == 0 {
+                return Ok(());
+            }
+            let start = read.saturating_sub(3);
+            read += count;
+            if let Some(end) = request[start..read]
+                .windows(4)
+                .position(|w| w == b"\r\n\r\n")
+            {
+                break &request[..start + end];
+            }
+        };
+        let mut lines = header.split(|b| *b == b'\n');
+        let mut words = lines
+            .next()
+            .unwrap_or_default()
+            .split(|b| b.is_ascii_whitespace());
+        let method = words.next();
+        let path = words.next().unwrap_or_default();
+        let host_matches = lines.any(|line| {
+            line.len() > 5
+                && line[..5].eq_ignore_ascii_case(b"host:")
+                && line[5..].trim_ascii() == self.host.as_bytes()
+        });
+        let authorized = matches!(method, Some(b"GET" | b"HEAD"))
+            && host_matches
+            && self.epoch == crate::account_session::epoch();
+        if let Some((mime, policy, bytes)) = authorized.then(|| self.response(path)).flatten() {
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: {mime}\r\nContent-Length: {}\r\n\
+                 Content-Disposition: inline\r\nCache-Control: no-store\r\nReferrer-Policy: no-referrer\r\n\
+                 X-Content-Type-Options: nosniff\r\nCross-Origin-Resource-Policy: same-origin\r\n\
+                 X-Frame-Options: DENY\r\nContent-Security-Policy: {policy}\r\nConnection: close\r\n\r\n",
+                bytes.len(),
+            );
+            stream.write_all(response.as_bytes()).await?;
+            if method == Some(b"GET") {
+                stream.write_all(bytes).await?;
+            }
+        } else {
+            stream
+                .write_all(
+                    b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .await?;
+        }
+        stream.shutdown().await
     }
 }
 
@@ -223,14 +299,19 @@ mod tests {
         let url = preview.url().clone();
         assert!(request(&preview, "/missing", "GET").starts_with(b"HTTP/1.1 404"));
         assert!(request(&preview, url.path(), "POST").starts_with(b"HTTP/1.1 404"));
-        let response = request(&preview, url.path(), "GET");
-        assert!(
-            response
-                .windows(29)
-                .any(|w| w == b"Content-Type: application/pdf")
-        );
+        let viewer = String::from_utf8(request(&preview, url.path(), "GET")).unwrap();
+        assert!(viewer.contains("Content-Type: text/html"));
+        assert!(viewer.contains("worker-src 'self'"));
+        assert!(viewer.contains("src=\"reader.mjs\""));
+        let path = url.join("document.pdf").unwrap();
+        let response = request(&preview, path.path(), "GET");
+        assert!(response.starts_with(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream"));
         assert!(response.ends_with(pdf));
-        assert!(!request(&preview, url.path(), "HEAD").ends_with(pdf));
+        assert!(!request(&preview, path.path(), "HEAD").ends_with(pdf));
+        let worker = url.join("pdf.worker.min.mjs").unwrap();
+        assert!(request(&preview, worker.path(), "HEAD").starts_with(b"HTTP/1.1 200"));
+        let unknown = url.join("private.txt").unwrap();
+        assert!(request(&preview, unknown.path(), "GET").starts_with(b"HTTP/1.1 404"));
         let stale = DocumentPreview::new(
             DownloadKind::Pdf,
             pdf.to_vec(),
