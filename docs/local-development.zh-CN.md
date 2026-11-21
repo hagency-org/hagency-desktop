@@ -14,8 +14,8 @@ SQLite、pkg-config 与原生显示/音频库，见[上游构建依赖](robrix-u
 使用已提交的 Cargo lockfile，不复用 server 的 target 产物。
 
 ```sh
-cargo build --locked -p rinx --bin rinx
-cargo run --locked --bin rinx
+cargo build --locked -p rinx --bin hagency
+cargo run --locked --bin hagency
 ```
 
 包名/二进制仍为 `rinx`，应用名称为 Hagency Desktop，默认 features 已支持原生管理。
@@ -23,7 +23,7 @@ macOS Cargo 通过 `packaging/run-macos.sh` 在 `target/debug/.rinx-dev/` 生成
 开发 bundle。替换 bundle 前先退出上一实例；launcher 转发自己启动的应用日志与停止信号。
 
 调试器连接或 LaunchServices 启动停滞时，可在 checkout 中运行
-`RINX_DEV_NO_BUNDLE=1 cargo run --locked --bin rinx`。此时系统权限提示可能归属于
+`RINX_DEV_NO_BUNDLE=1 cargo run --locked --bin hagency`。此时系统权限提示可能归属于
 终端。构建完成或取得 PID 不代表应用已初始化、登录或加载 Project。
 
 ## 隔离测试账号和数据
@@ -31,7 +31,7 @@ macOS Cargo 通过 `packaging/run-macos.sh` 在 `target/debug/.rinx-dev/` 生成
 ```sh
 mkdir -p .run
 HAGENCY_DESKTOP_DATA_DIR="$PWD/.run/desktop-test-profile" \
-cargo run --locked --bin rinx
+cargo run --locked --bin hagency
 ```
 
 后续使用同一绝对路径；该设置隔离数据与缓存，`RINX_DATA_DIR`、`ROBRIX_DATA_DIR`
@@ -86,7 +86,7 @@ Project 导航测试覆盖独立文件夹展开、名称打开详情与账号/�
 umask 077
 mkdir -p .run/diagnostics
 RUST_LOG='warn,hagency=debug,matrix_sdk::authentication::oauth=debug' \
-cargo run --locked --bin rinx > .run/diagnostics/desktop.log 2>&1
+cargo run --locked --bin hagency > .run/diagnostics/desktop.log 2>&1
 ```
 
 关注 `owner_adoption_grant`（创建 Hagency 会话）、`owner_renewal`

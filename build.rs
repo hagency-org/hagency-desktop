@@ -60,7 +60,7 @@ fn main() {
         let plist = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("packaging/macos/Info.plist");
         println!("cargo:rerun-if-changed=packaging/macos/Info.plist");
-        println!("cargo:rustc-link-arg-bin=rinx=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
+        println!("cargo:rustc-link-arg-bin=hagency=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
     }
 
     if target_os == "windows" {

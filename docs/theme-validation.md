@@ -42,7 +42,7 @@ cargo test --locked --manifest-path crates/theme-contract/Cargo.toml
 cargo test --profile fast --locked --features octosense-module --lib
 cargo check --profile fast --locked --no-default-features --features octosense-module
 cargo check --profile fast --locked --features tsp
-cargo build --profile fast --locked --example theme_mvp --example chat_web_browser --example chat_link_preview --bin rinx
+cargo build --profile fast --locked --example theme_mvp --example chat_web_browser --example chat_link_preview --bin hagency
 python3 tools/wechat-ux/live/native_theme.py
 python3 tools/wechat-ux/live/native_theme_packages.py
 python3 tools/wechat-ux/live/native_chat_link_preview.py --binary target/fast/examples/chat_link_preview

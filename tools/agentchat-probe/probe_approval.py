@@ -7,7 +7,7 @@ Input is injected via `Cx::dispatch_studio_msg`, the same path studio uses, so
 hit-testing and capture behave exactly as they do for a human click.
 
     # 1. start the app with the bridge on a fixed port
-    MAKEPAD_REMOTE=8099 ./target/debug/rinx <user> <password> <homeserver>
+    MAKEPAD_REMOTE=8099 ./target/debug/hagency <user> <password> <homeserver>
     # 2. with a pending request already in the room:
     python3 probe_approval.py --bridge 8099 --homeserver http://127.0.0.1:8128 \
         --room '!room:server' --request-id approval_<32hex> --token <reader-token> \

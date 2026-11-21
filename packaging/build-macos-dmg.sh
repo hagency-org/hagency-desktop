@@ -201,7 +201,7 @@ echo "==> Found unsigned DMG: $DMG_FILE"
 echo "==> Codesigning $APP_PATH..."
 xattr -cr "$APP_PATH"
 codesign_with_retry "$APP_PATH/Contents/MacOS/octos" app
-codesign_with_retry "$APP_PATH/Contents/MacOS/rinx" app
+codesign_with_retry "$APP_PATH/Contents/MacOS/hagency" app
 codesign_with_retry "$APP_PATH" app
 codesign --verify --verbose=2 "$APP_PATH"
 

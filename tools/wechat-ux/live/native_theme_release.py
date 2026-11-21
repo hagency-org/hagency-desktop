@@ -15,7 +15,7 @@ def main():
     parser.add_argument('--isolated-installation',action='store_true',help='Required when the binary enables onboarding-test-support')
     args=parser.parse_args()
     root=Path('target/theme-release-validation')/uuid.uuid4().hex;root.mkdir(parents=True)
-    report={'passed':False,'binary_sha256':hashlib.sha256(Path('target/release/rinx').read_bytes()).hexdigest(),'runs':[]}
+    report={'passed':False,'binary_sha256':hashlib.sha256(Path('target/release/hagency').read_bytes()).hexdigest(),'runs':[]}
     try:
      for mode in ['light','dark']:
       run=(root/mode).resolve();profile=run/'profile';profile.mkdir(parents=True)
@@ -24,7 +24,7 @@ def main():
       (profile/'theme-state.json').write_text(json.dumps(state))
       with socket.socket() as s:s.bind(('127.0.0.1',0));port=s.getsockname()[1]
       app=NativeApp(run,port,auto_login=False);app.output.mkdir(parents=True);app.log=(app.output/'native.log').open('w')
-      command=['target/release/rinx']
+      command=['target/release/hagency']
       if args.isolated_installation:command += ['--hagency-isolated-installation-root',str(run/'installation')]
       app.process=subprocess.Popen(command,env=dict(os.environ,MAKEPAD_REMOTE=str(port),MAKEPAD_HIDE_WINDOWS='1',MAKEPAD_NO_FOCUS='1',HAGENCY_DESKTOP_DATA_DIR=str(profile)),stdout=app.log,stderr=subprocess.STDOUT)
       try:
