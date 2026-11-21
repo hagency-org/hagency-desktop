@@ -96,6 +96,8 @@ pub struct DownloadableAttachment {
 pub enum DownloadKind {
     File,
     Markdown,
+    Html,
+    Pdf,
     Theme,
     Audio,
     Video,
@@ -110,7 +112,35 @@ impl DownloadKind {
             Self::Video => Some("video/*"),
             Self::File => None,
             Self::Markdown => Some("text/markdown"),
+            Self::Html => Some("text/html"),
+            Self::Pdf => Some("application/pdf"),
             Self::Theme => Some(octosense_theme_contract::MIME),
+        }
+    }
+
+    pub fn for_file(filename: &str, mimetype: Option<&str>) -> Self {
+        if is_theme_attachment(filename, mimetype) { return Self::Theme; }
+        if is_markdown_attachment(filename, mimetype) { return Self::Markdown; }
+
+        let mime = mimetype.unwrap_or_default().split(';').next().unwrap_or_default().trim();
+        let extension = filename.rsplit_once('.').map_or("", |(_, extension)| extension);
+        if extension.eq_ignore_ascii_case("html") || extension.eq_ignore_ascii_case("htm")
+            || mime.eq_ignore_ascii_case("text/html")
+        {
+            Self::Html
+        } else if extension.eq_ignore_ascii_case("pdf") || mime.eq_ignore_ascii_case("application/pdf") {
+            Self::Pdf
+        } else {
+            Self::File
+        }
+    }
+
+    pub fn can_preview(self) -> bool {
+        match self {
+            Self::Markdown | Self::Theme => true,
+            Self::Html => cfg!(any(target_os = "macos", target_os = "windows", target_os = "ios", target_os = "android")),
+            Self::Pdf => cfg!(any(target_os = "macos", target_os = "windows")),
+            _ => false,
         }
     }
 }
@@ -188,7 +218,40 @@ pub fn start_markdown_preview(info: DownloadableAttachment, update_sender: Timel
         }
         match bytes.read_small(crate::attachment_transport::MARKDOWN_LIMIT).and_then(markdown_source) {
             Ok(source) => {
-                makepad_widgets::Cx::post_action(crate::shared::web_browser::WebBrowserAction::OpenMarkdown { title, source, account, attachment });
+                makepad_widgets::Cx::post_action(crate::shared::web_browser::WebBrowserAction::OpenMarkdown { title, source, account, attachment, save: None });
+                finish_download_indicator(&sender, Some(&mxc), DownloadOutcome::Succeeded);
+            }
+            Err(error) => {
+                enqueue_popup_notification(error, PopupKind::Error, None);
+                finish_download_indicator(&sender, Some(&mxc), DownloadOutcome::Failed);
+            }
+        }
+    });
+}
+
+pub fn start_document_preview(info: DownloadableAttachment, update_sender: TimelineUpdateSenderOption) {
+    use super::document_preview::{DocumentPreview, HTML_LIMIT, PDF_LIMIT};
+    let kind = info.kind;
+    let limit = match kind {
+        DownloadKind::Html => HTML_LIMIT,
+        DownloadKind::Pdf => PDF_LIMIT,
+        _ => return,
+    };
+    let account = crate::sliding_sync::current_user_id();
+    let epoch = crate::account_session::epoch();
+    download_media(info, update_sender, limit, move |title, mxc, file, sender| {
+        if account != crate::sliding_sync::current_user_id()
+            || epoch != crate::account_session::epoch()
+            || crate::logout::logout_state_machine::is_logout_in_progress()
+        {
+            finish_download_indicator(&sender, Some(&mxc), DownloadOutcome::Cancelled);
+            return;
+        }
+        match file.read_small(limit).and_then(|bytes| DocumentPreview::new(kind, bytes, epoch)) {
+            Ok(preview) => {
+                makepad_widgets::Cx::post_action(super::web_browser::WebBrowserAction::OpenAttachment {
+                    title, preview, account, epoch, save: None,
+                });
                 finish_download_indicator(&sender, Some(&mxc), DownloadOutcome::Succeeded);
             }
             Err(error) => {
@@ -209,6 +272,19 @@ mod markdown_tests {
         assert!(is_markdown_attachment("notes", Some("text/markdown; charset=utf-8")));
         assert!(is_markdown_attachment("notes.txt", Some("text/x-markdown")));
         for name in ["md", "notes.md.exe", "image.png", "notes.txt"] { assert!(!is_markdown_attachment(name, None)); }
+    }
+
+    #[test]
+    fn document_preview_routes_html_pdf_and_other_files_by_name_or_mime() {
+        for name in ["report.HTML", "report.htm"] {
+            assert_eq!(DownloadKind::for_file(name, Some("application/octet-stream")), DownloadKind::Html);
+        }
+        assert_eq!(DownloadKind::for_file("report", Some("text/html; charset=utf-8")), DownloadKind::Html);
+        assert_eq!(DownloadKind::for_file("Report.PDF", None), DownloadKind::Pdf);
+        assert_eq!(DownloadKind::for_file("receipt", Some("application/pdf")), DownloadKind::Pdf);
+        assert_eq!(DownloadKind::for_file("notes.markdown", None), DownloadKind::Markdown);
+        assert_eq!(DownloadKind::for_file("report.html.zip", None), DownloadKind::File);
+        assert_eq!(DownloadKind::for_file("theme.octotheme", None), DownloadKind::Theme);
     }
 
     #[test]

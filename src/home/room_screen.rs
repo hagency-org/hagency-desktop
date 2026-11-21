@@ -159,7 +159,7 @@ script_mod! {
         wrap_spacing: 8,
         margin: Inset{top: 8, bottom: 2}
 
-        open_markdown_button := RobrixIconButton {
+        open_attachment_button := RobrixIconButton {
             visible: false height: mod.widgets.SETTINGS_BUTTON_HEIGHT
             padding: Inset{left: 12 right: 12} margin: 0
             draw_icon.svg: crate_resource("self://resources/icons/eye_open.svg")
@@ -3395,7 +3395,7 @@ impl RoomScreen {
                 MessageAction::ExportAnswer { details, pdf } => {
                     let Some(tl) = self.tl_state.as_ref() else { continue };
                     if let Some(event) = Self::find_event_in_timeline(&tl.items, details) {
-                        crate::agent_chat::answer_export::save(plaintext_body_of_timeline_item(event), *pdf);
+                        crate::agent_chat::answer_export::open(plaintext_body_of_timeline_item(event), *pdf);
                     } else {
                         enqueue_popup_notification(crate::i18n::tr("Could not find the answer to export. Please try again."), PopupKind::Error, Some(5.0));
                     }
@@ -3586,24 +3586,15 @@ impl RoomScreen {
                 MessageAction::DownloadAttachment(info) => {
                     self.begin_media_transfer(cx, portal_list, info, TransferKind::Download, start_attachment_download);
                 }
-                MessageAction::OpenMarkdownAttachment(info) => {
-                    if info.kind == DownloadKind::Theme {
-                        self.begin_media_transfer(
-                            cx,
-                            portal_list,
-                            info,
-                            TransferKind::Preview,
-                            crate::shared::attachment_download::start_theme_preview,
-                        );
-                    } else {
-                        self.begin_media_transfer(
-                            cx,
-                            portal_list,
-                            info,
-                            TransferKind::Preview,
-                            crate::shared::attachment_download::start_markdown_preview,
-                        );
-                    }
+                MessageAction::PreviewAttachment(info) => {
+                    use crate::shared::attachment_download::{start_document_preview, start_markdown_preview, start_theme_preview};
+                    let preview = match info.kind {
+                        DownloadKind::Theme => start_theme_preview,
+                        DownloadKind::Markdown => start_markdown_preview,
+                        kind if kind.can_preview() => start_document_preview,
+                        _ => continue,
+                    };
+                    self.begin_media_transfer(cx, portal_list, info, TransferKind::Preview, preview);
                 }
                 MessageAction::ShareAttachment(info) => {
                     self.begin_media_transfer(cx, portal_list, info, TransferKind::Share, start_attachment_share);
@@ -5731,23 +5722,10 @@ fn populate_message_view(
                             .as_ref()
                             .and_then(|i| i.size)
                             .map(u64::from),
-                        kind: if crate::shared::attachment_download::is_theme_attachment(
+                        kind: DownloadKind::for_file(
                             file_content.filename(),
-                            file_content
-                                .info
-                                .as_ref()
-                                .and_then(|info| info.mimetype.as_deref()),
-                        ) {
-                            DownloadKind::Theme
-                        } else if crate::shared::attachment_download::is_markdown_attachment(
-                            file_content.filename(),
-                            file_content
-                                .info
-                                .as_ref()
-                                .and_then(|info| info.mimetype.as_deref()),
-                        ) {
-                            DownloadKind::Markdown
-                        } else { DownloadKind::File },
+                            file_content.info.as_ref().and_then(|info| info.mimetype.as_deref()),
+                        ),
                     });
                     let template = if mobile {
                         if event_tl_item.is_own() { id!(MobileOwnMessage) } else { id!(MobileMessage) }
@@ -7581,8 +7559,8 @@ pub enum MessageAction {
 
     /// The user clicked the "Download" button on a media/file message.
     DownloadAttachment(DownloadableAttachment),
-    /// The user opened a Markdown attachment in the shared reader.
-    OpenMarkdownAttachment(DownloadableAttachment),
+    /// The user requested an in-app preview for an attachment.
+    PreviewAttachment(DownloadableAttachment),
     /// The user clicked the "Share" button on a media/file message.
     ShareAttachment(DownloadableAttachment),
     /// User clicked the cancel × next to the in-progress spinner.
@@ -7925,15 +7903,15 @@ impl Widget for Message {
 
             // Handle clicks on the media-related buttons (download, share, cancel) beneath media messages.
             if let Some(info) = self.download_info.as_ref() {
-                if matches!(info.kind, DownloadKind::Markdown | DownloadKind::Theme)
+                if info.kind.can_preview()
                     && self
                         .view
-                        .button(cx, ids!(content.download_section.open_markdown_button))
+                        .button(cx, ids!(content.download_section.open_attachment_button))
                         .clicked(actions)
                 {
                     cx.widget_action(
                         room_screen_widget_uid,
-                        MessageAction::OpenMarkdownAttachment(info.clone()),
+                        MessageAction::PreviewAttachment(info.clone()),
                     );
                 }
                 if self.view.button(cx, ids!(content.download_section.download_button)).clicked(actions) {
@@ -8168,12 +8146,12 @@ impl Message {
         self.view.view(cx, ids!(content.download_section)).set_visible(cx, section_visible);
         if section_visible {
             self.view
-                .button(cx, ids!(content.download_section.open_markdown_button))
+                .button(cx, ids!(content.download_section.open_attachment_button))
                 .set_visible(
                     cx,
                     matches!(download_state, DownloadDisplayState::Idle)
                         && self.download_info.as_ref().is_some_and(|info| {
-                            matches!(info.kind, DownloadKind::Markdown | DownloadKind::Theme)
+                            info.kind.can_preview()
                         }),
                 );
             let download_button = self
