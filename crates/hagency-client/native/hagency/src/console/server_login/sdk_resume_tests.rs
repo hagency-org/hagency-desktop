@@ -67,6 +67,35 @@ mod sdk_resume_tests {
     }
 
     #[tokio::test]
+    async fn slow_local_clock_allows_owner_session_and_project_adoption() {
+        use crate::native_owner::{ManagementCommand, ManagementPackage, ManagementPermission};
+        let mode = Arc::new(std::sync::atomic::AtomicU16::new(SERVER_CLOCK_32_SECONDS_AHEAD));
+        let (origin, requests, task) = fixture_controlled("@owner:test", None, mode).await;
+        let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+        let state = root.path().join("state");
+        let owner = NativeOwner::open_with_matrix(&state, &origin, "@owner:test", source()).await.unwrap();
+        owner.suspend().await.unwrap();
+        drop(owner);
+        let owner = NativeOwner::open_with_matrix(&state, &origin, "@owner:test", source()).await.unwrap();
+        let manager = owner.management(ManagementPackage {
+            digest: "a".repeat(64),
+            instance: 1,
+            account_epoch: 1,
+            permissions: vec![ManagementPermission::ReadConnections],
+        }).await.unwrap();
+        assert_eq!(manager.central(ManagementCommand::Session {}).await.unwrap()["account"], "@owner:test");
+        let project = owner.execute(Command::AdoptProject {
+            space_id: "!space:test".into(),
+            project_folder: None,
+        }).await.unwrap();
+        assert_eq!(project["id"], "project_1");
+        assert_eq!(count(&requests, "/devices"), 1);
+        assert_eq!(count(&requests, "/projects/adopt"), 1);
+        owner.shutdown().await;
+        task.abort();
+    }
+
+    #[tokio::test]
     async fn sdk_successful_authorization_consumes_signin_before_later_remote_revocation() {
         for restore in [false, true] {
             let mode = Arc::new(std::sync::atomic::AtomicU16::new(0));

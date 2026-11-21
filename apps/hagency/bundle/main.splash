@@ -221,6 +221,7 @@ A.project_state_text = fn(state){
     return state
 }
 A.error_text = fn(code){
+    if code == "authorization_time_window_unavailable" {return A.t("The server authorization is outside its time window. Check the device and server clocks, then retry.","服务器授权不在有效时间内。请核对本机和服务器的时钟后重试。")}
     if code=="pool_agent_resource_mismatch" && H.entry_role=="owner" {return A.t("This request is above the pool’s current per-request limit, so it can’t be approved. Decline it, or raise the per-request limit first.","这个申请超过了资源池现在的每次申请上限，不能批准。可以拒绝，或先调高每次申请上限。")}
     if code == "native_resume_missing" || code == "native_resume_revoked" {return A.t("Sign in again with this Matrix account to restore Hagency access. Existing records and saved requests stay on this device.", "请使用当前 Matrix 账号重新登录以恢复 Hagency 访问。此设备上的已有记录和已保存请求会保留。")}
 

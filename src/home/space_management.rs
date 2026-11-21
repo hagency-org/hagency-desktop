@@ -414,8 +414,12 @@ async fn finish_creation(
         ),
         Err(error) => (
             format!(
-                "{}: {error}",
-                crate::i18n::tr("Created, but setup is incomplete. Use Finish setup to retry.")
+                "{}: {}",
+                crate::i18n::tr("Created, but setup is incomplete. Use Finish setup to retry."),
+                match error.to_string().as_str() {
+                    "authorization_time_window_unavailable" => crate::i18n::tr("The server authorization is outside its time window. Check the device and server clocks, then retry."),
+                    other => other,
+                }
             ),
             true,
         ),

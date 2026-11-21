@@ -1483,6 +1483,7 @@
   "Copied Hagency version.": "Copied Hagency version.",
   "No chats yet. Use the Chats menu to start a conversation.": "No chats yet. Use the Chats menu to start a conversation.",
   "No matching chats": "No matching chats",
+  "The server authorization is outside its time window. Check the device and server clocks, then retry.": "The server authorization is outside its time window. Check the device and server clocks, then retry.",
   "Sign in again to restore Projects for this account": "Sign in again to restore Projects for this account",
   "Hagency Projects could not be loaded. Retrying…": "Hagency Projects could not be loaded. Retrying…",
   "Loading Hagency Projects…": "Loading Hagency Projects…",
