@@ -39,6 +39,18 @@ impl Entry {
             self.pending_drafts.iter().map(|draft| draft.text.as_str()).collect::<Vec<_>>().join("\n\n")
         )
     }
+    /// A run that completed and holds no instruction of the person's: none being
+    /// written, sent, retried, unconfirmed or left unexecuted. Its result is the
+    /// Agent's reply, so its card has nothing to add. A note on an action the
+    /// Agent already answered, such as a stop request, does not keep the card.
+    fn completed_quietly(&self) -> bool {
+        self.card.state == RunState::Completed
+            && self.draft.is_empty()
+            && !self.sending
+            && self.retry.is_none()
+            && self.recovered_drafts.is_empty()
+            && self.pending_drafts.is_empty()
+    }
 }
 #[derive(Clone, Debug)]
 pub struct Requested {
@@ -224,6 +236,8 @@ pub(super) fn authenticated(
     store.entries.push(entry);
     true
 }
+/// The run cards shown under the message `event`, running ones first. A run
+/// that completed quietly shows none: its result is the Agent's reply.
 pub fn for_event(room: &RoomId, event: &str, include_thread: bool) -> Vec<Entry> {
     let store = STORE.lock().unwrap_or_else(|e| e.into_inner());
     let mut entries: Vec<_> = store
@@ -233,6 +247,7 @@ pub fn for_event(room: &RoomId, event: &str, include_thread: bool) -> Vec<Entry>
             e.card.room_id == room.as_str()
                 && (e.card.event_id == event
                     || (include_thread && e.card.thread_root == event))
+                && !e.completed_quietly()
         })
         .cloned()
         .collect();
@@ -626,6 +641,48 @@ mod tests {
         STORE.lock().unwrap_or_else(|e| e.into_inner()).entries
             .retain(|entry| cards.iter().all(|card| card.key != entry.key));
         assert_eq!(found, [true, false, false, false, false]);
+    }
+
+    /// A completed run shows no card under its message: its result is the
+    /// Agent's reply. A run that ended otherwise keeps its card, and so does a
+    /// completed one that still holds an instruction of the person's.
+    #[test]
+    fn a_completed_run_shows_no_card_unless_it_still_holds_an_instruction() {
+        let _guard = super::super::pending_questions::test_serial();
+        let mut cards = Vec::new();
+        for (key, event, state) in [
+            ("$card-done", "$done", RunState::Completed),
+            ("$card-done-noted", "$done-noted", RunState::Completed),
+            ("$card-done-draft", "$done-draft", RunState::Completed),
+            ("$card-done-recovered", "$done-recovered", RunState::Completed),
+            ("$card-done-unconfirmed", "$done-unconfirmed", RunState::Completed),
+            ("$card-done-sending", "$done-sending", RunState::Completed),
+            ("$card-stopped", "$stopped", RunState::Interrupted),
+            ("$card-failed", "$failed", RunState::Failed),
+            ("$card-unknown", "$unknown", RunState::Unknown),
+            ("$card-running", "$running", RunState::Running),
+        ] {
+            let mut e = entry();
+            (e.key, e.card.event_id, e.card.state) = (key.into(), event.into(), state);
+            e.draft.clear();
+            match event {
+                "$done-noted" => e.hint = "Agent 已接收此操作。".into(),
+                "$done-draft" => e.draft = "not sent yet".into(),
+                "$done-recovered" => e.recovered_drafts.push("left unexecuted".into()),
+                "$done-unconfirmed" => e.pending_drafts.push(PendingDraft {
+                    event: "$sent".into(), owner: "@requester:test".into(), text: "maybe applied".into(),
+                }),
+                "$done-sending" => e.sending = true,
+                _ => {}
+            }
+            cards.push(e);
+        }
+        STORE.lock().unwrap_or_else(|e| e.into_inner()).entries.extend(cards.iter().cloned());
+        let room = matrix_sdk::ruma::room_id!("!room:test");
+        let shown = cards.iter().map(|card| for_event(room, &card.card.event_id, true).len()).collect::<Vec<_>>();
+        STORE.lock().unwrap_or_else(|e| e.into_inner()).entries
+            .retain(|entry| cards.iter().all(|card| card.key != entry.key));
+        assert_eq!(shown, [0, 0, 1, 1, 1, 1, 1, 1, 1, 1]);
     }
 
     #[test]
