@@ -316,26 +316,21 @@ impl OwnerGrantIntents {
         registry: &OwnerResourceRegistry,
         contribution_id: String,
     ) -> Result<VerifiedManagementEnrollment, NativeError> {
-        self.verified_enrollment_for_round(registry, contribution_id, None).await
+        let cookie = self.cookie().await?;
+        let witness = |runtime, profile, resource, revision| {
+            self.manager.verified_resource_witness(registry, profile, runtime, resource, revision)
+        };
+        Ok(self.verified_enrollment_observe(registry, contribution_id, &cookie, None, witness, None).await?.0)
     }
 
-    pub(super) async fn verified_enrollment_for_round(
-        &self,
-        registry: &OwnerResourceRegistry,
-        contribution_id: String,
+    pub(super) async fn observe_enrollment<'a>(
+        &'a self, registry: &OwnerResourceRegistry, contribution_id: String, cookie: &'a str,
         expected: Option<&admission::AdmissionRound>,
-    ) -> Result<VerifiedManagementEnrollment, NativeError> {
-        Ok(self.observe_enrollment(registry, contribution_id, expected).await?.0)
-    }
-
-    pub(super) async fn observe_enrollment(
-        &self, registry: &OwnerResourceRegistry, contribution_id: String,
-        expected: Option<&admission::AdmissionRound>,
-    ) -> Result<(VerifiedManagementEnrollment, ConnectionReply), NativeError> {
-        self.verified_enrollment_observe(registry, contribution_id, expected, |runtime,profile,resource,revision| {
-            self.manager.verified_resource_witness(registry,profile,runtime,resource,revision)
-        })
-        .await
+    ) -> Result<(VerifiedManagementEnrollment, ConnectionReply, NativeIo<'a>), NativeError> {
+        let witness = |runtime, profile, resource, revision| {
+            self.manager.verified_resource_witness(registry, profile, runtime, resource, revision)
+        };
+        self.verified_enrollment_observe(registry, contribution_id, cookie, expected, witness, Some(witness)).await
     }
     #[cfg(test)]
     pub(super) async fn verified_enrollment_with<F,Fut>(
@@ -344,10 +339,11 @@ impl OwnerGrantIntents {
     where F:FnOnce(ManagementRuntime)->Fut,
           Fut:std::future::Future<Output=Result<VerifiedProviderAccount,NativeError>>,
     {
-        self.verified_enrollment_observe(registry,contribution_id,None,|runtime,_,_,_| {
+        let cookie = self.cookie().await?;
+        self.verified_enrollment_observe(registry,contribution_id,&cookie,None,|runtime,_,_,_| {
             let account = observe(runtime);
             async move { account.await.map(ResourceWitness::Account) }
-        }).await.map(|(proof, _)| proof)
+        }, None).await.map(|(proof, _, _)| proof)
     }
     #[cfg(test)]
     pub(super) async fn verified_enrollment_witness_with<F,Fut>(
@@ -356,22 +352,24 @@ impl OwnerGrantIntents {
     where F:FnOnce(ManagementRuntime)->Fut,
           Fut:std::future::Future<Output=Result<ResourceWitness,NativeError>>,
     {
-        self.verified_enrollment_observe(registry,contribution_id,None,|runtime,_,_,_|observe(runtime)).await.map(|(proof, _)| proof)
+        let cookie = self.cookie().await?;
+        self.verified_enrollment_observe(registry,contribution_id,&cookie,None,|runtime,_,_,_|observe(runtime), None).await.map(|(proof, _, _)| proof)
     }
-    async fn verified_enrollment_observe<F, Fut>(
-        &self,
+    pub(super) async fn verified_enrollment_observe<'a, F, Fut>(
+        &'a self,
         registry: &OwnerResourceRegistry,
         contribution_id: String,
+        cookie: &'a str,
         expected: Option<&admission::AdmissionRound>,
         observe: F,
-    ) -> Result<(VerifiedManagementEnrollment, ConnectionReply), NativeError>
+        final_observation: Option<F>,
+    ) -> Result<(VerifiedManagementEnrollment, ConnectionReply, NativeIo<'a>), NativeError>
     where
         F: FnOnce(ManagementRuntime, ProfileAuthority, String, String) -> Fut,
         Fut: std::future::Future<Output = Result<ResourceWitness, NativeError>>,
     {
         super::super::key(&contribution_id)?;
-        let cookie = self.cookie().await?;
-        let io = self.io(&cookie, Permission::ConsentGrants).await?;
+        let io = self.io(cookie, Permission::ConsentGrants).await?;
         for permission in [Permission::ReadProviders, Permission::ConnectProviders] {
             io.session
                 .authorize(&io.context, permission)
@@ -384,7 +382,7 @@ impl OwnerGrantIntents {
             Some(gate) => transport.restrict_to_host(gate.clone()),
             None => transport,
         };
-        let (before, io) = self.enrollment_snapshot(&transport, &io, &cookie, &contribution_id).await?;
+        let (before, io) = self.enrollment_snapshot(&transport, &io, cookie, &contribution_id).await?;
         let runtime = validate_admission(&before, &io, &contribution_id)?;
         // The central record must name the tool of the local resource before
         // any provider is observed on its word.
@@ -396,10 +394,11 @@ impl OwnerGrantIntents {
         if local.framework != before.admission.contribution.runtime {
             return Err(failure(409, "management_enrollment_changed"));
         }
-        let provider = observe(runtime,io.profile.clone(),before.admission.contribution.resource_id.clone(),before.admission.contribution.resource_revision.clone()).await?;
+        let provider = Box::pin(observe(runtime, io.profile.clone(),
+            before.admission.contribution.resource_id.clone(), before.admission.contribution.resource_revision.clone())).await?;
         io.check().await?;
         let lane = self.manager.owner.0.management.mutations.lock().await;
-        let (latest, io) = self.enrollment_snapshot(&transport, &io, &cookie, &contribution_id).await?;
+        let (latest, io) = self.enrollment_snapshot(&transport, &io, cookie, &contribution_id).await?;
         validate_admission(&latest, &io, &contribution_id)?;
         if expected.is_some_and(|round| *round != admission::AdmissionRound::observed(&latest)) {
             return Err(failure(409, "management_enrollment_changed"));
@@ -416,57 +415,17 @@ impl OwnerGrantIntents {
         {
             return Err(failure(409, "management_enrollment_changed"));
         }
-        let resource_id = before.admission.contribution.resource_id.clone();
-        // A Claude pool is supplied by whichever Claude account the owner's
-        // Claude Code is signed in to now, as its pooled launches are: owners
-        // switch between their accounts. Granting, amending or renewing its
-        // capacity must not require the account the pool was created with;
-        // the binding keeps that recorded identity, so the enrollment still
-        // matches the earlier grants. Codex resources keep the exact check.
-        // An Octos resource is bound to the owner's profile and model, as its
-        // pooled launches are.
-        let resource = match (local.framework.as_str(), provider) {
-            ("claude", ResourceWitness::Account(provider)) => {
-                registry
-                    .verify_claude_launch_resource(io.profile.clone(), resource_id, provider)
-                    .await
-            }
-            ("codex", ResourceWitness::Account(provider)) => {
-                registry
-                    .verify_provider_resource(io.profile.clone(), resource_id, provider)
-                    .await
-            }
-            ("octos", ResourceWitness::Octos(profile)) => {
-                match registry
-                    .verify_octos_resource(io.profile.clone(), resource_id, profile)
-                    .await
-                {
-                    // With the session still valid, a refused binding means
-                    // the profile, its model or its settings are no longer
-                    // the ones the pool was created with.
-                    Err(hagency_store::Error::LocalAuthority) => {
-                        io.check().await?;
-                        return Err(failure(409, "octos_profile_changed"));
-                    }
-                    result => result,
-                }
-            }
-            _ => return Err(failure(409, "management_enrollment_changed")),
-        }
-        .map_err(storage)?;
+        let resource = Self::bind_witness(registry, &io, c.resource_id.clone(),
+            &c.resource_revision, &c.runtime, provider).await?;
         io.check().await?;
-        if resource.resource_revision() != before.admission.contribution.resource_revision
-            || resource.runtime() != before.admission.contribution.runtime
-        {
-            return Err(failure(409, "management_enrollment_changed"));
-        }
+        let provider_digest = resource.binding_digest().map_err(|error| storage(error))?;
         let binding = EnrollmentBinding {
             registry_id: registry.id().into(),
             contribution_id: contribution_id.clone(),
             admission_request_id: Some(c.request_id.clone()),
             resource_id: c.resource_id.clone(),
             resource_revision: c.resource_revision.clone(),
-            provider_binding: resource.binding_digest().map_err(storage)?,
+            provider_binding: provider_digest.clone(),
             coordinator_mxid: c.coordinator_mxid.clone(),
             executor_generation: c.executor_generation,
         };
@@ -540,6 +499,23 @@ impl OwnerGrantIntents {
         // The provider observation may expire sooner than the SDK session.
         // Finish every await before constructing the returned finite proof.
         io.check().await?;
+        // The first observation pins the provider between the admission reads.
+        // Issue the proof used for the review from that same provider after
+        // discovery and journal I/O, with no mutation lock held during the probe.
+        let (io, resource) = if let Some(observe) = final_observation {
+            let current = self.enrollment_io(&io, cookie).await?;
+            let witness = Box::pin(observe(runtime, current.profile.clone(),
+                c.resource_id.clone(), c.resource_revision.clone())).await?;
+            let binding = Self::bind_witness(registry, &current, c.resource_id.clone(),
+                &c.resource_revision, &c.runtime, witness).await?;
+            current.check().await?;
+            if binding.binding_digest().map_err(|error| storage(error))? != provider_digest {
+                return Err(failure(409, "management_enrollment_changed"));
+            }
+            (current, binding)
+        } else {
+            (io, resource)
+        };
         let proof = VerifiedManagementEnrollment::new(
             io.profile.clone(),
             enrollment_id,
@@ -554,7 +530,57 @@ impl OwnerGrantIntents {
         .map_err(storage)?
         .with_verified_resource(resource)
         .map_err(storage)?;
-        Ok((proof, latest))
+        Ok((proof, latest, io))
+    }
+
+
+    async fn bind_witness(
+        registry: &OwnerResourceRegistry, io: &NativeIo<'_>, resource_id: String,
+        revision: &str, framework: &str, provider: ResourceWitness,
+    ) -> Result<VerifiedOwnerResourceBinding, NativeError> {
+        // A Claude pool is supplied by whichever Claude account the owner's
+        // Claude Code is signed in to now, as its pooled launches are: owners
+        // switch between their accounts. Granting, amending or renewing its
+        // capacity must not require the account the pool was created with;
+        // the binding keeps that recorded identity, so the enrollment still
+        // matches the earlier grants. Codex resources keep the exact check.
+        // An Octos resource is bound to the owner's profile and model, as its
+        // pooled launches are.
+        let resource = match (framework, provider) {
+            ("claude", ResourceWitness::Account(provider)) => {
+                registry
+                    .verify_claude_launch_resource(io.profile.clone(), resource_id, provider)
+                    .await
+            }
+            ("codex", ResourceWitness::Account(provider)) => {
+                registry
+                    .verify_provider_resource(io.profile.clone(), resource_id, provider)
+                    .await
+            }
+            ("octos", ResourceWitness::Octos(profile)) => {
+                match registry
+                    .verify_octos_resource(io.profile.clone(), resource_id, profile)
+                    .await
+                {
+                    // With the session still valid, a refused binding means
+                    // the profile, its model or its settings are no longer
+                    // the ones the pool was created with.
+                    Err(hagency_store::Error::LocalAuthority) => {
+                        io.check().await?;
+                        return Err(failure(409, "octos_profile_changed"));
+                    }
+                    result => result,
+                }
+            }
+            _ => return Err(failure(409, "management_enrollment_changed")),
+        }
+        .map_err(storage)?;
+        if resource.resource_revision() != revision
+            || resource.runtime() != framework
+        {
+            return Err(failure(409, "management_enrollment_changed"));
+        }
+        Ok(resource)
     }
 
     async fn enrollment_snapshot<'a>(
@@ -566,6 +592,13 @@ impl OwnerGrantIntents {
             return Err(failure(401, "management_scope_changed"));
         }
         let reply = Box::pin(transport.request(&scope, Operation::Contribution(contribution.into()), false)).await?;
+        let current = self.enrollment_io(previous, cookie).await?;
+        Ok((reply, current))
+    }
+
+    async fn enrollment_io<'a>(
+        &'a self, previous: &NativeIo<'_>, cookie: &'a str,
+    ) -> Result<NativeIo<'a>, NativeError> {
         let current = self.io(cookie, Permission::ConsentGrants).await?;
         if current.context != previous.context || current.identity != previous.identity
             || !current.matrix.same_session(&previous.matrix)
@@ -575,6 +608,6 @@ impl OwnerGrantIntents {
         for permission in [Permission::ReadProviders, Permission::ConnectProviders] {
             current.session.authorize(&current.context, permission).map_err(storage)?;
         }
-        Ok((reply, current))
+        Ok(current)
     }
 }

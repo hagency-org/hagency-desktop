@@ -419,16 +419,16 @@ impl OwnerGrantIntents {
         enrollment: VerifiedManagementEnrollment,
         choices: OwnerGrantChoices,
     ) -> Result<OwnerGrantReview, NativeError> {
-        self.prepare_with_observations(registry, enrollment, choices, None).await
+        let cookie = self.cookie().await?;
+        let io = self.io(&cookie, Permission::ConsentGrants).await?;
+        self.prepare_with_observations(registry, enrollment, choices, None, io).await
     }
 
     async fn prepare_with_observations(
         &self, registry: &OwnerResourceRegistry, enrollment: VerifiedManagementEnrollment,
         choices: OwnerGrantChoices,
-        observations: Option<PreparationFacts>,
+        observations: Option<PreparationFacts>, io: NativeIo<'_>,
     ) -> Result<OwnerGrantReview, NativeError> {
-        let cookie = self.cookie().await?;
-        let io = self.io(&cookie, Permission::ConsentGrants).await?;
         let _lane = self.manager.owner.0.management.mutations.lock().await;
         io.check().await?;
         if choices.coordinator_mxid != io.identity.owner {
@@ -628,6 +628,13 @@ impl OwnerGrantIntents {
         super::key(&intent_id)?;
         let cookie = self.cookie().await?;
         let io = self.io(&cookie, Permission::ConsentGrants).await?;
+        self.review_existing_scoped(registry, enrollment, intent_id, facts, io).await
+    }
+
+    async fn review_existing_scoped(
+        &self, registry: &OwnerResourceRegistry, enrollment: VerifiedManagementEnrollment,
+        intent_id: String, facts: Option<RootReviewFacts>, io: NativeIo<'_>,
+    ) -> Result<OwnerGrantReviewResult, NativeError> {
         let _lane = self.manager.owner.0.management.mutations.lock().await;
         io.check().await?;
         let mut history = History::load(&io.path, io.identity.clone())?;
@@ -965,10 +972,10 @@ impl OwnerGrantAccess {
         let cookie = service.cookie().await?;
         let io = service.io(&cookie, Permission::ConsentGrants).await?;
         let features = Box::pin(service.session_features(&io)).await?;
-        let (proof, admission) = Box::pin(service.observe_enrollment(&self.registry, contribution, None)).await?;
+        let (proof, admission, current) = Box::pin(service.observe_enrollment(&self.registry, contribution, &cookie, None)).await?;
         let facts = PreparationFacts { context: io.context, admission, features };
         let mut review = service.prepare_with_observations(
-            &self.registry, proof, choices, Some(facts),
+            &self.registry, proof, choices, Some(facts), current,
         ).await?;
         self.offer_window(&mut review);
         Ok(review)
@@ -998,19 +1005,21 @@ impl OwnerGrantAccess {
         if !matches!(progress.state, OwnerGrantState::ReviewRequired) {
             return Ok((OwnerGrantReviewResult::Progress(Box::new(progress)), None));
         }
-        let facts = if progress.summary.succession.is_none() {
-            let cookie = service.cookie().await?;
-            let io = service.io(&cookie, Permission::ConsentGrants).await?;
-            let history = History::load(&io.path, io.identity.clone())?;
-            let original = history.data.records[history.index(&id)?].original.clone();
-            Some(service.root_review_facts(&io, original).await?)
-        } else {
-            None
-        };
-        let proof = service.verified_enrollment_for_round(&self.registry, progress.summary.contribution_id,
-            facts.as_ref().map(|f| &f.admission)).await?;
-        let result = service.review_existing_with(&self.registry, proof, id, facts.clone()).await?;
-        Ok((result, facts))
+        if progress.summary.succession.is_some() {
+            let proof = service.verified_enrollment(&self.registry, progress.summary.contribution_id).await?;
+            let result = service.review_existing(&self.registry, proof, id).await?;
+            return Ok((result, None));
+        }
+        let cookie = service.cookie().await?;
+        let io = service.io(&cookie, Permission::ConsentGrants).await?;
+        let history = History::load(&io.path, io.identity.clone())?;
+        let original = history.data.records[history.index(&id)?].original.clone();
+        let facts = service.root_review_facts(&io, original).await?;
+        let (proof, _, current) = Box::pin(service.observe_enrollment(
+            &self.registry, progress.summary.contribution_id, &cookie, Some(&facts.admission),
+        )).await?;
+        let result = service.review_existing_scoped(&self.registry, proof, id, Some(facts.clone()), current).await?;
+        Ok((result, Some(facts)))
     }
 
     pub async fn confirm(
