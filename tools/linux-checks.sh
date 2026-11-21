@@ -86,9 +86,7 @@ lib-features)
     runtime_probe
     step feature-tests "$client" "${tests[@]}" --locked -p hagency \
         --features shared-budget-execution,resource-adoption --lib
-    step empty-device "$client" cargo test --locked -p hagency-store \
-        --features shared-budget-execution,resource-adoption --lib \
-        domain::owner_resources::adoption::empty_device::tests:: -- --test-threads=1
+    step current-profile "$client" bash "$root/tools/check-current-profile.sh"
     ;;
 app)
     step miniapp-core "" cargo test --locked --manifest-path crates/miniapp-core/Cargo.toml

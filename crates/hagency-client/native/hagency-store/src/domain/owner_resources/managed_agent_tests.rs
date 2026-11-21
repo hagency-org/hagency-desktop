@@ -859,3 +859,14 @@ fn direct_pool_agent_contract_matches_server_and_has_no_project() {
     wrong.decision_actor_mxid = "@admin:example.test".into();
     assert!(wrong.validate("@owner:example.test").is_err());
 }
+
+#[test]
+fn v12_reserve_contract_keeps_digest_and_authority_validation() {
+    let fixture:serde_json::Value=serde_json::from_str(include_str!("capacity/managed_agents/pool-agent-v1.json")).unwrap();
+    let mut command:ManagedAgentReserveCommand=serde_json::from_value(fixture["command"].clone()).unwrap();
+    command.room_id="!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ".into();
+    command.validate("@owner:example.test").unwrap();
+    assert_ne!(canonical::digest(&serde_json::to_value(&command).unwrap()).unwrap(),fixture["commandDigest"]);
+    command.room_id="!broken_hash".into();
+    assert!(command.validate("@owner:example.test").is_err());
+}
