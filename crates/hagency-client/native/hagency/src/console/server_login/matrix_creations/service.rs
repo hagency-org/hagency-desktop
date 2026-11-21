@@ -202,6 +202,10 @@ impl<'a> Scope<'a> {
         self.check_local().await
     }
 
+    pub(in crate::console) fn same_session(&self, other: &Self) -> bool {
+        self.cookie == other.cookie && self.token == other.token
+    }
+
     pub(in crate::console) fn cookie(&self) -> &str {
         self.cookie
     }

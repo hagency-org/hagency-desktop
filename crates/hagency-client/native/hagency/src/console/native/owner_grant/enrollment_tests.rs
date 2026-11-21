@@ -724,3 +724,32 @@ async fn expired_display_profile_returns_local_401_while_the_same_manager_is_aut
     assert_eq!(f.count("owner_capacity_grants"), 1);
     f.stop().await;
 }
+
+#[tokio::test]
+async fn first_pool_review_survives_slow_discovery_and_provider_observation() {
+    let mut f = Fixture::new().await;
+    f.enable_factory().await;
+    {
+        let mut reply = f.admission.lock().unwrap();
+        reply["admission"]["contribution"]["publicationFirst"] = json!(true);
+        reply["admission"]["contribution"]["state"] = json!("draft");
+        reply["admission"]["request"]["state"] = json!("draft");
+    }
+    {
+        let mut server = f.publications.lock().unwrap();
+        server.admission_receipts = true;
+        server.contribution_delay = Duration::from_secs(5);
+    }
+    // Two five-second reads around a slow provider exceed the initial
+    // thirty-second device proof. Each individual observation completes live.
+    let proof = f.service.verified_enrollment_with(
+        &f.registry, "fixture_contribution".into(), |_| async {
+            tokio::time::sleep(Duration::from_secs(22)).await;
+            Ok(provider_fixture("synthetic-account"))
+        },
+    ).await.expect("a current account can enroll its unchanged draft");
+    let review = f.service.prepare(&f.registry, proof, Fixture::choices()).await.unwrap();
+    assert_eq!(review.original.binding.resource_id, f.resource);
+    assert_eq!(f.count("owner_capacity_grants"), 0);
+    f.stop().await;
+}

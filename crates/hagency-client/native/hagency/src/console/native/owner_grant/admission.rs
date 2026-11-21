@@ -153,7 +153,13 @@ impl OwnerGrantIntents {
             &scope, Operation::Contribution(binding.contribution_id.clone()), false,
         ).await?;
         io.check().await?;
-        enrollment::validate_admission(&reply, io, &binding.contribution_id)?;
+        self.bind_observed_admission(io, binding, &reply)
+    }
+
+    pub(super) fn bind_observed_admission(
+        &self, io: &NativeIo<'_>, binding: &Binding, reply: &ConnectionReply,
+    ) -> Result<AdmissionRound, NativeError> {
+        enrollment::validate_admission(reply, io, &binding.contribution_id)?;
         let c = &reply.admission.contribution;
         if c.resource_id != binding.resource_id
             || c.resource_revision != binding.resource_revision
@@ -164,8 +170,8 @@ impl OwnerGrantIntents {
         {
             return Err(failure(409, "management_enrollment_changed"));
         }
-        enrollment::check_grant_enrollment(io, binding, &reply)?;
-        Ok(AdmissionRound::observed(&reply))
+        enrollment::check_grant_enrollment(io, binding, reply)?;
+        Ok(AdmissionRound::observed(reply))
     }
 
     pub(super) async fn check_grant_admission(

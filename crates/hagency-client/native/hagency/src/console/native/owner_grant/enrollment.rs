@@ -325,6 +325,13 @@ impl OwnerGrantIntents {
         contribution_id: String,
         expected: Option<&admission::AdmissionRound>,
     ) -> Result<VerifiedManagementEnrollment, NativeError> {
+        Ok(self.observe_enrollment(registry, contribution_id, expected).await?.0)
+    }
+
+    pub(super) async fn observe_enrollment(
+        &self, registry: &OwnerResourceRegistry, contribution_id: String,
+        expected: Option<&admission::AdmissionRound>,
+    ) -> Result<(VerifiedManagementEnrollment, ConnectionReply), NativeError> {
         self.verified_enrollment_observe(registry, contribution_id, expected, |runtime,profile,resource,revision| {
             self.manager.verified_resource_witness(registry,profile,runtime,resource,revision)
         })
@@ -340,7 +347,7 @@ impl OwnerGrantIntents {
         self.verified_enrollment_observe(registry,contribution_id,None,|runtime,_,_,_| {
             let account = observe(runtime);
             async move { account.await.map(ResourceWitness::Account) }
-        }).await
+        }).await.map(|(proof, _)| proof)
     }
     #[cfg(test)]
     pub(super) async fn verified_enrollment_witness_with<F,Fut>(
@@ -349,7 +356,7 @@ impl OwnerGrantIntents {
     where F:FnOnce(ManagementRuntime)->Fut,
           Fut:std::future::Future<Output=Result<ResourceWitness,NativeError>>,
     {
-        self.verified_enrollment_observe(registry,contribution_id,None,|runtime,_,_,_|observe(runtime)).await
+        self.verified_enrollment_observe(registry,contribution_id,None,|runtime,_,_,_|observe(runtime)).await.map(|(proof, _)| proof)
     }
     async fn verified_enrollment_observe<F, Fut>(
         &self,
@@ -357,7 +364,7 @@ impl OwnerGrantIntents {
         contribution_id: String,
         expected: Option<&admission::AdmissionRound>,
         observe: F,
-    ) -> Result<VerifiedManagementEnrollment, NativeError>
+    ) -> Result<(VerifiedManagementEnrollment, ConnectionReply), NativeError>
     where
         F: FnOnce(ManagementRuntime, ProfileAuthority, String, String) -> Fut,
         Fut: std::future::Future<Output = Result<ResourceWitness, NativeError>>,
@@ -370,17 +377,14 @@ impl OwnerGrantIntents {
                 .authorize(&io.context, permission)
                 .map_err(storage)?;
         }
+        // Discovery owns its short-lived transport proof. The provider namespace
+        // must be opened under a current proof after the server round trip.
         let transport = AllocationTransport::new(self.manager.clone());
-        let scope = transport.scope(Permission::ConsentGrants).await?;
-        io.check().await?;
-        let before: ConnectionReply = transport
-            .request(
-                &scope,
-                Operation::Contribution(contribution_id.clone()),
-                false,
-            )
-            .await?;
-        io.check().await?;
+        let transport = match &self.host_gate {
+            Some(gate) => transport.restrict_to_host(gate.clone()),
+            None => transport,
+        };
+        let (before, io) = self.enrollment_snapshot(&transport, &io, &cookie, &contribution_id).await?;
         let runtime = validate_admission(&before, &io, &contribution_id)?;
         // The central record must name the tool of the local resource before
         // any provider is observed on its word.
@@ -394,6 +398,24 @@ impl OwnerGrantIntents {
         }
         let provider = observe(runtime,io.profile.clone(),before.admission.contribution.resource_id.clone(),before.admission.contribution.resource_revision.clone()).await?;
         io.check().await?;
+        let lane = self.manager.owner.0.management.mutations.lock().await;
+        let (latest, io) = self.enrollment_snapshot(&transport, &io, &cookie, &contribution_id).await?;
+        validate_admission(&latest, &io, &contribution_id)?;
+        if expected.is_some_and(|round| *round != admission::AdmissionRound::observed(&latest)) {
+            return Err(failure(409, "management_enrollment_changed"));
+        }
+        let c = &latest.admission.contribution;
+        let previous = &before.admission.contribution;
+        if c.request_id != previous.request_id
+            || c.revision != previous.revision
+            || latest.admission.request.revision != before.admission.request.revision
+            || c.resource_id != previous.resource_id
+            || c.resource_revision != previous.resource_revision
+            || c.runtime != previous.runtime
+            || c.coordinator_mxid != previous.coordinator_mxid
+        {
+            return Err(failure(409, "management_enrollment_changed"));
+        }
         let resource_id = before.admission.contribution.resource_id.clone();
         // A Claude pool is supplied by whichever Claude account the owner's
         // Claude Code is signed in to now, as its pooled launches are: owners
@@ -435,32 +457,6 @@ impl OwnerGrantIntents {
         io.check().await?;
         if resource.resource_revision() != before.admission.contribution.resource_revision
             || resource.runtime() != before.admission.contribution.runtime
-        {
-            return Err(failure(409, "management_enrollment_changed"));
-        }
-        let lane = self.manager.owner.0.management.mutations.lock().await;
-        io.check().await?;
-        let latest: ConnectionReply = transport
-            .request(
-                &scope,
-                Operation::Contribution(contribution_id.clone()),
-                false,
-            )
-            .await?;
-        io.check().await?;
-        validate_admission(&latest, &io, &contribution_id)?;
-        if expected.is_some_and(|round| *round != admission::AdmissionRound::observed(&latest)) {
-            return Err(failure(409, "management_enrollment_changed"));
-        }
-        let c = &latest.admission.contribution;
-        let previous = &before.admission.contribution;
-        if c.request_id != previous.request_id
-            || c.revision != previous.revision
-            || latest.admission.request.revision != before.admission.request.revision
-            || c.resource_id != previous.resource_id
-            || c.resource_revision != previous.resource_revision
-            || c.runtime != previous.runtime
-            || c.coordinator_mxid != previous.coordinator_mxid
         {
             return Err(failure(409, "management_enrollment_changed"));
         }
@@ -558,6 +554,27 @@ impl OwnerGrantIntents {
         .map_err(storage)?
         .with_verified_resource(resource)
         .map_err(storage)?;
-        Ok(proof)
+        Ok((proof, latest))
+    }
+
+    async fn enrollment_snapshot<'a>(
+        &'a self, transport: &AllocationTransport, previous: &NativeIo<'_>,
+        cookie: &'a str, contribution: &str,
+    ) -> Result<(ConnectionReply, NativeIo<'a>), NativeError> {
+        let scope = transport.scope(Permission::ConsentGrants).await?;
+        if DeviceIdentity::from(&scope.device) != DeviceIdentity::from(&previous.device) {
+            return Err(failure(401, "management_scope_changed"));
+        }
+        let reply = Box::pin(transport.request(&scope, Operation::Contribution(contribution.into()), false)).await?;
+        let current = self.io(cookie, Permission::ConsentGrants).await?;
+        if current.context != previous.context || current.identity != previous.identity
+            || !current.matrix.same_session(&previous.matrix)
+        {
+            return Err(failure(401, "management_scope_changed"));
+        }
+        for permission in [Permission::ReadProviders, Permission::ConnectProviders] {
+            current.session.authorize(&current.context, permission).map_err(storage)?;
+        }
+        Ok((reply, current))
     }
 }

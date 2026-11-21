@@ -102,6 +102,12 @@ struct RootReviewFacts {
     features: Vec<serde_json::Value>,
 }
 
+struct PreparationFacts {
+    context: HostContext,
+    admission: super::allocation_transport::ConnectionReply,
+    features: Vec<serde_json::Value>,
+}
+
 struct NativeIo<'a> {
     manager: &'a NativeManagement,
     matrix: MatrixScope<'a>,
@@ -413,6 +419,14 @@ impl OwnerGrantIntents {
         enrollment: VerifiedManagementEnrollment,
         choices: OwnerGrantChoices,
     ) -> Result<OwnerGrantReview, NativeError> {
+        self.prepare_with_observations(registry, enrollment, choices, None).await
+    }
+
+    async fn prepare_with_observations(
+        &self, registry: &OwnerResourceRegistry, enrollment: VerifiedManagementEnrollment,
+        choices: OwnerGrantChoices,
+        observations: Option<PreparationFacts>,
+    ) -> Result<OwnerGrantReview, NativeError> {
         let cookie = self.cookie().await?;
         let io = self.io(&cookie, Permission::ConsentGrants).await?;
         let _lane = self.manager.owner.0.management.mutations.lock().await;
@@ -440,17 +454,28 @@ impl OwnerGrantIntents {
         let binding = Binding::from_native(&consent.binding().map_err(storage)?);
         // Keep the transport future out of the enclosing adoption/consent
         // state machine, which also runs on ordinary small worker stacks.
-        let admission = Box::pin(self.observe_grant_admission(&io, &binding)).await?;
+        let (admission, features) = match observations {
+            Some(facts) if facts.context == io.context => (
+                self.bind_observed_admission(&io, &binding, &facts.admission)?,
+                facts.features,
+            ),
+            Some(_) => return Err(failure(401, "management_scope_changed")),
+            None => (
+                Box::pin(self.observe_grant_admission(&io, &binding)).await?,
+                Box::pin(self.session_features(&io)).await?,
+            ),
+        };
+        let supports = |name: &str| features.iter().any(|v| v.as_str() == Some(name));
         let receipt_version = if consent.selection().renewal_mode.is_some() {
-            if !Box::pin(self.supports_pool_renewal(&io)).await? { return Err(failure(409,"management_pool_renewal_policy_required")); }
+            if !supports("pool-renewal-policy-v1") { return Err(failure(409,"management_pool_renewal_policy_required")); }
             6
         } else if consent.selection().per_request_tokens.is_some() {
-            if !Box::pin(self.supports_split_limits(&io)).await? { return Err(failure(409,"management_pool_limits_required")); }
+            if !supports("pool-grant-limits-v1") { return Err(failure(409,"management_pool_limits_required")); }
             5
         } else if consent.selection().calendar.is_some() {
-            if !Box::pin(self.supports_calendar(&io)).await? { return Err(failure(409,"management_calendar_grants_required")); }
+            if !supports("calendar-grants-v1") { return Err(failure(409,"management_calendar_grants_required")); }
             4
-        } else if Box::pin(self.supports_admission_receipts(&io)).await? { 2 } else { 1 };
+        } else if admission::admission_receipts(&features)? { 2 } else { 1 };
         let void = Box::pin(self.void_successors(&io, registry, &binding.contribution_id)).await?;
         let regrant = receipt_version >= 2
             && History::load(&io.path, io.identity.clone())?.admission_month_ended(
@@ -937,10 +962,14 @@ impl OwnerGrantAccess {
         choices: OwnerGrantChoices,
     ) -> Result<OwnerGrantReview, NativeError> {
         let service = self.service();
-        let proof = service
-            .verified_enrollment(&self.registry, contribution)
-            .await?;
-        let mut review = service.prepare(&self.registry, proof, choices).await?;
+        let cookie = service.cookie().await?;
+        let io = service.io(&cookie, Permission::ConsentGrants).await?;
+        let features = Box::pin(service.session_features(&io)).await?;
+        let (proof, admission) = Box::pin(service.observe_enrollment(&self.registry, contribution, None)).await?;
+        let facts = PreparationFacts { context: io.context, admission, features };
+        let mut review = service.prepare_with_observations(
+            &self.registry, proof, choices, Some(facts),
+        ).await?;
         self.offer_window(&mut review);
         Ok(review)
     }
