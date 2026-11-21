@@ -199,6 +199,16 @@ impl<'a> Scope<'a> {
         }
         // A queued SDK read may finish after logout, account replacement, or
         // retirement. Never use that stale success for the next remote effect.
+        self.check_local().await
+    }
+
+    pub(in crate::console) fn cookie(&self) -> &str {
+        self.cookie
+    }
+
+    /// Recheck this exact scoped session around a separate authenticated SDK read.
+    pub(in crate::console) async fn check_local(&self) -> Result<(), OwnerError> {
+        let login = &self.console.0.server_login;
         self.console
             .0
             .authority

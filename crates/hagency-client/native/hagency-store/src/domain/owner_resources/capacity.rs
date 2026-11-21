@@ -505,6 +505,11 @@ impl OwnerGrantConsent {
         Ok(self)
     }
 
+    /// A new native confirmation must bind the same budget facts the owner saw.
+    pub fn same_reviewed_budget(&self, other: &Self) -> bool {
+        self.reviewed_budget.is_some() && self.reviewed_budget == other.reviewed_budget
+    }
+
     pub fn require_unissued_contribution(mut self) -> Result<Self, Error> {
         self.check()?;
         self.require_unissued_contribution = true;

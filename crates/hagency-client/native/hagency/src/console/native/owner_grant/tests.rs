@@ -154,7 +154,8 @@ async fn server() -> (
                     }
                     "/hagency/api/v1/sessions/current/renew" => json!({"validUntilMs":at+30000}),
                     "/hagency/api/v1/management/session" => {
-                        let state = publications.lock().unwrap();
+                        let mut state = publications.lock().unwrap();
+                        state.session_reads += 1;
                         let mut features = if state.allocations_disabled { vec![] }
                         else if state.admission_receipts && state.monthly_regrant {
                             vec!["admission-bound-grants-v2", "pool-monthly-regrant-v1"]
@@ -1200,6 +1201,10 @@ async fn native_owner_grant_review_snapshot_changed_budget_requires_same_intent_
         .approve()
         .await
         .unwrap();
+    let OwnerGrantReviewResult::Review(changed) = f.service.review_existing(
+        &f.registry, f.enrollment().await, original.intent_id.clone(),
+    ).await.unwrap() else { panic!("original must still be reviewable"); };
+    assert!(!changed.same_terms(&review));
     assert_eq!(
         f.service
             .confirm(&f.registry, review)

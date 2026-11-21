@@ -316,7 +316,16 @@ impl OwnerGrantIntents {
         registry: &OwnerResourceRegistry,
         contribution_id: String,
     ) -> Result<VerifiedManagementEnrollment, NativeError> {
-        self.verified_enrollment_observe(registry, contribution_id, |runtime,profile,resource,revision| {
+        self.verified_enrollment_for_round(registry, contribution_id, None).await
+    }
+
+    pub(super) async fn verified_enrollment_for_round(
+        &self,
+        registry: &OwnerResourceRegistry,
+        contribution_id: String,
+        expected: Option<&admission::AdmissionRound>,
+    ) -> Result<VerifiedManagementEnrollment, NativeError> {
+        self.verified_enrollment_observe(registry, contribution_id, expected, |runtime,profile,resource,revision| {
             self.manager.verified_resource_witness(registry,profile,runtime,resource,revision)
         })
         .await
@@ -328,7 +337,7 @@ impl OwnerGrantIntents {
     where F:FnOnce(ManagementRuntime)->Fut,
           Fut:std::future::Future<Output=Result<VerifiedProviderAccount,NativeError>>,
     {
-        self.verified_enrollment_observe(registry,contribution_id,|runtime,_,_,_| {
+        self.verified_enrollment_observe(registry,contribution_id,None,|runtime,_,_,_| {
             let account = observe(runtime);
             async move { account.await.map(ResourceWitness::Account) }
         }).await
@@ -340,12 +349,13 @@ impl OwnerGrantIntents {
     where F:FnOnce(ManagementRuntime)->Fut,
           Fut:std::future::Future<Output=Result<ResourceWitness,NativeError>>,
     {
-        self.verified_enrollment_observe(registry,contribution_id,|runtime,_,_,_|observe(runtime)).await
+        self.verified_enrollment_observe(registry,contribution_id,None,|runtime,_,_,_|observe(runtime)).await
     }
     async fn verified_enrollment_observe<F, Fut>(
         &self,
         registry: &OwnerResourceRegistry,
         contribution_id: String,
+        expected: Option<&admission::AdmissionRound>,
         observe: F,
     ) -> Result<VerifiedManagementEnrollment, NativeError>
     where
@@ -439,6 +449,9 @@ impl OwnerGrantIntents {
             .await?;
         io.check().await?;
         validate_admission(&latest, &io, &contribution_id)?;
+        if expected.is_some_and(|round| *round != admission::AdmissionRound::observed(&latest)) {
+            return Err(failure(409, "management_enrollment_changed"));
+        }
         let c = &latest.admission.contribution;
         let previous = &before.admission.contribution;
         if c.request_id != previous.request_id

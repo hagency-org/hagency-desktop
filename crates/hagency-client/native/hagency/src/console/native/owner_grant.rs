@@ -28,7 +28,11 @@ use publication::PublicationIntent;
 fn history_error() -> NativeError {
     failure(409, "owner_grant_history_unavailable")
 }
+#[track_caller]
 fn storage(e: hagency_store::Error) -> NativeError {
+    if matches!(e, hagency_store::Error::LocalAuthority) {
+        tracing::info!(at = %std::panic::Location::caller(), "Pool grant authority rejected");
+    }
     super::management::store_error(e)
 }
 fn positive(value: u64) -> Result<(), NativeError> {
@@ -89,6 +93,15 @@ fn now_ms() -> Result<u64, NativeError> {
     u64::try_from(ms).map_err(|_| history_error())
 }
 
+/// Read-only server facts. These can be gathered before the finite native
+/// provider proof; confirmation fetches both again before any write.
+#[derive(Clone)]
+struct RootReviewFacts {
+    original: Original,
+    admission: admission::AdmissionRound,
+    features: Vec<serde_json::Value>,
+}
+
 struct NativeIo<'a> {
     manager: &'a NativeManagement,
     matrix: MatrixScope<'a>,
@@ -122,11 +135,11 @@ impl NativeIo<'_> {
         if Instant::now() >= self.deadline || !(self.gate())() {
             return Err(failure(401, "management_scope_changed"));
         }
-        self.matrix
-            .check()
-            .await
-            .map_err(|e| failure(e.status, &e.code))?;
-        let (context, session) = self.manager.authorized().await?;
+        // The manager verifies the SDK source for this exact cookie. Keep the
+        // original token, account, device and local-session fences on both sides.
+        self.matrix.check_local().await.map_err(|e| failure(e.status, &e.code))?;
+        let (context, session) = self.manager.authorized_for_cookie(Some(self.matrix.cookie())).await?;
+        self.matrix.check_local().await.map_err(|e| failure(e.status, &e.code))?;
         if context != self.context {
             return Err(failure(401, "management_scope_changed"));
         }
@@ -503,6 +516,7 @@ impl OwnerGrantIntents {
         io.check().await?;
         consent.binding().map_err(storage)?;
         Ok(OwnerGrantReview {
+            native_window: None,
             manager: self.manager.clone(),
             identity: io.identity,
             original,
@@ -566,6 +580,26 @@ impl OwnerGrantIntents {
         enrollment: VerifiedManagementEnrollment,
         intent_id: String,
     ) -> Result<OwnerGrantReviewResult, NativeError> {
+        self.review_existing_with(registry, enrollment, intent_id, None).await
+    }
+
+    async fn root_review_facts(&self, io: &NativeIo<'_>, original: Original) -> Result<RootReviewFacts, NativeError> {
+        let admission = Box::pin(self.check_grant_admission(io, &original)).await?;
+        let features = if original.receipt_version >= 2 {
+            Box::pin(self.session_features(io)).await?
+        } else {
+            Vec::new()
+        };
+        Ok(RootReviewFacts { original, admission, features })
+    }
+
+    async fn review_existing_with(
+        &self,
+        registry: &OwnerResourceRegistry,
+        enrollment: VerifiedManagementEnrollment,
+        intent_id: String,
+        facts: Option<RootReviewFacts>,
+    ) -> Result<OwnerGrantReviewResult, NativeError> {
         super::key(&intent_id)?;
         let cookie = self.cookie().await?;
         let io = self.io(&cookie, Permission::ConsentGrants).await?;
@@ -596,7 +630,12 @@ impl OwnerGrantIntents {
         {
             return Err(failure(409, "owner_grant_original_review_expired"));
         }
-        let admission = Box::pin(self.check_grant_admission(&io, &original)).await?;
+        let facts = match facts {
+            Some(facts) if facts.original == original => facts,
+            Some(_) => return Err(history_error()),
+            None => self.root_review_facts(&io, original.clone()).await?,
+        };
+        let admission = facts.admission;
         let void = Box::pin(self.void_successors(&io, registry, &original.binding.contribution_id)).await?;
         let regrant = original.receipt_version >= 2
             && history.admission_month_ended(
@@ -606,14 +645,14 @@ impl OwnerGrantIntents {
                 &void,
             );
         let consent = if original.receipt_version >= 2 {
-            if !Box::pin(self.supports_admission_receipts(&io)).await? {
+            if !admission::admission_receipts(&facts.features)? {
                 return Err(failure(409, "management_admission_receipts_required"));
             }
             let consent = consent
                 .with_admission_request(admission.request_id.clone())
                 .map_err(storage)?;
             if regrant {
-                if !Box::pin(self.supports_monthly_regrant(&io)).await? {
+                if !facts.features.iter().any(|v| v.as_str() == Some("pool-monthly-regrant-v1")) {
                     return Err(failure(409, "management_monthly_regrant_required"));
                 }
                 consent
@@ -626,6 +665,7 @@ impl OwnerGrantIntents {
         io.check().await?;
         let (consent, context) = self.review_context(&io, registry, consent).await?;
         Ok(OwnerGrantReviewResult::Review(Box::new(OwnerGrantReview {
+            native_window: None,
             manager: self.manager.clone(),
             identity: io.identity,
             original,
@@ -660,6 +700,7 @@ impl OwnerGrantIntents {
         let (consent, mut context) = self.review_context(io, registry, consent).await?;
         context.remaining_tokens = max_tokens;
         Ok(OwnerGrantReviewResult::Review(Box::new(OwnerGrantReview {
+            native_window: None,
             manager: self.manager.clone(),
             identity: io.identity.clone(),
             original,
@@ -674,6 +715,13 @@ impl OwnerGrantIntents {
         &self,
         registry: &OwnerResourceRegistry,
         review: OwnerGrantReview,
+    ) -> Result<OwnerGrantProgress, NativeError> {
+        self.commit_review(registry, review, None).await
+    }
+
+    async fn commit_review(
+        &self, registry: &OwnerResourceRegistry, review: OwnerGrantReview,
+        click_facts: Option<RootReviewFacts>,
     ) -> Result<OwnerGrantProgress, NativeError> {
         if !Arc::ptr_eq(&self.manager, &review.manager) {
             return Err(failure(401, "owner_grant_review_changed"));
@@ -694,7 +742,10 @@ impl OwnerGrantIntents {
         if !matches!(progress.state, OwnerGrantState::ReviewRequired) {
             return Ok(progress);
         }
-        if Binding::from_native(&review.consent.binding().map_err(storage)?)
+        if Binding::from_native(&review.consent.binding().map_err(|err| {
+            tracing::info!("Pool confirmation proof unavailable before admission checks");
+            storage(err)
+        })?)
             != review.original.binding
             || review.original.binding.executor_generation != io.device.generation()
         {
@@ -703,28 +754,30 @@ impl OwnerGrantIntents {
         if !review.capacity_available() {
             return Err(failure(409, "owner_grant_capacity_unavailable"));
         }
-        let admission = Box::pin(self.check_grant_admission(&io, &review.original)).await?;
+        // A native click re-observes the provider between two authenticated
+        // admission reads. Other callers retain the original proof contract.
+        let successor = review.original.succession.is_some();
+        let (admission, features) = match click_facts {
+            Some(facts) if !successor && facts.original == review.original => (facts.admission, facts.features),
+            Some(_) => return Err(failure(409, "owner_grant_review_changed")),
+            None => (
+                Box::pin(self.check_grant_admission(&io, &review.original)).await?,
+                Box::pin(self.session_features(&io)).await?,
+            ),
+        };
         if admission != review.admission {
             return Err(failure(409, "management_enrollment_changed"));
         }
-        // Disabling fresh allocations fences pending v1 and v2 consent alike;
-        // recovery above still returns an existing original receipt unchanged.
-        let admission_receipts = Box::pin(self.supports_admission_receipts(&io)).await?;
-        if review.original.receipt_version >= 2 && !admission_receipts {
-            return Err(failure(409, "management_admission_receipts_required"));
-        }
-        if review.regrant && !Box::pin(self.supports_monthly_regrant(&io)).await? {
-            return Err(failure(409, "management_monthly_regrant_required"));
-        }
-        if review.original.receipt_version == 6 && !Box::pin(self.supports_pool_renewal(&io)).await? { return Err(failure(409,"management_pool_renewal_policy_required")); }
-        if review.original.receipt_version >= 5 && !Box::pin(self.supports_split_limits(&io)).await? { return Err(failure(409,"management_pool_limits_required")); }
-        if review.original.receipt_version == 4 && !Box::pin(self.supports_calendar(&io)).await? {
-            return Err(failure(409,"management_calendar_grants_required"));
-        }
-        let successor = review.original.succession.is_some();
-        if successor && !Box::pin(self.supports_succession(&io)).await? {
-            return Err(failure(409, "management_grant_succession_required"));
-        }
+        admission::validate_confirmation_features(
+            &features, review.original.receipt_version, review.regrant, successor,
+        )?;
+        // The remote admission and capability reads may have outlived the
+        // native proof. Keep an unattempted original recoverable in that case.
+        io.check().await?;
+        review.consent.binding().map_err(|err| {
+            tracing::info!("Pool confirmation proof unavailable after admission checks");
+            storage(err)
+        })?;
         history.data.records[index].state = State::Applying;
         history.save()?;
         io.check().await?;
@@ -887,24 +940,72 @@ impl OwnerGrantAccess {
         let proof = service
             .verified_enrollment(&self.registry, contribution)
             .await?;
-        service.prepare(&self.registry, proof, choices).await
+        let mut review = service.prepare(&self.registry, proof, choices).await?;
+        self.offer_window(&mut review);
+        Ok(review)
     }
+
+    fn offer_window(&self, review: &mut OwnerGrantReview) {
+        if review.original.succession.is_none() && review.original.receipt_version >= 2
+            && review.original.binding.verified_resource_binding.is_some() {
+            review.native_window = Some(NativeReviewWindow {
+                until: Instant::now() + Duration::from_secs(60),
+                host_gate: self.host_gate.clone(),
+            });
+        }
+    }
+
     pub async fn review(&self, id: String) -> Result<OwnerGrantReviewResult, NativeError> {
+        let (mut result, _) = self.observe_original(id).await?;
+        if let OwnerGrantReviewResult::Review(review) = &mut result {
+            self.offer_window(review);
+        }
+        Ok(result)
+    }
+
+    async fn observe_original(&self, id: String) -> Result<(OwnerGrantReviewResult, Option<RootReviewFacts>), NativeError> {
         let service = self.service();
         let progress = service.recover(&self.registry, id.clone()).await?;
         if !matches!(progress.state, OwnerGrantState::ReviewRequired) {
-            return Ok(OwnerGrantReviewResult::Progress(Box::new(progress)));
+            return Ok((OwnerGrantReviewResult::Progress(Box::new(progress)), None));
         }
-        let proof = service
-            .verified_enrollment(&self.registry, progress.summary.contribution_id)
-            .await?;
-        service.review_existing(&self.registry, proof, id).await
+        let facts = if progress.summary.succession.is_none() {
+            let cookie = service.cookie().await?;
+            let io = service.io(&cookie, Permission::ConsentGrants).await?;
+            let history = History::load(&io.path, io.identity.clone())?;
+            let original = history.data.records[history.index(&id)?].original.clone();
+            Some(service.root_review_facts(&io, original).await?)
+        } else {
+            None
+        };
+        let proof = service.verified_enrollment_for_round(&self.registry, progress.summary.contribution_id,
+            facts.as_ref().map(|f| &f.admission)).await?;
+        let result = service.review_existing_with(&self.registry, proof, id, facts.clone()).await?;
+        Ok((result, facts))
     }
+
     pub async fn confirm(
         &self,
         review: OwnerGrantReview,
     ) -> Result<OwnerGrantProgress, NativeError> {
-        self.service().confirm(&self.registry, review).await
+        let Some(window) = &review.native_window else {
+            return self.service().confirm(&self.registry, review).await;
+        };
+        if !Arc::ptr_eq(&self.manager, &review.manager) || review.expired() {
+            return Err(failure(409, "owner_grant_original_review_expired"));
+        }
+        let original_gate = window.host_gate.clone();
+        let access = self.clone().restrict_to_host(move || original_gate.as_ref().is_none_or(|g| g()))?;
+        let (current, facts) = access.observe_original(review.original.intent_id.clone()).await?;
+        match current {
+            OwnerGrantReviewResult::Progress(progress) => Ok(*progress),
+            OwnerGrantReviewResult::Review(current) => {
+                if !current.same_terms(&review) {
+                    return Err(failure(409, "owner_grant_review_changed"));
+                }
+                access.service().commit_review(&access.registry, *current, facts).await
+            }
+        }
     }
     pub async fn recover(&self, id: String) -> Result<OwnerGrantProgress, NativeError> {
         self.service().recover(&self.registry, id).await
