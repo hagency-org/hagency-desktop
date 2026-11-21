@@ -208,7 +208,7 @@ class App(NativeApp):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('--binary', type=Path, default=Path('target/debug/rinx'))
+    parser.add_argument('--binary', type=Path, default=Path('target/debug/hagency'))
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     with socket.socket() as probe:

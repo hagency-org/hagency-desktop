@@ -85,7 +85,7 @@ def restart(run, port, output, accept_consent=True):
     for key in ("NO_PROXY", "no_proxy"):
         env[key] = ",".join(filter(None, [env.get(key, ""), "127.0.0.1,localhost,::1"]))
     with (run / "native.log").open("a") as log:
-        process = subprocess.Popen([str(run / "bin/rinx")], cwd=ROOT, env=env,
+        process = subprocess.Popen([str(run / "bin/hagency")], cwd=ROOT, env=env,
                                    stdin=subprocess.DEVNULL, stdout=log, stderr=subprocess.STDOUT,
                                    start_new_session=True)
     (run / "state.json").write_text(json.dumps({"pid": process.pid, "user_seq": None}))
@@ -236,7 +236,7 @@ def main():
         state = json.loads((run / "state.json").read_text())
         assert app.request("/s")["pid"] == state["pid"]
         process_command = subprocess.check_output(["ps", "-p", str(state["pid"]), "-o", "command="], text=True).strip()
-        assert process_command == str(run / "bin/rinx"), "Unexpected process; refusing kill"
+        assert process_command == str(run / "bin/hagency"), "Unexpected process; refusing kill"
         os.kill(state["pid"], signal.SIGKILL)
         writer.rollback()
         writer.close()

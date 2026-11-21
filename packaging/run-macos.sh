@@ -11,19 +11,19 @@ shift
 # for example to attach a debugger to the process cargo itself started.
 # Without the bundle the app still runs; macOS just attributes microphone,
 # speech and location prompts to the terminal instead of to Rinx.
-if [[ ${binary##*/} != rinx || -n ${RINX_DEV_NO_BUNDLE:-} ]]; then
+if [[ ${binary##*/} != hagency || -n ${RINX_DEV_NO_BUNDLE:-} ]]; then
     exec "$binary" "$@"
 fi
 # A missing or broken codesign is handled by the signing step below, which falls
 # back to running unbundled rather than failing the run.
 if [[ $(launchctl managername 2>/dev/null) != Aqua ]]; then
-    echo 'rinx: no macOS window session, so running without an app bundle. Native permission prompts will be attributed to the terminal.' >&2
+    echo 'hagency: no macOS window session, so running without an app bundle. Native permission prompts will be attributed to the terminal.' >&2
     exec "$binary" "$@"
 fi
 
 working_dir=$PWD
 binary_dir=$(cd "$(dirname "$binary")" && pwd -P)
-binary="$binary_dir/rinx"
+binary="$binary_dir/hagency"
 packaging_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 bundle_dir="$binary_dir/.rinx-dev"
 bundle="$bundle_dir/Hagency Desktop.app"
@@ -72,18 +72,19 @@ if [[ -f $binary_dir/octos ]]; then
 fi
 previous_inputs=
 if [[ -f $bundle_dir/inputs ]]; then previous_inputs=$(< "$bundle_dir/inputs"); fi
-if [[ $inputs != "$previous_inputs" || ! -f $bundle/Contents/MacOS/rinx ]]; then
+if [[ $inputs != "$previous_inputs" || ! -f $bundle/Contents/MacOS/hagency ]]; then
     # TCC may inspect the bundle again while it is running. Keep its executable
     # and signature in place until that instance has exited.
     while IFS= read -r running_binary; do
-        if [[ $running_binary == "$bundle/Contents/MacOS/rinx" ]]; then
-            echo 'Quit the running Rinx development app before launching a rebuilt version.' >&2
+        if [[ $running_binary == "$bundle/Contents/MacOS/hagency" ||
+              $running_binary == "$bundle/Contents/MacOS/rinx" ]]; then
+            echo 'Quit the running Hagency development app before launching a rebuilt version.' >&2
             exit 1
         fi
     done < <(/bin/ps -axo comm=)
     # Copy before signing: a symlink or hard link would mutate Cargo's executable.
     mkdir -p "$staging/Hagency Desktop.app/Contents/MacOS"
-    cp "$binary" "$staging/Hagency Desktop.app/Contents/MacOS/rinx"
+    cp "$binary" "$staging/Hagency Desktop.app/Contents/MacOS/hagency"
     mkdir -p "$staging/Hagency Desktop.app/Contents/Resources"
     cp "$packaging_dir/../resources/icon.icns" "$staging/Hagency Desktop.app/Contents/Resources/icon.icns"
     if [[ -f $binary_dir/octos ]]; then
@@ -100,7 +101,7 @@ if [[ $inputs != "$previous_inputs" || ! -f $bundle/Contents/MacOS/rinx ]]; then
     /usr/libexec/PlistBuddy -c 'Delete :CFBundleURLTypes' "$plist"
     if ! /usr/bin/codesign --force --sign - "$staging/Hagency Desktop.app" >"$staging/signing.log" 2>&1; then
         cat "$staging/signing.log" >&2
-        echo 'rinx: could not sign the development app bundle, so running without it.' >&2
+        echo 'hagency: could not sign the development app bundle, so running without it.' >&2
         cleanup
         exec "$binary" "$@"
     fi
@@ -132,7 +133,7 @@ startup_seconds=$SECONDS
 open_exited_seconds=
 while [[ ! -s $launch_dir/pid ]]; do
     if (( SECONDS - startup_seconds >= 30 )); then
-        echo 'Rinx did not complete its development launcher handshake.' >&2
+        echo 'Hagency did not complete its development launcher handshake.' >&2
         exit 1
     fi
     # `open -W` sometimes returns before the app has finished launching. Giving up
@@ -151,7 +152,7 @@ if [[ -s $launch_dir/pid ]]; then
     app_pid=$(< "$launch_dir/pid")
     if [[ ! $app_pid =~ ^[0-9]+$ || $app_pid -le 1 ]]; then
         app_pid=
-        echo 'Rinx returned an invalid development process ID.' >&2
+        echo 'Hagency returned an invalid development process ID.' >&2
         exit 1
     fi
     if [[ -n $pending_signal ]]; then
@@ -177,12 +178,12 @@ fi
 if (( interrupted != 0 )); then exit "$interrupted"; fi
 if (( open_status != 0 )); then exit "$open_status"; fi
 if [[ ! -s $launch_dir/status ]]; then
-    echo 'Rinx exited before reporting a normal application shutdown.' >&2
+    echo 'Hagency exited before reporting a normal application shutdown.' >&2
     exit 1
 fi
 app_status=$(< "$launch_dir/status")
 if [[ ! $app_status =~ ^[0-9]+$ || $app_status -gt 255 ]]; then
-    echo 'Rinx returned an invalid development exit status.' >&2
+    echo 'Hagency returned an invalid development exit status.' >&2
     exit 1
 fi
 completed=1

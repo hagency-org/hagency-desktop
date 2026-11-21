@@ -198,9 +198,9 @@ takes 0.2 s). On a shared machine run `relax` and `makepad run` experiments unde
 The owner daemon (`rinx daemon run`: it holds the owner database and runs the Agents) runs
 under the runner like the window does:
 
-    cargo build --bin rinx          # once: a native binary for the helper processes
+    cargo build --bin hagency          # once: a native binary for the helper processes
     export MAKEPAD_RUN_ALLOW_C=1 MAKEPAD_RUN_TRUST_PROC_MACROS=1 RUST_MIN_STACK=16777216
-    export HAGENCY_NATIVE_HELPER=$PWD/target/debug/rinx MAKEPAD_RUN_INSPECT=0
+    export HAGENCY_NATIVE_HELPER=$PWD/target/debug/hagency MAKEPAD_RUN_INSPECT=0
     ulimit -n 10240
     run=".sources/makepad/target/release/makepad run --no-live --allow-c rinx
          --features development-native-helper --"
