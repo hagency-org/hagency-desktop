@@ -981,18 +981,7 @@ async fn work_loop(
             // A lost acknowledgement is not a reason to fence a reply that the
             // central transaction may still deliver. Retry only saved evidence,
             // under this same live process; never repeat the model turn.
-            Err(error)
-                if matches!(
-                    error.code.as_str(),
-                    "server_unavailable"
-                        | "shared_message_delivery_pending"
-                        | "server_request_failed"
-                        | "management_outcome_unknown"
-                        | "allocation_ticket_expired"
-                ) =>
-            {
-                None
-            }
+            Err(error) if guarded::retry_reply_report(&error) => None,
             Err(error) => return Err(error),
         };
         if reply_settled(status.as_ref().map(|s| s.as_deref()), &terminal.state) {

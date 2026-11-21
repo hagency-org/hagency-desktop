@@ -925,19 +925,11 @@ async fn work_loop(
             // central transaction may still deliver. Retry only saved evidence,
             // under this same live process; never repeat the model turn.
             Err(error)
-                if matches!(
-                    error.code.as_str(),
-                    "server_unavailable"
-                        | "shared_message_delivery_pending"
-                        | "server_request_failed"
-                        | "management_outcome_unknown"
-                        | "allocation_ticket_expired"
-                        | "shared_encrypted_send_pending"
-                        | "shared_crypto_device_unavailable"
-                ) =>
-            {
-                None
-            }
+                if guarded::retry_reply_report(&error)
+                    || matches!(
+                        error.code.as_str(),
+                        "shared_encrypted_send_pending" | "shared_crypto_device_unavailable"
+                    ) => None,
             Err(error) => return Err(error),
         };
         let reported = status.as_ref().map(|s| s.as_deref());

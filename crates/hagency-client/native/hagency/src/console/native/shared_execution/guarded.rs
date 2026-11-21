@@ -64,6 +64,18 @@ where
     }
 }
 
+/// Retry the saved terminal receipt while the original activity can still send.
+pub(super) fn retry_reply_report(error: &NativeError) -> bool {
+    super::io::writer_busy(error) || matches!(
+        error.code.as_str(),
+        "server_unavailable"
+            | "shared_message_delivery_pending"
+            | "server_request_failed"
+            | "management_outcome_unknown"
+            | "allocation_ticket_expired"
+    )
+}
+
 /// Whether a driver's wait for the central reply is over.
 ///
 /// `reported` is `None` while the report itself is still being retried, and

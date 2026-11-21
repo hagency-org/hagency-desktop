@@ -67,6 +67,7 @@ pub(crate) struct State {
     false_start: bool,
     lose_work_result: bool,
     lose_completed_work_result: bool,
+    refuse_next_reply_authorization: bool,
     work_recover_calls: usize,
     session_routes: usize,
     forged_work: bool,
@@ -132,6 +133,9 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
     }
     if path.ends_with("/crypto/send") {
         assert_eq!(body["workId"], s.shared.work.as_ref().unwrap().id);
+        if std::mem::take(&mut s.shared.refuse_next_reply_authorization) {
+            return Some(json!({"fixtureStatus":503, "code":"domain_writer_busy"}));
+        }
         return Some(json!({"observedAtMs":now()}));
     }
     #[cfg(feature="shared-budget-execution")]
@@ -333,8 +337,7 @@ async fn fixture() -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) 
     runtime_fixture(f, t, c).await
 }
 
-#[tokio::test]
-async fn native_shared_recurring_expired_initial_command_uploads_exact_nonissuance_proof() {
+async fn recurring_fixture() -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) {
     use hagency_core::recurring_quota::{Cadence, Calendar, RenewalMode};
     let f = Fixture::with_provider_budget_calendar("openai.chatgpt", "fixture_account", 1000, 700, 60000,
         Some(Calendar {cadence:Cadence::Daily,time_zone:"America/Los_Angeles".into()})).await;
@@ -357,7 +360,12 @@ async fn native_shared_recurring_expired_initial_command_uploads_exact_nonissuan
     c.validate("@owner:test").unwrap();
     f.state.lock().unwrap().agent=Some(serde_json::to_value(&c).unwrap());
     let transport = ManagedAgentTransport::new(f.owner.management(package(1)).await.unwrap());
-    let (f,t,mut command)=runtime_fixture(f,transport,c).await;
+    runtime_fixture(f, transport, c).await
+}
+
+#[tokio::test]
+async fn native_shared_recurring_expired_initial_command_uploads_exact_nonissuance_proof() {
+    let (f, t, mut command) = recurring_fixture().await;
     command.issued_at_ms=now()-50;
     command.expires_at_ms=now()-1;
     {
@@ -458,7 +466,7 @@ fn rows(f: &Fixture, table: &str) -> u64 {
     db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
 }
-async fn stopped(f: &Fixture) {
+async fn wait_original_stopped(f: &Fixture) {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if f.state
@@ -476,6 +484,9 @@ async fn stopped(f: &Fixture) {
     })
     .await
     .expect("retained process stops with exact receipt");
+}
+async fn stopped(f: &Fixture) {
+    wait_original_stopped(f).await;
     f.owner.0.shared_execution.drain().await.unwrap();
 }
 #[tokio::test]

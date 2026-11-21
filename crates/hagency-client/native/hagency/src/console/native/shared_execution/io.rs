@@ -508,10 +508,14 @@ where
 /// How long a running process waits out a transient authority failure.
 const RUNNING_CHECK_SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Codes the owner's management boundary reports while its SDK credentials or
-/// management session are being renewed.
+/// The service could not acquire the domain writer within its admission window.
+pub(super) fn writer_busy(error: &NativeError) -> bool {
+    error.status == 503 && error.code == "domain_writer_busy"
+}
+
+/// A renewable management scope or a temporarily occupied domain writer.
 fn transient_boundary(error: &NativeError) -> bool {
-    matches!(
+    writer_busy(error) || matches!(
         error.code.as_str(),
         "management_scope_changed"
             | "management_outcome_unknown"
@@ -843,6 +847,13 @@ mod settle_tests {
         } else {
             Ok(call)
         }
+    }
+
+    #[test]
+    fn only_the_writer_contention_response_is_retryable_as_writer_contention() {
+        assert!(transient_boundary(&failure(503, "domain_writer_busy")));
+        assert!(!transient_boundary(&failure(403, "domain_writer_busy")));
+        assert!(!transient_boundary(&failure(503, "shared_room_send_authority_changed")));
     }
 
     #[tokio::test(start_paused = true)]
