@@ -88,6 +88,20 @@ script_mod! {
             rename_status := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
             rename_save := RobrixPositiveIconButton {text: #(crate::i18n::tr("Save")) i18n_text: "Save" width: Fill height: 40 padding: 10 icon_walk: Walk{width: 0 height: 0}}
         }
+        nick_panel := View {visible: false width: Fill height: Fit flow: Down padding: Inset{left: 16 right: 16 top: 12 bottom: 12} spacing: 10
+            nick_back := RinxBackButton {}
+            Label {width: Fill height: Fit text: #(crate::i18n::tr("My nickname in this room")) i18n_text: "My nickname in this room"
+                draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_bold{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}}
+            Label {width: Fill height: Fit flow: Flow.Right{wrap: true}
+                text: #(crate::i18n::tr("Only this room shows this name. Leave it empty to use your account's name."))
+                i18n_text: "Only this room shows this name. Leave it empty to use your account's name."
+                draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular{font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}}
+            nick_input := RinxInput {width: Fill height: (44 * mod.widgets.RINX_TEXT_SCALE) padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
+                draw_bg +: {border_size: 0 border_radius: 5} draw_text.text_style.font_size: (12 * mod.widgets.RINX_TEXT_SCALE)
+                empty_text: #(crate::i18n::tr("Nickname")) i18n_empty_text: "Nickname"}
+            nick_status := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
+            nick_save := RobrixPositiveIconButton {text: #(crate::i18n::tr("Save")) i18n_text: "Save" width: Fill height: 40 padding: 10 icon_walk: Walk{width: 0 height: 0}}
+        }
         services_panel := View {visible: false width: Fill height: Fit flow: Down padding: Inset{left: 16 right: 16 top: 12 bottom: 12} spacing: 10
             services_back := RinxBackButton {}
             Label {width: Fill height: Fit text: #(crate::i18n::tr("Room Agent services")) i18n_text: "Room Agent services"
@@ -224,12 +238,13 @@ enum CellTarget { Member(UserProfile), Add, Remove }
 enum InfoRow {
     /// A row of the member grid, by the position of its first cell.
     Members(usize),
-    AddChoice, Gap, Name, Topic, Notifications, Mode(usize), Back, AgentServices, Filler,
+    AddChoice, Gap, Name, Topic, Notifications, Nickname, Mode(usize), Back, AgentServices, Filler,
 }
 
 /// The one page of room information, top to bottom: the member grid, which ends in the tile
 /// that adds and, for a viewer who may remove members, the tile that removes; then the
-/// room's name, its topic when it has one, and its settings.
+/// room's name, its topic when it has one, and its settings: notifications, the viewer's
+/// nickname in the room and, for a viewer with an Agent of their own in the room, that Agent.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct InfoPage {
     members: usize,
@@ -242,6 +257,8 @@ struct InfoPage {
     topic: bool,
     /// Whether the notification modes are listed in place of the settings.
     choosing: bool,
+    /// Whether one of the members is an Agent of the viewer's own.
+    agents: bool,
 }
 impl InfoPage {
     fn cells(&self) -> usize {
@@ -257,7 +274,8 @@ impl InfoPage {
         self.cells().div_ceil(self.columns.max(1))
     }
     fn rows(&self) -> usize {
-        self.grid_rows() + usize::from(self.adding) + 2 + usize::from(self.topic) + if self.choosing {5} else {2}
+        self.grid_rows() + usize::from(self.adding) + 2 + usize::from(self.topic)
+            + if self.choosing {5} else {2 + usize::from(self.agents)}
     }
     fn row(&self, index: usize) -> InfoRow {
         let grid = self.grid_rows();
@@ -280,7 +298,8 @@ impl InfoPage {
             (0..=3, true) => InfoRow::Mode(index),
             (4, true) => InfoRow::Back,
             (0, false) => InfoRow::Notifications,
-            (1, false) => InfoRow::AgentServices,
+            (1, false) => InfoRow::Nickname,
+            (2, false) if self.agents => InfoRow::AgentServices,
             _ => InfoRow::Filler,
         }
     }
@@ -295,6 +314,16 @@ fn removable_members(
     members.iter().map(|member| &member.user_id)
         .filter(|user| !banned.contains(*user) && !is_hagency_service(user, viewer) && levels.user_can_kick_user(viewer, user))
         .cloned().collect()
+}
+
+/// Whether one of `members` is an Agent of `viewer`'s own, by what is known of who owns whom.
+fn has_own_agent(members: &[UserProfile], owners: &HashMap<OwnedUserId, OwnedUserId>, viewer: &UserId) -> bool {
+    members.iter().any(|member| owners.get(&member.user_id).is_some_and(|owner| owner == viewer))
+}
+
+/// The name `viewer` goes by in the room, when the room's member list gives one.
+fn own_nickname<'a>(members: &'a [UserProfile], viewer: &UserId) -> &'a str {
+    members.iter().find(|member| member.user_id == viewer).and_then(|member| member.username.as_deref()).unwrap_or("")
 }
 
 /// The room a row has for the room's name beside its title in the narrowest panel,
@@ -369,7 +398,11 @@ pub(crate) async fn fetch_member_owners(room: &str, owner: &OwnedUserId) -> Resu
     if rows.len()>128 {return Err("room_discovery_incomplete".into());}
     let mut owners = HashMap::new();let mut conflicts = HashSet::new();
     add_member_owners(&mut owners, &mut conflicts, &roster["agents"], Some(owner));
-    let incomplete = match service.agents_for_registered_room(room).await {
+    // That roster holds the personal Agents only. The pool Agents this owner may place in
+    // rooms are the owner's own as well, and are listed with the Agents that can join a room.
+    let placeable = service.execute(Command::RoomAgents).await;
+    if let Ok(placeable) = &placeable {add_member_owners(&mut owners, &mut conflicts, &placeable["agents"], Some(owner));}
+    let incomplete = placeable.is_err() | match service.agents_for_registered_room(room).await {
         Ok(context) => {
             let project = context["projectId"].as_str().filter(|id|!id.is_empty()).ok_or("room_discovery_unavailable")?;
             match service.execute(Command::RoomRoster {project_id:project.into(),room_id:room.into()}).await {
@@ -435,6 +468,18 @@ struct RoomRenamed {
     result: Result<String, String>,
 }
 
+/// The answer to a request to change the viewer's nickname in the room: the name the room
+/// now shows for them, if any, or why it wasn't set.
+#[derive(Debug)]
+struct NicknameSet {
+    owner: OwnedUserId,
+    origin: String,
+    epoch: u64,
+    room_id: OwnedRoomId,
+    request: u64,
+    result: Result<Option<String>, String>,
+}
+
 #[derive(Debug)]
 struct ChatInfoLoaded {
     owner: OwnedUserId,
@@ -456,6 +501,7 @@ struct RoomServicesLoaded {
 }
 
 fn room_service_status(service: &serde_json::Value) -> String {
+    if service["pool"] == true {return crate::i18n::tr("Runs on a shared resource pool.").into();}
     if service["ownerServicePaused"] == true {return crate::i18n::tr("Paused in this Room. Requests receive a pause notice.").into();}
     if service["bindingState"] == "suspended" {return crate::i18n::tr("Room access unavailable. Check membership and permissions.").into();}
     if service["bindingState"] == "pending" {return crate::i18n::tr("Joining this Room…").into();}
@@ -505,6 +551,12 @@ pub struct MobileChatInfo {
     #[rust] renaming: bool,
     #[rust] rename_busy: bool,
     #[rust] rename_request: u64,
+    /// Whether the page is replaced by the field that changes the viewer's nickname in the room.
+    #[rust] nicknaming: bool,
+    #[rust] nick_busy: bool,
+    #[rust] nick_request: u64,
+    /// The field that was just opened and is to take the keys once it has been drawn.
+    #[rust] focus_input: Option<LiveId>,
     #[rust] rendered_rows: HashMap<WidgetUid, InfoRow>,
     /// What each cell of a drawn grid row stood for, by the row's widget and in cell order.
     #[rust] rendered_cells: HashMap<WidgetUid, Vec<Option<CellTarget>>>,
@@ -617,12 +669,12 @@ impl MobileChatInfo {
         let name = data.room.display().into_owned();
         self.renaming = true;
         self.rename_busy = false;
+        self.nicknaming = false;
         self.services_open = false;
         self.adding = false;
         self.removing = false;
-        let input = self.view.text_input(cx, ids!(rename_input));
-        input.set_text(cx, &name);
-        input.set_key_focus(cx);
+        self.view.text_input(cx, ids!(rename_input)).set_text(cx, &name);
+        self.focus_input = Some(live_id!(rename_input));
         let mut status = self.view.label(cx, ids!(rename_status));
         status.set_text(cx, "");
         script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_MUTED}});
@@ -681,6 +733,84 @@ impl MobileChatInfo {
             Err(error) => {
                 let mut status = self.view.label(cx, ids!(rename_status));
                 status.set_text(cx, &crate::i18n::format("Could not change the room's name: {error}", &[("error", error.clone())]));
+                script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_DANGER_FG}});
+            }
+        }
+        self.view.redraw(cx);
+    }
+    /// Opens the field that changes the name the viewer goes by in this room.
+    fn tap_nickname(&mut self, cx: &mut Cx) {
+        let (Some(owner), Some(data)) = (self.owner.as_ref(), self.data.as_ref()) else {return;};
+        let name = own_nickname(&data.members, owner).to_owned();
+        self.nicknaming = true;
+        self.nick_busy = false;
+        self.renaming = false;
+        self.services_open = false;
+        self.adding = false;
+        self.removing = false;
+        self.view.text_input(cx, ids!(nick_input)).set_text(cx, &name);
+        self.focus_input = Some(live_id!(nick_input));
+        let mut status = self.view.label(cx, ids!(nick_status));
+        status.set_text(cx, "");
+        script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_MUTED}});
+    }
+    /// Sends the nickname in the field to the homeserver, unless there is nothing to change.
+    /// An empty field asks for the name of the viewer's account.
+    fn save_nickname(&mut self, cx: &mut Cx) {
+        if self.nick_busy {return;}
+        let (Some(owner), Some(data)) = (self.owner.clone(), self.data.as_ref()) else {return;};
+        let name = self.view.text_input(cx, ids!(nick_input)).text().trim().to_owned();
+        if !name.is_empty() && name == own_nickname(&data.members, &owner) {
+            self.nicknaming = false;
+            self.view.redraw(cx);
+            return;
+        }
+        let room_id = data.room.room_id().clone();
+        if !self.pin_is_current() {return;}
+        let Some(client) = get_client() else {return;};
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let request = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.nick_request = request;
+        self.nick_busy = true;
+        self.view.label(cx, ids!(nick_status)).set_text(cx, crate::i18n::tr("Saving…"));
+        let origin = self.origin.clone();
+        let epoch = self.epoch;
+        spawn_async_task(async move {
+            let result = tokio::time::timeout(INFO_TIMEOUT, async {
+                let room = client.get_room(&room_id).ok_or_else(|| crate::i18n::tr("This chat is no longer available.").to_owned())?;
+                // Matrix keeps one name per room in the person's own membership of it.
+                let name = if name.is_empty() {
+                    client.account().get_display_name().await.map_err(|e| e.to_string())?
+                } else {Some(name)};
+                room.set_own_member_display_name(name.clone()).await.map_err(|e| e.to_string())?;
+                Ok(name)
+            }).await.unwrap_or_else(|_| Err(crate::i18n::tr("The chat information request timed out.").into()));
+            Cx::post_action(NicknameSet {owner, origin, epoch, room_id, request, result});
+        });
+        self.view.redraw(cx);
+    }
+    fn nick_response_matches(&self, set: &NicknameSet) -> bool {
+        self.owner.as_ref() == Some(&set.owner) && self.origin == set.origin
+            && self.epoch == set.epoch && self.nick_request == set.request
+            && self.room.as_ref().is_some_and(|room| room.room_id() == &set.room_id)
+    }
+    /// Takes the answer to this panel's own request: the page and the grid show the new
+    /// nickname at once, or the field stays open with the reason it wasn't set.
+    fn finish_nickname(&mut self, cx: &mut Cx, set: &NicknameSet) {
+        self.nick_busy = false;
+        match &set.result {
+            Ok(name) => {
+                if let Some(data) = self.data.as_mut() {
+                    if let Some(own) = data.members.iter_mut().find(|member| member.user_id == set.owner) {
+                        own.username = name.clone();
+                    }
+                    group_members(&mut data.members, &self.member_owners);
+                }
+                self.nicknaming = false;
+            }
+            Err(error) => {
+                let mut status = self.view.label(cx, ids!(nick_status));
+                status.set_text(cx, &crate::i18n::format("Could not change your nickname: {error}", &[("error", error.clone())]));
                 script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_DANGER_FG}});
             }
         }
@@ -1008,6 +1138,10 @@ impl MobileChatInfo {
         self.renaming = false;
         self.rename_busy = false;
         self.rename_request = 0;
+        self.nicknaming = false;
+        self.nick_busy = false;
+        self.nick_request = 0;
+        self.focus_input = None;
         self.rendered_rows.clear(); self.rendered_cells.clear();
         self.agent_request = 0;
         self.agent_busy = false;
@@ -1140,6 +1274,9 @@ impl Widget for MobileChatInfo {
                 if let Some(renamed) = action.downcast_ref::<RoomRenamed>()
                     && self.pin_is_current() && self.rename_response_matches(renamed)
                 { self.finish_rename(cx, renamed); }
+                if let Some(set) = action.downcast_ref::<NicknameSet>()
+                    && self.pin_is_current() && self.nick_response_matches(set)
+                { self.finish_nickname(cx, set); }
                 if let Some(update) = action.downcast_ref::<RoomNotificationModeUpdated>() {
                     if let Some(data) = self.data.as_mut() {
                         if data.room.room_id() == &update.room_id {
@@ -1153,6 +1290,9 @@ impl Widget for MobileChatInfo {
             if self.view.button(cx, ids!(rename_back)).clicked(actions) {self.renaming=false;self.view.redraw(cx);return;}
             if self.renaming && (self.view.button(cx, ids!(rename_save)).clicked(actions)
                 || self.view.text_input(cx, ids!(rename_input)).returned(actions).is_some()) {self.save_name(cx);return;}
+            if self.view.button(cx, ids!(nick_back)).clicked(actions) {self.nicknaming=false;self.view.redraw(cx);return;}
+            if self.nicknaming && (self.view.button(cx, ids!(nick_save)).clicked(actions)
+                || self.view.text_input(cx, ids!(nick_input)).returned(actions).is_some()) {self.save_nickname(cx);return;}
             if self.services_open && self.view.button(cx, ids!(refresh_services)).clicked(actions) {self.load_services(cx);return;}
             if self.view.drop_down(cx, ids!(room_services)).changed(actions).is_some()
                 && let Some(index) = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1)
@@ -1162,8 +1302,12 @@ impl Widget for MobileChatInfo {
             if self.services_open && self.view.button(cx, ids!(configure_service)).clicked(actions) && self.pin_is_current() && !self.services_busy
                 && let Some(index) = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1)
                 && let Some(service) = self.services.get(index)
-                && let (Some(agent), Some(binding)) = (service["agentId"].as_str(),service["bindingId"].as_str()) {
-                cx.action(crate::hagency::ui::HagencyAction::AgentRun {agent_id:agent.into(),binding_id:binding.into()});
+                && let Some(agent) = service["agentId"].as_str() {
+                cx.action(match service["bindingId"].as_str() {
+                    Some(binding) => crate::hagency::ui::HagencyAction::AgentRun {agent_id:agent.into(),binding_id:binding.into()},
+                    // A pool Agent has no service of its own on this owner's devices: its page says what it does.
+                    None => crate::hagency::ui::HagencyAction::OpenAgent {agent_id:agent.into()},
+                });
                 return;
             }
             if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) || self.view.navigation_bar_button(cx, ids!(history_media)).clicked(actions) {
@@ -1221,6 +1365,7 @@ impl Widget for MobileChatInfo {
                         let Some(data) = self.data.as_ref() else {continue;};
                         match row {
                             InfoRow::Name => self.tap_name(cx),
+                            InfoRow::Nickname => self.tap_nickname(cx),
                             InfoRow::Notifications => self.choosing_notifications = true,
                             InfoRow::Mode(mode) => {
                                 if let Some((mode, _))=modes().get(mode) {submit_async_request(MatrixRequest::SetRoomNotificationMode {room_id:data.room.room_id().clone(),mode:*mode});}
@@ -1249,8 +1394,11 @@ impl Widget for MobileChatInfo {
         self.expire_pending_load(cx, std::time::Instant::now());
         self.view.view(cx, ids!(rename_panel)).set_visible(cx, self.renaming);
         self.view.button(cx, ids!(rename_save)).set_enabled(cx, !self.rename_busy);
-        self.view.view(cx, ids!(services_panel)).set_visible(cx, self.services_open && !self.renaming);
-        self.view.view(cx, ids!(information_list)).set_visible(cx, !self.services_open && !self.renaming);
+        self.view.view(cx, ids!(nick_panel)).set_visible(cx, self.nicknaming);
+        self.view.button(cx, ids!(nick_save)).set_enabled(cx, !self.nick_busy);
+        let editing = self.renaming || self.nicknaming;
+        self.view.view(cx, ids!(services_panel)).set_visible(cx, self.services_open && !editing);
+        self.view.view(cx, ids!(information_list)).set_visible(cx, !self.services_open && !editing);
         let service_selected = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1).is_some_and(|i| i < self.services.len());
         self.view.button(cx, ids!(configure_service)).set_enabled(cx, service_selected && !self.services_busy && self.pin_is_current());
         self.view.button(cx, ids!(refresh_services)).set_enabled(cx, !self.services_busy);
@@ -1279,6 +1427,7 @@ impl Widget for MobileChatInfo {
         let page = self.data.as_ref().map(|data| InfoPage {
             members: data.members.len(), can_remove: !data.removable.is_empty(), columns,
             adding: self.adding, topic: !data.topic.is_empty(), choosing: self.choosing_notifications,
+            agents: self.owner.as_ref().is_some_and(|owner| has_own_agent(&data.members, &self.member_owners, owner)),
         });
         self.rendered_rows.clear(); self.rendered_cells.clear();
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
@@ -1356,6 +1505,7 @@ impl Widget for MobileChatInfo {
                         _ => {
                             let widget = list.item(cx, index, id!(Action));
                             let name = shown_name(&data.room.display());
+                            let nick = shown_name(self.owner.as_ref().map_or("", |owner| own_nickname(&data.members, owner)));
                             // The arrow promises that a tap leads somewhere.
                             widget.view(cx, ids!(chevron)).set_visible(cx, row != InfoRow::Name || data.can_rename);
                             let (title, value) = match row {
@@ -1367,6 +1517,7 @@ impl Widget for MobileChatInfo {
                                     Some(RoomNotificationMode::MentionsAndKeywordsOnly) => crate::i18n::tr("Mentions"),
                                     None => crate::i18n::tr("Default"),
                                 }),
+                                InfoRow::Nickname => (crate::i18n::tr("My nickname in this room"), nick.as_str()),
                                 InfoRow::AgentServices => (crate::i18n::tr("Room Agent services"), ""),
                                 _ => ("", ""),
                             };
@@ -1379,6 +1530,13 @@ impl Widget for MobileChatInfo {
                     widget.draw_all(cx, scope);
                 }
             }
+        }
+        // A field is hidden until this draw, and what was never drawn can't take the keys:
+        // it gets them now, with its text selected so that typing replaces it.
+        if let Some(id) = self.focus_input.take() {
+            let input = self.view.text_input(cx, &[id]);
+            input.set_key_focus(cx);
+            if let Some(mut input) = input.borrow_mut() {input.select_all(cx);}
         }
         DrawStep::done()
     }
@@ -1633,9 +1791,9 @@ mod information_target_tests {
         assert_eq!(grid_columns(1000.0),(6,84.0));
         assert_eq!(grid_columns(0.0),(4,62.0),"a panel not laid out yet still gets a usable grid");
         for members in [0, 1, 3, 4, 5, 200] {
-            for variant in 0..48 {
-                let (can_remove, adding, choosing, topic, columns) = (variant & 1 == 1, variant & 2 == 2, variant & 4 == 4, variant & 8 == 8, 4 + variant / 16);
-                let page = InfoPage {members, can_remove, columns, adding, topic, choosing};
+            for variant in 0..96 {
+                let (can_remove, adding, choosing, topic, columns, agents) = (variant & 1 == 1, variant & 2 == 2, variant & 4 == 4, variant & 8 == 8, 4 + variant % 48 / 16, variant >= 48);
+                let page = InfoPage {members, can_remove, columns, adding, topic, choosing, agents};
                 // Members in their order, then the tile that adds, then the tile that removes.
                 for index in 0..members {assert_eq!(page.cell(index), Some(InfoCell::Member(index)));}
                 assert_eq!(page.cell(members), Some(InfoCell::Add));
@@ -1657,8 +1815,10 @@ mod information_target_tests {
                     assert_eq!(page.rows(), next + 5);
                 } else {
                     assert_eq!(page.row(next), InfoRow::Notifications);
-                    assert_eq!(page.row(next + 1), InfoRow::AgentServices);
-                    assert_eq!(page.rows(), next + 2);
+                    assert_eq!(page.row(next + 1), InfoRow::Nickname);
+                    // The row of the viewer's own Agents is there only for a viewer who has one in the room.
+                    if agents {assert_eq!(page.row(next + 2), InfoRow::AgentServices);}
+                    assert_eq!(page.rows(), next + 2 + usize::from(agents));
                 }
                 assert_eq!(page.row(page.rows()), InfoRow::Filler);
             }
@@ -1810,11 +1970,12 @@ mod information_target_tests {
         assert!(page.pos.y>=summary.pos.y+summary.size.y-1.0,"the page follows the fixed summary");
         assert!(page.size.y>200.0,"the summary must leave space for the page");
         // Members, room details and settings are on the one page: no tab hides any of them.
-        let rows:Vec<_>=(0..5).map(|index|InfoPage {members:0,can_remove:false,columns:4,adding:false,topic:true,choosing:false}.row(index)).collect();
+        let rows:Vec<_>=(0..5).map(|index|InfoPage {members:0,can_remove:false,columns:4,adding:false,topic:true,choosing:false,agents:false}.row(index)).collect();
         assert_eq!(rows,[InfoRow::Members(0),InfoRow::Gap,InfoRow::Name,InfoRow::Topic,InfoRow::Notifications]);
         let mut drawn:Vec<_>=info.rendered_rows.values().copied().collect();
         drawn.sort_by_key(|row|format!("{row:?}"));
-        assert_eq!(drawn,[InfoRow::AgentServices,InfoRow::Gap,InfoRow::Members(0),InfoRow::Name,InfoRow::Notifications,InfoRow::Topic]);
+        assert_eq!(drawn,[InfoRow::Gap,InfoRow::Members(0),InfoRow::Name,InfoRow::Nickname,InfoRow::Notifications,InfoRow::Topic],
+            "nobody's Agent is in the room: no row for the viewer's own Agents");
 
         // The tile that adds opens the choice between a person and an Agent, right under the grid.
         info.tap_cell(&mut cx,CellTarget::Add);
@@ -1898,6 +2059,91 @@ mod information_target_tests {
                 assert_eq!((to_app,to_screen),(!in_room,in_room),"{filter:?} in a room's screen: {in_room}");
             }
         }
+    }
+    #[test]
+    fn the_row_of_own_agents_is_for_a_viewer_with_an_agent_in_the_room() {
+        let me=user("@me:server");
+        let members=vec![member("@me:server","Me"),member("@_hagency_agt_mine:server","Mine"),member("@_hagency_agt_theirs:server","Theirs"),member("@zed:server","Zed")];
+        let mut owners=HashMap::new();
+        assert!(!has_own_agent(&members,&owners,&me),"nothing is known of who owns whom");
+        owners.insert(user("@_hagency_agt_theirs:server"),user("@zed:server"));
+        assert!(!has_own_agent(&members,&owners,&me));
+        owners.insert(user("@_hagency_agt_gone:server"),me.clone());
+        assert!(!has_own_agent(&members,&owners,&me),"an Agent of the viewer's that is not in this room");
+        owners.insert(user("@_hagency_agt_mine:server"),me.clone());
+        assert!(has_own_agent(&members,&owners,&me));
+        assert!(!has_own_agent(&members,&owners,&user("@other:server")));
+        // A pool Agent has no service of the personal kind to report.
+        assert_eq!(room_service_status(&serde_json::json!({"agentId":"a","displayName":"Pool","pool":true})),crate::i18n::tr("Runs on a shared resource pool."));
+    }
+    #[test]
+    fn a_person_sets_the_name_they_go_by_in_one_room() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=new_panel(&mut cx);
+        let room_id=matrix_sdk::ruma::room_id!("!a:server").to_owned();
+        let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),room_id.clone());
+        let me=user("@me:server");
+        info.room=Some(room.clone());
+        info.data=Some(ChatInfoData{room,topic:String::new(),members:vec![member("@me:server","Me"),member("@zed:server","Zed")],banned_members:HashSet::new(),removable:HashSet::new(),can_rename:false,mode:None,can_invite:true});
+        assert_eq!(own_nickname(&info.data.as_ref().unwrap().members,&me),"Me");
+        assert_eq!(own_nickname(&info.data.as_ref().unwrap().members,&user("@nobody:server")),"");
+        draw_information(&mut info,&mut cx);
+        let list=info.view.portal_list(&mut cx,ids!(list));
+        // Under the grid's one row, the gap, the room's name and the notifications.
+        let row=list.item(&mut cx,4,id!(Action));
+        assert_eq!(info.rendered_rows.get(&row.widget_uid()),Some(&InfoRow::Nickname));
+        assert_eq!(row.label(&mut cx,ids!(title)).text(),"My nickname in this room");
+        assert!(row.view(&mut cx,ids!(chevron)).visible());
+        info.tap_nickname(&mut cx);
+        assert!(!info.nicknaming,"without a signed-in viewer there is nobody to name");
+
+        info.owner=Some(me.clone());info.origin="https://server/".into();info.epoch=4;
+        info.renaming=true;
+        info.tap_nickname(&mut cx);
+        assert!(info.nicknaming && !info.renaming,"one field at a time");
+        assert_eq!(info.view.text_input(&mut cx,ids!(nick_input)).text(),"Me","the field starts from the present name");
+        assert_eq!(info.focus_input,Some(live_id!(nick_input)),"the field takes the keys once it is drawn");
+        // The present name closes the field without a request.
+        info.view.text_input(&mut cx,ids!(nick_input)).set_text(&mut cx," Me ");
+        info.save_nickname(&mut cx);
+        assert!(!info.nicknaming && !info.nick_busy && info.nick_request==0);
+
+        // Only the answer to this panel's own request ends a change.
+        info.tap_nickname(&mut cx);info.nick_request=8;info.nick_busy=true;
+        let mut set=NicknameSet{owner:me.clone(),origin:"https://server/".into(),epoch:4,room_id:room_id.clone(),request:8,result:Err("not allowed".into())};
+        assert!(info.nick_response_matches(&set));
+        set.request=7;assert!(!info.nick_response_matches(&set));set.request=8;
+        set.epoch=3;assert!(!info.nick_response_matches(&set));set.epoch=4;
+        set.origin="https://other/".into();assert!(!info.nick_response_matches(&set));set.origin="https://server/".into();
+        set.room_id=matrix_sdk::ruma::room_id!("!other:server").to_owned();assert!(!info.nick_response_matches(&set));set.room_id=room_id;
+        set.owner=user("@other:server");assert!(!info.nick_response_matches(&set));set.owner=me.clone();
+        info.finish_nickname(&mut cx,&set);
+        assert!(info.nicknaming && !info.nick_busy,"a refused change keeps the field open");
+        assert!(info.view.label(&mut cx,ids!(nick_status)).text().contains("not allowed"));
+        set.result=Ok(Some("阿明".into()));
+        info.finish_nickname(&mut cx,&set);
+        assert!(!info.nicknaming);
+        let members=&info.data.as_ref().unwrap().members;
+        assert_eq!(own_nickname(members,&me),"阿明");
+        assert_eq!(members.iter().map(|m|m.displayable_name().to_owned()).collect::<Vec<_>>(),["Zed","阿明"],"the grid is in order by the new name");
+        // An account without a name leaves this person without one in the room.
+        set.result=Ok(None);
+        info.finish_nickname(&mut cx,&set);
+        assert_eq!(own_nickname(&info.data.as_ref().unwrap().members,&me),"");
+        // The field replaces the page while it is open.
+        info.owner=None;info.nicknaming=true;info.focus_input=Some(live_id!(nick_input));
+        info.view.text_input(&mut cx,ids!(nick_input)).set_text(&mut cx,"Me");
+        draw_information(&mut info,&mut cx);
+        assert!(info.focus_input.is_none());
+        let field=info.view.text_input(&mut cx,ids!(nick_input));
+        assert_eq!(field.borrow().unwrap().selected_text(),"Me","typing replaces the name that is there");
+        assert!(info.view.view(&mut cx,ids!(nick_panel)).visible());
+        assert!(!info.view.view(&mut cx,ids!(information_list)).visible());
+        info.nicknaming=false;
+        draw_information(&mut info,&mut cx);
+        assert!(!info.view.view(&mut cx,ids!(nick_panel)).visible());
+        assert!(info.view.view(&mut cx,ids!(information_list)).visible());
+        cx.with_vm(|vm|assert!(vm.take_errors().is_empty()));
     }
     #[test]
     fn the_room_is_shown_by_its_name_which_only_those_allowed_can_change() {

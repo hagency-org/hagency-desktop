@@ -3210,5 +3210,10 @@
   "This server cannot keep a shared project folder yet, so each Agent keeps its own folder.": "This server cannot keep a shared project folder yet, so each Agent keeps its own folder.",
   "Coding Agents of this space share its project folder.": "Coding Agents of this space share its project folder.",
   "The shared project folder was not confirmed; each Agent may keep its own folder.": "The shared project folder was not confirmed; each Agent may keep its own folder.",
-  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "Could not check whether this room is encrypted. Your message was not sent. Try again."
+  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "Could not check whether this room is encrypted. Your message was not sent. Try again.",
+  "My nickname in this room": "My nickname in this room",
+  "Only this room shows this name. Leave it empty to use your account's name.": "Only this room shows this name. Leave it empty to use your account's name.",
+  "Nickname": "Nickname",
+  "Could not change your nickname: {error}": "Could not change your nickname: {error}",
+  "Runs on a shared resource pool.": "Runs on a shared resource pool."
 }

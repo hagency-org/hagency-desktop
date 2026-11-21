@@ -3210,5 +3210,10 @@
   "This server cannot keep a shared project folder yet, so each Agent keeps its own folder.": "此服务器暂不支持共享项目文件夹，每个 Agent 仍使用自己的文件夹。",
   "Coding Agents of this space share its project folder.": "此空间的编程 Agent 共用它的项目文件夹。",
   "The shared project folder was not confirmed; each Agent may keep its own folder.": "共享项目文件夹未获确认，各 Agent 可能仍使用自己的文件夹。",
-  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "无法确认此聊天室是否已加密，消息未发送，请重试。"
+  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "无法确认此聊天室是否已加密，消息未发送，请重试。",
+  "My nickname in this room": "我在本房间的昵称",
+  "Only this room shows this name. Leave it empty to use your account's name.": "仅在本房间显示。留空则使用账号昵称。",
+  "Nickname": "昵称",
+  "Could not change your nickname: {error}": "无法修改昵称：{error}",
+  "Runs on a shared resource pool.": "由共享资源池运行。"
 }
