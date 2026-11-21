@@ -7,6 +7,10 @@ rust-version.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[package.metadata.cargo-machete]
+# Shared TLS fixtures are imported from hagency-matrix/tests/common with #[path].
+ignored = ["tokio-rustls"]
+
 [features]
 shared-budget-execution = ["agent-budget", "shared-context", "hagency-store/shared-budget-execution"]
 agent-budget = ["resource-adoption", "hagency-store/agent-budget"]
@@ -51,6 +55,7 @@ httpdate = "1.0.3"
 reqwest = { workspace = true, features = ["rustls-tls-webpki-roots", "rustls-tls-native-roots", "json"] }
 unicode-normalization.workspace = true
 thiserror.workspace = true
+# NativeOwner uses Service/TestClient for in-process management dispatch in production.
 salvo = { workspace = true, features = ["server", "server-handle", "http1", "test"] }
 clap = { workspace = true, features = ["derive"] }
 getrandom.workspace = true
@@ -76,13 +81,12 @@ hagency-store = { workspace = true, features = ["test-support"] }
 # The offline pins of ADR-182 need the execution crate's diagnostics fault
 # (an unproven stop no real fixture can force); test builds only.
 hagency-execution = { workspace = true, features = ["test-diagnostics"] }
-matrix-sdk-base = { workspace = true, features = ["e2e-encryption"] }
-matrix-sdk-sqlite = { workspace = true, features = ["state-store", "bundled"] }
 ruma = { workspace = true, features = ["client-api-c", "events"] }
 tokio = { workspace = true, features = ["process", "test-util"] }
 rmcp = { workspace = true, features = ["client", "transport-async-rw"] }
 rusqlite = { workspace = true, features = ["bundled"] }
 tempfile.workspace = true
+# Used by the shared Matrix HTTP fixtures in unit and integration tests.
 tokio-rustls = { workspace = true, features = ["ring", "tls12"] }
 
 [[bin]]

@@ -16,6 +16,10 @@ license = "MIT"
 repository = "https://github.com/project-robius/robius"
 readme = "README.md"
 
+[package.metadata.cargo-machete]
+# build.rs compiles the Android picker Java class and dex resource.
+ignored = ["android-build"]
+
 
 ## Note: ideally this would be only included when we're building for Android,
 ## but Cargo doesn't support target-specific build scripts yet.
