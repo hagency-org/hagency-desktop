@@ -7,6 +7,7 @@ use ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
 use crate::article_app::{ArticleAction, ArticlePanelWidgetRefExt};
 use crate::shared::navigation_bar_button::{NavigationBarButtonAction, NavigationBarButtonWidgetExt};
 use super::attachment_download::{DownloadableAttachment, MediaDownloadResult, markdown_source};
+use super::document_preview::DocumentPreview;
 use super::web_browser_session::{ReaderSession, ReaderTab};
 
 const CAPTION_PADDING: f64 = if cfg!(target_os = "macos") { 28.0 } else { 0.0 };
@@ -19,6 +20,12 @@ pub enum WebBrowserAction {
         source: Arc<str>,
         account: Option<OwnedUserId>,
         attachment: Option<DownloadableAttachment>,
+    },
+    OpenAttachment {
+        title: String,
+        preview: DocumentPreview,
+        account: Option<OwnedUserId>,
+        epoch: u64,
     },
     ReadArticle {
         room: OwnedRoomId,
@@ -33,8 +40,14 @@ pub enum WebBrowserAction {
 
 impl WebBrowserAction {
     pub fn allowed(&self) -> bool {
-        !matches!(self, Self::OpenMarkdown { account, .. } | Self::Restore { account, .. } if account.as_ref() != crate::sliding_sync::current_user_id().as_ref()
-            || crate::logout::logout_state_machine::is_logout_in_progress())
+        let account = match self {
+            Self::OpenMarkdown { account, .. } | Self::Restore { account, .. } => account,
+            Self::OpenAttachment { account, epoch, .. } if *epoch == crate::account_session::epoch() => account,
+            Self::OpenAttachment { .. } => return false,
+            _ => return true,
+        };
+        account.as_ref() == crate::sliding_sync::current_user_id().as_ref()
+            && !crate::logout::logout_state_machine::is_logout_in_progress()
     }
 }
 
@@ -182,6 +195,7 @@ struct WebTab {
     spawned: bool,
     location: Option<ReaderTab>,
     status: Option<String>,
+    preview: Option<DocumentPreview>,
 }
 
 impl WebTab {
@@ -304,6 +318,7 @@ impl WebBrowser {
             title: String::new(),
             spawned,
             status: None,
+            preview: None,
         });
         self.select_tab(cx, self.tabs.len() - 1);
     }
@@ -317,6 +332,22 @@ impl WebBrowser {
             });
             WidgetRef::script_from_value(vm, template)
         })
+    }
+
+    fn open_attachment(&mut self, cx: &mut Cx, title: String, preview: DocumentPreview) {
+        let id = LiveId::from_str(&format!("rinx.document.tab.{}", LiveId::unique().0));
+        Self::spawn_webview(cx, id, preview.url(), self.session_account.as_ref());
+        self.tabs.push(WebTab {
+            id,
+            original_url: None,
+            article: None,
+            title,
+            spawned: true,
+            location: None,
+            status: None,
+            preview: Some(preview),
+        });
+        self.select_tab(cx, self.tabs.len() - 1);
     }
 
     fn open_document(
@@ -334,6 +365,7 @@ impl WebBrowser {
             spawned: false,
             location,
             status: None,
+            preview: None,
         });
         self.select_tab(cx, self.tabs.len() - 1);
     }
@@ -386,6 +418,7 @@ impl WebBrowser {
                         spawned: false,
                         location: Some(location.clone()),
                         status: Some(crate::i18n::tr("Loading file preview...").into()),
+                        preview: None,
                     });
                     self.select_tab(cx, self.tabs.len() - 1);
                     let account = self.session_account.clone();
@@ -514,6 +547,7 @@ impl WebBrowser {
         let url = tab.original_url.clone();
         let title = tab.title();
         let status = tab.status.clone();
+        let is_attachment = tab.preview.is_some();
         let is_web = url.is_some();
         for path in [
             ids!(web_back),
@@ -531,7 +565,7 @@ impl WebBrowser {
             }
             self.label(cx, ids!(web_title)).set_text(cx, &title);
             self.label(cx, ids!(web_address))
-                .set_text(cx, crate::i18n::tr("Read full article"));
+                .set_text(cx, crate::i18n::tr(if is_attachment { "File preview" } else { "Read full article" }));
             return;
         };
         self.label(cx, ids!(web_title))
@@ -632,8 +666,13 @@ impl Widget for WebBrowser {
                 if let Some(navigation) = action.downcast_ref::<NativeSystemBrowserNavigation>() {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id.0 == navigation.browser_id) {
                         if let Some(error) = &navigation.error {
-                            log!("In-app browser failed: {}", error);
-                            tab.status = Some(crate::i18n::tr("Unable to load this page in the app. Use Open in browser.").to_string());
+                            let message = if tab.preview.is_some() {
+                                "File preview unavailable. You can download the original from chat."
+                            } else {
+                                log!("In-app browser failed: {}", error);
+                                "Unable to load this page in the app. Use Open in browser."
+                            };
+                            tab.status = Some(crate::i18n::tr(message).to_owned());
                         } else if navigation.loading {
                             tab.status = None;
                         }
@@ -860,6 +899,10 @@ impl WebBrowserRef {
                 );
                 modal.open(cx);
             }
+            WebBrowserAction::OpenAttachment { title, preview, .. } => {
+                inner.open_attachment(cx, title.clone(), preview.clone());
+                modal.open(cx);
+            }
             WebBrowserAction::ReadArticle { room, event } => {
                 inner.open_article(cx, room.clone(), event.clone());
                 modal.open(cx);
@@ -1016,6 +1059,7 @@ mod session_tests {
             spawned: false,
             location: None,
             status: Some("Loading".into()),
+            preview: None,
         });
         inner.open(&mut cx, "https://example.org".parse().unwrap());
         let result = RestoredMarkdown {

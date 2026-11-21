@@ -1,6 +1,7 @@
 use makepad_widgets::ScriptVm;
 
 pub mod attachment_download;
+pub mod document_preview;
 pub mod cached_widget;
 pub mod avatar;
 pub mod avatar_crop;
