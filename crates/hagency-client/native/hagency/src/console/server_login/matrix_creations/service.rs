@@ -236,16 +236,26 @@ impl<'a> Scope<'a> {
         device: &crate::console::AuthorizedDevice,
         native_gate: Box<dyn Fn() -> bool + Send + Sync + 'a>,
     ) -> Result<Self, OwnerError> {
+        console.0.server_login.check_matrix_source(cookie).await
+            .map_err(|code| error(401, code))?;
+        let scope = Self::management_snapshot(console, cookie, device, native_gate).await?;
+        scope.check().await?;
+        Ok(scope)
+    }
+    /// Capture the local scope between two SDK checks. Grant I/O validates it
+    /// against the current SDK and device in NativeIo::check before it escapes.
+    pub(in crate::console) async fn management_snapshot(
+        console: &'a Console,
+        cookie: &'a str,
+        device: &crate::console::AuthorizedDevice,
+        native_gate: Box<dyn Fn() -> bool + Send + Sync + 'a>,
+    ) -> Result<Self, OwnerError> {
         let local = console
             .0
             .authority
             .authenticate(cookie)
             .map_err(|_| error(401, "sign_in_required"))?;
         let login = &console.0.server_login;
-        login
-            .check_matrix_source(cookie)
-            .await
-            .map_err(|code| error(401, code))?;
         let session = login
             .sessions
             .lock()
@@ -253,7 +263,7 @@ impl<'a> Scope<'a> {
             .get(&session_key(cookie))
             .cloned()
             .ok_or_else(|| error(401, "sign_in_required"))?;
-        if session.binding.origin != device.origin()
+        if session.matrix_source.is_none() || session.binding.origin != device.origin()
             || session.binding.owner.as_deref() != Some(device.owner_mxid())
             || session.binding.subject.as_deref() != Some(device.subject())
             || format!("{}auth/", session.binding.origin) != device.issuer()
@@ -280,7 +290,7 @@ impl<'a> Scope<'a> {
             path: directory.join("matrix-creations.json"),
             native_gate: Some(native_gate),
         };
-        scope.check().await?;
+        scope.check_local().await?;
         Ok(scope)
     }
     pub(in crate::console) fn management_path(&self) -> PathBuf {

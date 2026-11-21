@@ -506,9 +506,11 @@ impl OwnerGrantIntents {
             let current = self.enrollment_io(&io, cookie).await?;
             let witness = Box::pin(observe(runtime, current.profile.clone(),
                 c.resource_id.clone(), c.resource_revision.clone())).await?;
+            // The provider observation is independently time-limited. Bind it
+            // under the current session after the external provider process.
+            let current = self.enrollment_io(&current, cookie).await?;
             let binding = Self::bind_witness(registry, &current, c.resource_id.clone(),
                 &c.resource_revision, &c.runtime, witness).await?;
-            current.check().await?;
             if binding.binding_digest().map_err(|error| storage(error))? != provider_digest {
                 return Err(failure(409, "management_enrollment_changed"));
             }

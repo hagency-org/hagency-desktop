@@ -759,12 +759,14 @@ async fn first_pool_review_rechecks_the_provider_after_the_enrollment_journal() 
     for final_account in ["synthetic-account", "another-account"] {
         let mut f = Fixture::new().await;
         f.enable_factory().await;
+        f.publications.lock().unwrap().admission_receipts = true;
         let calls = std::sync::atomic::AtomicUsize::new(0);
         let journal = f.enrollment_path().await;
-        let first_expires = Instant::now() + Duration::from_secs(2);
+        let first_deadline = std::sync::OnceLock::new();
         let observer = |_: super::super::ManagementRuntime, _: ProfileAuthority, _: String, _: String| {
             let first = calls.fetch_add(1, Ordering::Relaxed) == 0;
             assert_eq!(journal.exists(), !first);
+            let first_expires = *first_deadline.get_or_init(|| Instant::now() + Duration::from_secs(2));
             async move {
                 let provider = if first {
                     VerifiedProviderAccount::new("codex", "https://provider.test", "synthetic-account", first_expires).unwrap()
@@ -775,14 +777,25 @@ async fn first_pool_review_rechecks_the_provider_after_the_enrollment_journal() 
                 Ok(super::super::provider_identity::ResourceWitness::Account(provider))
             }
         };
-        let cookie = f.service.cookie().await.unwrap();
-        let result = f.service.verified_enrollment_observe(
-            &f.registry, "fixture_contribution".into(), &cookie, None, observer, Some(observer),
-        ).await;
-        assert_eq!(calls.load(Ordering::Relaxed), 2);
-        assert_eq!(result.is_ok(), final_account == "synthetic-account");
-        assert_eq!(f.count("owner_capacity_grants"), 0);
-        drop(result);
+        {
+            let cookie = f.service.cookie().await.unwrap();
+            let initial = f.service.io(&cookie, Permission::ConsentGrants).await.unwrap();
+            let features = f.service.session_features(&initial).await.unwrap();
+            let result = f.service.verified_enrollment_observe(
+                &f.registry, "fixture_contribution".into(), &cookie, None, observer, Some(observer),
+            ).await;
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+            assert_eq!(result.is_ok(), final_account == "synthetic-account");
+            if let Ok((proof, admission, current)) = result {
+                let facts = PreparationFacts { context: initial.context.clone(), admission, features };
+                let review = f.service.prepare_with_observations(
+                    &f.registry, proof, Fixture::choices(), Some(facts), current,
+                ).await.unwrap();
+                assert_eq!(review.original.binding.resource_id, f.resource);
+                assert_eq!(review.original.receipt_version, 2);
+            }
+            assert_eq!(f.count("owner_capacity_grants"), 0);
+        }
         f.stop().await;
     }
 }
