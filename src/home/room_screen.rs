@@ -3395,7 +3395,7 @@ impl RoomScreen {
                 MessageAction::ExportAnswer { details, pdf } => {
                     let Some(tl) = self.tl_state.as_ref() else { continue };
                     if let Some(event) = Self::find_event_in_timeline(&tl.items, details) {
-                        crate::agent_chat::answer_export::save(plaintext_body_of_timeline_item(event), *pdf);
+                        crate::agent_chat::answer_export::open(plaintext_body_of_timeline_item(event), *pdf);
                     } else {
                         enqueue_popup_notification(crate::i18n::tr("Could not find the answer to export. Please try again."), PopupKind::Error, Some(5.0));
                     }

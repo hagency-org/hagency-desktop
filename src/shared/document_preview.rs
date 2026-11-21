@@ -31,7 +31,7 @@ const PAGE_ELEMENTS: [&str; 22] = [
 ];
 
 fn static_html(bytes: Vec<u8>) -> Result<Vec<u8>, String> {
-    let source = String::from_utf8(bytes).map_err(|_| "HTML must contain UTF-8 text".to_owned())?;
+    let source = String::from_utf8(bytes).map_err(|_| crate::i18n::tr("HTML must contain UTF-8 text").to_owned())?;
     let html = Html::parse(source.trim_start_matches('\u{feff}'));
     // A page is laid out by its classes, ids and inline styles, and a table by the cells that
     // span several. None of these can run code or reach the network: the response's policy
@@ -115,7 +115,7 @@ impl DocumentPreview {
             .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(4)))
             .clone()
             .try_acquire_owned()
-            .map_err(|_| "Close an open attachment preview, then try again.".to_owned())?;
+            .map_err(|_| crate::i18n::tr("Close an open attachment preview, then try again.").to_owned())?;
         let document = match kind {
             DownloadKind::Html if bytes.len() as u64 <= HTML_LIMIT => {
                 PreviewDocument::Html(static_html(bytes)?)
@@ -123,7 +123,7 @@ impl DocumentPreview {
             DownloadKind::Pdf if bytes.len() as u64 <= PDF_LIMIT && bytes.starts_with(b"%PDF-") => {
                 PreviewDocument::Pdf(bytes)
             }
-            _ => return Err("This file cannot be previewed.".into()),
+            _ => return Err(crate::i18n::tr("This file cannot be previewed.").into()),
         };
         let listener = TcpListener::bind(("127.0.0.1", 0)).map_err(|e| e.to_string())?;
         listener.set_nonblocking(true).map_err(|e| e.to_string())?;

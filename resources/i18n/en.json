@@ -3209,5 +3209,12 @@
   "This server cannot keep a shared project folder yet, so each Agent keeps its own folder.": "This server cannot keep a shared project folder yet, so each Agent keeps its own folder.",
   "Coding Agents of this space share its project folder.": "Coding Agents of this space share its project folder.",
   "The shared project folder was not confirmed; each Agent may keep its own folder.": "The shared project folder was not confirmed; each Agent may keep its own folder.",
-  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "Could not check whether this room is encrypted. Your message was not sent. Try again."
+  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "Could not check whether this room is encrypted. Your message was not sent. Try again.",
+  "View as Markdown": "View as Markdown",
+  "View as PDF": "View as PDF",
+  "Save a copy": "Save a copy",
+  "Agent answer": "Agent answer",
+  "HTML must contain UTF-8 text": "HTML must contain UTF-8 text",
+  "Close an open attachment preview, then try again.": "Close an open attachment preview, then try again.",
+  "This file cannot be previewed.": "This file cannot be previewed."
 }

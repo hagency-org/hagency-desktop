@@ -3209,5 +3209,12 @@
   "This server cannot keep a shared project folder yet, so each Agent keeps its own folder.": "此服务器暂不支持共享项目文件夹，每个 Agent 仍使用自己的文件夹。",
   "Coding Agents of this space share its project folder.": "此空间的编程 Agent 共用它的项目文件夹。",
   "The shared project folder was not confirmed; each Agent may keep its own folder.": "共享项目文件夹未获确认，各 Agent 可能仍使用自己的文件夹。",
-  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "无法确认此聊天室是否已加密，消息未发送，请重试。"
+  "Could not check whether this room is encrypted. Your message was not sent. Try again.": "无法确认此聊天室是否已加密，消息未发送，请重试。",
+  "View as Markdown": "查看 Markdown",
+  "View as PDF": "查看 PDF",
+  "Save a copy": "保存副本",
+  "Agent answer": "Agent 回答",
+  "HTML must contain UTF-8 text": "HTML 文件必须是 UTF-8 文本",
+  "Close an open attachment preview, then try again.": "请先关闭一个已打开的文件预览，然后重试。",
+  "This file cannot be previewed.": "无法预览此文件。"
 }

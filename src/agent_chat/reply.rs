@@ -179,8 +179,9 @@ impl AgentReply {
         for (path, label) in [
             (ids!(answer_actions.answer_copy), "Copy"),
             (ids!(answer_actions.answer_forward), "Forward answer"),
-            (ids!(answer_actions.answer_markdown), "Save Markdown"),
-            (ids!(answer_actions.answer_pdf), "Export PDF"),
+            (ids!(answer_actions.answer_markdown), "View as Markdown"),
+            // Where this computer shows no PDF, the button saves one, as it always did.
+            (ids!(answer_actions.answer_pdf), if crate::shared::attachment_download::DownloadKind::Pdf.can_preview() { "View as PDF" } else { "Export PDF" }),
         ] {
             if let Some(mut button) = self.view.navigation_bar_button(cx, path).borrow_mut() {
                 button.set_tooltip_text(crate::i18n::tr(label));

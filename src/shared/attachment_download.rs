@@ -218,7 +218,7 @@ pub fn start_markdown_preview(info: DownloadableAttachment, update_sender: Timel
         }
         match bytes.read_small(crate::attachment_transport::MARKDOWN_LIMIT).and_then(markdown_source) {
             Ok(source) => {
-                makepad_widgets::Cx::post_action(crate::shared::web_browser::WebBrowserAction::OpenMarkdown { title, source, account, attachment });
+                makepad_widgets::Cx::post_action(crate::shared::web_browser::WebBrowserAction::OpenMarkdown { title, source, account, attachment, save: None });
                 finish_download_indicator(&sender, Some(&mxc), DownloadOutcome::Succeeded);
             }
             Err(error) => {
@@ -250,7 +250,7 @@ pub fn start_document_preview(info: DownloadableAttachment, update_sender: Timel
         match file.read_small(limit).and_then(|bytes| DocumentPreview::new(kind, bytes, epoch)) {
             Ok(preview) => {
                 makepad_widgets::Cx::post_action(super::web_browser::WebBrowserAction::OpenAttachment {
-                    title, preview, account, epoch,
+                    title, preview, account, epoch, save: None,
                 });
                 finish_download_indicator(&sender, Some(&mxc), DownloadOutcome::Succeeded);
             }
