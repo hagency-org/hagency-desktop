@@ -147,9 +147,10 @@ impl OwnerResourceRegistry {
 impl OwnerResourceRegistry {
     pub async fn require_shared_attempt_start(
         &self,
-        authority: ManagedCleanupAuthority,
+        authority: impl Into<Arc<ManagedCleanupAuthority>>,
         command: SharedAttemptCommand,
     ) -> Result<bool, Error> {
+        let authority = authority.into();
         authority.check(&self.0)?;
         command.validate(&authority.enrollment.profile.account)?;
         if authority.child != command.agent_reservation_id {

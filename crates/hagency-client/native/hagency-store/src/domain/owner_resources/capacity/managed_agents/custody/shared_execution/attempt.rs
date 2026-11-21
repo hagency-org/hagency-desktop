@@ -205,10 +205,14 @@ impl VerifiedSharedAttemptDelivery {
         {
             return Err(Error::LocalAuthority);
         }
-        let expires = expires.min(enrollment.expires).min(
-            Instant::now()
-                + Duration::from_millis(command.expires_at_ms.saturating_sub(graphs::now_ms()?)),
-        );
+        let now = Instant::now();
+        let wall_ms = graphs::now_ms()?;
+        let command_until = now + Duration::from_millis(command.expires_at_ms.saturating_sub(wall_ms));
+        let remaining_ms = |until: Instant| until.saturating_duration_since(now).as_millis() as u64;
+        tracing::info!(command_id = %command.command_id, mac_wall_ms = wall_ms,
+            lease_left_ms = remaining_ms(expires), enrollment_left_ms = remaining_ms(enrollment.expires),
+            command_left_ms = remaining_ms(command_until), "Shared attempt deadlines");
+        let expires = expires.min(enrollment.expires).min(command_until);
         let result = Self {
             enrollment,
             command,
@@ -311,9 +315,10 @@ impl OwnerResourceRegistry {
     /// No process right is reconstructed, even after a generation change.
     pub async fn shared_successor_history(
         &self,
-        authority: ManagedCleanupAuthority,
+        authority: impl Into<Arc<ManagedCleanupAuthority>>,
         command: SharedAttemptCommand,
     ) -> Result<Option<SharedAttemptHistory>, Error> {
+        let authority = authority.into();
         authority.check(&self.0)?;
         command.validate(&authority.enrollment.profile.account)?;
         if authority.child != command.agent_reservation_id {

@@ -141,10 +141,11 @@ impl SharedAttemptProcessSink {
 impl OwnerResourceRegistry {
     pub async fn recover_shared_attempt_process(
         &self,
-        authority: ManagedCleanupAuthority,
+        authority: impl Into<Arc<ManagedCleanupAuthority>>,
         command: SharedAttemptCommand,
         observation_id: Option<String>,
     ) -> Result<Option<SharedAttemptProcessReceipt>, Error> {
+        let authority = authority.into();
         authority.check(&self.0)?;
         command.validate(&authority.enrollment.profile.account)?;
         if authority.child != command.agent_reservation_id {

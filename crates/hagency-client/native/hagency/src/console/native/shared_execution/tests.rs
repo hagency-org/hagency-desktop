@@ -325,7 +325,7 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
 }
 async fn fixture() -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("hagency::console::native::shared_execution=debug,hagency_runtime::owned=info")
+        .with_env_filter("hagency::console::native::shared_execution=debug,hagency_store::domain::owner_resources::capacity::managed_agents::custody::shared_execution::attempt=info,hagency_runtime::owned=info")
         .with_test_writer()
         .try_init();
     let (f, t, c) =

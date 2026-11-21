@@ -522,6 +522,28 @@ fn transient_boundary(error: &NativeError) -> bool {
     )
 }
 impl Bound {
+    /// Preparation only inspects provider configuration. Pin all its checks to
+    /// the delivery scope, including its expiry, and the selected launch gates.
+    /// A running process still obtains new scopes through its own Io.
+    pub(super) fn preparation_check(
+        mut self,
+        launch: &Io,
+        command: SharedRuntimeCommand,
+    ) -> super::super::managed_runtime::LiveCheck {
+        self.namespace = launch.namespace.clone();
+        self.provider_gate = launch.provider_gate.clone();
+        let bound = Arc::new(self);
+        let command = Arc::new(command);
+        Arc::new(move || {
+            let b = bound.clone();
+            let command = command.clone();
+            Box::pin(async move {
+                b.transport.check_scope(&b.scope, false).await?;
+                binding(&b.scope, &command, true)?;
+                b.check_namespace(&command).await
+            })
+        })
+    }
     async fn check_namespace(&self, c: &SharedRuntimeCommand) -> Result<(), NativeError> {
         if self.provider_gate.as_ref().is_some_and(|gate| !gate()) {
             return Err(failure(409, "provider_account_changed"));
