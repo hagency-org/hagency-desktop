@@ -500,6 +500,13 @@ struct RoomServicesLoaded {
     result: Result<serde_json::Value, String>,
 }
 
+/// The Agent and the binding of a listed Agent whose service this owner's devices run, which
+/// is what the page of a service shows. A pool Agent has neither a binding of that kind nor
+/// such a page: the pool runs it.
+fn openable_service(service: &serde_json::Value) -> Option<(&str, &str)> {
+    Some((service["agentId"].as_str()?, service["bindingId"].as_str()?))
+}
+
 fn room_service_status(service: &serde_json::Value) -> String {
     if service["pool"] == true {return crate::i18n::tr("Runs on a shared resource pool.").into();}
     if service["ownerServicePaused"] == true {return crate::i18n::tr("Paused in this Room. Requests receive a pause notice.").into();}
@@ -1301,13 +1308,8 @@ impl Widget for MobileChatInfo {
             }
             if self.services_open && self.view.button(cx, ids!(configure_service)).clicked(actions) && self.pin_is_current() && !self.services_busy
                 && let Some(index) = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1)
-                && let Some(service) = self.services.get(index)
-                && let Some(agent) = service["agentId"].as_str() {
-                cx.action(match service["bindingId"].as_str() {
-                    Some(binding) => crate::hagency::ui::HagencyAction::AgentRun {agent_id:agent.into(),binding_id:binding.into()},
-                    // A pool Agent has no service of its own on this owner's devices: its page says what it does.
-                    None => crate::hagency::ui::HagencyAction::OpenAgent {agent_id:agent.into()},
-                });
+                && let Some((agent, binding)) = self.services.get(index).and_then(openable_service) {
+                cx.action(crate::hagency::ui::HagencyAction::AgentRun {agent_id:agent.into(),binding_id:binding.into()});
                 return;
             }
             if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) || self.view.navigation_bar_button(cx, ids!(history_media)).clicked(actions) {
@@ -1399,8 +1401,12 @@ impl Widget for MobileChatInfo {
         let editing = self.renaming || self.nicknaming;
         self.view.view(cx, ids!(services_panel)).set_visible(cx, self.services_open && !editing);
         self.view.view(cx, ids!(information_list)).set_visible(cx, !self.services_open && !editing);
-        let service_selected = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1).is_some_and(|i| i < self.services.len());
-        self.view.button(cx, ids!(configure_service)).set_enabled(cx, service_selected && !self.services_busy && self.pin_is_current());
+        let selected = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1).and_then(|i| self.services.get(i));
+        // The button is there to be pressed once an Agent is picked, and is gone for a picked
+        // Agent that has no service to open.
+        let openable = selected.is_some_and(|service| openable_service(service).is_some());
+        self.view.button(cx, ids!(configure_service)).set_visible(cx, selected.is_none() || openable);
+        self.view.button(cx, ids!(configure_service)).set_enabled(cx, openable && !self.services_busy && self.pin_is_current());
         self.view.button(cx, ids!(refresh_services)).set_enabled(cx, !self.services_busy);
         if !self.agent_picker_open {
             self.close_agent_picker(cx);
@@ -2028,6 +2034,19 @@ mod information_target_tests {
         assert!(info.view.view(&mut cx,ids!(services_panel)).visible());
         assert!(!info.view.view(&mut cx,ids!(information_list)).visible());
         assert_eq!(info.view.button(&mut cx,ids!(services_back)).text(),crate::i18n::tr("Back"));
+        // The button that opens a service is there before an Agent is picked and for an Agent
+        // with a service on this owner's devices, and gone for one a pool runs.
+        assert!(info.view.button(&mut cx,ids!(configure_service)).visible());
+        info.services=vec![serde_json::json!({"agentId":"own","bindingId":"b","displayName":"Own"}),serde_json::json!({"agentId":"pool","displayName":"Pool","pool":true})];
+        let picker=info.view.drop_down(&mut cx,ids!(room_services));
+        picker.set_labels(&mut cx,vec!["Choose an Agent".into(),"Own".into(),"Pool".into()]);
+        picker.set_selected_item(&mut cx,1);draw_information(&mut info,&mut cx);
+        assert!(info.view.button(&mut cx,ids!(configure_service)).visible());
+        picker.set_selected_item(&mut cx,2);draw_information(&mut info,&mut cx);
+        assert!(!info.view.button(&mut cx,ids!(configure_service)).visible());
+        picker.set_selected_item(&mut cx,0);draw_information(&mut info,&mut cx);
+        assert!(info.view.button(&mut cx,ids!(configure_service)).visible());
+        info.services.clear();
         info.services_open=false;draw_information(&mut info,&mut cx);
         assert!(!info.view.view(&mut cx,ids!(services_panel)).visible());
         assert!(info.view.view(&mut cx,ids!(information_list)).visible());
@@ -2074,7 +2093,11 @@ mod information_target_tests {
         assert!(has_own_agent(&members,&owners,&me));
         assert!(!has_own_agent(&members,&owners,&user("@other:server")));
         // A pool Agent has no service of the personal kind to report.
-        assert_eq!(room_service_status(&serde_json::json!({"agentId":"a","displayName":"Pool","pool":true})),crate::i18n::tr("Runs on a shared resource pool."));
+        let pool=serde_json::json!({"agentId":"a","displayName":"Pool","pool":true});
+        assert_eq!(room_service_status(&pool),crate::i18n::tr("Runs on a shared resource pool."));
+        assert_eq!(openable_service(&pool),None,"the pool runs it: no service of this owner's devices to open");
+        assert_eq!(openable_service(&serde_json::json!({"agentId":"a","bindingId":"b"})),Some(("a","b")));
+        assert_eq!(openable_service(&serde_json::json!({"bindingId":"b"})),None);
     }
     #[test]
     fn a_person_sets_the_name_they_go_by_in_one_room() {
