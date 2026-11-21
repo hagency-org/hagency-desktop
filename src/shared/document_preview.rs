@@ -121,7 +121,7 @@ impl DocumentPreview {
                 PreviewDocument::Html(static_html(bytes)?)
             }
             DownloadKind::Pdf if bytes.len() as u64 <= PDF_LIMIT && bytes.starts_with(b"%PDF-") => {
-                PreviewDocument::Pdf(bytes)
+                PreviewDocument::Pdf { bytes, texts: reader_texts() }
             }
             _ => return Err(crate::i18n::tr("This file cannot be previewed.").into()),
         };
@@ -132,7 +132,7 @@ impl DocumentPreview {
         let host = address.to_string();
         let entry = match document {
             PreviewDocument::Html(_) => "",
-            PreviewDocument::Pdf(_) => "/",
+            PreviewDocument::Pdf { .. } => "/",
         };
         let url = Url::parse(&format!("http://{host}{path}{entry}")).map_err(|e| e.to_string())?;
         let runtime = crate::sliding_sync::backend_runtime();
@@ -180,7 +180,28 @@ const PDF_READER_POLICY: &str = concat!(
 
 enum PreviewDocument {
     Html(Vec<u8>),
-    Pdf(Vec<u8>),
+    /// A PDF, and what its reader says in the person's language.
+    Pdf { bytes: Vec<u8>, texts: Vec<u8> },
+}
+
+/// What the PDF reader's page says, by the names its script knows them by. The page itself
+/// holds the English, for a reader these never reach.
+fn reader_texts() -> Vec<u8> {
+    use crate::i18n::{self, Language, language};
+    let texts = serde_json::json!({
+        "lang": match language() { Language::Chinese => "zh-CN", Language::English => "en" },
+        "loading": i18n::tr("Loading PDF…"),
+        "failed": i18n::tr("This PDF cannot be displayed."),
+        "page": i18n::tr("Page {n}"),
+        "zoomIn": i18n::tr("Zoom in"),
+        "zoomOut": i18n::tr("Zoom out"),
+        "fit": i18n::tr("Fit width"),
+        "find": i18n::tr("Find in document"),
+        "previous": i18n::tr("Previous match"),
+        "next": i18n::tr("Next match"),
+        "none": i18n::tr("No matches"),
+    });
+    serde_json::to_vec(&texts).unwrap_or_default()
 }
 
 struct PreviewServer {
@@ -197,10 +218,13 @@ impl PreviewServer {
             (PreviewDocument::Html(bytes), b"") => {
                 Some(("text/html; charset=utf-8", STATIC_HTML_POLICY, bytes))
             }
-            (PreviewDocument::Pdf(bytes), b"/document.pdf") => {
+            (PreviewDocument::Pdf { bytes, .. }, b"/document.pdf") => {
                 Some(("application/octet-stream", "default-src 'none'", bytes))
             }
-            (PreviewDocument::Pdf(_), resource) => {
+            (PreviewDocument::Pdf { texts, .. }, b"/strings.json") => {
+                Some(("application/json; charset=utf-8", "default-src 'none'", texts))
+            }
+            (PreviewDocument::Pdf { .. }, resource) => {
                 let (mime, bytes) = pdf_preview_asset(resource)?;
                 Some((mime, PDF_READER_POLICY, bytes))
             }
@@ -344,6 +368,20 @@ mod tests {
         assert!(viewer.contains("Content-Type: text/html"));
         assert!(viewer.contains("worker-src 'self'"));
         assert!(viewer.contains("src=\"reader.mjs\""));
+        // The reader finds text and changes its size; its words come from the app.
+        assert!(viewer.contains("id=\"find\"") && viewer.contains("id=\"fit\""));
+        let texts = request(&preview, url.join("strings.json").unwrap().path(), "GET");
+        assert!(texts.starts_with(b"HTTP/1.1 200 OK\r\nContent-Type: application/json"));
+        let body = texts.windows(4).position(|w| w == b"\r\n\r\n").unwrap() + 4;
+        let texts: serde_json::Value = serde_json::from_slice(&texts[body..]).unwrap();
+        for name in ["lang", "loading", "failed", "page", "zoomIn", "zoomOut", "fit", "find", "previous", "next", "none"] {
+            assert!(texts[name].as_str().is_some_and(|text| !text.is_empty()), "{name} is missing");
+        }
+        assert!(texts["page"].as_str().unwrap().contains("{n}"));
+        let reader = String::from_utf8(request(&preview, url.join("reader.mjs").unwrap().path(), "GET")).unwrap();
+        for name in ["zoomIn", "zoomOut", "previous", "none"] {
+            assert!(reader.contains(&format!("text.{name}")), "the reader does not use {name}");
+        }
         let path = url.join("document.pdf").unwrap();
         let response = request(&preview, path.path(), "GET");
         assert!(response.starts_with(b"HTTP/1.1 200 OK\r\nContent-Type: application/octet-stream"));

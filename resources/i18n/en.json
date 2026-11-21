@@ -3216,5 +3216,15 @@
   "Agent answer": "Agent answer",
   "HTML must contain UTF-8 text": "HTML must contain UTF-8 text",
   "Close an open attachment preview, then try again.": "Close an open attachment preview, then try again.",
-  "This file cannot be previewed.": "This file cannot be previewed."
+  "This file cannot be previewed.": "This file cannot be previewed.",
+  "Loading PDF…": "Loading PDF…",
+  "This PDF cannot be displayed.": "This PDF cannot be displayed.",
+  "Page {n}": "Page {n}",
+  "Zoom in": "Zoom in",
+  "Zoom out": "Zoom out",
+  "Fit width": "Fit width",
+  "Find in document": "Find in document",
+  "Previous match": "Previous match",
+  "Next match": "Next match",
+  "No matches": "No matches"
 }

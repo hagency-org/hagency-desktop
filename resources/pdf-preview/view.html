@@ -3,19 +3,114 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>PDF preview</title>
+<title>PDF</title>
 <style>
-:root { color-scheme: light dark; font: 15px system-ui, sans-serif; }
-body { margin: 0; padding: 12px; background: Canvas; color: CanvasText; }
-#pages { display: grid; gap: 12px; margin: 0 auto; max-width: 1100px; }
-.page { position: relative; display: grid; place-items: center; width: 100%; min-height: 96px; aspect-ratio: 0.77; background: white; color: #242424; box-shadow: 0 1px 4px #0004; }
-canvas { display: block; width: 100%; height: 100%; object-fit: contain; }
+:root {
+    color-scheme: light dark;
+    font: 13px system-ui, sans-serif;
+    --line: rgba(128, 128, 128, .28);
+    --press: rgba(128, 128, 128, .18);
+    --hit: rgba(255, 204, 0, .42);
+    --hit-now: rgba(255, 138, 0, .62);
+}
+html, body { height: 100%; }
+body { margin: 0; display: flex; flex-direction: column; overflow: hidden; background: Canvas; color: CanvasText; }
+
+#bar {
+    flex: none; display: flex; align-items: center; gap: 2px; min-height: 40px; padding: 0 8px;
+    border-bottom: 1px solid var(--line); user-select: none; -webkit-user-select: none; white-space: nowrap;
+}
+#bar button {
+    flex: none; display: grid; place-items: center; width: 28px; height: 28px; padding: 0; border: 0;
+    border-radius: 7px; background: none; color: inherit; font: inherit; cursor: default;
+}
+#bar button:hover:enabled, #bar button[aria-pressed="true"] { background: var(--press); }
+#bar button:active:enabled { background: var(--line); }
+#bar button:disabled { opacity: .32; }
+#bar button:focus-visible { outline: 2px solid Highlight; outline: 2px solid AccentColor; outline-offset: -1px; }
+#field:focus-within { box-shadow: 0 0 0 2px Highlight; box-shadow: 0 0 0 2px AccentColor; }
+#bar svg { width: 16px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.5; stroke-linecap: round; stroke-linejoin: round; }
+#zoom { min-width: 44px; text-align: center; font-variant-numeric: tabular-nums; }
+#where, #count { padding: 0 6px; opacity: .62; font-variant-numeric: tabular-nums; }
+#gap { flex: 1; min-width: 8px; }
+#field {
+    display: flex; align-items: center; gap: 6px; flex: 0 1 220px; min-width: 96px; height: 28px; padding: 0 8px;
+    border-radius: 8px; background: var(--press);
+}
+#field svg { flex: none; opacity: .62; }
+#find {
+    flex: 1; min-width: 0; height: 100%; padding: 0; border: 0; outline: 0; background: none; color: inherit; font: inherit;
+    -webkit-appearance: none; appearance: none;
+}
+#find::-webkit-search-cancel-button { display: none; }
+
+#view { flex: 1; position: relative; overflow: auto; outline: 0; }
+#pages {
+    display: flex; flex-direction: column; align-items: center; gap: 12px; box-sizing: border-box;
+    width: max-content; min-width: 100%; padding: 12px;
+}
 #status { margin: 1rem; }
+.page {
+    position: relative; flex: none; overflow: hidden; background: white; color: #242424;
+    box-shadow: 0 1px 4px rgba(0, 0, 0, .27); --scale-round-x: 1px; --scale-round-y: 1px;
+}
+.page > canvas { display: block; position: absolute; inset: 0; width: 100%; height: 100%; }
+.page > .note { position: absolute; inset: 0; display: grid; place-items: center; padding: 12px; text-align: center; }
+/* What a search found, as boxes that tint the picture under the text. */
+.hits { position: absolute; inset: 0; pointer-events: none; mix-blend-mode: multiply; }
+.hits > i { position: absolute; border-radius: 2px; background: var(--hit); }
+.hits > i.now { background: var(--hit-now); }
+
+/* The text of a page, laid over its picture so that it can be selected. After PDF.js's viewer. */
+.textLayer {
+    position: absolute; inset: 0; z-index: 2; overflow: clip; opacity: 1; line-height: 1; text-align: initial;
+    -webkit-text-size-adjust: none; text-size-adjust: none; forced-color-adjust: none;
+    transform-origin: 0 0; caret-color: CanvasText; color-scheme: only light;
+    --min-font-size: 1;
+    --text-scale-factor: calc(var(--total-scale-factor) * var(--min-font-size));
+    --min-font-size-inv: calc(1 / var(--min-font-size));
+}
+.textLayer :is(span, br) { color: transparent; position: absolute; white-space: pre; cursor: text; transform-origin: 0% 0%; }
+.textLayer > :not(.markedContent), .textLayer .markedContent span:not(.markedContent) {
+    z-index: 1; --font-height: 0; font-size: calc(var(--text-scale-factor) * var(--font-height));
+    --scale-x: 1; --rotate: 0deg;
+    transform: rotate(var(--rotate)) scaleX(var(--scale-x)) scale(var(--min-font-size-inv));
+}
+.textLayer .markedContent { display: contents; }
+.textLayer ::selection { background: rgba(0, 0, 255, .25); background: color-mix(in srgb, AccentColor, transparent 75%); }
+.textLayer br::selection { background: transparent; }
+.textLayer .endOfContent {
+    display: block; position: absolute; inset: 100% 0 0; z-index: 0; cursor: default;
+    user-select: none; -webkit-user-select: none;
+}
+.textLayer.selecting .endOfContent { top: 0; }
+/* The canvas PDF.js measures text with. */
+.hiddenCanvasElement { position: absolute; top: 0; left: 0; width: 0; height: 0; display: none; }
+.textLayer[data-main-rotation="90"] { transform: rotate(90deg) translateY(-100%); }
+.textLayer[data-main-rotation="180"] { transform: rotate(180deg) translate(-100%, -100%); }
+.textLayer[data-main-rotation="270"] { transform: rotate(270deg) translateX(-100%); }
 </style>
 <script type="module" src="reader.mjs"></script>
 </head>
 <body>
-<p id="status" role="status">Loading PDF…</p>
-<main id="pages" aria-label="PDF pages"></main>
+<div id="bar" role="toolbar">
+    <button id="out" type="button" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9"/></svg></button>
+    <output id="zoom"></output>
+    <button id="in" type="button" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M3.5 8h9M8 3.5v9"/></svg></button>
+    <button id="fit" type="button" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="M2.5 3v10M13.5 3v10M5 8h6M6.75 6.25 5 8l1.75 1.75M9.25 6.25 11 8 9.25 9.75"/></svg></button>
+    <span id="where"></span>
+    <span id="gap"></span>
+    <label id="field">
+        <svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="7" cy="7" r="4.25"/><path d="m10.25 10.25 3 3"/></svg>
+        <input id="find" type="search" autocomplete="off" autocapitalize="off" spellcheck="false" disabled>
+    </label>
+    <span id="count" role="status"></span>
+    <button id="prev" type="button" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 10 4-4 4 4"/></svg></button>
+    <button id="next" type="button" disabled><svg viewBox="0 0 16 16" aria-hidden="true"><path d="m4 6 4 4 4-4"/></svg></button>
+</div>
+<div id="view" tabindex="0">
+    <p id="status" role="status"></p>
+    <main id="pages"></main>
+</div>
 </body>
 </html>

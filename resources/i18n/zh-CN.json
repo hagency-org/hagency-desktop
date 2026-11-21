@@ -3216,5 +3216,15 @@
   "Agent answer": "Agent 回答",
   "HTML must contain UTF-8 text": "HTML 文件必须是 UTF-8 文本",
   "Close an open attachment preview, then try again.": "请先关闭一个已打开的文件预览，然后重试。",
-  "This file cannot be previewed.": "无法预览此文件。"
+  "This file cannot be previewed.": "无法预览此文件。",
+  "Loading PDF…": "正在加载 PDF…",
+  "This PDF cannot be displayed.": "无法显示此 PDF。",
+  "Page {n}": "第 {n} 页",
+  "Zoom in": "放大",
+  "Zoom out": "缩小",
+  "Fit width": "适合宽度",
+  "Find in document": "在文档中查找",
+  "Previous match": "上一个",
+  "Next match": "下一个",
+  "No matches": "无结果"
 }
