@@ -15,6 +15,7 @@ struct PublicationFixtureState {
     connections: ConnectionFixtureState,
     session_reads: usize,
     contribution_reads: usize,
+    contribution_delay: Duration,
     recover_reads: usize,
     lose_reply: bool,
     reject: bool,

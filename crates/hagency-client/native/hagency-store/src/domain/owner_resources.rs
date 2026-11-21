@@ -129,14 +129,16 @@ impl ProfileAuthority {
         Ok(self)
     }
     fn check(&self) -> Result<(), Error> {
-        if !self.live.load(Ordering::Acquire)
-            || Instant::now() >= self.expires
-            || self.native_gate.as_ref().is_some_and(|gate| !gate())
-        {
-            Err(Error::LocalAuthority)
+        if !self.live.load(Ordering::Acquire) {
+            tracing::info!("Pool profile authority retired");
+        } else if Instant::now() >= self.expires {
+            tracing::info!(overdue_ms = self.expires.elapsed().as_millis() as u64, "Pool profile authority expired");
+        } else if self.native_gate.as_ref().is_some_and(|gate| !gate()) {
+            tracing::info!("Pool profile native gate rejected");
         } else {
-            Ok(())
+            return Ok(());
         }
+        Err(Error::LocalAuthority)
     }
     pub fn account(&self) -> &str {
         &self.account

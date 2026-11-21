@@ -170,6 +170,10 @@ async fn server() -> (
                         json!({"features": features})
                     }
                     "/hagency/api/v1/management/contributions/fixture_contribution" => {
+                        let delay = publications.lock().unwrap().contribution_delay;
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
                         let mut state = publications.lock().unwrap();
                         state.contribution_reads += 1;
                         state.invalidate("contribution");
