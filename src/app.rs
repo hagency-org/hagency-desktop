@@ -2446,7 +2446,8 @@ pub(crate) fn workspace_navigation(action: &Action) -> bool {
         || matches!(action.downcast_ref::<crate::home::main_desktop_ui::MainDesktopUiAction>(),
             Some(crate::home::main_desktop_ui::MainDesktopUiAction::ShowChats))
         || matches!(action.downcast_ref::<WebBrowserAction>(),
-            Some(WebBrowserAction::Open(_) | WebBrowserAction::OpenMarkdown {..} | WebBrowserAction::ReadArticle {..}))
+            Some(WebBrowserAction::Open(_) | WebBrowserAction::OpenMarkdown {..}
+                | WebBrowserAction::OpenAttachment {..} | WebBrowserAction::ReadArticle {..}))
         || matches!(action.downcast_ref::<MiniAppsAction>(), Some(MiniAppsAction::Open | MiniAppsAction::OpenAgent | MiniAppsAction::OpenReviewed))
         || matches!(action.downcast_ref::<ThemeStudioAction>(), Some(ThemeStudioAction::Open))
         || matches!(action.downcast_ref::<AgentAccessAction>(), Some(AgentAccessAction::Open))
