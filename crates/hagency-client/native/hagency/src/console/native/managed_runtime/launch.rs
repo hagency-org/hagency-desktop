@@ -20,6 +20,7 @@ pub(in crate::console::native) struct PreparedLaunch {
     launch: Launch,
     instructions: PathBuf,
     discovery_pending: bool,
+    pub(super) inspect_account: bool,
     web_search: bool,
     tool_mode: Option<String>,
     text_model: Option<(String, String)>,
@@ -280,6 +281,7 @@ impl PreparedLaunch {
             // before final-process qualification, regardless of credential
             // storage. Namespace isolation does not prove the no-tools policy.
             discovery_pending: true,
+            inspect_account: false,
             web_search: false,
             tool_mode: None,
             text_model,
@@ -306,6 +308,9 @@ impl PreparedLaunch {
         } else {
             process.discover_managed_policy(&self.instructions).await
         }
+    }
+    pub(in crate::console::native) fn inspect_account_before_ticket(&mut self) {
+        self.inspect_account = true;
     }
     pub(super) fn discovery_required(&self) -> bool {
         self.discovery_pending
@@ -545,6 +550,7 @@ impl PreparedLaunch {
             guardian: binary.clone(),
             instructions: directory.join(MANAGED_INSTRUCTIONS_FILE),
             discovery_pending: false,
+            inspect_account: false,
             web_search: false,
             tool_mode: None,
             text_model: None,

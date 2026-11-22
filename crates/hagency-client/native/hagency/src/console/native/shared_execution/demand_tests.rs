@@ -12,9 +12,10 @@ pub(super) struct State {
     revision: u64,
     paused: bool,
     lose_start: bool,
-    inspection_before_start: Option<(std::path::PathBuf, usize, usize)>,
+    inspection_before_start: Option<(std::path::PathBuf, usize, usize, usize)>,
     lose_stop: bool,
     invalid_binding: bool,
+    binding_epoch: Option<u64>,
     lose_binding: bool,
     stop_inputs: Vec<Value>,
     stop_results: BTreeMap<String, u64>,
@@ -119,9 +120,10 @@ pub(super) fn management(
             return Some(Some(json!({"demand":status(s),"observedAtMs":at})));
         }
         if path.ends_with("/start") {
-            if let Some((file, reads, turns)) = s.shared.demands.inspection_before_start.take() {
+            if let Some((file, reads, accounts, turns)) = s.shared.demands.inspection_before_start.take() {
                 let methods = std::fs::read_to_string(file).unwrap();
                 assert!(methods.lines().filter(|m| *m == "config/read").count() > reads);
+                assert_eq!(methods.lines().filter(|m| *m == "account/read").count(), accounts + 1);
                 assert_eq!(methods.lines().filter(|m| *m == "turn/start").count(), turns);
             }
             let input: SharedDemandStartInput = serde_json::from_value(body.clone()).unwrap();
@@ -186,6 +188,7 @@ pub(super) fn management(
         }
     }
     if path.ends_with("/demand") {
+        s.shared.demands.binding_epoch = Some(s.shared.activity_epoch);
         let o = s.shared.demands.offer.clone().unwrap();
         let w = s.shared.work.clone().unwrap();
         assert_eq!(body["workDigest"], digest(&w).unwrap());
@@ -312,7 +315,10 @@ pub(super) fn offer(f: &Fixture, number: u64) {
     s.shared.starts = 0;
 }
 pub(super) async fn wait_attempt(f: &Fixture) {
-    tokio::time::timeout(Duration::from_secs(15), async {
+    wait_attempt_for(f, Duration::from_secs(15)).await
+}
+async fn wait_attempt_for(f: &Fixture, timeout: Duration) {
+    tokio::time::timeout(timeout, async {
         loop {
             if f.state
                 .lock()
@@ -436,7 +442,7 @@ async fn native_demand_inspects_provider_before_ticket_and_runs_one_turn() {
     offer(&f, 1);
     f.state.lock().unwrap().shared.demands.inspection_before_start = Some((
         f._root.path().join("shared-probe/methods"), count_methods(&f, "config/read"),
-        count_methods(&f, "turn/start"),
+        count_methods(&f, "account/read"), count_methods(&f, "turn/start"),
     ));
     let p = t.poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage").shared_fixture()))
         .await.unwrap().outcome.unwrap();
@@ -444,6 +450,58 @@ async fn native_demand_inspects_provider_before_ticket_and_runs_one_turn() {
     wait_attempt(&f).await;
     assert!(f.state.lock().unwrap().shared.demands.inspection_before_start.is_none());
     assert_eq!(count_methods(&f, "turn/start"), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn cold_account_lookup_completes_the_first_demand() {
+    let (f, t, _) = fixture_budget(1000).await;
+    offer(&f, 1);
+    // The fixture execute ticket lasts 20s. The account endpoint recovers
+    // after that window, but within the metadata inspection's own deadline.
+    let available_at = now() + 23_000;
+    std::fs::write(
+        f._root.path().join("shared-probe/account-available-at"),
+        available_at.to_string(),
+    ).unwrap();
+    let progress = t.poll_demand_fixture(
+        &f.registry, None, Some(launch(&f, "text-cold-account").shared_fixture())
+    ).await.unwrap().outcome.unwrap();
+    assert!(matches!(progress, SharedDemandProgress::Execution {
+        progress: SharedExecutionProgress::Running { .. }, ..
+    }));
+    assert!(now() >= available_at, "the offline account delay must actually run");
+    wait_attempt(&f).await;
+    assert_eq!(f.state.lock().unwrap().shared.starts, 1);
+    assert!(f.state.lock().unwrap().shared.receipts.values().any(|receipt|
+        receipt.work_id == "demand_work_1" && receipt.state == "completed"));
+    f.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn slow_demand_binding_renews_before_the_first_work_ack() {
+    let (f, t, _) = fixture_budget(1000).await;
+    offer(&f, 1);
+    {
+        let mut state = f.state.lock().unwrap();
+        state.shared.delay_demand_binding = true;
+        state.shared.ack_epoch = None;
+    }
+    let progress = t.poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage")))
+        .await.unwrap().outcome.unwrap();
+    assert!(matches!(progress, SharedDemandProgress::Execution {
+        progress: SharedExecutionProgress::Running { .. }, ..
+    }));
+    wait_attempt_for(&f, Duration::from_secs(40)).await;
+    {
+        let state = f.state.lock().unwrap();
+        assert!(state.shared.ack_epoch.unwrap() > state.shared.demands.binding_epoch.unwrap());
+        assert_eq!(state.shared.starts, 1);
+        assert!(state.shared.receipts.values().any(|receipt|
+            receipt.work_id == "demand_work_1" && receipt.state == "completed"));
+    }
     f.stop().await;
 }
 
