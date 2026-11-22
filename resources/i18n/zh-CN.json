@@ -3248,5 +3248,7 @@
   "Only this room shows this name. Leave it empty to use your account's name.": "仅在本房间显示。留空则使用账号昵称。",
   "Nickname": "昵称",
   "Could not change your nickname: {error}": "无法修改昵称：{error}",
-  "Runs on a shared resource pool.": "由共享资源池运行。"
+  "Runs on a shared resource pool.": "由共享资源池运行。",
+  "Invited": "已邀请",
+  "Only some of the members are shown.": "仅显示部分成员。"
 }
