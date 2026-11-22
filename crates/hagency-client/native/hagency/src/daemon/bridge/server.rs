@@ -483,9 +483,10 @@ impl Bridge {
                     arguments: arguments.clone(),
                 };
                 if operation.is_mutation() {
-                    match self.journal.admit(
+                    match self.journal.admit_with(
                         request_id,
                         &super::client::fingerprint(owner, &package.receipt_scope()?, &call)?,
+                        |failure| operation.settled_prepare_denial(failure),
                     )? {
                         Admission::Pending => return Err(error(503, "daemon_command_pending")),
                         Admission::RecoveryRequired => return Err(error(409, "daemon_command_recovery_required")),
@@ -509,7 +510,11 @@ impl Bridge {
                 )
                 .await;
                 if operation.is_mutation() {
-                    let result = result.map_err(Failure::from);
+                    let result = result.map_err(|error| {
+                        let mut failure = Failure::from(error);
+                        failure.terminal |= operation.settled_prepare_denial(&failure);
+                        failure
+                    });
                     self.journal.finish(request_id, &result)?;
                     receipt_recorded.store(super::terminal_receipt(&result),Ordering::Release);
                     return result.map_err(Failure::native);

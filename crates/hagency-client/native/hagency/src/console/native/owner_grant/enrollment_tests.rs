@@ -724,3 +724,78 @@ async fn expired_display_profile_returns_local_401_while_the_same_manager_is_aut
     assert_eq!(f.count("owner_capacity_grants"), 1);
     f.stop().await;
 }
+
+#[tokio::test]
+async fn first_pool_review_survives_slow_discovery_and_provider_observation() {
+    let mut f = Fixture::new().await;
+    f.enable_factory().await;
+    {
+        let mut reply = f.admission.lock().unwrap();
+        reply["admission"]["contribution"]["publicationFirst"] = json!(true);
+        reply["admission"]["contribution"]["state"] = json!("draft");
+        reply["admission"]["request"]["state"] = json!("draft");
+    }
+    {
+        let mut server = f.publications.lock().unwrap();
+        server.admission_receipts = true;
+        server.contribution_delay = Duration::from_secs(5);
+    }
+    // Two five-second reads around a slow provider exceed the initial
+    // thirty-second device proof. Each individual observation completes live.
+    let proof = f.service.verified_enrollment_with(
+        &f.registry, "fixture_contribution".into(), |_| async {
+            tokio::time::sleep(Duration::from_secs(22)).await;
+            Ok(provider_fixture("synthetic-account"))
+        },
+    ).await.expect("a current account can enroll its unchanged draft");
+    let review = f.service.prepare(&f.registry, proof, Fixture::choices()).await.unwrap();
+    assert_eq!(review.original.binding.resource_id, f.resource);
+    assert_eq!(f.count("owner_capacity_grants"), 0);
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn first_pool_review_rechecks_the_provider_after_the_enrollment_journal() {
+    for final_account in ["synthetic-account", "another-account"] {
+        let mut f = Fixture::new().await;
+        f.enable_factory().await;
+        f.publications.lock().unwrap().admission_receipts = true;
+        let calls = std::sync::atomic::AtomicUsize::new(0);
+        let journal = f.enrollment_path().await;
+        let first_deadline = std::sync::OnceLock::new();
+        let observer = |_: super::super::ManagementRuntime, _: ProfileAuthority, _: String, _: String| {
+            let first = calls.fetch_add(1, Ordering::Relaxed) == 0;
+            assert_eq!(journal.exists(), !first);
+            let first_expires = *first_deadline.get_or_init(|| Instant::now() + Duration::from_secs(2));
+            async move {
+                let provider = if first {
+                    VerifiedProviderAccount::new("codex", "https://provider.test", "synthetic-account", first_expires).unwrap()
+                } else {
+                    tokio::time::sleep_until(first_expires.into()).await;
+                    provider_fixture(final_account)
+                };
+                Ok(super::super::provider_identity::ResourceWitness::Account(provider))
+            }
+        };
+        {
+            let cookie = f.service.cookie().await.unwrap();
+            let initial = f.service.io(&cookie, Permission::ConsentGrants).await.unwrap();
+            let features = f.service.session_features(&initial).await.unwrap();
+            let result = f.service.verified_enrollment_observe(
+                &f.registry, "fixture_contribution".into(), &cookie, None, observer, Some(observer),
+            ).await;
+            assert_eq!(calls.load(Ordering::Relaxed), 2);
+            assert_eq!(result.is_ok(), final_account == "synthetic-account");
+            if let Ok((proof, admission, current)) = result {
+                let facts = PreparationFacts { context: initial.context.clone(), admission, features };
+                let review = f.service.prepare_with_observations(
+                    &f.registry, proof, Fixture::choices(), Some(facts), current,
+                ).await.unwrap();
+                assert_eq!(review.original.binding.resource_id, f.resource);
+                assert_eq!(review.original.receipt_version, 2);
+            }
+            assert_eq!(f.count("owner_capacity_grants"), 0);
+        }
+        f.stop().await;
+    }
+}
