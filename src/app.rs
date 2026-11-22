@@ -355,6 +355,10 @@ impl MatchEvent for App {
         self.approvals_timer = cx.start_interval(crate::hagency::pending_approvals::POLL_SECONDS);
         crate::hagency::owner_dashboard::register_host_accessibility(cx);
         init_tracing();
+        // An update may have left the hosting service at this app's former executable.
+        let _ = std::thread::Builder::new()
+            .name("owner-hosting-service".into())
+            .spawn(crate::hagency::hosting::follow_renamed_executable);
 
         // On iOS (and potentially other devices), there is a very low limit
         // (albeit a soft limit) on max file descriptors, as little as 256.
