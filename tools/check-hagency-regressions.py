@@ -481,6 +481,8 @@ def main():
         ("native-known-usage-recovery", "hagency-store", "recurring_"),
         ("native-never-started-store-recovery", "hagency-store", "shared_demand_v2_"),
         ("native-never-started-message-recovery", "hagency", "native_demand_never_started_attempt_retries_same_event_exactly_once"),
+        ("native-demand-cold-account", "hagency", "cold_account_lookup_completes_the_first_demand"),
+        ("native-demand-slow-binding", "hagency", "slow_demand_binding_renews_before_the_first_work_ack"),
         ("native-demand-late-stop-recovery", "hagency", "native_demand_late_stop_and_logout_keep_unknown_state_and_deny_stale_offer"),
     ]:
         run(name, ["cargo", "test", "--locked", "-p", package, "--features", "shared-budget-execution,resource-adoption", "--lib", pattern, "--", "--include-ignored", "--test-threads=1"], cwd=CLIENT, rust_tests=True)

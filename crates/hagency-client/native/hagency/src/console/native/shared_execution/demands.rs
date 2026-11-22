@@ -402,13 +402,16 @@ impl SharedExecutionTransport {
         let inspected = matches!(status.state.as_str(), "offered" | "retry_offered")
             && original.runtime().map_err(store)? == "codex";
         if inspected {
-            // Only inspect the saved owner's provider policy here. No business
-            // child is started or claimed until H1 returns the matching command.
+            // Inspect the selected provider's policy and account availability.
+            // The execution process still requires H1's matching command.
             submission.check().map_err(store)?;
             let started = Instant::now();
             let b = self.io.bound().await?;
-            let selected = self.select_attempt_launch(r, &b, original, input.start.web_search,
+            let mut selected = self.select_attempt_launch(r, &b, original, input.start.web_search,
                 input.start.tool_policy.as_ref().map(|p| p.mode.as_str()), launch).await?;
+            if let launch::Launch::Codex(prepared) = &mut selected {
+                prepared.inspect_account_before_ticket();
+            }
             let until = b.scope.deadline;
             let process_io = selected.io(&self.io);
             let check = b.preparation_check(&process_io, original.clone());
