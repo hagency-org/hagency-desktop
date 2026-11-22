@@ -60,8 +60,19 @@ is refused the same way, while the others still start in the sandbox.
 
 **The image.** The Dockerfile is part of the app: Debian with Node 22 (pinned
 by digest), Claude Code 2.1.323, and the tools a coding run expects. The tag is
-`hagency/claude-agent:<first 12 hex of the Dockerfile's SHA-256>`, so a changed
-recipe gets a new tag. Runs name the image by ID, never by tag, and never pull.
+`hagency/claude-agent:<first 12 hex of the Dockerfile's SHA-256>-<uid>-<gid>`
+(the numbers of the user who owns the daemon's folders), so a changed recipe,
+or another owner account, gets its own image. Runs name the image by ID, never
+by tag, and never pull.
+
+The build gives the owner's uid and gid a user and group entry (`agent`) and
+sets `USER` and `LOGNAME`, so a program that asks who it runs as (`whoami`,
+Node's `os.userInfo`, Python's `getpass`) gets an answer. git trusts every
+repository in the container (`safe.directory`): a container engine on macOS
+can report a shared folder's owner as another user, and git would then refuse
+a repository in the space's project folder. A run may already write everything
+it can see, so this opens nothing. git also has a default author, for a
+repository that names none; a repository's own author still wins.
 
 **The run.** Each launch is one `docker run --rm --interactive --init` with the
 CLI's normal arguments. Claude talks to the host over stdin and stdout as it
@@ -123,6 +134,11 @@ of resuming one made under the other.
   the base image and Claude Code. Later switch-ons find the image at once.
 - **Claude Code's version is the image's.** A new version is a new Dockerfile
   and so a new tag, built on the next switch-on.
+- **An image stays in use until a turn-on runs again.** Resources turned on
+  under an earlier recipe keep its image. Turning any resource on builds the
+  current image, which then serves every resource listed.
+- **The default commit author is the same for every Agent** (`Hagency Agent`),
+  where the repository names none.
 - **Start failures** reach the caller as `shared_claude_container_unavailable`
   (409), and the daemon logs `shared_claude_container_start_failed`.
 
@@ -136,6 +152,13 @@ of resuming one made under the other.
   credential and not the CLI's process, cannot write the image, and works in
   the run's folder. The containers are gone after a normal end, after the
   client is killed, and after another host's sweep.
+- The image with a real engine, under the run's isolation settings: in a
+  repository at the top of a shared project folder that the engine reported as
+  root's, the earlier image failed `git status` ("dubious ownership"),
+  `whoami`, `os.userInfo()` and `getpass`, and a commit had no author. The
+  current image passes each, and a repository's own author is kept. The
+  ignored test that prepares the image passes with the owner's numbers in the
+  tag.
 - The switch with a real engine (ignored test): two resources turned on one
   after the other, a third left in the sandbox, then each turned off.
 - Setting file tests in the `hagency` crate: each resource's choice, one
