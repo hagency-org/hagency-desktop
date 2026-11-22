@@ -1,6 +1,18 @@
 # Desktop 0.5.0 发布
 
-更新：2026-11-19。
+更新：2026-11-22。
+
+## 2026-11-21 rc.15 发布
+
+用户要求合并 PR #194、#193，随后要求出 rc，并要求带上 PR #192；由 Claude 执行。
+
+- [v0.5.0-rc.15](https://github.com/hagency-org/hagency-desktop/releases/tag/v0.5.0-rc.15) 于 2026-11-21 05:59:16 UTC 公开为 prerelease。标签和两个安装包都由 Desktop `9aaab2ebe7f4a5b4ee4c2e2ee8cb19e87bbf90f5` 构建，即发布提交（PR #195 的合并提交）本身：rc.14 之后合入了产品改动 PR #190（朋友圈在聊天窗格内打开）、#191（成员列表每次从服务器重读）、#194（Markdown、HTML、PDF 附件在阅读器中预览，PDF 阅读页可选字、查找、缩放，回答下方的按钮改为打开阅读器标签页）、#193（房间信息改为单页，成员宫格加减，房间改名，房间内昵称，聊天记录不再盖住房间列表）和 #192（已完成的运行不再留卡片），以及只改 CI 和文档的 PR #180。`crates/` 下没有改动，托管服务和托管数据库与 rc.14 相同。Makepad 与 rc.14 相同，为 `8f788cbb788f287f4e684de913e83fbbb70df701`。
+- 发布运行 [44866091218](https://github.com/hagency-org/hagency-desktop/actions/runs/44866091218)（publish=true、macos-arm64-windows）在 main 上第一次尝试全部通过。发布 PR 的分支在合并前并入了当时的 main，它的检查跑在与发布提交完全相同的内容上。
+- 用时：从触发到公开 93 分钟。回归门禁 19 分钟，桌面测试 macOS 5.5 分钟、Windows 25 分钟，macOS 安装包在项目自己的发布机上 11.5 分钟，Windows 安装包 92 分钟，是整个发布的用时。两个平台的随包内核都复用了此前 main 上发布运行留存的内核（macOS 来自 44649851440，Windows 来自 44627576533），没有从源码构建。
+- 只有两个安装包：`hagency-desktop-macos-arm64.dmg`（174,770,396 字节）和 `hagency-desktop-windows-amd64.exe`（125,104,864 字节），比 rc.14 各大约 5 MB 和 2.6 MB，主要是随包的 PDF.js。公开附件已重新下载，`SHA256SUMS.txt` 和两个平台各自的校验文件都校验通过，两份构建报告都写明上述提交和版本 0.5.0-rc.15。
+- 在构建机以外的一台 Mac 上，用空 profile 和隐藏窗口，通过 `tools/release-desktop-smoke.py` 运行了公开的 macOS 安装包：第一次运行通过，登录页和包内标志已绘制，随包内核为 `octos 2.0.3-rc.13 (fe08d8e)`，没有资源错误。Windows 安装包没有在实机上运行。
+- 发布前在真实账号上手动运行过的内容和没有运行过的内容，写在发布说明末尾 rc.15 一段里；rc.15 的任何改动都没有在 Windows 上运行。
+- 这次发布没有部署服务端，也不需要服务端改动。
 
 ## 2026-11-20 rc.14 发布
 
