@@ -842,8 +842,12 @@ fn parse_response(
                 || lease.device_generation
                     != i64::try_from(device.generation()).map_err(|_| invalid())?
                 || lease.epoch < 1
+                // The server cuts a lease to the device's authorization
+                // window. `remaining` is that end by the local clock, so it is
+                // measured against the window read the same way: the device's
+                // own deadline is earlier by what its proof clock left out.
                 || std::time::Instant::now() + Duration::from_millis(remaining as u64)
-                    > device.valid_until() + Duration::from_secs(1)
+                    > device.window_until() + Duration::from_secs(1)
                 || operation
                     .lease()
                     .is_some_and(|reference| reference.epoch != lease.epoch)
@@ -1153,6 +1157,41 @@ impl Console {
 #[cfg(test)]
 mod processing_tests {
     use super::*;
+    #[test]
+    fn a_lease_is_measured_against_the_window_the_proof_clock_shortened() {
+        let renew = DeviceOperation::Renew {
+            lease: LeaseRef { agent_id: "agent-a".into(), epoch: 3 },
+            ttl_ms: 30_000,
+        };
+        let answer = |remaining_ms: i64| json!({"lease":{
+            "agentId":"agent-a","ownerUserId":"owner-subject","deviceId":"fixture_device",
+            "deviceGeneration":1,"epoch":3,"expiresAtMs":now_ms().unwrap() + remaining_ms
+        }});
+        let device = |window_ms: u64, taken_ms: u64| {
+            super::super::server_login::fixture_device(
+                "https://example.test/", "owner-subject", "@owner:example.test",
+            )
+            .0
+            .with_fixture_window(Duration::from_millis(window_ms), Duration::from_millis(taken_ms))
+        };
+        let refused = |device: &AuthorizedDevice| {
+            let error = parse_response(&renew, answer(30_000), device).err().unwrap();
+            (error.status, error.code)
+        };
+        // The server cut the lease to the end of the device's window. The proof
+        // clock ended the device's own deadline 1.3 s before that end.
+        assert!(parse_response(&renew, answer(30_000), &device(30_000, 1_300)).is_ok());
+        // Measured against that deadline alone, the same lease was refused.
+        assert_eq!(
+            refused(&device(28_700, 0)),
+            (502, "execution_scope_mismatch".to_owned())
+        );
+        // A lease that outlives the window itself by more than a second still is.
+        assert_eq!(
+            refused(&device(28_000, 500)),
+            (502, "execution_scope_mismatch".to_owned())
+        );
+    }
     #[test]
     fn message_authorization_pins_the_host_route_and_expires() {
         let lease = LeaseRef { agent_id: "agent-a".into(), epoch: 3 };

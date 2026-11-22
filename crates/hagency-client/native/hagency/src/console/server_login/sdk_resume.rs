@@ -369,6 +369,7 @@ impl ServerLogin {
             refresh_token: None,
             oauth_expires: now,
             authorized_until: now,
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: record.binding.clone(),
             checked: now,

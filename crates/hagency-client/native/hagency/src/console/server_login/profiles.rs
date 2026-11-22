@@ -442,6 +442,7 @@ mod tests {
             refresh_token: None,
             oauth_expires: Instant::now(),
             authorized_until: Instant::now(),
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: alice.clone(),
             checked: Instant::now(),
