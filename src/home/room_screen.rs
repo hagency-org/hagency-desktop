@@ -959,8 +959,8 @@ script_mod! {
             // only bounce at the end, not the start because that triggers back pagination.
             bounce_at_start: false,
             bounce_at_end: true,
-            // Read-receipt logic listens for scroll position changes.
-            emit_scroll_actions: true,
+            // The room samples the final scroll position after layout.
+            emit_scroll_actions: false,
             // Prefetch older history shortly before the user actually hits the top.
             reached_start_margin: 2,
             // A message row is expensive to build (its cards, its text). The rows near the
@@ -1199,17 +1199,7 @@ struct ReadReceiptState {
     user_scroll_travel_at_timer_start: f64,
     /// The timeline's `user_scroll_travel` when we last sampled it.
     last_user_scroll_travel: f64,
-}
-
-/// Whether this batch contains only the scroll notification already handled
-/// by this RoomScreen. Other actions must still reach its child widgets.
-fn only_timeline_scroll_actions(actions: &Actions, timeline_uid: WidgetUid) -> bool {
-    !actions.is_empty() && actions.iter().all(|action| {
-        action.as_widget_action().is_some_and(|action| {
-            action.widget_uid == timeline_uid
-                && matches!(action.action.downcast_ref::<PortalListAction>(), Some(PortalListAction::Scroll))
-        })
-    })
+    last_drawn_position: (usize, f64),
 }
 
 impl ReadReceiptState {
@@ -1243,6 +1233,11 @@ impl ReadReceiptState {
     /// caused the movement and in which direction.
     fn handle_scroll(&mut self, cx: &mut Cx, portal_list: &PortalListRef) {
         let user_travel = portal_list.user_scroll_travel();
+        let position = (portal_list.first_id(), portal_list.scroll_position());
+        if position == self.last_drawn_position && user_travel == self.last_user_scroll_travel {
+            return;
+        }
+        self.last_drawn_position = position;
         let did_scroll_up = user_travel > self.last_user_scroll_travel;
         let did_scroll_down = user_travel < self.last_user_scroll_travel;
         self.last_user_scroll_travel = user_travel;
@@ -1277,6 +1272,7 @@ impl ReadReceiptState {
     /// Reads the last user scroll travel when a new timeline is first shown.
     fn on_timeline_shown(&mut self, portal_list: &PortalListRef) {
         self.last_user_scroll_travel = portal_list.user_scroll_travel();
+        self.last_drawn_position = (portal_list.first_id(), portal_list.scroll_position());
     }
 }
 
@@ -1802,29 +1798,9 @@ impl Widget for RoomScreen {
                 }
             }
 
-            /*
-            // close message action bar if scrolled.
-            if portal_list.scrolled(actions) {
-                let message_action_bar_popup = self.popup_notification(cx, ids!(message_action_bar_popup));
-                message_action_bar_popup.close(cx);
-            }
-            */
-
-            // Back paginate the timeline when the start of the timeline comes into view.
+            // Pagination and smooth-scroll completion still use their own list actions.
             self.send_pagination_request_on_reached_start(cx, actions, &portal_list);
-
-            // Once scrolling stops, the read receipt timer determines which events are
-            // actually visible and sends read receipts for them.
-            if portal_list.scrolled(actions) {
-                self.read_receipt_state.handle_scroll(cx, &portal_list);
-            }
-
-            // Handle the jump to bottom button: update its visibility, and handle clicks.
-            jump_to_bottom_button.update_from_actions(
-                cx,
-                &portal_list,
-                actions,
-            );
+            jump_to_bottom_button.handle_click(cx, &portal_list, actions);
         }
 
         if let Event::Signal = event {
@@ -1859,15 +1835,6 @@ impl Widget for RoomScreen {
                     self.history_jump_started = false;
                 }
             }
-        }
-
-        // Read receipts and the jump button already consumed this list's scroll
-        // notification above. Do not revisit every retained message for that
-        // action alone; mixed action batches still reach the whole subtree.
-        if let Event::Actions(actions) = event
-            && only_timeline_scroll_actions(actions, portal_list.widget_uid())
-        {
-            return;
         }
 
         // Forward the event to the inner timeline view, but capture any actions it produces
@@ -1906,6 +1873,7 @@ impl Widget for RoomScreen {
                     if let Some(event) = tl.items.get(index).and_then(|item| item.as_event()) {
                         let id = event.identifier();
                         if !tl.expanded_system_updates.remove(&id) { tl.expanded_system_updates.insert(id); }
+                        tl.system_update_groups = None;
                     }
                 }
                 self.relayout_redraws_left = 12;
@@ -2027,11 +1995,13 @@ impl Widget for RoomScreen {
 
 
         // Recovery can finish while Settings covers this cached page.
-        let list = self.view.portal_list(cx, ids!(timeline.list));
+        let RoomScreenWidgetRefs { portal_list: list, jump_to_bottom_button, .. } =
+            self.cached_widget_refs(cx);
         self.process_timeline_updates(cx, &list);
 
         let room_screen_widget_uid = self.widget_uid();
         let has_agent_status = self.has_agent_status(cx);
+        let mut drew_timeline = false;
         while let Some(subview) = self.view.draw_walk(cx, scope, walk).step() {
             // Here, we only need to handle drawing the portal list.
             let portal_list_ref = subview.as_portal_list();
@@ -2043,23 +2013,17 @@ impl Widget for RoomScreen {
                 return DrawStep::done();
             };
 
+            drew_timeline = true;
             // Set the portal list's range based on the number of timeline items.
+            let cleared_through = super::chat_actions::cleared_through(tl_state.kind.room_id());
+            tl_state.refresh_system_update_groups(cleared_through);
+            let system_updates = tl_state.system_update_groups.as_ref().unwrap();
             let tl_items = &tl_state.items;
             let last_item_id = tl_items.len();
-            let cleared_through = super::chat_actions::cleared_through(tl_state.kind.room_id());
-            let system_groups = system_update_ranges(tl_items.iter().map(|item| {
-                item.as_event().is_some_and(|event| {
-                    cleared_through.is_none_or(|cutoff| u64::from(event.timestamp().0) > cutoff)
-                        && is_groupable_system_update(event.content())
-                })
-            }));
 
             let list = list_ref.deref_mut();
             list.set_item_range(cx, 0, last_item_id + usize::from(has_agent_status));
-            let skipped_system_updates = system_groups.iter().filter(|range| tl_items[range.start].as_event()
-                .is_some_and(|event| !tl_state.expanded_system_updates.contains(&event.identifier())))
-                .map(|range| range.start + 1..range.end).collect::<Vec<_>>();
-            list.set_skipped_ranges(&skipped_system_updates);
+            list.set_skipped_ranges(&system_updates.skipped);
             self.agent_status_drawn = false;
 
             while let Some(item_id) = list.next_visible_item(cx) {
@@ -2085,15 +2049,13 @@ impl Widget for RoomScreen {
                         continue;
                     }
 
-                    let system_group = system_groups.iter().find(|range| range.contains(&tl_idx));
-                    let group_open = system_group.is_some_and(|range| tl_items[range.start].as_event()
-                        .is_some_and(|event| tl_state.expanded_system_updates.contains(&event.identifier())));
-                    if system_group.is_some_and(|range| range.start != tl_idx) && !group_open {
+                    let system_group = system_updates.group_at(tl_idx);
+                    if system_group.is_some_and(|group| group.range.start != tl_idx && !group.expanded) {
                         list.item(cx, item_id, id!(Empty)).draw_all(cx, scope);
                         continue;
                     }
-                    let group_header = system_group.filter(|range| range.start == tl_idx)
-                        .map(|range| (range.len(), group_open));
+                    let group_header = system_group.filter(|group| group.range.start == tl_idx)
+                        .map(|group| (group.range.len(), group.expanded));
 
                     // Determine whether this item's content and profile have been drawn since the last update.
                     // Pass this state to each of the `populate_*` functions so they can attempt to re-use
@@ -2316,6 +2278,11 @@ impl Widget for RoomScreen {
             }
         }
 
+        if drew_timeline {
+            self.read_receipt_state.handle_scroll(cx, &list);
+            jump_to_bottom_button.update_visibility_after_draw(cx, &list);
+        }
+
         // Arm (or re-arm) the timer for the earliest live approval card just drawn.
         #[cfg(feature = "agent_chat")]
         self.schedule_agent_chat_expiry(cx);
@@ -2462,7 +2429,7 @@ impl RoomScreen {
                     portal_list.set_tail_range(true);
                     jump_to_bottom_button.update_visibility(cx, true);
 
-                    tl.items = initial_items;
+                    tl.replace_items(initial_items);
                     items_changed = true;
                     done_loading = true;
                 }
@@ -2622,7 +2589,7 @@ impl RoomScreen {
                         tl.profile_drawn_since_last_update.remove(changed_indices.clone());
                         // log!("process_timeline_updates(): changed_indices: {changed_indices:?}, items len: {}\ncontent drawn: {:#?}\nprofile drawn: {:#?}", items.len(), tl.content_drawn_since_last_update, tl.profile_drawn_since_last_update);
                     }
-                    tl.items = new_items;
+                    tl.replace_items(new_items);
                     items_changed = true;
                     done_loading = true;
                 }
@@ -2914,7 +2881,7 @@ impl RoomScreen {
                 }
                 TimelineUpdate::LocalEchoProgress { new_items } => {
                     // we don't have to do anything except update the timeline items and redraw.
-                    tl.items = new_items;
+                    tl.replace_items(new_items);
                     portal_list.redraw(cx);
                 }
                 TimelineUpdate::SendFailedBeforeBeingQueued { message, replied_to } => {
@@ -3655,9 +3622,14 @@ impl RoomScreen {
 
         if let Some(index) = related_msg_tl_index {
             // A search, receipt or reply jump must reveal a target inside a folded run.
-            if let Some(range) = system_update_ranges(tl.items.iter().map(|item| item.as_event()
-                .is_some_and(|event| is_groupable_system_update(event.content())))).into_iter().find(|r| r.contains(&index)) {
-                if let Some(event) = tl.items[range.start].as_event() { tl.expanded_system_updates.insert(event.identifier()); }
+            let cleared_through = super::chat_actions::cleared_through(tl.kind.room_id());
+            tl.refresh_system_update_groups(cleared_through);
+            if let Some(group) = tl.system_update_groups.as_ref().and_then(|groups| groups.group_at(index))
+                && !group.expanded
+                && let Some(event) = tl.items[group.range.start].as_event()
+            {
+                tl.expanded_system_updates.insert(event.identifier());
+                tl.system_update_groups = None;
                 cx.redraw_all();
             }
             // log!("The related message {replied_to_event} was immediately found in room {}, scrolling to from index {reply_message_item_id} --> {index} (first ID {}).", tl.kind.room_id(), portal_list.first_id());
@@ -3797,6 +3769,7 @@ impl RoomScreen {
                     pending_downloads: SmallVec::new(),
                     expanded_reply_previews: HashSet::new(),
                     expanded_system_updates: HashSet::new(),
+                    system_update_groups: None,
                     #[cfg(feature = "agent_chat")]
                     agent_chat_approvals: ApprovalUiState::default(),
                     #[cfg(feature = "agent_chat")]
@@ -4961,7 +4934,7 @@ mod timeline_state_store {
         TIMELINE_STATES.with_borrow_mut(|states| {
             if let Some(StateEntry::Stored(state)) = states.get_mut(kind) {
                 if state.update_receiver.identity() > channel { return; }
-                state.items.clear();
+                state.replace_items(Vector::new());
                 state.room_members = None;
                 state.fetched_thread_summaries.clear();
                 state.pending_thread_summary_fetches.clear();
@@ -5220,6 +5193,7 @@ struct TimelineUiState {
     expanded_reply_previews: HashSet<TimelineEventItemId>,
     /// Track disclosures by event ID rather than transient timeline indices.
     expanded_system_updates: HashSet<TimelineEventItemId>,
+    system_update_groups: Option<SystemUpdateGroups>,
 
     /// Local decision/expiry state of the agent-chat approval cards in this timeline.
     #[cfg(feature = "agent_chat")]
@@ -5233,6 +5207,27 @@ struct TimelineUiState {
 }
 
 impl TimelineUiState {
+    fn replace_items(&mut self, items: Vector<Arc<TimelineItem>>) {
+        self.items = items;
+        self.system_update_groups = None;
+    }
+
+    fn refresh_system_update_groups(&mut self, cleared_through: Option<u64>) {
+        if self.system_update_groups.as_ref().is_some_and(|groups| groups.cleared_through == cleared_through) {
+            return;
+        }
+        let is_groupable = self.items.iter().map(|item| {
+            item.as_event().is_some_and(|event| {
+                cleared_through.is_none_or(|cutoff| u64::from(event.timestamp().0) > cutoff)
+                    && is_groupable_system_update(event.content())
+            })
+        });
+        self.system_update_groups = Some(SystemUpdateGroups::new(cleared_through, is_groupable, |start| {
+            self.items[start].as_event()
+                .is_some_and(|event| self.expanded_system_updates.contains(&event.identifier()))
+        }));
+    }
+
     /// Whether we've given up automatic back pagination.
     ///
     /// This happens after we've done multiple back pagination rounds without getting any new events.
@@ -8347,33 +8342,6 @@ mod upstream_fix_tests;
 mod agent_chat_selection_tests;
 
 #[cfg(test)]
-mod scroll_action_tests {
-    use super::*;
-
-    #[test]
-    fn only_the_current_timeline_scroll_batch_can_skip_child_dispatch() {
-        let mut cx = Cx::new(Box::new(|_, _| {}));
-        let timeline = WidgetUid(1);
-        let other = WidgetUid(2);
-        assert!(!only_timeline_scroll_actions(&[], timeline));
-        let scroll = cx.capture_actions(|cx| cx.widget_action(timeline, PortalListAction::Scroll));
-        assert!(only_timeline_scroll_actions(&scroll, timeline));
-        let other_scroll = cx.capture_actions(|cx| cx.widget_action(other, PortalListAction::Scroll));
-        assert!(!only_timeline_scroll_actions(&other_scroll, timeline));
-        let mixed = cx.capture_actions(|cx| {
-            cx.widget_action(timeline, PortalListAction::Scroll);
-            cx.widget_action(timeline, PortalListAction::ReachedStart);
-        });
-        assert!(!only_timeline_scroll_actions(&mixed, timeline));
-        let general = cx.capture_actions(|cx| {
-            cx.widget_action(timeline, PortalListAction::Scroll);
-            cx.action("other action");
-        });
-        assert!(!only_timeline_scroll_actions(&general, timeline));
-    }
-}
-
-#[cfg(test)]
 mod desktop_information_columns_tests {
     use super::*;
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
@@ -8841,6 +8809,7 @@ pub(crate) mod crypto_recovery_resume_tests {
                     pending_downloads: SmallVec::new(),
                     expanded_reply_previews: HashSet::new(),
                     expanded_system_updates: HashSet::new(),
+                    system_update_groups: None,
                     #[cfg(feature = "agent_chat")]
                     agent_chat_approvals: ApprovalUiState::default(),
                     #[cfg(feature = "agent_chat")]
@@ -8897,7 +8866,7 @@ pub(crate) mod crypto_recovery_resume_tests {
 mod system_updates;
 mod restore;
 pub(crate) use restore::RoomMembershipChanged;
-use system_updates::{system_update_ranges, is_groupable_system_update, present_system_update_group};
+use system_updates::{SystemUpdateGroups, is_groupable_system_update, present_system_update_group};
 
 /// Offline layout fixture using the production disclosure presentation.
 #[cfg(feature = "onboarding-test-support")]
