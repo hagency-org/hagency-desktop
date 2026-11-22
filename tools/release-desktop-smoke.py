@@ -3,6 +3,7 @@
 import argparse
 import json
 import os
+import plistlib
 from pathlib import Path
 import re
 import shutil
@@ -70,13 +71,15 @@ with tempfile.TemporaryDirectory(prefix='hagency-release-smoke-') as temporary:
         else:
             app = temporary/package.name
             shutil.copytree(package, app)
-        binary = app/'Contents/MacOS/rinx'
+        binary = app/'Contents/MacOS/hagency'
+        with (app/'Contents/Info.plist').open('rb') as plist:
+            assert plistlib.load(plist)['CFBundleExecutable'] == binary.name
         kernel = app/'Contents/MacOS/octos'
         subprocess.run(['codesign','--verify','--deep','--strict',str(app)], check=True)
     elif sys.platform == 'win32':
         install = temporary/'installed'
         subprocess.run([str(package), '/S', '/D='+str(install)], timeout=120, check=True)
-        candidates = list(install.rglob('rinx.exe'))
+        candidates = list(install.rglob('hagency.exe'))
         assert len(candidates) == 1, 'Installer did not install one Desktop executable'
         binary = candidates[0]
         kernel = binary.with_name('octos.exe')

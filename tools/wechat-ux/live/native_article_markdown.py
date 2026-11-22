@@ -45,7 +45,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--audit-existing",type=Path,help="Recheck logs of a completed desktop interaction run; preserve its original result")
-    parser.add_argument("--binary", type=Path, default=Path("target/debug/rinx"))
+    parser.add_argument("--binary", type=Path, default=Path("target/debug/hagency"))
     parser.add_argument("--skip-small-cases",action="store_true",help="Debug only the navigation and large-document cases")
     parser.add_argument("--diagrams-only",action="store_true",help="Run diagram rendering, editing, errors and wide-window restart checks")
     parser.add_argument("--desktop-entry",action="store_true",help="Force wide layout and exercise the desktop Contacts and article-editor buttons")

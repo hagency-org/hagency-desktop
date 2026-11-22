@@ -111,7 +111,7 @@ class NativeApp:
         profile.mkdir(exist_ok=True)
         (profile / "window_geom_state.json").write_text(json.dumps({"inner_size": list(self.size), "position": [50, 50], "is_fullscreen": False}))
         fixture = json.loads((self.root / "fixture.json").read_text())
-        args = ["target/debug/rinx"]
+        args = ["target/debug/hagency"]
         if self.auto_login and not (profile / "latest_user_id.txt").exists():
             user = fixture["users"]["alex"]
             args += [user["user_id"], user["password"], fixture["url"]]

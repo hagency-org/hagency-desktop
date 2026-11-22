@@ -13,7 +13,7 @@ CARGO_BUILD_JOBS=2 cargo build -p rinx --release --features onboarding-test-supp
 install -d -m 700 "$PWD/.run/onboarding-installation"
 install -d -m 700 "$PWD/.run/onboarding-installation/profile"
 HAGENCY_DESKTOP_DATA_DIR="$PWD/.run/onboarding-installation/profile" \
-  ./target/release/rinx \
+  ./target/release/hagency \
   --hagency-isolated-installation-root "$PWD/.run/onboarding-installation" \
   --hagency-seed-empty-personal-fixture
 ```

@@ -111,7 +111,7 @@ Install CMake and the platform's native build dependencies, then run:
 
 ```sh
 .jit/sources.sh    # fetches the pinned makepad checkout; repeat when .jit/sources.lock changes
-cargo run --locked --bin rinx
+cargo run --locked --bin hagency
 cargo test --locked --lib
 cargo test --locked --manifest-path crates/article-core/Cargo.toml
 python3 tools/wechat-ux/check_i18n.py
@@ -152,8 +152,8 @@ Then, from this folder:
 .sources/makepad/target/release/makepad test --allow-c rinx --lib -- <test name filter>
 
 # The owner daemon (the process that runs Agents).
-cargo build --bin rinx       # once: a native binary for the daemon's helper processes
-HAGENCY_NATIVE_HELPER="$PWD/target/debug/rinx" MAKEPAD_RUN_INSPECT=0 \
+cargo build --bin hagency       # once: a native binary for the daemon's helper processes
+HAGENCY_NATIVE_HELPER="$PWD/target/debug/hagency" MAKEPAD_RUN_INSPECT=0 \
   .sources/makepad/target/release/makepad run --no-live --allow-c rinx \
   --features development-native-helper -- daemon run --home <daemon home>
 ```

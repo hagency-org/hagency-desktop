@@ -31,7 +31,7 @@ For a development build:
 
 ```sh
 cargo build --profile fast
-python3 tools/package-octos.py desktop --app-binary target/fast/rinx
+python3 tools/package-octos.py desktop --app-binary target/fast/hagency
 cargo run --profile fast
 ```
 

@@ -1326,13 +1326,15 @@ mod tests {
     #[test]
     fn the_service_check_names_this_app_another_program_or_none() {
         let temp = Temp::new();
-        let exe = temp.0.join("Hagency Desktop.app/Contents/MacOS/rinx");
+        let exe = temp.0.join("Hagency Desktop.app/Contents/MacOS/hagency");
         let plist = temp.0.join("io.hagency.owner-daemon.plist");
         assert_eq!(service_at(&plist, &exe), Service::NotInstalled);
         let write = |program: &Path| std::fs::write(&plist, ::hagency::service::daemon_launchd_plist(
             program, Path::new("/home/a/owner-daemon"), "/usr/bin", Path::new("/tmp/owner-daemon.log"))).unwrap();
         write(&exe);
         assert_eq!(service_at(&plist, &exe), Service::ThisApp);
+        write(&exe.with_file_name("rinx"));
+        assert_eq!(service_at(&plist, &exe), Service::OtherProgram);
         write(Path::new("/Applications/Hagency Hosting.app/Contents/Helpers/hagency"));
         assert_eq!(service_at(&plist, &exe), Service::OtherProgram);
         assert_eq!(plist_program("<key>ProgramArguments</key><array><string>/a &amp; b</string></array>").as_deref(), Some("/a & b"));

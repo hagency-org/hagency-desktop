@@ -29,7 +29,7 @@ class LoginApp(NativeApp):
         (profile / "window_geom_state.json").write_text(json.dumps({"inner_size": list(self.size), "position": [50, 50], "is_fullscreen": False}))
         self.log = (self.output / "native.log").open("w")
         os.chmod(self.output / "native.log", 0o600)
-        binary = Path("target/debug/rinx")
+        binary = Path("target/debug/hagency")
         self.trace.append({"binary_sha256": hashlib.sha256(binary.read_bytes()).hexdigest()})
         env = dict(os.environ, HAGENCY_DESKTOP_DATA_DIR=str(profile), MAKEPAD_REMOTE=str(self.port), MAKEPAD_HIDE_WINDOWS="1", MAKEPAD_NO_FOCUS="1")
         env.pop("MAKEPAD_FOCUS", None)
@@ -121,7 +121,7 @@ def main():
         result["checks"].append("restart_restores_same_account_and_device_without_password")
         log = (app.output / "native.log").read_text()
         assert not any(line.startswith("[E]") for line in log.splitlines()), "Native runtime errors after restore"
-        result["binary_sha256"] = hashlib.sha256(Path("target/debug/rinx").read_bytes()).hexdigest()
+        result["binary_sha256"] = hashlib.sha256(Path("target/debug/hagency").read_bytes()).hexdigest()
         result["restore_evidence"] = str(app.output)
         result["passed"] = True
     except Exception as error:

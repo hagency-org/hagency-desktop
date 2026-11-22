@@ -57,11 +57,15 @@ def check_one_binary_target():
     manifest = (ROOT/'Cargo.toml').read_text() + '\n['
     def tables(header):
         return re.findall(r'^' + re.escape(header) + r'[ \t]*\n(.*?)(?=^\[)', manifest, re.M | re.S)
-    def name(table):
-        found = re.search(r'^name\s*=\s*"([^"]+)"', table, re.M)
-        return found[1] if found else table.strip()
-    app = next((name(table) for table in tables('[package]')), None)
-    extra = [name(table) for table in tables('[[bin]]') if name(table) != app]
+    def field(table, key):
+        found = re.search(r'^' + key + r'\s*=\s*"([^"]+)"', table, re.M)
+        return found[1] if found else None
+    package, = tables('[package]')
+    app = field(package, 'default-run') or field(package, 'name')
+    declared = [field(table, 'name') for table in tables('[[bin]]')]
+    if declared and declared.count(app) != 1:
+        raise SystemExit(f'Expected a single binary target named {app}.')
+    extra = [binary for binary in declared if binary != app]
     if (ROOT/'src'/'bin').is_dir():
         extra += sorted(p.stem for p in (ROOT/'src'/'bin').iterdir())
     if extra:

@@ -88,7 +88,7 @@ def main():
         state = json.loads((run / "state.json").read_text())
         assert manager.request("/s")["pid"] == state["pid"]
         command = subprocess.check_output(["ps", "-p", str(state["pid"]), "-o", "command="], text=True).strip()
-        assert command == str(run / "bin/rinx"), "Refusing to kill an unrelated process"
+        assert command == str(run / "bin/hagency"), "Refusing to kill an unrelated process"
         os.kill(state["pid"], signal.SIGKILL)
         writer.rollback()
         writer.close()
