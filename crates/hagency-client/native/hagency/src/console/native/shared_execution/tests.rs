@@ -59,6 +59,8 @@ pub(crate) struct State {
     refuse_renewal: bool,
     delay_renewal_reply: bool,
     delay_start_reply: bool,
+    delay_demand_binding: bool,
+    ack_epoch: Option<u64>,
     delay_run_card_device: bool,
     run_card_device_requested: std::sync::atomic::AtomicBool,
     process_writes: usize,
@@ -77,6 +79,10 @@ pub(crate) struct State {
     stopped_before_reply: bool,
 }
 pub(crate) fn idle_boundary_delay(path: &str, s: &State) -> Option<Duration> {
+    if s.delay_demand_binding && (path.ends_with("/work/poll") || path.ends_with("/demand")) {
+        // Each read fits within a fixture lease (25s), but both together do not.
+        return Some(Duration::from_secs(13));
+    }
     if s.delay_run_card_device && path.ends_with("/crypto/device") {
         s.run_card_device_requested.store(true, std::sync::atomic::Ordering::SeqCst);
         return Some(Duration::from_secs(30));
@@ -268,6 +274,8 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         return Some(json!({"work":w,"observedAtMs":at}));
     }
     if path.ends_with("/work/ack") {
+        assert_eq!(body["authority"]["epoch"], s.shared.activity_epoch);
+        s.shared.ack_epoch = Some(s.shared.activity_epoch);
         assert_eq!(body["workDigest"], wh);
         return Some(json!({"acknowledged":true,"observedAtMs":at}));
     }

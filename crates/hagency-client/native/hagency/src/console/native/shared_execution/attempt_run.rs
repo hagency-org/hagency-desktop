@@ -208,7 +208,7 @@ async fn renew(
     sink: &Arc<SharedAttemptProcessSink>,
     control: &SharedTextActivityControl,
     a: &mut Activity,
-) -> Result<(), NativeError> {
+) -> Result<Bound, NativeError> {
     let mut random = [0u8; 16];
     getrandom::fill(&mut random).map_err(|_| failure(503, "native_random_unavailable"))?;
     let id = format!(
@@ -254,8 +254,14 @@ async fn renew(
         .renew_lease(next.lease.authority.epoch, next.until)
         .map_err(|_| failure(409, "shared_execution_expired"))?;
     *a = next;
-    Ok(())
+    Ok(b)
 }
+impl Activity {
+    fn renewal_due(&self) -> bool {
+        self.until.saturating_duration_since(Instant::now()) <= Duration::from_secs(20)
+    }
+}
+
 async fn maybe_renew(
     io: &Io,
     r: &OwnerResourceRegistry,
@@ -263,10 +269,10 @@ async fn maybe_renew(
     control: &SharedTextActivityControl,
     a: &mut Activity,
 ) -> Result<(), NativeError> {
-    if a.until.saturating_duration_since(Instant::now()) <= Duration::from_secs(20) {
+    if a.renewal_due() {
         renew(io, r, sink, control, a).await.inspect_err(|error| {
             tracing::warn!(code = %error.code, "Shared activity renewal failed");
-        })?
+        })?;
     }
     Ok(())
 }
@@ -534,25 +540,42 @@ async fn work_loop(
         .await?;
         if let Some(w) = reply.value.work {
             w.validate().map_err(store)?;
-            if cfg!(feature = "shared-intake") {
-                super::demands::bind_work(
-                    &b,
-                    r,
-                    &sink.command().original_runtime_command,
-                    &w,
-                    verified,
-                    a.until,
-                )
-                .await?;
-                let (_, fresh) = guarded(cancel, a.until, || proof(io, r, sink, a)).await?;
-                r.receive_shared_work(fresh, w.clone())
-                    .await
-                    .map_err(store)?;
+            // Poll, demand binding, local intake and ACK can together outlast
+            // the activity. Only renew between operations, and use the proof
+            // and token of the resulting epoch for the next operation.
+            let (b, verified) = if a.renewal_due() {
+                guarded(cancel, a.until, || renew(io, r, sink, control, a)).await?;
+                guarded(cancel, a.until, || proof(io, r, sink, a)).await?
             } else {
-                r.receive_shared_work(verified, w.clone())
-                    .await
-                    .map_err(store)?;
-            }
+                (b, verified)
+            };
+            let (b, verified) = if cfg!(feature = "shared-intake") {
+                guarded(cancel, a.until, || {
+                    super::demands::bind_work(
+                        &b,
+                        r,
+                        &sink.command().original_runtime_command,
+                        &w,
+                        verified,
+                        a.until,
+                    )
+                })
+                .await?;
+                guarded(cancel, a.until, || maybe_renew(io, r, sink, control, a)).await?;
+                guarded(cancel, a.until, || proof(io, r, sink, a)).await?
+            } else {
+                (b, verified)
+            };
+            r.receive_shared_work(verified, w.clone())
+                .await
+                .map_err(store)?;
+            let b = if a.renewal_due() {
+                let b = guarded(cancel, a.until, || renew(io, r, sink, control, a)).await?;
+                io::binding(&b.scope, &sink.command().original_runtime_command, true)?;
+                b
+            } else {
+                b
+            };
             let input = SharedWorkInput {
                 authority: a.lease.authority.clone(),
                 work_id: w.id.clone(),

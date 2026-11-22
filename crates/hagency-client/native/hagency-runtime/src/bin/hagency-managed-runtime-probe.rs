@@ -80,6 +80,17 @@ fn main() -> io::Result<()> {
                 "room history tool was not registered by the execution driver",
             ));
         }
+        if mode == "text-cold-account" && method == "account/read" {
+            // All processes see the same finite provider outage. A new process
+            // still performs its own account read after the service recovers.
+            let available_at: u64 = fs::read_to_string(root.join("account-available-at"))?
+                .parse()
+                .map_err(io::Error::other)?;
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(io::Error::other)?;
+            std::thread::sleep(Duration::from_millis(available_at).saturating_sub(now));
+        }
         if (mode == "delay" && method == "account/rateLimits/read")
             || (mode == "delay-config" && method == "config/read")
         {
@@ -326,6 +337,7 @@ fn main() -> io::Result<()> {
                     | "text-workspace-yolo-usage"
                     | "text-start-renew"
                     | "text-small-usage"
+                    | "text-cold-account"
                     | "text-usage"
                     | "text-long"
                     | "text-overflow"
