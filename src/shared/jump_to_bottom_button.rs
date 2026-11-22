@@ -227,37 +227,17 @@ impl JumpToBottomButton {
         }
     }
 
-    /// Updates the visibility of the jump to bottom button and the unread message badge
-    /// based on the given actions and the state of the portal list.
-    ///
-    /// Also handles the click event on the jump to bottom button.
-    ///
-    /// Redraws the jump to bottom button if its visibility changes.
-    pub fn update_from_actions(
-        &mut self,
-        cx: &mut Cx,
-        portal_list: &PortalListRef,
-        actions: &Actions,
-    ) {
-        let was_visible = self.visible;
-        // Note: here, we could choose to set visibility ONLY IF the portallist was scrolled.
-        //       However, we intentionally skip that check, as it's actually more expensive
-        //       to check if the portallist has been scrolled than to just directly
-        //       query the portallist's `at_end` state and set the visibility accordingly.
-
+    fn handle_click(&mut self, cx: &mut Cx, list: &PortalListRef, actions: &Actions) {
         if self.child_refs(cx).inner_button.clicked(actions) {
-            portal_list.smooth_scroll_to_end(
-                cx,
-                SCROLL_TO_BOTTOM_SPEED,
-                None,
-            );
-            self.update_visibility(cx, false);
-        } else {
-            self.update_visibility(cx, portal_list.is_at_end());
+            list.smooth_scroll_to_end(cx, SCROLL_TO_BOTTOM_SPEED, None);
         }
+    }
 
+    fn update_visibility_after_draw(&mut self, cx: &mut Cx, list: &PortalListRef) {
+        let was_visible = self.visible;
+        self.update_visibility(cx, list.is_at_end());
         if self.visible != was_visible {
-            self.redraw(cx);
+            cx.redraw_area_in_draw(list.area());
         }
     }
 
@@ -278,17 +258,18 @@ impl JumpToBottomButtonRef {
         }
     }
 
-    /// See [`JumpToBottomButton::update_from_actions()`].
-    pub fn update_from_actions(
-        &self,
-        cx: &mut Cx,
-        portal_list: &PortalListRef,
-        actions: &Actions,
-    ) {
+    pub fn handle_click(&self, cx: &mut Cx, list: &PortalListRef, actions: &Actions) {
         if let Some(mut inner) = self.borrow_mut() {
-            inner.update_from_actions(cx, portal_list, actions);
+            inner.handle_click(cx, list, actions);
         }
     }
+
+    pub fn update_visibility_after_draw(&self, cx: &mut Cx, list: &PortalListRef) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.update_visibility_after_draw(cx, list);
+        }
+    }
+
 }
 
 /// The number of unread messages in a room.

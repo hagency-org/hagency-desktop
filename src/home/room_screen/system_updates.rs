@@ -2,7 +2,44 @@
 //! undecryptable messages, calls and polls) always retain their normal rows.
 use super::*;
 
-pub(super) fn system_update_ranges(items: impl IntoIterator<Item = bool>) -> Vec<Range<usize>> {
+pub(super) struct SystemUpdateGroup {
+    pub range: Range<usize>,
+    pub expanded: bool,
+}
+
+pub(super) struct SystemUpdateGroups {
+    pub cleared_through: Option<u64>,
+    groups: Vec<SystemUpdateGroup>,
+    pub skipped: Vec<Range<usize>>,
+}
+
+impl SystemUpdateGroups {
+    pub(super) fn new(
+        cleared_through: Option<u64>,
+        items: impl IntoIterator<Item = bool>,
+        is_expanded: impl Fn(usize) -> bool,
+    ) -> Self {
+        let mut skipped = Vec::new();
+        let groups = system_update_ranges(items)
+            .into_iter()
+            .map(|range| {
+                let expanded = is_expanded(range.start);
+                if !expanded {
+                    skipped.push(range.start + 1..range.end);
+                }
+                SystemUpdateGroup { range, expanded }
+            })
+            .collect();
+        Self { cleared_through, groups, skipped }
+    }
+
+    pub(super) fn group_at(&self, index: usize) -> Option<&SystemUpdateGroup> {
+        let candidate = self.groups.partition_point(|group| group.range.end <= index);
+        self.groups.get(candidate).filter(|group| group.range.contains(&index))
+    }
+}
+
+fn system_update_ranges(items: impl IntoIterator<Item = bool>) -> Vec<Range<usize>> {
     let mut ranges = Vec::new();
     let mut start = None;
     let mut end = 0;
@@ -52,6 +89,21 @@ mod tests {
         assert!(system_update_ranges([true,true,false,true,true]).is_empty());
         assert_eq!(system_update_ranges(std::iter::repeat_n(true,16).chain([false,false])), vec![0..16]);
     }
+    #[test]
+    fn lookup_preserves_expanded_and_collapsed_group_boundaries() {
+        let groups = SystemUpdateGroups::new(
+            Some(500),
+            [false, true, true, true, false, true, true, true],
+            |start| start == 5,
+        );
+        assert_eq!(groups.skipped, vec![2..4]);
+        assert_eq!(groups.group_at(1).unwrap().range, 1..4);
+        assert!(!groups.group_at(3).unwrap().expanded);
+        assert!(groups.group_at(4).is_none());
+        assert!(groups.group_at(7).unwrap().expanded);
+        assert!(groups.group_at(8).is_none());
+    }
+
     #[test]
     fn collapsed_and_expanded_rows_keep_original_event_body_available() {
         let mut cx = Cx::new(Box::new(|_,_|{}));
