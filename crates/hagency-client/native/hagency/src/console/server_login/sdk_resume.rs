@@ -357,6 +357,7 @@ impl ServerLogin {
                 .ok_or("native_resume_unavailable")?,
             user_id: record.user_id.clone(),
             valid_until: now,
+            clock_allowance: std::time::Duration::ZERO,
             revoked: std::sync::Arc::new(AtomicBool::new(false)),
             stopped: self.stopped.clone(),
         };
@@ -369,6 +370,7 @@ impl ServerLogin {
             refresh_token: None,
             oauth_expires: now,
             authorized_until: now,
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: record.binding.clone(),
             checked: now,

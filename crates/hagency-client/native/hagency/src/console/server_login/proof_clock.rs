@@ -43,6 +43,24 @@ impl ProofClock {
     }
 
     pub(super) fn deadline_ms(&self, until: u64) -> Result<Instant, &'static str> {
+        self.bounds_ms(until).map(|(deadline, _)| deadline)
+    }
+
+    /// The proof's deadline, and how much of its window the deadline leaves
+    /// out as the local clock alone reads that window: the whole second the
+    /// server's date may be behind, and the round trip. A deadline the server
+    /// derives from the same window, such as an execution lease, reaches the
+    /// host as server time and is read with the local clock, so it is compared
+    /// with the deadline plus this allowance, not with the deadline alone.
+    pub(super) fn bounds(&self, body: &Value) -> Result<(Instant, Duration), &'static str> {
+        self.bounds_ms(
+            body["validUntilMs"]
+                .as_u64()
+                .ok_or("invalid_server_response")?,
+        )
+    }
+
+    fn bounds_ms(&self, until: u64) -> Result<(Instant, Duration), &'static str> {
         let now = Instant::now();
         let local_ms = SystemTime::now()
             .duration_since(UNIX_EPOCH)
@@ -55,8 +73,20 @@ impl ProofClock {
             now.duration_since(self.started),
         )
         .ok_or("authorization_time_window_unavailable")?;
-        Ok(now + Duration::from_millis(remaining))
+        Ok((
+            now + Duration::from_millis(remaining),
+            Duration::from_millis(allowance_ms(until, local_ms, remaining)),
+        ))
     }
+}
+
+/// What `remaining` leaves out of the window that ends at `until`, as the
+/// local clock reads it. Never more than the longest window a proof may have.
+fn allowance_ms(until: u64, local_ms: u64, remaining: u64) -> u64 {
+    until
+        .saturating_sub(local_ms)
+        .min(MAX_WINDOW_MS)
+        .saturating_sub(remaining)
 }
 
 fn remaining_ms(
@@ -107,6 +137,30 @@ mod tests {
             remaining_ms(131_000, 100_000, None, half_second),
             Some(31_000)
         );
+    }
+
+    #[test]
+    fn the_allowance_is_what_the_server_date_and_the_round_trip_took() {
+        let date = Some(132_000);
+        let half_second = Duration::from_millis(500);
+        // A local clock in step with the server, 200 ms into the server's
+        // second: the proof keeps 28.5 s of a window the local clock reads as
+        // 29.8 s.
+        let remaining = remaining_ms(162_000, 132_200, date, half_second).unwrap();
+        assert_eq!(remaining, 28_500);
+        assert_eq!(allowance_ms(162_000, 132_200, remaining), 1_300);
+        // A local clock that is ahead bounds the proof by itself: nothing was
+        // taken beyond what it reads.
+        let remaining = remaining_ms(162_000, 140_000, date, half_second).unwrap();
+        assert_eq!(remaining, 22_000);
+        assert_eq!(allowance_ms(162_000, 140_000, remaining), 0);
+        // An undated proof is read with the local clock alone.
+        let remaining = remaining_ms(131_000, 100_000, None, half_second).unwrap();
+        assert_eq!(allowance_ms(131_000, 100_000, remaining), 0);
+        // A local clock far behind never widens the allowance past one window.
+        let remaining = remaining_ms(162_000, 100_000, date, half_second).unwrap();
+        assert_eq!(allowance_ms(162_000, 100_000, remaining), 31_000 - 28_500);
+        assert_eq!(allowance_ms(162_000, 170_000, 1), 0);
     }
 
     #[test]

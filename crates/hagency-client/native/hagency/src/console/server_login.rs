@@ -58,6 +58,11 @@ struct RemoteSession {
     refresh_token: Option<String>,
     oauth_expires: Instant,
     authorized_until: Instant,
+    /// How far the end of the window, as the local clock reads it, lies beyond
+    /// `authorized_until`: what the proof clock left out. Each renewal sets it;
+    /// it is zero before the first one, which keeps the lease comparison the
+    /// stricter one.
+    clock_allowance: Duration,
     invalidated: bool,
     binding: Binding,
     checked: Instant,
@@ -75,6 +80,7 @@ pub struct AuthorizedDevice {
     subject: String,
     user_id: String,
     valid_until: Instant,
+    clock_allowance: Duration,
     revoked: std::sync::Arc<AtomicBool>,
     stopped: std::sync::Arc<AtomicBool>,
 }
@@ -96,6 +102,7 @@ pub(super) fn fixture_device(
             generation: 1,
             token: "e".repeat(64),
             valid_until: Instant::now() + Duration::from_secs(30),
+            clock_allowance: Duration::ZERO,
             revoked: revoked.clone(),
             stopped: std::sync::Arc::new(AtomicBool::new(false)),
         },
@@ -137,6 +144,21 @@ impl AuthorizedDevice {
     }
     pub fn valid_until(&self) -> Instant {
         self.valid_until
+    }
+    /// The end of the authorization window for a deadline the server derived
+    /// from that window and the host reads with its local clock, such as an
+    /// execution lease: `valid_until` plus what the proof clock left out of
+    /// the window. Every use of the credential itself keeps to `valid_until`.
+    pub fn window_until(&self) -> Instant {
+        self.valid_until + self.clock_allowance
+    }
+    /// A device whose window ends `window` from now and whose proof clock
+    /// left `taken` of it out.
+    #[cfg(test)]
+    pub(super) fn with_fixture_window(mut self, window: Duration, taken: Duration) -> Self {
+        self.valid_until = Instant::now() + window - taken;
+        self.clock_allowance = taken;
+        self
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -442,6 +464,7 @@ impl ServerLogin {
         }
         let mut device = session.device.clone().ok_or(Error::Unauthorized)?;
         device.valid_until = session.authorized_until;
+        device.clock_allowance = session.clock_allowance;
         device.stopped = self.stopped.clone();
         Ok(device)
     }
@@ -756,7 +779,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
         );
     }
     let (renewed, clock) = proof_response(request_started, renewal_response).await.map_err(renewal_error)?;
-    let mut until = clock.deadline(&renewed).map_err(|_| Error::Unavailable)?;
+    let (mut until, mut taken) = clock.bounds(&renewed).map_err(|_| Error::Unavailable)?;
     if until <= Instant::now() + Duration::from_secs(20)
         && let Some(source) = &session.matrix_source
     {
@@ -793,7 +816,9 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             );
         }
         let (refreshed, clock) = proof_response(request_started, response).await.map_err(renewal_error)?;
-        until = clock.deadline(&refreshed).map_err(|_| Error::Unavailable)?;
+        let bounds = clock.bounds(&refreshed).map_err(|_| Error::Unavailable)?;
+        until = bounds.0;
+        taken = bounds.1;
     }
     let (identity, clock) = get_identity(
         &client,
@@ -808,7 +833,11 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     if !identity_matches(&identity, &session.binding) || identity["userId"] != session.user_id {
         return Err(Error::Unauthorized);
     }
-    let identity_until = clock.deadline(&identity).map_err(|_| Error::Unavailable)?;
+    let (identity_until, identity_taken) =
+        clock.bounds(&identity).map_err(|_| Error::Unavailable)?;
+    // The same window as the local clock alone reads it. A lease the server
+    // cuts to this window is read that way too.
+    let mut window = (until + taken).min(identity_until + identity_taken);
     if let Some(source) = &session.matrix_source {
         let after = source.access_token().await.map_err(|error| {
             let code = super::native::sdk_source_failure(error);
@@ -823,8 +852,11 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             return Err(Error::Unauthorized);
         }
         session.oauth_expires = until.min(identity_until);
+    } else {
+        window = window.min(session.oauth_expires);
     }
     session.authorized_until = until.min(identity_until).min(session.oauth_expires);
+    session.clock_allowance = window.saturating_duration_since(session.authorized_until);
     session.checked = Instant::now();
     Ok(())
 }
@@ -1381,6 +1413,7 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
                 refresh_token: refresh_token.clone(),
                 oauth_expires: Instant::now() + oauth_lifetime,
                 authorized_until: authorized_until.min(Instant::now() + oauth_lifetime),
+                clock_allowance: std::time::Duration::ZERO,
                 invalidated: false,
                 binding: pending.binding.clone(),
                 checked: Instant::now(),
@@ -1468,6 +1501,7 @@ async fn register_device(
             subject: binding.subject.clone().ok_or("invalid_server_response")?,
             user_id: user_id.into(),
             valid_until: clock.deadline(&value)?,
+            clock_allowance: Duration::ZERO,
             revoked: std::sync::Arc::new(AtomicBool::new(false)),
             stopped: std::sync::Arc::new(AtomicBool::new(false)),
         },
@@ -1935,6 +1969,7 @@ impl ServerLogin {
                 .as_mut()
                 .ok_or_else(|| OwnerError::new(401, "device_authorization_required"))?;
             device.valid_until = session.authorized_until;
+            device.clock_allowance = session.clock_allowance;
             device
                 .bearer()
                 .map_err(|_| OwnerError::new(401, "device_authorization_required"))?
@@ -2187,6 +2222,7 @@ mod oauth_refresh_tests {
             refresh_token: Some("retained-refresh".into()),
             oauth_expires: now,
             authorized_until: now,
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: Binding {
                 origin: origin.clone(),

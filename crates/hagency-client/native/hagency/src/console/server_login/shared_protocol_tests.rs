@@ -20,6 +20,7 @@ async fn fixture(
             refresh_token: None,
             oauth_expires: now + Duration::from_secs(900),
             authorized_until: now + Duration::from_secs(900),
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: Binding {
                 origin,

@@ -161,6 +161,7 @@ async fn matrix_calls_use_only_current_oauth_grant_and_fail_closed_after_expiry(
             refresh_token: None,
             oauth_expires: now + Duration::from_secs(300),
             authorized_until: now + Duration::from_secs(30),
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: super::super::Binding {
                 origin: base,
@@ -284,6 +285,7 @@ async fn fixture_with_status_and_hook(
             refresh_token: None,
             oauth_expires: now + Duration::from_secs(300),
             authorized_until: now + Duration::from_secs(30),
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: super::super::Binding {
                 origin: base,
