@@ -541,6 +541,7 @@ script_mod! {
                             }
                             od_detail_containers := mod.widgets.OdSwitch {}
                         }
+                        od_detail_containers_retry := mod.widgets.OdButton {visible: false text: "Try again"}
                     }
                     mod.widgets.OdSeparator {}
                     od_detail_tokens := OdList {Line := KeyValue {}}
@@ -1079,6 +1080,14 @@ impl OwnerDashboard {
                 _ => self.changed(cx),
             }
         }
+        if self.clicked(cx, ids!(od_detail_containers_retry), actions) {
+            let changing = self.state.options.as_ref().and_then(|o| o.containers.as_ref()).is_none_or(|c| c.changing());
+            if let Some(pool) = self.state.view.selected_resource.clone().filter(|_| !changing) {
+                // On again for a pool that is already chosen: it stays chosen
+                // whatever comes of it.
+                self.emit(cx, DashboardAction::PoolContainers { pool, on: true });
+            }
+        }
         if self.clicked(cx, ids!(od_use_this_service), actions) {
             self.emit(cx, DashboardAction::StartService);
         }
@@ -1581,6 +1590,7 @@ impl OwnerDashboard {
                 if switch.active(cx) != containers.on {
                     switch.set_active(cx, containers.on, Animate::No);
                 }
+                self.button(cx, ids!(od_detail_containers_retry), containers.retry.unwrap_or_default(), containers.retry.is_some(), true);
             }
             let wanted: Vec<_> = d.tokens.iter().map(|l| (l.label.to_string(), id!(Line))).collect();
             let lines = self.view.od_list(cx, ids!(od_detail_tokens)).sync(cx, &wanted);

@@ -9,7 +9,8 @@ use std::{
 
 const IMAGE: &str = "sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 const ENDPOINT: &str = "unix:///var/run/hagency-test.sock";
-/// A client that records each call and answers `ps` and `rm` as told.
+/// A client that records each call, answers `ps` and `rm` as told, and has
+/// the image once it was built.
 const FAKE_CLIENT: &str = r#"#!/bin/sh
 here="$(dirname "$0")"
 { printf 'call'; for a in "$@"; do printf ' [%s]' "$a"; done; printf '\n'; env | sed 's/^/env /'; } >> "$here/calls"
@@ -19,6 +20,8 @@ case "$1" in
         gone) echo "Error response from daemon: No such container: $3" >&2; exit 1 ;;
         fail) echo "Error response from daemon: engine refused" >&2; exit 1 ;;
       esac ;;
+  image) if [ -f "$here/built" ]; then cat "$here/built"; else echo "Error response from daemon: No such image: $5" >&2; exit 1; fi ;;
+  build) cat > "$here/recipe"; cp "$here/image-id" "$here/built" ;;
 esac
 exit 0
 "#;
@@ -276,12 +279,43 @@ fn loopback_names_and_addresses() {
 }
 
 #[test]
-fn the_image_tag_follows_the_recipe() {
-    let tag = image_tag();
-    let digest = tag.strip_prefix(IMAGE_TAG_PREFIX).unwrap();
+fn the_image_tag_follows_the_recipe_and_the_owner() {
+    let tag = image_tag(505, 20);
+    let (digest, owner) = tag.strip_prefix(IMAGE_TAG_PREFIX).unwrap().split_once('-').unwrap();
     assert!(digest.len() == 12 && digest.bytes().all(|b| b.is_ascii_hexdigit()));
+    assert_eq!(owner, "505-20");
+    assert_ne!(image_tag(506, 20), tag, "another owner's image names another user");
     // Claude Code's command sandbox needs both inside the container.
     assert!(DOCKERFILE.contains("bubblewrap") && DOCKERFILE.contains("socat"));
+    // git works in a folder the engine reports as another user's, a commit
+    // has an author, and the user a container runs as has a name.
+    assert!(DOCKERFILE.contains("--system --add safe.directory '*'"));
+    assert!(DOCKERFILE.contains("--system user.name") && DOCKERFILE.contains("--system user.email"));
+    assert!(DOCKERFILE.contains("ARG AGENT_UID") && DOCKERFILE.contains("ARG AGENT_GID"));
+}
+
+#[test]
+fn the_image_is_built_once_for_the_owner_its_containers_run_as() {
+    use std::os::unix::fs::MetadataExt;
+    let f = fixture();
+    f.answer("image-id", IMAGE);
+    let folder = std::fs::metadata(&f.config).unwrap();
+    let (uid, gid) = (folder.uid(), folder.gid());
+    assert_eq!(prepare_image(&f.cli, ENDPOINT, &f.config, &f.root).unwrap(), IMAGE);
+    let tag = image_tag(uid, gid);
+    let calls = f.calls();
+    assert!(
+        calls.contains(&format!(
+            "call [build] [--quiet] [--build-arg] [AGENT_UID={uid}] [--build-arg] [AGENT_GID={gid}] [--tag] [{tag}] [-]"
+        )),
+        "{calls}"
+    );
+    // The recipe arrives on the client's input; nothing of it is a file.
+    assert_eq!(std::fs::read_to_string(f.cli.with_file_name("recipe")).unwrap(), DOCKERFILE);
+    // The engine has the image now: it is looked up, not built again.
+    assert_eq!(prepare_image(&f.cli, ENDPOINT, &f.config, &f.root).unwrap(), IMAGE);
+    assert_eq!(f.calls().matches("call [build]").count(), 1);
+    assert_eq!(f.calls().matches(&format!("[{tag}]")).count(), 4, "looked up, built, looked up, and looked up once more");
 }
 
 #[test]
@@ -307,7 +341,7 @@ fn a_real_engine_prepares_the_image_once() {
     let f = fixture();
     let started = Instant::now();
     let id = prepare_image(&cli, &endpoint, &f.config, &home).unwrap();
-    eprintln!("{} = {id} in {:?} via {} at {endpoint}", image_tag(), started.elapsed(), cli.display());
+    eprintln!("{id} in {:?} via {} at {endpoint}", started.elapsed(), cli.display());
     let again = Instant::now();
     assert_eq!(prepare_image(&cli, &endpoint, &f.config, &home).unwrap(), id);
     assert!(again.elapsed() < SHORT_WAIT);
@@ -322,7 +356,7 @@ fn a_real_engine_prepares_the_image_once() {
 ///
 ///   HAGENCY_TEST_DOCKER=/usr/local/bin/docker \
 ///   HAGENCY_TEST_DOCKER_HOST=unix:///Users/me/.docker/run/docker.sock \
-///   HAGENCY_TEST_CLAUDE_IMAGE=sha256:… (scripts/build-claude-container.sh)
+///   HAGENCY_TEST_CLAUDE_IMAGE=sha256:… (what `a_real_engine_prepares_the_image_once` prints)
 #[test]
 #[ignore = "explicit Docker-compatible engine and the pool Agent image"]
 fn a_real_engine_runs_a_turn_with_a_tool_and_removes_its_containers() {

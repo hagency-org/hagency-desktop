@@ -32,8 +32,9 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-/// The image recipe. A build tags it with [`IMAGE_TAG_PREFIX`] and the first
-/// 12 hex digits of its SHA-256, so a changed recipe is a new image.
+/// The image recipe. A build tags it with [`IMAGE_TAG_PREFIX`], the first 12
+/// hex digits of its SHA-256 and the owner's user and group numbers, so a
+/// changed recipe is a new image.
 pub const DOCKERFILE: &str = include_str!("container/Dockerfile");
 pub const IMAGE_TAG_PREFIX: &str = "hagency/claude-agent:";
 /// Where the image keeps Claude Code.
@@ -213,7 +214,9 @@ pub fn prepare_image(
     home: &Path,
 ) -> Result<String, ProbeError> {
     check_client(cli, endpoint, client_config).map_err(|_| ProbeError::Unexpected)?;
-    let tag = image_tag();
+    // The client's settings folder is the owner's, as every run's folders are.
+    let (uid, gid) = owner(client_config).map_err(|_| ProbeError::Unexpected)?;
+    let tag = image_tag(uid, gid);
     let inspect = |tag: &str| {
         run(
             client(cli, endpoint, client_config).args(["image", "inspect", "--format", "{{.Id}}", tag]),
@@ -234,9 +237,17 @@ pub fn prepare_image(
     // The owner's own client settings find the build plugin and the
     // credential helper for the registry the base image comes from.
     let mut build = owner_client(cli, home);
-    build
-        .env("DOCKER_HOST", endpoint)
-        .args(["build", "--quiet", "--tag", &tag, "-"]);
+    build.env("DOCKER_HOST", endpoint).args([
+        "build",
+        "--quiet",
+        "--build-arg",
+        &format!("AGENT_UID={uid}"),
+        "--build-arg",
+        &format!("AGENT_GID={gid}"),
+        "--tag",
+        &tag,
+        "-",
+    ]);
     let built = run(&mut build, Some(DOCKERFILE.as_bytes()), BUILD_WAIT).ok_or(ProbeError::BuildFailed)?;
     if !built.success {
         tracing::warn!(code = "shared_claude_image_build_failed", "The pool Agent image did not build");
@@ -249,10 +260,12 @@ pub fn prepare_image(
         .ok_or(ProbeError::Unexpected)
 }
 
-/// The tag of the image this host builds from [`DOCKERFILE`].
-pub fn image_tag() -> String {
+/// The tag of the image this host builds from [`DOCKERFILE`] for an owner
+/// with these user and group numbers: the image names the user its
+/// containers run as.
+pub fn image_tag(uid: u32, gid: u32) -> String {
     format!(
-        "{IMAGE_TAG_PREFIX}{}",
+        "{IMAGE_TAG_PREFIX}{}-{uid}-{gid}",
         &hex(&Sha256::digest(DOCKERFILE.as_bytes()))[..12]
     )
 }
@@ -472,11 +485,11 @@ fn bind(path: &Path) -> Result<String, StartError> {
 
 /// The run's folders belong to the owner; the container runs as them, and
 /// never as root.
-fn owner(scope: &Path) -> Result<(u32, u32), StartError> {
+fn owner(folder: &Path) -> Result<(u32, u32), StartError> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
-        let metadata = std::fs::metadata(scope).map_err(|_| StartError::Settings)?;
+        let metadata = std::fs::metadata(folder).map_err(|_| StartError::Settings)?;
         if metadata.uid() == 0 {
             return Err(StartError::Settings);
         }
@@ -484,7 +497,7 @@ fn owner(scope: &Path) -> Result<(u32, u32), StartError> {
     }
     #[cfg(not(unix))]
     {
-        let _ = scope;
+        let _ = folder;
         Err(StartError::Unsupported)
     }
 }

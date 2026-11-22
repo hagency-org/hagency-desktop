@@ -100,8 +100,25 @@ fn a_claude_resource_has_its_own_container_switch_that_says_what_happens_next() 
         (ContainerProblem::Other, "keep running in the sandbox"),
     ] {
         let failed = with(&[("res_sonnet", PoolContainers::Failed(problem))], false);
-        assert!(!failed.on && !failed.busy);
+        assert!(!failed.on && !failed.busy && failed.retry.is_none());
         assert!(failed.body.contains(step), "{problem:?}: {}", failed.body);
+    }
+    // A pool whose owner already chose containers keeps the choice when
+    // nothing can run it: the switch stays on, its Agents wait, and the
+    // owner turns on again in place instead of through the sandbox.
+    assert!(gone.body.contains("try again") && gone.retry == Some("Try again"));
+    assert!(unreadable.retry.is_none(), "choices that cannot be read are left by turning a pool off");
+    assert!(off.retry.is_none() && turning.retry.is_none() && on.retry.is_none());
+    for (problem, step) in [
+        (ContainerProblem::NoRuntime, "Install and start"),
+        (ContainerProblem::EngineStopped, "Start your container app"),
+        (ContainerProblem::BuildFailed, "reach the internet"),
+        (ContainerProblem::Other, "could not be prepared"),
+    ] {
+        let waiting = with(&[("res_sonnet", PoolContainers::Waiting(problem))], false);
+        assert!(waiting.on && !waiting.busy && waiting.retry == Some("Try again"));
+        assert!(waiting.body.contains(step), "{problem:?}: {}", waiting.body);
+        assert!(waiting.body.contains("cannot start") && !waiting.body.contains("keep running"), "{}", waiting.body);
     }
     // Codex, Octos and departed resources have none, and neither has a
     // personal Agent's usage row, even when that Agent runs Claude.

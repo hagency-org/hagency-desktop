@@ -25,6 +25,7 @@ pub(crate) mod accounts;
 pub(crate) mod enrollment;
 pub(crate) mod resource_edit;
 pub(crate) mod resource_create;
+mod containers;
 pub(crate) mod retirement;
 mod tasks;
 pub(crate) mod web_connections;
@@ -703,10 +704,14 @@ impl Host {
             (None, Some(ResourceCall::Pending)) => manager.saved_commands().await.map_err(|e| e.code)
                 .map(|rows| json!({"commands":rows.into_iter().map(|r| {
                     let reply=json!(r.reply);
+                    containers::recorded(&account, &r.command_id, &json!(r.operation), &reply);
                     json!({"commandId":r.command_id,"operation":r.operation,"hasReply":!reply.is_null(),
                         "error":if reply["kind"]=="failure" {reply["data"]["code"].clone()} else {Value::Null}})
                 }).collect::<Vec<_>>()})),
-            (None, Some(ResourceCall::Retry(id))) => manager.retry_saved_command(id).await.map_err(|e|e.code),
+            (None, Some(ResourceCall::Retry(id))) => manager.retry_saved_command(id.clone()).await.map_err(|e|e.code).map(|mut reply| {
+                containers::recovered(&account, &id, &mut reply);
+                reply
+            }),
             (None, Some(ResourceCall::Acknowledge(id))) => manager.acknowledge_command(id).await.map(|()|json!({"acknowledged":true})).map_err(|e|e.code),
             (Some(command @ (ManagementCommand::SharedApprovals{..}|ManagementCommand::SharedApprovalDecide{..})),None) => Box::pin(crate::hagency::backend::Service::for_current()?.shared_permissions_with(manager.clone(),command)).await,
             (Some(command), None) => manager.central(command).await.map_err(|e| e.code),
@@ -724,7 +729,7 @@ impl Host {
         };
         self.check(&lease)?;
         lease.authorize(&account, service, None)?;
-        rinx_miniapp_core::bounded_reply(budget::display_reply(service, control::display_reply(service, allocations::display_reply(service, agents::display_reply(service, local::display(service, local_zone::display(service, pools::display(result?))))?)?)?)?)
+        rinx_miniapp_core::bounded_reply(budget::display_reply(service, control::display_reply(service, allocations::display_reply(service, agents::display_reply(service, local::display(service, local_zone::display(service, containers::display(service, pools::display(result?)))))?)?)?)?)
     }
 }
 fn value(input: impl serde::Serialize) -> Result<Value, String> {

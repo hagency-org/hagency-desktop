@@ -962,7 +962,7 @@ fn change_containers(account: &Account, pool: &str, on: bool) -> owner_dashboard
         Ok(_) => PoolContainers::On,
         Err(error) => {
             makepad_widgets::warning!("A pool's containers did not turn on: {error:?}");
-            PoolContainers::Failed(match error {
+            left_by_failure(&daemon_home, pool, match error {
                 Error::Probe(ProbeError::NoClient) => ContainerProblem::NoRuntime,
                 Error::Probe(ProbeError::EngineUnavailable) => ContainerProblem::EngineStopped,
                 Error::Probe(ProbeError::BuildFailed) => ContainerProblem::BuildFailed,
@@ -970,6 +970,153 @@ fn change_containers(account: &Account, pool: &str, on: bool) -> owner_dashboard
             })
         }
     }
+}
+
+/// Where a turn-on that failed leaves `pool`. A pool that is already chosen
+/// (when it was created, or turned on earlier) stays chosen: its Agents wait,
+/// they do not fall back to the sandbox. Any other pool keeps the sandbox.
+#[cfg(unix)]
+fn left_by_failure(daemon_home: &Path, pool: &str, problem: owner_dashboard::ContainerProblem) -> owner_dashboard::PoolContainers {
+    use owner_dashboard::PoolContainers;
+    match ::hagency::pool_containers::load(daemon_home) {
+        Ok(Some(setting)) if setting.pools.contains(pool) => PoolContainers::Waiting(problem),
+        _ => PoolContainers::Failed(problem),
+    }
+}
+
+/// Whether a pool of `account` can be created with containers chosen: on a
+/// computer that can run them, once the account's hosting has a home here.
+/// The Hosting page offers each pool's switch on the same computers.
+pub fn containers_offered(account: &Account) -> bool {
+    #[cfg(unix)]
+    {
+        container_home(account).is_some_and(|home| home.is_dir())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = account;
+        false
+    }
+}
+
+/// A pool is about to be created with containers chosen for it. Keeps the
+/// choice with the creating command, so that it holds however the command's
+/// result arrives. False when it cannot be kept: the pool is then not
+/// created, since it would run in the sandbox.
+pub fn expect_containers(account: &Account, command: &str) -> bool {
+    #[cfg(unix)]
+    {
+        container_home(account).is_some_and(|home| ::hagency::pool_containers::expect(&home, command).is_ok())
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (account, command);
+        false
+    }
+}
+
+/// Whether `pool` is listed as its owner's choice of containers: its Agents
+/// then run in one or do not start.
+pub fn containers_chosen(account: &Account, pool: &str) -> bool {
+    #[cfg(unix)]
+    {
+        container_home(account).is_some_and(|home| {
+            matches!(::hagency::pool_containers::load(&home), Ok(Some(setting)) if setting.pools.contains(pool))
+        })
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (account, pool);
+        false
+    }
+}
+
+/// What came of a new pool's container choice.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CreatedContainers {
+    /// Its creating command did not ask for containers.
+    NotAsked,
+    /// Chosen; finding the runtime and preparing the image has started.
+    Preparing,
+    /// Chosen, and this computer has no Docker-compatible app: its Agents
+    /// wait for one.
+    NoRuntime,
+    /// The choice could not be saved, so the pool would run in the sandbox.
+    Unsaved,
+}
+
+/// `command` created `pool`. Where the command asked for containers the pool
+/// is chosen at once, before anything is prepared, and turning on starts in
+/// the background; until that succeeds its Agents do not start.
+pub fn pool_created(account: &Account, command: &str, pool: &str) -> CreatedContainers {
+    #[cfg(unix)]
+    {
+        let Some(daemon_home) = container_home(account) else { return CreatedContainers::Unsaved };
+        let home = std::env::var_os("HOME").filter(|home| !home.is_empty()).map(PathBuf::from);
+        let created = list_created(&daemon_home, home.as_deref(), command, pool);
+        if matches!(created, CreatedContainers::Preparing | CreatedContainers::NoRuntime) {
+            // Without a runtime this ends at once, with the reason for the
+            // Hosting page to show.
+            prepare_created(account.clone(), pool.to_owned());
+        }
+        created
+    }
+    #[cfg(not(unix))]
+    {
+        // Named here so that a build without the daemon has a use for them.
+        let _ = (account, command, pool, CreatedContainers::Preparing, CreatedContainers::NoRuntime, CreatedContainers::Unsaved);
+        CreatedContainers::NotAsked
+    }
+}
+
+/// Lists the pool `command` created, where the command asked for containers.
+/// `home` is where a Docker-compatible client is looked for.
+#[cfg(unix)]
+fn list_created(daemon_home: &Path, home: Option<&Path>, command: &str, pool: &str) -> CreatedContainers {
+    match ::hagency::pool_containers::created(daemon_home, command, pool) {
+        Ok(false) => CreatedContainers::NotAsked,
+        Err(error) => {
+            makepad_widgets::warning!("A new pool's container choice was not saved: {error:?}");
+            CreatedContainers::Unsaved
+        }
+        Ok(true) if home.is_some_and(::hagency::pool_containers::client_found) => CreatedContainers::Preparing,
+        Ok(true) => CreatedContainers::NoRuntime,
+    }
+}
+
+/// How long a new pool's turning on waits for a change that is running.
+#[cfg(unix)]
+const CREATED_WAIT: std::time::Duration = std::time::Duration::from_secs(30 * 60);
+
+/// Turns a newly created, already chosen pool on in the background, after
+/// any change that is running. Whatever comes of it the pool stays chosen;
+/// the Hosting page shows where it stopped and offers to try again.
+#[cfg(unix)]
+fn prepare_created(account: Account, pool: String) {
+    use owner_dashboard::PoolContainers;
+    let _ = std::thread::Builder::new().name("owner-hosting-containers".into()).spawn(move || {
+        let deadline = std::time::Instant::now() + CREATED_WAIT;
+        loop {
+            let mut guard = shared();
+            let state = &mut *guard;
+            if !state.containers_running {
+                state.containers_running = true;
+                if state.account.as_ref() == Some(&account) {
+                    state.view.containers.get_or_insert_with(Default::default).pools.insert(pool.clone(), PoolContainers::TurningOn);
+                    state.view.generation += 1;
+                }
+                break;
+            }
+            drop(guard);
+            if std::time::Instant::now() >= deadline {
+                return;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
+        makepad_widgets::SignalToUI::set_ui_signal();
+        let result = change_containers(&account, &pool, true);
+        finish_containers(&account, pool, result);
+    });
 }
 
 #[cfg(unix)]
@@ -1002,7 +1149,8 @@ fn read_containers(account: &Account) -> Option<owner_dashboard::ContainerChoice
 }
 
 /// A running change decides, and a pool's failure stays shown until the
-/// owner changes that pool's switch again.
+/// owner changes that pool's switch again. So does the reason a chosen pool
+/// waits, for as long as the saved choice says only that it cannot run.
 fn merged_containers(
     current: Option<&owner_dashboard::ContainerChoices>,
     read: Option<owner_dashboard::ContainerChoices>,
@@ -1014,7 +1162,12 @@ fn merged_containers(
     }
     let mut read = read?;
     for (pool, state) in current.map(|c| &c.pools).into_iter().flatten() {
-        if matches!(state, PoolContainers::Failed(_)) && read.of(pool) == PoolContainers::Off {
+        let kept = match state {
+            PoolContainers::Failed(_) => read.of(pool) == PoolContainers::Off,
+            PoolContainers::Waiting(_) => read.pools.get(pool) == Some(&PoolContainers::Unavailable),
+            _ => false,
+        };
+        if kept {
             read.pools.insert(pool.clone(), *state);
         }
     }
@@ -1062,13 +1215,58 @@ mod tests {
         let unreadable = ContainerChoices { unreadable: true, ..Default::default() };
         let merged = merged_containers(Some(&current), Some(unreadable), false).unwrap();
         assert_eq!((merged.of("a"), merged.of("c")), (P::Unavailable, P::Unavailable));
+        // The reason a chosen pool waits stays shown while the saved choice
+        // says only that nothing can run it, and goes when the choice does.
+        let waiting = P::Waiting(ContainerProblem::NoRuntime);
+        let current = choices(&[("a", waiting), ("b", waiting)]);
+        let read = choices(&[("a", P::Unavailable), ("b", P::On)]);
+        assert_eq!(merged_containers(Some(&current), Some(read), false), Some(choices(&[("a", waiting), ("b", P::On)])));
+        assert_eq!(merged_containers(Some(&current), Some(choices(&[])), false), Some(choices(&[])));
+    }
+
+    #[test]
+    fn a_pool_created_with_containers_chosen_is_listed_before_any_runtime_is_found() {
+        use ::hagency::pool_containers::{self, Error, isolation};
+        use owner_dashboard::{ContainerProblem, PoolContainers};
+        let temp = Temp::new();
+        let daemon_home = temp.0.join("daemon");
+        private(&daemon_home);
+        // A command that did not ask for containers lists nothing.
+        assert_eq!(list_created(&daemon_home, None, "command-a", "resource_a"), CreatedContainers::NotAsked);
+        assert!(pool_containers::load(&daemon_home).unwrap().is_none());
+        assert_eq!(left_by_failure(&daemon_home, "resource_a", ContainerProblem::NoRuntime), PoolContainers::Failed(ContainerProblem::NoRuntime));
+        // One that asked: its pool is chosen at once, with nothing to run it
+        // yet, so its Agents start in a container or not at all.
+        pool_containers::expect(&daemon_home, "command-a").unwrap();
+        assert_eq!(list_created(&daemon_home, None, "command-a", "resource_a"), CreatedContainers::NoRuntime);
+        assert!(matches!(isolation(&daemon_home, "resource_a"), Err(Error::NotReady)));
+        assert!(isolation(&daemon_home, "resource_b").unwrap().is_none(), "other pools keep the sandbox");
+        // A turn-on that fails leaves it chosen; another pool keeps the sandbox.
+        assert_eq!(left_by_failure(&daemon_home, "resource_a", ContainerProblem::EngineStopped), PoolContainers::Waiting(ContainerProblem::EngineStopped));
+        assert_eq!(left_by_failure(&daemon_home, "resource_b", ContainerProblem::EngineStopped), PoolContainers::Failed(ContainerProblem::EngineStopped));
+        // The same result arriving again changes nothing.
+        assert_eq!(list_created(&daemon_home, None, "command-a", "resource_a"), CreatedContainers::NotAsked);
+        assert!(matches!(isolation(&daemon_home, "resource_a"), Err(Error::NotReady)));
+        // Where a client is looked for and found, preparing is what comes next.
+        pool_containers::expect(&daemon_home, "command-b").unwrap();
+        let home = temp.0.join("home");
+        let expected = if pool_containers::client_found(&home) { CreatedContainers::Preparing } else { CreatedContainers::NoRuntime };
+        assert_eq!(list_created(&daemon_home, Some(&home), "command-b", "resource_b"), expected);
+        assert!(matches!(isolation(&daemon_home, "resource_b"), Err(Error::NotReady)));
+        // Turning the pools off is the owner's way back to the sandbox.
+        pool_containers::turn_off(&daemon_home, "resource_a").unwrap();
+        pool_containers::turn_off(&daemon_home, "resource_b").unwrap();
+        assert!(isolation(&daemon_home, "resource_a").unwrap().is_none());
+        assert!(pool_containers::load(&daemon_home).unwrap().is_none());
     }
 
     /// The switch end to end with a real engine, in the daemon home that
     /// `HAGENCY_OWNER_DAEMON_HOME` names (an empty folder, never the real
     /// one): turning a pool on finds the client and its engine, prepares the
     /// image and saves a choice its launches can run, while other pools keep
-    /// the sandbox; turning the last pool off removes the choice.
+    /// the sandbox; turning the last pool off removes the choice. Then a pool
+    /// created with containers chosen: it is listed before anything is
+    /// prepared, turned on in the background, and its launches then run.
     #[test]
     #[ignore = "explicit Docker-compatible engine and an empty HAGENCY_OWNER_DAEMON_HOME"]
     fn the_container_switch_turns_on_and_off_with_a_real_engine() {
@@ -1114,6 +1312,24 @@ mod tests {
         assert_eq!(settled("resource_b"), Some(PoolContainers::Off));
         assert_eq!(read_containers(&account), Some(Default::default()));
         assert!(isolation(&daemon, "resource_b").unwrap().is_none());
+        // Created with containers chosen: no switch is pressed.
+        assert!(containers_offered(&account));
+        assert!(expect_containers(&account, "command-created"));
+        assert_eq!(pool_created(&account, "command-created", "resource_d"), CreatedContainers::Preparing);
+        assert!(read_containers(&account).unwrap().pools.contains_key("resource_d"), "chosen at once");
+        assert!(containers_chosen(&account, "resource_d") && !containers_chosen(&account, "resource_a"));
+        assert!(!matches!(isolation(&daemon, "resource_d"), Ok(None)), "a container or no start, never the sandbox");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1200);
+        while !matches!(isolation(&daemon, "resource_d"), Ok(Some(_))) {
+            assert!(std::time::Instant::now() < deadline, "the new pool was turned on");
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        assert_eq!(settled("resource_d"), Some(PoolContainers::On));
+        assert_eq!(pool_created(&account, "command-created", "resource_d"), CreatedContainers::NotAsked, "one result, one change");
+        assert!(isolation(&daemon, "resource_a").unwrap().is_none(), "other pools keep the sandbox");
+        assert!(set_containers("resource_d".into(), false));
+        assert_eq!(settled("resource_d"), Some(PoolContainers::Off));
+        assert_eq!(read_containers(&account), Some(Default::default()));
     }
 
     const ORIGIN: &str = "https://hagency.example.test/";

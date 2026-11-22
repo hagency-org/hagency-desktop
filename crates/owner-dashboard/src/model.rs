@@ -141,11 +141,15 @@ pub enum PoolContainers {
     /// Finding the runtime and preparing the image; minutes the first time.
     TurningOn,
     On,
-    /// On, but the chosen app is no longer there or the choice cannot be
-    /// read: its Agents cannot start.
+    /// On, but nothing can run it: the container app is no longer there, no
+    /// runtime was found yet for a pool created with containers chosen, or
+    /// the choice cannot be read. Its Agents cannot start.
     Unavailable,
     /// Turning on stopped here; its Agents keep the sandbox.
     Failed(ContainerProblem),
+    /// Turning on stopped here for a pool whose owner already chose
+    /// containers: the choice stands and its Agents do not start.
+    Waiting(ContainerProblem),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -928,12 +932,16 @@ pub struct ResourceDetail {
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct ContainerSwitch {
-    /// On while turning on and once on.
+    /// On while turning on, once on, and while the choice waits for a
+    /// runtime.
     pub on: bool,
     /// Turning on: the switch waits for the host.
     pub busy: bool,
     pub title: &'static str,
     pub body: &'static str,
+    /// The label of the button that turns on again without leaving the
+    /// choice, where the choice stands and nothing can run it.
+    pub retry: Option<&'static str>,
 }
 
 fn container_switch(state: &DashboardState, resource: &ResourceUsage, locale: Locale) -> Option<ContainerSwitch> {
@@ -944,20 +952,32 @@ fn container_switch(state: &DashboardState, resource: &ResourceUsage, locale: Lo
         return None;
     }
     let containers = choices.of(&resource.id);
+    // Choices that cannot be read leave nothing to turn on again: the way
+    // out is to turn a pool off.
+    let waiting = !choices.unreadable && matches!(containers, PoolContainers::Unavailable | PoolContainers::Waiting(_));
     Some(ContainerSwitch {
-        on: matches!(containers, PoolContainers::TurningOn | PoolContainers::On | PoolContainers::Unavailable),
+        on: matches!(
+            containers,
+            PoolContainers::TurningOn | PoolContainers::On | PoolContainers::Unavailable | PoolContainers::Waiting(_)
+        ),
         busy: containers == PoolContainers::TurningOn,
         title: tr(locale, Msg::ContainersTitle),
         body: tr(locale, match containers {
             PoolContainers::Off => Msg::ContainersOff,
             PoolContainers::TurningOn => Msg::ContainersTurningOn,
             PoolContainers::On => Msg::ContainersOn,
+            PoolContainers::Unavailable if waiting => Msg::ContainersNotReady,
             PoolContainers::Unavailable => Msg::ContainersUnavailable,
             PoolContainers::Failed(ContainerProblem::NoRuntime) => Msg::ContainersNoRuntime,
             PoolContainers::Failed(ContainerProblem::EngineStopped) => Msg::ContainersEngineStopped,
             PoolContainers::Failed(ContainerProblem::BuildFailed) => Msg::ContainersBuildFailed,
             PoolContainers::Failed(ContainerProblem::Other) => Msg::ContainersFailed,
+            PoolContainers::Waiting(ContainerProblem::NoRuntime) => Msg::ContainersWaitingNoRuntime,
+            PoolContainers::Waiting(ContainerProblem::EngineStopped) => Msg::ContainersWaitingEngineStopped,
+            PoolContainers::Waiting(ContainerProblem::BuildFailed) => Msg::ContainersWaitingBuildFailed,
+            PoolContainers::Waiting(ContainerProblem::Other) => Msg::ContainersWaiting,
         }),
+        retry: waiting.then(|| tr(locale, Msg::ContainersTryAgain)),
     })
 }
 

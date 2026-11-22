@@ -27,16 +27,24 @@ pub(crate) struct ResourceCreateConsent {
     host: Host,
     lease: Lease,
     input: CreateResourceConfiguration,
+    /// The owner chose containers for the new pool's Agents.
+    containers: bool,
     expires: Instant,
     review: Option<ResourceConfigurationReview>,
 }
 
-pub(super) fn parse_create(args: Value) -> Result<CreateResourceConfiguration, String> {
+/// A creation request: the native command's closed input and, beside it, the
+/// owner's choice of containers for the new pool.
+pub(super) fn parse_create(mut args: Value) -> Result<(CreateResourceConfiguration, bool), String> {
+    let containers = containers::take(&mut args)?;
     let input: CreateResourceConfiguration = parse(args)?;
     input
         .validate()
         .map_err(|_| "invalid_management_arguments".to_owned())?;
-    Ok(input)
+    if containers && !containers::OFFERED {
+        return Err("invalid_management_arguments".into());
+    }
+    Ok((input, containers))
 }
 
 impl Host {
@@ -45,13 +53,14 @@ impl Host {
         lease: Lease,
         args: Value,
     ) -> Result<ResourceCreateConsent, String> {
-        let input = parse_create(args)?;
+        let (input, containers) = parse_create(args)?;
         let account = self.check(&lease)?;
         lease.authorize(&account, CREATE, None)?;
         Ok(ResourceCreateConsent {
             host: self.clone(),
             lease,
             input,
+            containers,
             expires: Instant::now() + Duration::from_secs(300),
             review: None,
         })
@@ -84,10 +93,25 @@ impl ResourceCreateConsent {
             .await
             .map_err(|e| e.code)?;
         self.authorize()?;
+        // Containers run Claude pools only; the new pool is its source's kind.
+        if self.containers
+            && let ResourceConfigurationReview::Available(detail) = &review
+            && !detail.resource.framework.eq_ignore_ascii_case("claude")
+        {
+            return Err("invalid_management_arguments".into());
+        }
         self.review = Some(review);
         Ok(self)
     }
     pub fn details(&self) -> String {
+        let details = self.review_details();
+        if self.containers && self.review.is_some() {
+            format!("{details}\n\n{}", containers::review_line(crate::i18n::language()))
+        } else {
+            details
+        }
+    }
+    fn review_details(&self) -> String {
         let tr = crate::i18n::tr;
         match &self.review {
             Some(ResourceConfigurationReview::Recorded(result)) => format!(
@@ -162,11 +186,23 @@ impl ResourceCreateConsent {
         }
         let manager = self.host.manager(&self.lease).await?;
         self.authorize()?;
+        // The choice is kept with the command before the pool exists, and
+        // the pool is listed as soon as it does, before anything is returned.
+        let command = self.input.command_id.clone();
+        let owner = self.lease.identity().account.clone();
+        let chosen = self.containers;
+        if chosen {
+            containers::expect(&owner, &command)?;
+        }
         let result = manager
             .create_resource_configuration(self.input, self.expires.min(Instant::now() + Duration::from_secs(30)))
             .await
             .map_err(|e| e.code)
-            .and_then(value);
+            .and_then(value)
+            .map(|mut reply| {
+                containers::created_first(&owner, &command, chosen, &mut reply);
+                reply
+            });
         self.host
             .check(&self.lease)
             .map_err(|_| "management_outcome_unknown".to_owned())?;
@@ -183,12 +219,26 @@ mod tests {
     #[test]
     fn resource_create_service_has_closed_input_and_only_its_required_permissions() {
         let valid = json!({"commandId":"original","sourceResourceId":"resource_1","expectedRevision":"a".repeat(64),"profile":ProfileChange::Preserve {},"ceiling":CeilingChange::Monthly { tokens:450.try_into().unwrap() }});
-        assert_eq!(serde_json::to_value(parse_create(valid.clone()).unwrap()).unwrap(), valid);
+        assert_eq!(serde_json::to_value(parse_create(valid.clone()).unwrap().0).unwrap(), valid);
+        assert!(!parse_create(valid.clone()).unwrap().1, "not asking is the sandbox");
         for yolo in [false, true] {
             let mut configured = valid.clone();
             configured["executionPolicy"] = json!({"yolo":yolo});
-            assert_eq!(parse_create(configured).unwrap().execution_policy.unwrap().yolo, yolo);
+            assert_eq!(parse_create(configured).unwrap().0.execution_policy.unwrap().yolo, yolo);
         }
+        // The owner's choice of containers travels beside the closed input,
+        // which the native command gets without it.
+        let mut chosen = valid.clone();
+        chosen["containers"] = json!(true);
+        if containers::OFFERED {
+            let (input, containers) = parse_create(chosen.clone()).unwrap();
+            assert!(containers);
+            assert_eq!(serde_json::to_value(input).unwrap(), valid);
+        } else {
+            assert!(parse_create(chosen.clone()).is_err());
+        }
+        chosen["containers"] = json!("true");
+        assert!(parse_create(chosen).is_err());
         for policy in [json!({"yolo":"true"}), json!({"yolo":true,"approved":true}), json!({})] {
             let mut invalid = valid.clone(); invalid["executionPolicy"] = policy;
             assert!(parse_create(invalid).is_err());
