@@ -244,6 +244,12 @@ messages! {
     ContainersEngineStopped => "The container engine isn't running. Start your container app, then turn this on again.", "容器引擎未运行。请启动容器应用，然后再次开启。";
     ContainersBuildFailed => "The Agent image could not be built. Check that your container app can reach the internet, then turn this on again.", "无法构建 Agent 镜像。请确认容器应用可以访问网络，然后再次开启。";
     ContainersFailed => "Containers could not be turned on. This resource's Agents keep running in the sandbox.", "无法开启容器。此资源的 Agent 仍在沙盒中运行。";
+    ContainersNotReady => "Containers are chosen for this resource but not ready, so its Agents cannot start. Start your container app (Docker Desktop, OrbStack or Colima) and try again, or turn this off to use the sandbox.", "此资源已选择容器，但容器尚未就绪，其 Agent 无法启动。请启动容器应用（Docker Desktop、OrbStack 或 Colima）后重试；或关闭此项，改用沙盒。";
+    ContainersWaitingNoRuntime => "No Docker-compatible app was found, so this resource's Agents cannot start. Install and start Docker Desktop, OrbStack or Colima, then try again. Turn this off to use the sandbox instead.", "未找到 Docker 兼容的应用，此资源的 Agent 无法启动。请安装并启动 Docker Desktop、OrbStack 或 Colima，然后重试。如需改用沙盒，请关闭此项。";
+    ContainersWaitingEngineStopped => "The container engine isn't running, so this resource's Agents cannot start. Start your container app, then try again. Turn this off to use the sandbox instead.", "容器引擎未运行，此资源的 Agent 无法启动。请启动容器应用，然后重试。如需改用沙盒，请关闭此项。";
+    ContainersWaitingBuildFailed => "The Agent image could not be built, so this resource's Agents cannot start. Check that your container app can reach the internet, then try again. Turn this off to use the sandbox instead.", "无法构建 Agent 镜像，此资源的 Agent 无法启动。请确认容器应用可以访问网络，然后重试。如需改用沙盒，请关闭此项。";
+    ContainersWaiting => "Containers could not be prepared, so this resource's Agents cannot start. Try again, or turn this off to use the sandbox instead.", "无法准备容器，此资源的 Agent 无法启动。请重试；如需改用沙盒，请关闭此项。";
+    ContainersTryAgain => "Try again", "重试";
     UninstallService => "Uninstall hosting service", "卸载托管服务";
     UninstallConfirmTitle => "Uninstall the hosting service?", "卸载托管服务？";
     UninstallConfirmBody => "Hosting for all accounts stops until you start the service again. Your setup, sign-in and resources are kept.", "在重新启动服务前，本机所有账号的托管都会停止。你的设置、登录和资源都会保留。";

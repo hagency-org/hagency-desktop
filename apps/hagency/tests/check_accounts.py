@@ -152,6 +152,73 @@ A.pool_create_preset(1001) assert(!A.pool_create_valid())
 A.pool_create_preset(1000) A.pool_create_submit()
 assert(H.calls[3].service=="hagency.accounts.enroll" && H.calls[3].args.model=="deepseek" && H.calls[3].args.monthlyTokens==1000)
 ''')
+        # A Claude pool can be created with its Agents in containers, where
+        # this computer offers them; the choice is sent only when it is made.
+        claude_pool=base+'''
+mod.widgets.HagencySegments=base mod.widgets.HagencyTallSegment=base mod.widgets.HagencyTallSegmentOn=base
+mod.widgets.HagencySwitchRow=base mod.widgets.HagencySwitch=base
+let offered=A.t("Run Agents in containers","在容器中运行 Agent")
+let pick={id:"open-model-a" model:"open-model-a" label:"Open model A" sharedReasoning:["medium","high"] sharedDefaultReasoning:"medium"}
+H.page="pool_create" H.pool_create={epoch:1 account:claude accounts:[claude] error:"" models:{enrollmentReady:true provider:{models:[pick]}} modelsError:"" loadingModels:false}
+H.enrollment_draft={account:{accountId:claude.id expectedRevision:claude.revision} model:pick models:[pick] reasoning:"medium" tokens:"1000000" sourceRequired:false source:nil name:"Open model A" named:false containers:false}
+let asked=fn(args){let {containers=nil}=args return containers}
+'''
+        run('claude_pool_containers_not_offered-'+lang,claude_pool+'''
+let root=View{'''+pool_page+'''}
+collect(root)
+assert(button("pool_create_containers")==nil && !has(offered))
+assert(!A.pool_containers_offered(claude))
+A.enroll_account()
+assert(H.calls.len()==1 && H.calls[0].service=="hagency.accounts.enroll" && asked(H.calls[0].args)==nil)
+''')
+        run('claude_pool_containers_chosen-'+lang,claude_pool+'''
+H.session={account:"@manager:test" features:[] poolContainers:true}
+assert(A.pool_containers_offered(claude) && !A.pool_containers_offered(octos) && !A.pool_containers_offered(second) && !A.pool_containers_offered(nil))
+let root=View{'''+pool_page+'''}
+collect(root)
+assert(has(offered) && button("pool_create_containers")!=nil && button("pool_create_containers").enabled)
+assert(has(A.t("Off: this pool’s Agents run in this computer’s sandbox. Turn this on to run each one in its own container (Docker Desktop, OrbStack or Colima) that sees only its own folders.","关闭时，此资源池的 Agent 在这台电脑的沙盒中运行。开启后，每个 Agent 会在自己的容器（Docker Desktop、OrbStack 或 Colima）中运行，只能看到自己的文件夹。")))
+A.enroll_account()
+assert(H.calls.len()==1 && asked(H.calls[0].args)==nil)
+button("pool_create_containers").on_click()
+assert(H.enrollment_draft.containers==true && A.pool_containers_chosen(H.enrollment_draft))
+A.enroll_account()
+assert(H.calls.len()==2 && H.calls[1].service=="hagency.accounts.enroll" && H.calls[1].args.containers==true)
+assert(H.calls[1].args.model=="open-model-a" && H.calls[1].args.monthlyTokens==1000000 && H.calls[1].args.account.accountId==claude.id)
+button("pool_create_containers").on_click()
+assert(H.enrollment_draft.containers==false)
+H.command={service:"hagency.accounts.enroll"} button("pool_create_containers").on_click()
+assert(H.enrollment_draft.containers==false)
+''')
+        run('claude_pool_containers_chosen_page-'+lang,claude_pool+'''
+H.session={account:"@manager:test" features:[] poolContainers:true} H.enrollment_draft.containers=true
+let root=View{'''+pool_page+'''}
+collect(root)
+assert(has(A.t("Each Agent of this pool runs in its own container and sees only its own folders. Until containers are ready on this computer its Agents do not start; they never fall back to the sandbox. You can change this later on the Hosting dashboard.","此资源池的每个 Agent 都在自己的容器中运行，只能看到自己的文件夹。这台电脑的容器就绪之前，Agent 不会启动，也不会改用沙盒。之后可在托管控制台更改。")))
+''')
+        run('pool_containers_result_notes-'+lang,base+'''
+H.pool_saved={rid:"resource_new" at:"top" tone:"running" text:"Created."}
+A.pool_containers_noted({resourceId:"resource_new"})
+assert(H.pool_saved.text=="Created." && H.pool_saved.tone=="running")
+A.pool_containers_noted({resourceId:"resource_new" containers:"preparing"})
+assert(H.pool_saved.tone=="running" && H.pool_saved.rid=="resource_new" && H.pool_saved.at=="top")
+assert(H.pool_saved.text=="Created."+A.pool_containers_note("preparing") && A.pool_containers_note("preparing")!="")
+for word in ["no_runtime","unsaved"]{
+ H.pool_saved={rid:"resource_new" at:"top" tone:"running" text:"Created."}
+ A.pool_containers_noted({resourceId:"resource_new" containers:word})
+ assert(H.pool_saved.tone=="attention" && H.pool_saved.text=="Created."+A.pool_containers_note(word) && A.pool_containers_note(word)!="")
+}
+assert(A.pool_containers_note("other")=="")
+H.pool_saved=nil
+A.pool_containers_noted({resourceId:"resource_new" containers:"preparing"})
+assert(H.pool_saved==nil)
+A.pool_containers_recovered({resourceId:"resource_r"})
+assert(H.pool_saved==nil)
+A.pool_containers_recovered({resourceId:"resource_r" containers:"no_runtime"})
+assert(H.pool_saved.rid=="resource_r" && H.pool_saved.at=="top" && H.pool_saved.tone=="attention" && H.pool_saved.text!="")
+A.pool_containers_recovered({resourceId:"resource_r" containers:"preparing"})
+assert(H.pool_saved.tone=="running")
+''')
         switch_base=PREFIX+'H.rendered_name=""\nlet ui={pool_create_name:{set_text:fn(value){H.rendered_name=value}}}\n'+helpers+fixture+('A.t=fn(en,zh){return zh}\n' if lang=='zh' else '')
         run('octos_model_switch_updates_visible_default_name-'+lang,switch_base+'''
 let one={model:"deepseek" label:"local · deepseek" enrolled:false sharedReasoning:[nil] sharedDefaultReasoning:nil}

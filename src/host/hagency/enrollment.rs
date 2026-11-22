@@ -5,15 +5,27 @@ pub(crate) struct ResourceConsent {
     host: Host,
     lease: Lease,
     input: ::hagency::native_owner::NamespaceEnrollment,
+    /// The owner chose containers for this pool's Agents.
+    containers: bool,
     expires: Instant,
+}
+/// An enrollment request: the native command's closed input and, beside it,
+/// the owner's choice of containers, which only a Claude pool can have.
+fn parse_enrollment(mut args:Value)->Result<(::hagency::native_owner::NamespaceEnrollment,bool),String>{
+    let containers=containers::take(&mut args)?;
+    let input: ::hagency::native_owner::NamespaceEnrollment=parse(args)?;
+    input.validate().map_err(|_|"invalid_management_arguments".to_owned())?;
+    if containers && !(containers::OFFERED && input.account.account_id == CLAUDE_ACCOUNT) {
+        return Err("invalid_management_arguments".into());
+    }
+    Ok((input,containers))
 }
 impl Host {
     pub fn resource_consent(&self,lease:Lease,args:Value)->Result<ResourceConsent,String>{
-        let input: ::hagency::native_owner::NamespaceEnrollment=parse(args)?;
-        input.validate().map_err(|_|"invalid_management_arguments".to_owned())?;
+        let (input,containers)=parse_enrollment(args)?;
         let account=self.check(&lease)?;lease.authorize(&account,ENROLL,None)?;
         ensure_enrollment_available(&input)?;
-        Ok(ResourceConsent{host:self.clone(),lease,input,expires:Instant::now()+Duration::from_secs(300)})
+        Ok(ResourceConsent{host:self.clone(),lease,input,containers,expires:Instant::now()+Duration::from_secs(300)})
     }
 }
 impl ResourceConsent {
@@ -24,7 +36,8 @@ impl ResourceConsent {
     /// resolve and validate the owner's connected Octos configuration.
     pub fn octos(&self)->bool {octos_profile(&self.input).is_some()}
     pub fn details(&self)->String {
-        enrollment_details(&self.input)
+        let details=enrollment_details(&self.input);
+        if self.containers {format!("{details}\n{}",containers::review_line(crate::i18n::language()))} else {details}
     }
     pub fn expired(&self)->bool {Instant::now()>=self.expires}
     pub async fn accept(self)->Result<Value,String>{
@@ -32,7 +45,12 @@ impl ResourceConsent {
         let account=self.host.check(&self.lease)?;self.lease.authorize(&account,ENROLL,None)?;
         let manager=self.host.manager(&self.lease).await?;
         self.host.check(&self.lease)?;self.lease.authorize(&account,ENROLL,None)?;
-        let result=manager.enroll_account_resource(self.input,self.expires).await.map_err(|e|e.code).and_then(value);
+        // The choice is kept with the command before the pool exists, and
+        // the pool is listed as soon as it does, before anything is returned.
+        let (command,chosen)=(self.input.command_id.clone(),self.containers);
+        if chosen {containers::expect(&account,&command)?;}
+        let result=manager.enroll_account_resource(self.input,self.expires).await.map_err(|e|e.code).and_then(value)
+            .map(|mut reply|{containers::created_first(&account,&command,chosen,&mut reply);reply});
         self.host.check(&self.lease).map_err(|_|"management_outcome_unknown".to_owned())?;
         self.lease.authorize(&account,ENROLL,None)?;
         rinx_miniapp_core::bounded_reply(result?)
@@ -170,6 +188,27 @@ mod tests {
                 assert!(ensure_enrollment_available(&value).is_err(),"{id}");
             }
         }
+    }
+    #[test]
+    fn only_a_claude_pool_can_be_created_with_containers_chosen(){
+        let request=|account:&str,containers:Value|json!({"commandId":"original","account":{"accountId":account,"expectedRevision":"a".repeat(64)},"model":"open-model-a","reasoning":"medium","monthlyTokens":1000,"containers":containers});
+        let claude=parse_enrollment(request("account_claude_code",json!(true)));
+        if containers::OFFERED {
+            let (input,chosen)=claude.unwrap();
+            assert!(chosen);
+            // The native command gets its closed input, without the choice.
+            assert!(serde_json::to_value(&input).unwrap().get("containers").is_none());
+            assert_eq!(input.command_id,"original");
+        } else {
+            // A computer that runs no containers creates no pool that needs them.
+            assert_eq!(claude.unwrap_err(),"invalid_management_arguments");
+        }
+        assert!(!parse_enrollment(request("account_claude_code",json!(false))).unwrap().1);
+        for account in ["account_selected","account_octos_coding"] {
+            assert_eq!(parse_enrollment(request(account,json!(true))).unwrap_err(),"invalid_management_arguments","{account}");
+            assert!(!parse_enrollment(request(account,json!(false))).unwrap().1);
+        }
+        assert!(parse_enrollment(request("account_claude_code",json!("yes"))).is_err());
     }
     #[test]
     fn enrollment_input_excludes_identity_paths_and_approval_claims(){

@@ -5,6 +5,12 @@
 //! into the owner daemon's home; the daemon reads it at each pooled Claude
 //! launch, so a change applies from the pool's next run. No file, or a pool
 //! the file does not list, means the sandbox.
+//!
+//! A pool created with containers chosen is listed before anything is
+//! prepared, with no runtime when none was found yet: from then on its Agents
+//! run in a container or do not start. The choice is kept with the command
+//! that creates the pool from before the pool exists, so it holds however the
+//! command's result arrives.
 use hagency_runtime::owned::container::{self, ContainerIsolation};
 pub use hagency_runtime::owned::container::ProbeError;
 use serde::{Deserialize, Serialize};
@@ -27,11 +33,19 @@ const CLIENT_CONFIG: &str = "container-client";
 const MAX_POOLS: usize = 256;
 const MAX_POOL_ID: usize = 128;
 const MAX_BYTES: usize = 64 * 1024;
+/// The commands that create a pool whose owner chose containers, each until
+/// its pool's ID is known.
+const REQUESTS: &str = "pool-container-requests.json";
+/// A command is here for the moments its pool takes to appear; one that
+/// never made a pool leaves with the oldest.
+const MAX_REQUESTS: usize = 64;
+const MAX_COMMAND_ID: usize = 128;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct Setting {
-    /// The Docker-compatible client.
+    /// The Docker-compatible client; empty while no runtime was found for
+    /// the pools listed, whose Agents then do not start.
     pub cli: PathBuf,
     /// Its engine's socket, `unix://…`.
     pub endpoint: String,
@@ -41,6 +55,14 @@ pub struct Setting {
     /// empty.
     pub pools: BTreeSet<String>,
 }
+impl Setting {
+    /// Whether turning on has found a runtime for the pools listed. An
+    /// earlier host reads the same file: it cannot start a listed pool whose
+    /// client is not a file, and so keeps these pools out of the sandbox too.
+    pub fn found(&self) -> bool {
+        !self.cli.as_os_str().is_empty()
+    }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Error {
@@ -48,6 +70,8 @@ pub enum Error {
     State,
     /// What the file says cannot run, or a pool ID is not one.
     Invalid,
+    /// The pool's owner chose containers and no runtime was found for it yet.
+    NotReady,
     /// Turning on stopped at this step.
     Probe(ProbeError),
 }
@@ -91,10 +115,119 @@ pub fn isolation(daemon_home: &Path, pool: &str) -> Result<Option<ContainerIsola
     if !setting.pools.contains(pool) {
         return Ok(None);
     }
+    if !setting.found() {
+        return Err(Error::NotReady);
+    }
     let config = client_config(daemon_home)?;
     ContainerIsolation::new(setting.cli, setting.endpoint, setting.image, config)
         .map(Some)
         .map_err(|_| Error::Invalid)
+}
+
+/// Lists `pool` as its owner's choice without preparing anything: from now on
+/// its Agents run in a container or do not start. A runtime saved for other
+/// pools serves it too; with none saved it waits for [`turn_on`]. Under the
+/// lock. A file that cannot be read stays as it is and is an error here: it
+/// refuses every launch now, and the owner's way out of it (turning a pool
+/// off) would leave this pool in the sandbox.
+fn list(daemon_home: &Path, pool: &str) -> Result<(), Error> {
+    let mut setting = load(daemon_home)?.unwrap_or_else(|| Setting {
+        cli: PathBuf::new(),
+        endpoint: String::new(),
+        image: String::new(),
+        pools: BTreeSet::new(),
+    });
+    if !setting.pools.insert(pool.to_owned()) {
+        return Ok(());
+    }
+    if setting.pools.len() > MAX_POOLS {
+        return Err(Error::Invalid);
+    }
+    save(daemon_home, &setting)
+}
+
+/// The commands whose pool is to run in containers, oldest first.
+#[derive(Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Requests {
+    commands: Vec<String>,
+}
+
+/// Before `command` creates a pool whose owner chose containers: keeps the
+/// choice with the command, so that [`created`] can list the pool whichever
+/// way its ID arrives (the first reply, a retry, a later recovery). An error
+/// means the choice cannot be kept, and the pool should not be created.
+pub fn expect(daemon_home: &Path, command: &str) -> Result<(), Error> {
+    if !command_id(command) {
+        return Err(Error::Invalid);
+    }
+    let _lock = lock(daemon_home)?;
+    // The pool will have to be listed in this file: it has to be readable
+    // and have room for one more.
+    if load(daemon_home)?.is_some_and(|setting| setting.pools.len() >= MAX_POOLS) {
+        return Err(Error::Invalid);
+    }
+    let mut requests = requests(daemon_home);
+    if requests.commands.iter().any(|known| known == command) {
+        return Ok(());
+    }
+    requests.commands.push(command.to_owned());
+    let extra = requests.commands.len().saturating_sub(MAX_REQUESTS);
+    requests.commands.drain(..extra);
+    save_requests(daemon_home, &requests)
+}
+
+/// `command` created `pool`. Lists the pool when the command asked for
+/// containers, and says whether it did. On an error the command stays known,
+/// for the next time its result arrives.
+pub fn created(daemon_home: &Path, command: &str, pool: &str) -> Result<bool, Error> {
+    if !command_id(command) || !pool_id(pool) {
+        return Err(Error::Invalid);
+    }
+    let _lock = lock(daemon_home)?;
+    let mut requests = requests(daemon_home);
+    let Some(at) = requests.commands.iter().position(|known| known == command) else {
+        return Ok(false);
+    };
+    list(daemon_home, pool)?;
+    requests.commands.remove(at);
+    // The pool is listed; a command that stays known only lists it again.
+    let _ = save_requests(daemon_home, &requests);
+    Ok(true)
+}
+
+/// Under the lock. A list that cannot be read starts again: what it held
+/// were commands waiting for their pool, not pools.
+fn requests(daemon_home: &Path) -> Requests {
+    let Ok(file) = hagency_store::private::open(&daemon_home.join(REQUESTS), false) else {
+        return Requests::default();
+    };
+    let mut bytes = Vec::new();
+    if file.take(MAX_BYTES as u64 + 1).read_to_end(&mut bytes).is_err() || bytes.len() > MAX_BYTES {
+        return Requests::default();
+    }
+    let mut requests: Requests = serde_json::from_slice(&bytes).unwrap_or_default();
+    requests.commands.retain(|command| command_id(command));
+    requests
+}
+
+fn save_requests(daemon_home: &Path, requests: &Requests) -> Result<(), Error> {
+    let path = daemon_home.join(REQUESTS);
+    if requests.commands.is_empty() {
+        return match std::fs::remove_file(path) {
+            Ok(()) => Ok(()),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(_) => Err(Error::State),
+        };
+    }
+    let bytes = serde_json::to_vec(requests).map_err(|_| Error::State)?;
+    hagency_store::private::replace(&path, &bytes).map_err(|_| Error::State)
+}
+
+/// Whether this computer has a Docker-compatible client where turning on
+/// looks for one. Says nothing about its engine running.
+pub fn client_found(home: &Path) -> bool {
+    container::find_client(home).is_some()
 }
 
 /// Runs `pool`'s Agents in containers from their next run. Finds the client
@@ -190,6 +323,11 @@ fn pool_id(id: &str) -> bool {
     hagency_core::project::identifier(id, MAX_POOL_ID).is_ok()
 }
 
+/// A command ID as the host issues them.
+fn command_id(id: &str) -> bool {
+    hagency_core::project::identifier(id, MAX_COMMAND_ID).is_ok()
+}
+
 fn client_config(daemon_home: &Path) -> Result<PathBuf, Error> {
     let path = daemon_home.join(CLIENT_CONFIG);
     hagency_store::private::directory(&path).map_err(|_| Error::State)?;
@@ -214,6 +352,12 @@ pub(crate) fn hosted_isolation(origin: &str, owner: &str, pool: &str) -> Result<
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Lists `pool` the way the result of its creating command does.
+    fn choose(home: &Path, pool: &str) -> Result<(), Error> {
+        expect(home, "command-choose")?;
+        created(home, "command-choose", pool).map(|_| ())
+    }
 
     fn home() -> (tempfile::TempDir, PathBuf) {
         let dir = tempfile::tempdir().unwrap();
@@ -295,5 +439,97 @@ mod tests {
         // Names that are not resource IDs are never listed.
         assert_eq!(turn_on(&home, &home, "../a").err(), Some(Error::Invalid));
         assert_eq!(turn_on(&home, &home, "").err(), Some(Error::Invalid));
+        assert_eq!(choose(&home, "../a").err(), Some(Error::Invalid));
+    }
+
+    #[test]
+    fn a_pool_chosen_before_a_runtime_is_found_starts_in_a_container_or_not_at_all() {
+        let (_dir, home) = home();
+        choose(&home, "resource_new").unwrap();
+        choose(&home, "resource_new").unwrap();
+        let saved = load(&home).unwrap().unwrap();
+        assert!(!saved.found());
+        assert_eq!(saved.pools, BTreeSet::from(["resource_new".to_owned()]));
+        assert_eq!(isolation(&home, "resource_new").err(), Some(Error::NotReady));
+        assert!(isolation(&home, "resource_other").unwrap().is_none(), "other pools keep the sandbox");
+        // What a host from before this choice existed goes by: the pool is
+        // listed and its client is no file, so it does not start it either.
+        let config = client_config(&home).unwrap();
+        assert!(!saved.cli.is_file());
+        assert!(ContainerIsolation::new(saved.cli, saved.endpoint, saved.image, config).is_err());
+        // The runtime found for any pool serves the waiting one too.
+        let found = add(&home, runtime(&home, 'b'), "resource_other").unwrap();
+        assert!(found.found() && found.pools.len() == 2);
+        assert_eq!(isolation(&home, "resource_new").unwrap().unwrap().image(), found.image);
+        // A pool chosen while a runtime is saved runs under that runtime.
+        choose(&home, "resource_third").unwrap();
+        assert_eq!(isolation(&home, "resource_third").unwrap().unwrap().image(), found.image);
+        assert_eq!(load(&home).unwrap().unwrap().cli, found.cli, "choosing never changes the runtime");
+        // Off is still the owner's way back to the sandbox.
+        for pool in ["resource_other", "resource_third"] {
+            turn_off(&home, pool).unwrap();
+        }
+        assert!(isolation(&home, "resource_new").unwrap().is_some());
+        turn_off(&home, "resource_new").unwrap();
+        assert_eq!(load(&home), Ok(None));
+        choose(&home, "resource_new").unwrap();
+        turn_off(&home, "resource_new").unwrap();
+        assert!(!home.join(FILE).exists(), "a waiting pool turned off takes the file with it");
+        // A file that cannot be read is not cleared for a new pool's sake.
+        hagency_store::private::replace(&home.join(FILE), b"not json").unwrap();
+        assert_eq!(choose(&home, "resource_new").err(), Some(Error::Invalid));
+        assert_eq!(std::fs::read(home.join(FILE)).unwrap(), b"not json");
+    }
+
+    #[test]
+    fn a_creating_command_keeps_the_choice_until_its_pool_is_known() {
+        let (_dir, home) = home();
+        // A command that never asked changes nothing.
+        assert_eq!(created(&home, "command-1", "resource_a"), Ok(false));
+        assert_eq!(load(&home), Ok(None));
+        expect(&home, "command-1").unwrap();
+        expect(&home, "command-1").unwrap();
+        assert_eq!(load(&home), Ok(None), "nothing is listed before the pool exists");
+        // Its result, whenever it comes, lists the pool once.
+        assert_eq!(created(&home, "command-1", "resource_a"), Ok(true));
+        assert_eq!(isolation(&home, "resource_a").err(), Some(Error::NotReady));
+        assert!(!home.join(REQUESTS).exists());
+        assert_eq!(created(&home, "command-1", "resource_a"), Ok(false));
+        assert_eq!(isolation(&home, "resource_a").err(), Some(Error::NotReady), "and it stays listed");
+        // A pool that cannot be listed leaves its command known for the next
+        // time the result arrives.
+        turn_off(&home, "resource_a").unwrap();
+        expect(&home, "command-2").unwrap();
+        hagency_store::private::replace(&home.join(FILE), b"not json").unwrap();
+        assert_eq!(created(&home, "command-2", "resource_b").err(), Some(Error::Invalid));
+        // While the choices cannot be read, no new choice is taken.
+        assert_eq!(expect(&home, "command-3").err(), Some(Error::Invalid));
+        turn_off(&home, "resource_b").unwrap();
+        assert_eq!(created(&home, "command-3", "resource_c"), Ok(false));
+        assert_eq!(created(&home, "command-2", "resource_b"), Ok(true));
+        assert_eq!(load(&home).unwrap().unwrap().pools, BTreeSet::from(["resource_b".to_owned()]));
+        // Only so many commands wait; the oldest leave first.
+        for n in 0..MAX_REQUESTS + 6 {
+            expect(&home, &format!("waiting-{n}")).unwrap();
+        }
+        assert_eq!(created(&home, "waiting-5", "resource_old"), Ok(false));
+        assert_eq!(created(&home, &format!("waiting-{}", MAX_REQUESTS + 5), "resource_last"), Ok(true));
+        // A list that cannot be read starts again.
+        hagency_store::private::replace(&home.join(REQUESTS), b"not json").unwrap();
+        assert_eq!(created(&home, "waiting-6", "resource_lost"), Ok(false));
+        expect(&home, "command-4").unwrap();
+        assert_eq!(created(&home, "command-4", "resource_d"), Ok(true));
+        // Only IDs are kept or listed.
+        assert_eq!(expect(&home, "../command").err(), Some(Error::Invalid));
+        assert_eq!(expect(&home, "").err(), Some(Error::Invalid));
+        assert_eq!(created(&home, "../command", "resource_e").err(), Some(Error::Invalid));
+        expect(&home, "command-5").unwrap();
+        assert_eq!(created(&home, "command-5", "../e").err(), Some(Error::Invalid));
+        // A list with no room for one more takes no new choice: its pool
+        // could not be listed.
+        let pools = (0..MAX_POOLS).map(|n| format!("resource_{n}")).collect();
+        save(&home, &Setting { cli: PathBuf::new(), endpoint: String::new(), image: String::new(), pools }).unwrap();
+        assert_eq!(expect(&home, "command-6").err(), Some(Error::Invalid));
+        assert!(client_found(Path::new("/")) == container::find_client(Path::new("/")).is_some());
     }
 }

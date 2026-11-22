@@ -190,6 +190,18 @@ fn a_claude_resource_page_carries_its_own_container_switch() {
         assert_eq!(widget.check_box(&cx, ids!(od_detail_containers)).active(&cx), active, "{choice:?}");
     }
     assert!(widget.label(&cx, ids!(od_detail_containers_body)).text().contains("Start your container app"));
+    assert!(!widget.button(&cx, ids!(od_detail_containers_retry)).visible(), "a failed switch is turned on with the switch");
+    // A choice that stands while nothing can run it: on, with its own way
+    // to turn on again.
+    for choice in [PoolContainers::Unavailable, PoolContainers::Waiting(ContainerProblem::NoRuntime)] {
+        dashboard.set_options(&mut cx, choices(&[("res_sonnet", choice)]));
+        assert!(widget.check_box(&cx, ids!(od_detail_containers)).active(&cx), "{choice:?}");
+        let retry = widget.button(&cx, ids!(od_detail_containers_retry));
+        assert!(retry.visible() && retry.text() == "Try again", "{choice:?}");
+        assert!(widget.label(&cx, ids!(od_detail_containers_body)).text().contains("cannot start"), "{choice:?}");
+    }
+    dashboard.set_options(&mut cx, choices(&[("res_sonnet", PoolContainers::On)]));
+    assert!(!widget.button(&cx, ids!(od_detail_containers_retry)).visible());
     // The overview has no computer-wide switch, and a Codex resource none.
     assert!(widget.widget(&cx, ids!(od_containers)).is_empty());
     state.view.selected_resource = Some("res_terra".into());

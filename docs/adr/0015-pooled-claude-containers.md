@@ -58,6 +58,45 @@ its Agents cannot start. Turning any of them off removes the file, which
 returns every resource to the sandbox. A listed resource whose client is gone
 is refused the same way, while the others still start in the sandbox.
 
+**Chosen when the pool is created.** The page that creates a Claude pool has
+the same choice, "Run Agents in containers", on computers where Hosting offers
+the switch (the session reply says so with `poolContainers`). The package
+sends one boolean, `containers`, beside the closed input of
+`hagency.accounts.enroll` or `hagency.resources.create`. The host takes it out
+before the native command sees its input, refuses it for a pool that is not
+Claude, and names it in the native review. Nothing is added to the native
+command, so saved requests and older daemons are unaffected.
+
+A pool created this way starts in a container or not at all:
+
+1. Before the creating command runs, its command ID is saved in
+   `pool-container-requests.json` in the daemon home. If it cannot be saved,
+   or the choices cannot be read or have no room, the pool is not created
+   (`pool_containers_unavailable`).
+2. When the command's result names the new resource, the resource is added to
+   `pools` at once and the command is forgotten. The result can arrive as the
+   first reply, as a retry of the same command, or from the saved request
+   after a restart (on `hagency.intent.retry`, and whenever the list of saved
+   requests is read, which the package does when it opens). The choice holds
+   on each of these paths.
+3. Turning on then runs in the background, as the switch would run it.
+
+The reply that names the new resource also says what came of the choice, in
+`containers`: `preparing` (a container app was found and turning on started),
+`no_runtime` (none was found, so its Agents wait) or `unsaved`. `unsaved` means
+the resource could not be listed when its first reply arrived, so it would run
+in the sandbox; the page then tells the owner to turn containers on in Hosting
+before publishing the pool.
+
+Until a runtime is found, the file lists the resource with an empty client,
+endpoint and image. A listed resource without a runtime is refused at launch
+(`shared_claude_container_not_ready`; a daemon from before this change refuses
+it as `shared_claude_container_invalid`), while resources that are not listed
+still start in the sandbox. Its page in Hosting shows the switch on, says why
+its Agents cannot start, and offers "Try again", which turns on in place. A
+turn-on that fails for a resource that is already listed leaves it listed.
+Only turning the switch off returns the pool to the sandbox.
+
 **The image.** The Dockerfile is part of the app: Debian with Node 22 (pinned
 by digest), Claude Code 2.1.323, and the tools a coding run expects. The tag is
 `hagency/claude-agent:<first 12 hex of the Dockerfile's SHA-256>-<uid>-<gid>`
@@ -135,8 +174,12 @@ of resuming one made under the other.
 - **Claude Code's version is the image's.** A new version is a new Dockerfile
   and so a new tag, built on the next switch-on.
 - **An image stays in use until a turn-on runs again.** Resources turned on
-  under an earlier recipe keep its image. Turning any resource on builds the
-  current image, which then serves every resource listed.
+  under an earlier recipe keep its image. Turning any resource on, or creating
+  a pool with containers chosen, builds the current image, which then serves
+  every resource listed.
+- **A pool chosen at creation does not run without a container app.** That is
+  the choice: its Agents wait, and the creation note and its Hosting page say
+  so. Publishing the pool is not held back.
 - **The default commit author is the same for every Agent** (`Hagency Agent`),
   where the repository names none.
 - **Start failures** reach the caller as `shared_claude_container_unavailable`
@@ -158,9 +201,20 @@ of resuming one made under the other.
   `whoami`, `os.userInfo()` and `getpass`, and a commit had no author. The
   current image passes each, and a repository's own author is kept. The
   ignored test that prepares the image passes with the owner's numbers in the
-  tag.
+  tag, and the ignored turn test (one turn with a tool command, a local
+  stand-in for the model) passes in that image.
 - The switch with a real engine (ignored test): two resources turned on one
   after the other, a third left in the sandbox, then each turned off.
+- A pool chosen at creation: setting file tests (listed before a runtime is
+  found and refused until one is, the creating command kept until its pool is
+  known, on each path its result can take), host tests (one boolean beside the
+  closed input, Claude pools only), the app's hosting test (a failed turn-on
+  leaves a listed resource listed), and Hosting screen model and widget tests
+  (the waiting state, its texts and "Try again"). The creation page in the
+  real widgets, both languages: the switch and its note appear only for a
+  Claude pool where the session offers them. The ignored real-engine test of
+  the switch also creates a pool this way: listed at once, never the sandbox,
+  turned on without a switch being pressed.
 - Setting file tests in the `hagency` crate: each resource's choice, one
   runtime for all, the last one off removing the file, and files that cannot
   run. Hosting screen model and widget tests: the switch only on a Claude
