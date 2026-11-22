@@ -71,6 +71,8 @@ async fn claude_withdrawal_closes_waiting_card_without_replaying_input() {
     let (queue, _) = codex::approval_queue(1).unwrap();
     let (questions, mut incoming) = question_queue();
     let queue = queue.with_questions(questions);
+    let presented = f.path("question-presented");
+    let (started, running) = tokio::sync::oneshot::channel();
     let run = process.session.run_with_started(
         &mut f.ledger,
         "@owner:test",
@@ -80,10 +82,18 @@ async fn claude_withdrawal_closes_waiting_card_without_replaying_input() {
         "ask questions",
         BudgetMode::Postpaid,
         &queue,
-        None,
+        Some(started),
     );
     let host = async {
+        // The host is slow on purpose: the whole thread stops once the turn
+        // runs, so the question waits unread while the fixture goes on. A
+        // withdrawal that is read before the question was presented sends
+        // no card at all, and the wait for the card below would not end.
+        // The fixture therefore withdraws only once the marker exists.
+        running.await.expect("the turn started");
+        std::thread::sleep(std::time::Duration::from_millis(300));
         let pending = incoming.recv().await.unwrap();
+        fs::write(presented, "presented").unwrap();
         tokio::time::timeout(std::time::Duration::from_secs(5), async {
             while !pending.is_closed() {
                 tokio::time::sleep(std::time::Duration::from_millis(10)).await;
@@ -93,7 +103,11 @@ async fn claude_withdrawal_closes_waiting_card_without_replaying_input() {
         .unwrap();
         assert!(!pending.reply(Default::default()).accepted().await);
     };
-    let (completed, ()) = tokio::join!(run, host);
+    let (completed, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(run, host)
+    })
+    .await
+    .unwrap();
     assert!(completed.is_ok());
     assert!(!f.path("question-answer").exists());
     assert_eq!(f.spent(), (24, 0));
