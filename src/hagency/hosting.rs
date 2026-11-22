@@ -145,15 +145,41 @@ pub enum Service {
     OtherProgram,
 }
 
-/// The program a LaunchAgent property list starts: the first string of its
-/// `ProgramArguments`, unescaped.
+/// What a LaunchAgent property list starts: the strings of its
+/// `ProgramArguments`, unescaped. The first is the program.
+#[cfg(any(target_os = "macos", test))]
+fn plist_arguments(plist: &str) -> Option<Vec<String>> {
+    let after = &plist[plist.find("<key>ProgramArguments</key>")?..];
+    let mut array = &after[after.find("<array>")? + "<array>".len()..after.find("</array>")?];
+    let mut arguments = Vec::new();
+    while let Some(open) = array.find("<string>") {
+        let start = open + "<string>".len();
+        let end = start + array[start..].find("</string>")?;
+        arguments.push(array[start..end].replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"));
+        array = &array[end + "</string>".len()..];
+    }
+    (!arguments.is_empty()).then_some(arguments)
+}
+
+/// The program a LaunchAgent property list starts.
 #[cfg(any(target_os = "macos", test))]
 fn plist_program(plist: &str) -> Option<String> {
-    let after = &plist[plist.find("<key>ProgramArguments</key>")?..];
-    let array = &after[after.find("<array>")? + "<array>".len()..after.find("</array>")?];
-    let start = array.find("<string>")? + "<string>".len();
-    let end = start + array[start..].find("</string>")?;
-    Some(array[start..end].replace("&quot;", "\"").replace("&lt;", "<").replace("&gt;", ">").replace("&amp;", "&"))
+    plist_arguments(plist)?.into_iter().next()
+}
+
+/// Whether the service in `plist` is this app's own, registered before an
+/// update gave its executable another name: it starts a program that stood
+/// beside `exe` and is gone, as the owner daemon of `home`. launchd cannot
+/// start such a service, so nothing hosts until it names `exe`.
+#[cfg(any(target_os = "macos", test))]
+fn names_former_executable(plist: &str, exe: &Path, home: &Path) -> bool {
+    let Some(arguments) = plist_arguments(plist) else { return false };
+    let Some((program, daemon)) = arguments.split_first() else { return false };
+    let program = Path::new(program);
+    daemon.iter().map(String::as_str).eq([SUBCOMMAND, "run", "--home"].into_iter().chain(home.to_str()))
+        && program != exe
+        && matches!(std::fs::symlink_metadata(program), Err(error) if error.kind() == std::io::ErrorKind::NotFound)
+        && program.parent().and_then(|folder| folder.canonicalize().ok()).as_deref() == exe.parent()
 }
 
 #[cfg(any(target_os = "macos", test))]
@@ -810,6 +836,62 @@ pub fn start(kind: JobKind, account: &Account) -> bool {
     }
 }
 
+/// macOS, once at start: an update that gives this app's executable another
+/// name leaves the hosting service registered to a program that is gone.
+/// launchd cannot start it, so the owner's Agents stay offline. Register this
+/// executable in its place, as the owner would in Hosting Options.
+///
+/// Only a service that this app registered itself and whose daemon no longer
+/// runs is changed. Another app's service, and a daemon that still runs from
+/// before the update, are left as they are; Hosting Options offers the
+/// change. Blocking.
+pub fn follow_renamed_executable() {
+    #[cfg(target_os = "macos")]
+    {
+        use std::{ffi::OsStr, time::Duration};
+        let (Some(user_home), Ok(exe), Ok(locations)) = (
+            std::env::var_os("HOME").filter(|h| !h.is_empty()),
+            std::env::current_exe().and_then(|p| p.canonicalize()),
+            Locations::system(),
+        ) else {
+            return;
+        };
+        let home = locations.daemon_home();
+        let plist = PathBuf::from(user_home)
+            .join("Library/LaunchAgents")
+            .join(format!("{}.plist", ::hagency::service::DAEMON_LABEL));
+        if !std::fs::read_to_string(&plist).is_ok_and(|text| names_former_executable(&text, &exe, home)) {
+            return;
+        }
+        // One job at a time: the owner may be asking for the same in Hosting Options.
+        {
+            let mut state = shared();
+            if state.running { return; }
+            state.running = true;
+        }
+        // Registering stops the registered service first. A daemon that still
+        // runs from before the update may be in the middle of an Agent's run.
+        let idle = daemon::hello(home, Duration::from_secs(2)).is_none()
+            && !matches!(::hagency::daemon::DaemonHome::open(home), Err(::hagency::daemon::HomeError::AlreadyRunning));
+        let registered = idle.then(|| {
+            let install = helper::command(&exe, &[OsStr::new("install"), OsStr::new("--home"), home.as_os_str()]);
+            helper::run(install, Duration::from_secs(30), &helper::Cancellation::default(), false, || {})
+        });
+        {
+            let mut state = shared();
+            state.running = false;
+            // The next read shows the service as it is now.
+            state.read_at = None;
+        }
+        match registered {
+            None => makepad_widgets::log!("The hosting service names this app's former executable, and its daemon still runs: left as it is."),
+            Some(Ok(_)) => makepad_widgets::log!("The hosting service named this app's former executable: registered this one."),
+            Some(Err(failure)) => makepad_widgets::warning!("The hosting service names this app's former executable and was not registered again: {failure:?}"),
+        }
+        makepad_widgets::SignalToUI::set_ui_signal();
+    }
+}
+
 /// Run `pool`'s Claude Agents in containers (finding the runtime and
 /// preparing the image, minutes the first time) or back in the sandbox. The
 /// choice is kept in this computer's daemon home and applies from each of
@@ -1340,6 +1422,40 @@ mod tests {
         assert_eq!(plist_program("<key>ProgramArguments</key><array><string>/a &amp; b</string></array>").as_deref(), Some("/a & b"));
         std::fs::write(&plist, "not a property list").unwrap();
         assert_eq!(service_at(&plist, &exe), Service::Unknown);
+    }
+
+    #[test]
+    fn a_service_left_at_this_apps_former_name_is_told_from_every_other() {
+        let temp = Temp::new();
+        let folder = temp.0.join("Hagency Desktop.app/Contents/MacOS");
+        let other = temp.0.join("Hagency Hosting.app/Contents/Helpers");
+        for folder in [&folder, &other] {
+            std::fs::create_dir_all(folder).unwrap();
+        }
+        let (exe, former) = (folder.join("hagency"), folder.join("rinx"));
+        std::fs::write(&exe, "").unwrap();
+        let home = Path::new("/home/a/owner-daemon");
+        let plist = |program: &Path, home: &Path| ::hagency::service::daemon_launchd_plist(
+            program, home, "/usr/bin", Path::new("/tmp/owner-daemon.log"));
+        // Registered before an update renamed the executable: the program is gone.
+        assert!(names_former_executable(&plist(&former, home), &exe, home));
+        // Registered to this executable.
+        assert!(!names_former_executable(&plist(&exe, home), &exe, home));
+        // A build folder keeps the former executable, which still runs.
+        std::fs::write(&former, "").unwrap();
+        assert!(!names_former_executable(&plist(&former, home), &exe, home));
+        std::fs::remove_file(&former).unwrap();
+        // Another app's program, there or gone, and one in a folder that is gone.
+        std::fs::write(other.join("hagency"), "").unwrap();
+        assert!(!names_former_executable(&plist(&other.join("hagency"), home), &exe, home));
+        assert!(!names_former_executable(&plist(&other.join("rinx"), home), &exe, home));
+        assert!(!names_former_executable(&plist(&temp.0.join("Gone.app/Contents/MacOS/rinx"), home), &exe, home));
+        // Another daemon home, and a command line that is not the daemon's.
+        assert!(!names_former_executable(&plist(&former, Path::new("/home/b/owner-daemon")), &exe, home));
+        let isolated = plist(&former, home).replace("<string>daemon</string>", "<string>--hagency-isolated-installation-root</string>\n    <string>/i</string>\n    <string>daemon</string>");
+        assert_eq!(plist_arguments(&isolated).map(|a| a.len()), Some(7));
+        assert!(!names_former_executable(&isolated, &exe, home));
+        assert!(!names_former_executable("not a property list", &exe, home));
     }
 
     #[test]
