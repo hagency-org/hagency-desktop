@@ -584,7 +584,7 @@ pub struct MobileChatInfo {
     #[rust] review_mode: bool,
 }
 
-fn is_hagency_service(user: &matrix_sdk::ruma::UserId, owner: &matrix_sdk::ruma::UserId) -> bool {
+pub(crate) fn is_hagency_service(user: &matrix_sdk::ruma::UserId, owner: &matrix_sdk::ruma::UserId) -> bool {
     user.localpart() == "_hagency_service" && user.server_name() == owner.server_name()
 }
 

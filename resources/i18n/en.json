@@ -3248,5 +3248,7 @@
   "Only this room shows this name. Leave it empty to use your account's name.": "Only this room shows this name. Leave it empty to use your account's name.",
   "Nickname": "Nickname",
   "Could not change your nickname: {error}": "Could not change your nickname: {error}",
-  "Runs on a shared resource pool.": "Runs on a shared resource pool."
+  "Runs on a shared resource pool.": "Runs on a shared resource pool.",
+  "Invited": "Invited",
+  "Only some of the members are shown.": "Only some of the members are shown."
 }
