@@ -365,8 +365,13 @@ if kind == 'claude':
                 'options':[{'label':'One','description':'First'},{'label':'Two','description':'Second'}]} for i in range(4)]
             send({'type':'control_request','request_id':'question-1','request':{'subtype':'can_use_tool','tool_name':'AskUserQuestion','tool_use_id':'question-tool','input':{'questions':questions}}})
             if mode == 'question_cancel':
-                import time
-                time.sleep(0.1)
+                # Withdraw only a card the host already holds: the test writes
+                # this marker when the card reaches it. After a fixed delay, a
+                # slow host read the withdrawal before it had presented the
+                # question, and no card was ever sent.
+                deadline = time.monotonic() + 5
+                while not (root / 'question-presented').exists() and time.monotonic() < deadline:
+                    time.sleep(.01)
                 send({'type':'control_cancel_request','request_id':'question-1'})
             else:
                 response = read()['response']['response']
