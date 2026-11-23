@@ -22,8 +22,10 @@ pub const GEO_URI_SCHEME: &str = "geo:";
 pub(crate) enum InviteHistory {
     /// The room is not encrypted; there is no history to share.
     NotNeeded,
-    /// The room's keys were shared with the invitee.
-    Shared,
+    /// The invitation was sent. The SDK shares the room's history on invite when this device has a
+    /// cross-signing identity and the room's history visibility allows it, and otherwise skips it
+    /// silently, so whether history was shared is not known here.
+    Sent,
     /// The invitation was sent, but the history could not be shared (for example from an
     /// unverified device); the invitee may not read messages from before they joined.
     NotShared(String),
@@ -51,28 +53,59 @@ pub(crate) async fn invite_room_member(
         send_invite().await?;
         return Ok(InviteHistory::NotNeeded);
     }
-    invite_sharing_history(room.invite_user_by_id(user), send_invite, |history_error| {
-        makepad_widgets::warning!(
-            "Inviting {user} to {} without sharing history: {history_error}",
-            room.room_id()
-        );
-    }).await
+    invite_sharing_history(
+        room.invite_user_by_id(user),
+        || already_invited(room, user),
+        send_invite,
+        |history_error| {
+            makepad_widgets::warning!(
+                "Inviting {user} to {} without sharing history: {history_error}",
+                room.room_id()
+            );
+        },
+    ).await
 }
 
-/// Tries the SDK invitation that shares history first. If it fails, the plain
-/// invitation is sent instead; its own failure is the caller's error.
-async fn invite_sharing_history<Plain, PlainFut>(
+/// Whether the homeserver already has `user` invited to or joined in `room`. Asked of the server,
+/// not the local store, which may not have synced the invitation yet.
+async fn already_invited(room: &matrix_sdk::Room, user: &matrix_sdk::ruma::UserId) -> matrix_sdk::Result<bool> {
+    use matrix_sdk::{config::RequestConfig, ruma::{api::{client::state::get_state_event_for_key, error::ErrorKind}, events::StateEventType}};
+    let request = get_state_event_for_key::v3::Request::new(room.room_id().to_owned(), StateEventType::RoomMember, user.to_string());
+    match room.client().send(request).with_request_config(RequestConfig::short_retry()).await {
+        Ok(response) => {
+            let content = response.into_content().deserialize_as_unchecked::<serde_json::Value>()?;
+            Ok(matches!(content["membership"].as_str(), Some("invite" | "join")))
+        }
+        Err(error) if error.client_api_error_kind() == Some(&ErrorKind::NotFound) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Tries the SDK invitation that shares history first. If it fails, the SDK may have failed
+/// sharing (nothing was sent) or the invitation itself (it may have reached the server). The
+/// homeserver is asked which: an invitation already there is not sent again; otherwise the plain
+/// invitation is sent once, and its own failure is the caller's error. When the server cannot be
+/// asked, the first error is returned rather than risking a second invitation.
+async fn invite_sharing_history<Check, CheckFut, Plain, PlainFut>(
     sharing: impl std::future::Future<Output = matrix_sdk::Result<()>>,
+    invited: Check,
     plain: Plain,
     on_history_error: impl FnOnce(&matrix_sdk::Error),
 ) -> matrix_sdk::Result<InviteHistory>
 where
+    Check: FnOnce() -> CheckFut,
+    CheckFut: std::future::Future<Output = matrix_sdk::Result<bool>>,
     Plain: FnOnce() -> PlainFut,
     PlainFut: std::future::Future<Output = matrix_sdk::Result<()>>,
 {
     match sharing.await {
-        Ok(()) => Ok(InviteHistory::Shared),
+        Ok(()) => Ok(InviteHistory::Sent),
         Err(history_error) => {
+            match invited().await {
+                Ok(true) => return Ok(InviteHistory::Sent),
+                Ok(false) => {}
+                Err(_) => return Err(history_error),
+            }
             on_history_error(&history_error);
             plain().await?;
             Ok(InviteHistory::NotShared(history_error.to_string()))
@@ -85,33 +118,48 @@ mod invite_history_tests {
     use super::*;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    #[tokio::test]
-    async fn a_failed_history_share_still_sends_the_plain_invitation() {
+    async fn run(
+        sharing: matrix_sdk::Result<()>,
+        invited: matrix_sdk::Result<bool>,
+        plain: matrix_sdk::Result<()>,
+    ) -> (matrix_sdk::Result<InviteHistory>, usize) {
         let plain_sent = AtomicUsize::new(0);
         let history = invite_sharing_history(
-            async { Err(matrix_sdk::Error::NoOlmMachine) },
-            || async { plain_sent.fetch_add(1, Ordering::SeqCst); Ok(()) },
+            async { sharing },
+            || async { invited },
+            || async { plain_sent.fetch_add(1, Ordering::SeqCst); plain },
             |_| {},
-        ).await.unwrap();
-        assert!(matches!(history, InviteHistory::NotShared(_)), "{history:?}");
-        assert_eq!(plain_sent.load(Ordering::SeqCst), 1);
+        ).await;
+        (history, plain_sent.load(Ordering::SeqCst))
     }
 
     #[tokio::test]
-    async fn a_shared_invitation_sends_nothing_more_and_a_refused_plain_invite_is_an_error() {
-        let plain_sent = AtomicUsize::new(0);
-        let history = invite_sharing_history(
-            async { Ok(()) },
-            || async { plain_sent.fetch_add(1, Ordering::SeqCst); Ok(()) },
-            |_| {},
-        ).await.unwrap();
-        assert_eq!(history, InviteHistory::Shared);
-        assert_eq!(plain_sent.load(Ordering::SeqCst), 0);
-        let refused = invite_sharing_history(
-            async { Err(matrix_sdk::Error::NoOlmMachine) },
-            || async { Err(matrix_sdk::Error::InsufficientData) },
-            |_| {},
-        ).await;
+    async fn a_failed_history_share_sends_the_plain_invitation_once() {
+        let (history, sent) = run(Err(matrix_sdk::Error::NoOlmMachine), Ok(false), Ok(())).await;
+        assert!(matches!(history, Ok(InviteHistory::NotShared(_))), "{history:?}");
+        assert_eq!(sent, 1);
+    }
+
+    #[tokio::test]
+    async fn an_invitation_already_on_the_server_is_not_sent_again() {
+        let (history, sent) = run(Err(matrix_sdk::Error::NoOlmMachine), Ok(true), Ok(())).await;
+        assert_eq!(history.unwrap(), InviteHistory::Sent);
+        assert_eq!(sent, 0, "no second invitation");
+    }
+
+    #[tokio::test]
+    async fn when_the_server_cannot_be_asked_the_first_error_is_returned_without_resending() {
+        let (history, sent) = run(Err(matrix_sdk::Error::NoOlmMachine), Err(matrix_sdk::Error::InsufficientData), Ok(())).await;
+        assert!(matches!(history, Err(matrix_sdk::Error::NoOlmMachine)), "{history:?}");
+        assert_eq!(sent, 0);
+    }
+
+    #[tokio::test]
+    async fn a_sent_invitation_claims_nothing_about_history_and_a_refused_plain_invite_is_an_error() {
+        let (history, sent) = run(Ok(()), Ok(false), Ok(())).await;
+        assert_eq!(history.unwrap(), InviteHistory::Sent);
+        assert_eq!(sent, 0);
+        let (refused, _) = run(Err(matrix_sdk::Error::NoOlmMachine), Ok(false), Err(matrix_sdk::Error::InsufficientData)).await;
         assert!(refused.is_err());
     }
 }
