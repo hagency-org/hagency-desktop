@@ -2622,6 +2622,7 @@
   "Created. Continue with the next step below.": "创建成功。请继续下面的步骤。",
   "Created, but setup is incomplete. Use Finish setup to retry.": "已创建，但设置未完成。请点击“继续完成设置”重试",
   "Choose a space and refresh its type before creating the room.": "请先选择空间并刷新其类型，再创建聊天室。",
+  "Ask a project manager on the home server to add rooms to this Agent space.": "请联系项目所在服务器的管理员，在此 Agent 空间中添加房间。",
   "Space type unavailable": "空间类型暂不可用",
   "Agent space": "Agent 空间",
   "Ordinary space": "普通空间",
