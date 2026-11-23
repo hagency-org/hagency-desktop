@@ -468,7 +468,7 @@ async fn remote_kind(client: &Client, room: &RoomId) -> RemoteKind {
     struct Kind { agent: bool }
 
     let read = async {
-        let mut url = client.homeserver().join("/_matrix/client/unstable/im.hagency/space_kind").ok()?;
+        let mut url = client.homeserver().join("/hagency/api/v1/space-kind").ok()?;
         url.query_pairs_mut().append_pair("room", room.as_str());
         let mut response = client.http_client().get(url)
             .bearer_auth(client.access_token()?)
