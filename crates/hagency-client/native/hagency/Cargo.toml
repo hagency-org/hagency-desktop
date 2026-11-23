@@ -26,7 +26,6 @@ resource-adoption = ["hagency-store/resource-adoption"]
 [dependencies]
 toml = { version = "=1.1.5", default-features = false, features = ["parse", "serde", "std"] }
 percent-encoding = "=2.3.2"
-httpdate = "1"
 rusqlite = { workspace = true, features = ["hooks"] }
 hagency-agent-local = { path = "../hagency-agent-local" }
 hagency-core.workspace = true
