@@ -87,6 +87,23 @@ pub fn line_in(language: Language, meta: &Value) -> Option<String> {
     }
 }
 
+/// The line for an event, only when it comes from the Hagency service account of the viewer's own
+/// server, which posts GitFab stage messages and status notices. Anyone in the Room can put the
+/// same metadata on a message, so a card from any other sender would let members fake a stage or a
+/// "completed" run.
+fn line_from(
+    language: Language,
+    sender: &matrix_sdk::ruma::UserId,
+    viewer: Option<&matrix_sdk::ruma::UserId>,
+    meta: Option<Value>,
+) -> Option<String> {
+    let viewer = viewer?;
+    if !crate::home::mobile_chat_info::is_hagency_service(sender, viewer) {
+        return None;
+    }
+    line_in(language, &meta?)
+}
+
 /// The GitFab metadata of an event's original content.
 fn meta_of(event: &matrix_sdk_ui::timeline::EventTimelineItem) -> Option<Value> {
     let content = event
@@ -116,7 +133,8 @@ impl GitfabStageCardRef {
     /// Shows the line for `event`, or hides the card: a recycled message may have shown another's.
     pub fn populate(&self, cx: &mut Cx, event: &matrix_sdk_ui::timeline::EventTimelineItem) {
         let Some(mut inner) = self.borrow_mut() else { return };
-        let line = meta_of(event).and_then(|m| line_in(crate::i18n::language(), &m));
+        let viewer = crate::sliding_sync::current_user_id();
+        let line = line_from(crate::i18n::language(), event.sender(), viewer.as_deref(), meta_of(event));
         inner.view.set_visible(cx, line.is_some());
         inner
             .view
@@ -150,6 +168,22 @@ mod tests {
         assert_eq!(line_in(Chinese, &status(json!({"kind":"awaiting_spec_approval","specRevision":3}))).unwrap(), "GitFab · T · 等待确认 Spec 第 3 版");
         assert_eq!(line_in(Chinese, &status(json!({"kind":"completed"}))).unwrap(), "GitFab · T · 已完成");
         assert_eq!(line_in(English, &status(json!({"kind":"failed","reason":"stage_failed"}))).unwrap(), "GitFab · T · ended (stage_failed)");
+    }
+
+    #[test]
+    fn only_the_hagency_service_of_the_viewers_server_shows_a_card() {
+        use matrix_sdk::ruma::user_id;
+        let meta = || Some(json!({"version": 1, "kind": "status", "runId": "r", "taskId": "T-1", "state": {"kind": "completed"}}));
+        let viewer = user_id!("@alice:river.example");
+        assert!(line_from(English, user_id!("@_hagency_service:river.example"), Some(viewer), meta()).is_some());
+        for sender in [
+            user_id!("@bob:river.example"),
+            user_id!("@_hagency_service:evil.example"),
+            user_id!("@_hagency_agt_01abc:river.example"),
+        ] {
+            assert_eq!(line_from(English, sender, Some(viewer), meta()), None, "{sender}");
+        }
+        assert_eq!(line_from(English, user_id!("@_hagency_service:river.example"), None, meta()), None, "no viewer, no card");
     }
 
     #[test]
