@@ -298,6 +298,14 @@ where
                 "Database inventory contains an invalid state directory"
             ),
         }
+        let mut documents = tokio::fs::read_dir(&state).await?;
+        while let Some(entry) = documents.next_entry().await? {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with("session.unavailable-") || name.starts_with("retained_db.json.unavailable-") {
+                anyhow::bail!("Database inventory includes preserved, locked history");
+            }
+        }
         for (name, retained) in [("retained_db.json", true), ("session", false)] {
             let document = state.join(name);
             match tokio::fs::symlink_metadata(&document).await {
@@ -549,7 +557,7 @@ async fn restore_session_inner(
         .homeserver_url(client_session.homeserver)
         .build()
         .await?;
-    crate::login::homeserver::login_methods(&client).await?;
+    crate::login::homeserver::check_saved_account_server(&client).await?;
     if !matches!(&user_session, PersistedUserSession::OAuth { .. }) {
         bail!("Sign in again through Pasion on your Hagency server.");
     }

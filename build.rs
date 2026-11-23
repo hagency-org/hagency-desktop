@@ -21,6 +21,7 @@ fn main() {
     // a package-name.path file beside the compiled libraries. Rinx is also a
     // hosted dependency, so publish its resource root like makepad-widgets.
     let out_dir = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    index_pdf_preview_assets(&root, &out_dir);
     let profile_dir = out_dir.ancestors().nth(3).unwrap();
     std::fs::write(
         profile_dir.join("rinx.path"),
@@ -59,7 +60,7 @@ fn main() {
         let plist = std::path::Path::new(&std::env::var("CARGO_MANIFEST_DIR").unwrap())
             .join("packaging/macos/Info.plist");
         println!("cargo:rerun-if-changed=packaging/macos/Info.plist");
-        println!("cargo:rustc-link-arg-bin=rinx=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
+        println!("cargo:rustc-link-arg-bin=hagency=-Wl,-sectcreate,__TEXT,__info_plist,{}", plist.display());
     }
 
     if target_os == "windows" {
@@ -95,6 +96,59 @@ fn main() {
     println!("cargo:rerun-if-env-changed=TESTFLIGHT_BUILD_NUMBER");
     let testflight_build = std::env::var("TESTFLIGHT_BUILD_NUMBER").unwrap_or_default();
     println!("cargo:rustc-env=TESTFLIGHT_BUILD_NUMBER={testflight_build}");
+}
+
+fn index_pdf_preview_assets(root: &std::path::Path, out_dir: &std::path::Path) {
+    let directory = "resources/pdf-preview";
+    println!("cargo:rerun-if-changed={directory}");
+    let mut assets = vec![
+        (
+            "/".to_owned(),
+            "view.html".to_owned(),
+            "text/html; charset=utf-8",
+        ),
+        ("/reader.mjs".to_owned(), "reader.mjs".to_owned(), "text/javascript"),
+        ("/pdf.min.mjs".to_owned(), "pdf.min.mjs".to_owned(), "text/javascript"),
+        (
+            "/pdf.worker.min.mjs".to_owned(),
+            "pdf.worker.min.mjs".to_owned(),
+            "text/javascript",
+        ),
+    ];
+    for (subdirectory, extensions, mime) in [
+        ("cmaps", &["bcmap"][..], "application/octet-stream"),
+        ("standard_fonts", &["pfb", "ttf"][..], "application/octet-stream"),
+        ("decoders", &["js"][..], "text/javascript"),
+    ] {
+        let entries =
+            std::fs::read_dir(root.join(directory).join(subdirectory)).expect("list PDF assets");
+        for entry in entries {
+            let path = entry.expect("read PDF asset").path();
+            if path
+                .extension()
+                .and_then(|value| value.to_str())
+                .is_some_and(|ext| extensions.contains(&ext))
+            {
+                let file = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .expect("PDF asset filename");
+                let name = format!("{subdirectory}/{file}");
+                assets.push((format!("/{name}"), name, mime));
+            }
+        }
+    }
+    assets.sort_unstable();
+    let mut code = String::from(
+        "fn pdf_preview_asset(path: &[u8]) -> Option<(&'static str, &'static [u8])> {\n    match path {\n",
+    );
+    for (route, file, mime) in assets {
+        code.push_str(&format!(
+            "        b{route:?} => Some(({mime:?}, include_bytes!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/{directory}/{file}\")))),\n"
+        ));
+    }
+    code.push_str("        _ => None,\n    }\n}\n");
+    std::fs::write(out_dir.join("pdf-preview-assets.rs"), code).expect("index PDF preview assets");
 }
 
 /// Returns Rinx's own current git commit info as a commit hash and a permalink.

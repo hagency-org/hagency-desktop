@@ -38,6 +38,8 @@ pub fn view_from_live_ptr(
 
 /// The top-level main application module.
 pub mod app;
+#[cfg(target_os = "macos")]
+pub mod macos_dev_output;
 pub mod dock_serde;
 pub mod jit_compat;
 pub mod accounts;
@@ -115,6 +117,7 @@ pub mod agent_access;
 pub mod sliding_sync;
 mod matrix_context;
 mod room_encryption;
+mod room_members;
 pub mod space_service_sync;
 pub mod avatar_cache;
 pub mod room_preview_cache;

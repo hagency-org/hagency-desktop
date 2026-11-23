@@ -16,24 +16,35 @@ impl SharedExecutionTransport {
         Ok(SharedDemandPoll{next_after:reply.value.next_after,outcome})
     }
     pub async fn poll_budget_demand(&self,r:&OwnerResourceRegistry,after:Option<String>)->Result<SharedDemandPoll,NativeError>{
+        let reply = self.fetch_budget_demand(after).await?;
+        let outcome=match reply.value.demand {Some(s)=>self.consume_budget_demand(r,s,reply.observed,None).await,None=>Ok(SharedDemandProgress::Idle)};
+        Ok(SharedDemandPoll{next_after:reply.value.next_after,outcome})
+    }
+    async fn fetch_budget_demand(&self, after: Option<String>) -> Result<Timed<hagency_store::owner_resources::shared_execution::SharedBudgetDemandPoll>, NativeError> {
         self.pump_crypto().await?;
         let b=self.io.bound().await?;budget_demand_io::require_pair(&b).await?;
         let reply:Timed<hagency_store::owner_resources::shared_execution::SharedBudgetDemandPoll>=b.request(BudgetDemandAction::Poll{after}.into(),false).await?;
         if let Some(id)=&reply.value.next_after{super::super::key(id)?;}
-        let outcome=match reply.value.demand {Some(s)=>self.consume_budget_demand(r,s,reply.observed,None).await,None=>Ok(SharedDemandProgress::Idle)};
-        Ok(SharedDemandPoll{next_after:reply.value.next_after,outcome})
+        Ok(reply)
+    }
+    pub(in crate::console::native) async fn discover_budget_demand(&self, after: Option<String>) -> Result<(Option<String>, Option<(String,String)>),NativeError> {
+        let reply = self.fetch_budget_demand(after).await?.value;
+        Ok((reply.next_after, reply.demand.map(|s| (s.offer.demand_id,s.demand_digest))))
     }
     pub async fn resume_next_budget_demand(&self,r:&OwnerResourceRegistry,after:Option<String>)->Result<Option<SharedDemandResume>,NativeError>{
         let b=self.io.bound().await?;
         let Some(saved)=r.next_shared_demand(b.scope.profile.clone(),b.scope.device.device_id().into(),after).await.map_err(store)?else{return Ok(None)};
         let id=saved.intent().offer().demand_id.clone();let expected=saved.intent().offer().digest().map_err(store)?;
-        let outcome=async{
-            let reply:Timed<budget_demand_io::RecoverReply>=b.request(BudgetDemandAction::Recover{id:id.clone(),digest:expected.clone()}.into(),false).await?;
+        let outcome=self.consume_budget_ref(r,&id,&expected).await;
+        Ok(Some(SharedDemandResume{demand_id:id,outcome}))
+    }
+    pub(in crate::console::native) async fn consume_budget_ref(&self,r:&OwnerResourceRegistry,id:&str,expected:&str)->Result<SharedDemandProgress,NativeError>{
+        let b=self.io.bound().await?;
+
+            let reply:Timed<budget_demand_io::RecoverReply>=b.request(BudgetDemandAction::Recover{id:id.to_owned(),digest:expected.to_owned()}.into(),false).await?;
             let status=reply.value.demand.ok_or_else(invalid)?;
             if status.offer.demand_id!=id||status.demand_digest!=expected{return Err(invalid())}
             self.consume_budget_demand(r,status,reply.observed,None).await
-        }.await;
-        Ok(Some(SharedDemandResume{demand_id:id,outcome}))
     }
     async fn consume_budget_demand(&self,r:&OwnerResourceRegistry,s:SharedBudgetDemandStatus,observed:u64,launch:Option<super::super::managed_runtime::PreparedLaunch>)->Result<SharedDemandProgress,NativeError>{
         s.validate().map_err(store)?;let id=s.offer.demand_id.clone();let b=self.io.bound().await?;

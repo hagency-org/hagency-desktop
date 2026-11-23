@@ -138,7 +138,7 @@ pub(super) async fn send_message(
     }
     let _ = pending;
     let device = device(io, b, &work.assignment_id).await?;
-    outbox.send_next(&device, work.encrypted).await
+    outbox.send_next(&device, work.encrypted, None, None).await
         .map_err(|_| failure(503, "shared_message_delivery_pending"))
 }
 pub(super) fn file_records(io: &Io, b: &Bound, assignment: &str) -> Result<PathBuf, NativeError> {
@@ -621,7 +621,11 @@ pub(super) async fn wire_receipt(
                 // The model already ran. Preserve usage even when permission to
                 // publish was revoked; do not claim an uncertain send never ran.
                 Err(e) if matches!(e.status, 401 | 403 | 409) => None,
-                Err(e) => return Err(e),
+                Err(e) => {
+                    tracing::debug!(work_id = %w.id, status = e.status, code = %e.code,
+                        "Final encrypted reply could not obtain send authorization");
+                    return Err(e);
+                }
             };
             let content = crate::console::owned_runtime::e2ee::reply_content(&dispatch(w), body)
                 .map_err(|_| invalid())?;

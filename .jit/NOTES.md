@@ -1,5 +1,13 @@
 # Hagency Desktop on the makepad JIT line: port notes
 
+Development and test policy: use JIT. Native compilation is reserved for
+explicitly requested release work. Reuse existing matching runner and native
+helper binaries; do not run Cargo builds to prepare a development test. Cargo
+commands and timings below document release/CI behavior and earlier runs,
+and do not override this policy. If a test driver cannot run under the JIT,
+report the limitation or reuse an existing driver while the actual product
+UI and daemon run under JIT.
+
 The desktop app (package `rinx`) builds against the makepad JIT line: upstream makepad `work`
 (the HAL rewrite with the relax JIT) plus the fixes on OctoSense-org/makepad branch `main`.
 That branch was named `hagency-jit` until 13 Nov 2026; the fork's earlier line is now
@@ -190,9 +198,9 @@ takes 0.2 s). On a shared machine run `relax` and `makepad run` experiments unde
 The owner daemon (`rinx daemon run`: it holds the owner database and runs the Agents) runs
 under the runner like the window does:
 
-    cargo build --bin rinx          # once: a native binary for the helper processes
+    cargo build --bin hagency          # once: a native binary for the helper processes
     export MAKEPAD_RUN_ALLOW_C=1 MAKEPAD_RUN_TRUST_PROC_MACROS=1 RUST_MIN_STACK=16777216
-    export HAGENCY_NATIVE_HELPER=$PWD/target/debug/rinx MAKEPAD_RUN_INSPECT=0
+    export HAGENCY_NATIVE_HELPER=$PWD/target/debug/hagency MAKEPAD_RUN_INSPECT=0
     ulimit -n 10240
     run=".sources/makepad/target/release/makepad run --no-live --allow-c rinx
          --features development-native-helper --"

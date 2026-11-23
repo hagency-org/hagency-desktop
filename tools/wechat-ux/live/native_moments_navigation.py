@@ -22,7 +22,7 @@ from native_probe import NativeApp
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--binary", type=Path, default=Path("target/release/rinx"))
+    parser.add_argument("--binary", type=Path, default=Path("target/release/hagency"))
     args = parser.parse_args()
     assert (args.profile / "latest_user_id.txt").read_text().strip().startswith("@robrix_ux_")
     root = Path("target/moments-navigation") / uuid.uuid4().hex

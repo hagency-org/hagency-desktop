@@ -22,7 +22,7 @@ from native_probe import NativeApp
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--profile", type=Path, required=True)
-    parser.add_argument("--binary", type=Path, default=Path("target/debug/rinx"))
+    parser.add_argument("--binary", type=Path, default=Path("target/debug/hagency"))
     parser.add_argument("--markdown-file", type=Path, help="Also exercise the macOS file picker with this fixture and an HTML file")
     parser.add_argument("--math-checks", action="store_true", help="Capture all math rows and exercise TeX edit/save/reopen")
     args = parser.parse_args()

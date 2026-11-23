@@ -27,7 +27,7 @@ class App(NativeApp):
         self._user_seq = saved["user_seq"]
         self._activity_checked = self._user_seq is not None
         assert self.request("/s")["pid"] == saved["pid"], "Different native process"
-        binary = self.root / "bin/rinx"
+        binary = self.root / "bin/hagency"
         self.binary_hash = hashlib.sha256(binary.read_bytes()).hexdigest()
         self.log_offset = (self.root / "native.log").stat().st_size
 

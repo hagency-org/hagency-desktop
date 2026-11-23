@@ -67,6 +67,7 @@ impl VerifiedOwnerResourceBinding {
     pub(super) fn check(&self) -> Result<(), Error> {
         self.profile.check()?;
         if Instant::now() >= self.expires {
+            tracing::info!(overdue_ms = self.expires.elapsed().as_millis() as u64, "Pool provider binding expired");
             return Err(Error::LocalAuthority);
         }
         if let Some(octos) = &self.octos {

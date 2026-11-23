@@ -24,7 +24,7 @@ from native_probe import NativeApp
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--profile", required=True, type=Path)
-    parser.add_argument("--binary", type=Path, default=Path("target/debug/rinx"))
+    parser.add_argument("--binary", type=Path, default=Path("target/debug/hagency"))
     parser.add_argument("--content-checks", action="store_true", help="Also check images, tables, code highlighting, emoji and flowcharts")
     parser.add_argument("--content-case", choices=["images", "linked_image", "table", "code", "emoji", "flow"])
     args = parser.parse_args()

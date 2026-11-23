@@ -13,13 +13,10 @@ pub(super) fn confine(
     scope: &Path,
     project: Option<&SharedProject>,
 ) -> Result<(), StartError> {
-    confine_paths(
-        launch,
-        scope,
-        project,
-        &["HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "CLAUDE_CODE_TMPDIR"],
-    )
+    confine_paths(launch, scope, project, &CLAUDE_PATHS)
 }
+/// The folders a shared Claude run keeps inside its private scope.
+pub(super) const CLAUDE_PATHS: [&str; 4] = ["HOME", "CLAUDE_CONFIG_DIR", "TMPDIR", "CLAUDE_CODE_TMPDIR"];
 
 /// Octos runs with a private, ephemeral copy of exactly one selected
 /// profile. The caller still has to bind pool custody and a live lease.
@@ -50,6 +47,33 @@ fn confine_paths(
     project: Option<&SharedProject>,
     names: &[&str],
 ) -> Result<(), StartError> {
+    check_paths(launch, scope, project, names)?;
+    #[cfg(target_os = "macos")]
+    {
+        let executable = launch
+            .executable
+            .canonicalize()
+            .map_err(|_| StartError::Settings)?;
+        let policy = seatbelt(scope, &executable, project.map(SharedProject::directory))?;
+        let mut arguments = vec!["-p".into(), policy.into(), executable.into_os_string()];
+        arguments.append(&mut launch.arguments);
+        launch.executable = "/usr/bin/sandbox-exec".into();
+        launch.arguments = arguments;
+        Ok(())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(StartError::Unsupported)
+    }
+}
+/// The launch works in its own scope, or in the space's project folder, and
+/// each of `names` is a folder inside the scope.
+pub(super) fn check_paths(
+    launch: &Launch,
+    scope: &Path,
+    project: Option<&SharedProject>,
+    names: &[&str],
+) -> Result<(), StartError> {
     let working = match project {
         Some(project) => {
             project.check()
@@ -71,23 +95,7 @@ fn confine_paths(
             return Err(StartError::Settings);
         }
     }
-    #[cfg(target_os = "macos")]
-    {
-        let executable = launch
-            .executable
-            .canonicalize()
-            .map_err(|_| StartError::Settings)?;
-        let policy = seatbelt(scope, &executable, project.map(SharedProject::directory))?;
-        let mut arguments = vec!["-p".into(), policy.into(), executable.into_os_string()];
-        arguments.append(&mut launch.arguments);
-        launch.executable = "/usr/bin/sandbox-exec".into();
-        launch.arguments = arguments;
-        Ok(())
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        Err(StartError::Unsupported)
-    }
+    Ok(())
 }
 
 #[cfg(target_os = "macos")]

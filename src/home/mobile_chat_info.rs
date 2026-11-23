@@ -4,17 +4,20 @@ use makepad_widgets::*;
 use std::collections::{HashMap, HashSet};
 use matrix_sdk::{
     notification_settings::RoomNotificationMode,
-    ruma::{events::room::member::MembershipState, OwnedUserId, OwnedRoomId},
+    ruma::{events::{room::power_levels::RoomPowerLevels, StateEventType}, OwnedRoomId, OwnedUserId, UserId},
     RoomMemberships,
 };
 
 use crate::{
     home::{invite_modal::InviteModalAction, rooms_list::RoomNotificationModeUpdated},
     logout::logout_confirm_modal::LogoutAction,
+    moderation::{MemberAbilitiesInvalidated, MemberAction, MemberModeration},
+    moderation_modal::{ModerationModalAction, ModerationRequest},
     profile::user_profile::{ShowUserProfileAction, UserProfile, UserProfileAndRoomId},
     shared::{
         avatar::{AvatarState, AvatarWidgetRefExt},
-        navigation_bar_button::{NavigationBarButtonWidgetRefExt, NavigationBarButtonWidgetExt},
+        navigation_bar_button::{NavigationBarButton, NavigationBarButtonWidgetRefExt, NavigationBarButtonWidgetExt},
+        popup_list::{enqueue_popup_notification, PopupKind},
     },
     sliding_sync::{
         current_user_id, get_client, spawn_async_task, submit_async_request, MatrixRequest,
@@ -26,12 +29,38 @@ script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
+    let InfoMemberCell = NavigationBarButton {
+        width: 64 height: 84 flow: Down spacing: 2
+        padding: Inset{top: 4 bottom: 4 left: 2 right: 2}
+        align: Align{x: 0.5 y: 0.0}
+        draw_bg +: {color_hover: mod.widgets.RINX_HOVER color_active: mod.widgets.RINX_HOVER border_radius: 6}
+        face := View {width: 48 height: 46 flow: Overlay
+            photo := View {width: 40 height: 40 margin: Inset{left: 4 top: 6}
+                avatar := mod.widgets.MobileAvatar {width: 40 height: 40}
+            }
+            tile := RoundedView {visible: false width: 40 height: 40 margin: Inset{left: 4 top: 6}
+                flow: Overlay align: Align{x: 0.5 y: 0.5}
+                draw_bg +: {color: mod.widgets.RINX_SURFACE border_radius: 5.0 border_size: 1.0 border_color: mod.widgets.RINX_DISABLED}
+                SolidView {width: 16 height: 2 draw_bg.color: mod.widgets.RINX_MUTED}
+                upright := SolidView {width: 2 height: 16 draw_bg.color: mod.widgets.RINX_MUTED}
+            }
+            badge := RoundedView {visible: false width: 16 height: 16 align: Align{x: 0.5 y: 0.5}
+                draw_bg +: {color: mod.widgets.RINX_DANGER_FG border_radius: 8.0}
+                SolidView {width: 8 height: 2 draw_bg.color: mod.widgets.RINX_ON_ACCENT}
+            }
+        }
+        name := Label {width: Fill height: Fit padding: 0 align: Align{x: 0.5} max_lines: 1 text_overflow: Ellipsis
+            draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_regular {font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}}
+        note := Label {width: Fill height: Fit padding: 0 align: Align{x: 0.5} max_lines: 1 text_overflow: Ellipsis
+            draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular {font_size: (8 * mod.widgets.RINX_TEXT_SCALE)}}}
+    }
+
     mod.widgets.MobileChatInfo = #(MobileChatInfo::register_widget(vm)) {
         ..mod.widgets.SolidView
         width: Fill height: Fill flow: Down
         draw_bg.color: mod.widgets.MOBILE_BG
-        summary := View {width: Fill height: Fit flow: Down padding: 16 spacing: 8
-            summary_details := View {width: Fill height: Fit flow: Down spacing: 8
+        summary := View {width: Fill height: Fit flow: Down
+            summary_details := View {width: Fill height: Fit flow: Down spacing: 8 padding: Inset{left: 16 right: 16 top: 16 bottom: 4}
                 summary_name := Label {width: Fill height: Fit max_lines: 2 text_overflow: Ellipsis
                     draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_bold{font_size: (15 * mod.widgets.RINX_TEXT_SCALE)}}}
                 View {width: Fill height: 32 flow: Right spacing: 8 align: Align{y: 0.5}
@@ -42,10 +71,6 @@ script_mod! {
                         Icon {icon_walk: Walk{width: 16 height: 16} draw_icon +: {svg: ICON_ADD_ATTACHMENT color: mod.widgets.RINX_MUTED}}}
                 }
             }
-            View {width: Fill height: 36 flow: Right spacing: 8
-                overview_tab := RobrixNeutralIconButton {width: Fill height: 36 text: #(crate::i18n::tr("Overview")) icon_walk: Walk{width: 0 height: 0}}
-                members_tab := RobrixNeutralIconButton {width: Fill height: 36 text: #(crate::i18n::tr("Members")) icon_walk: Walk{width: 0 height: 0}}
-            }
         }
         status := Label {
             width: Fill height: Fit margin: 16
@@ -53,7 +78,31 @@ script_mod! {
             draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular {font_size: (11 * mod.widgets.RINX_TEXT_SCALE)}}
         }
         retry := RobrixNeutralIconButton {visible: false text: #(crate::i18n::tr("Retry")) i18n_text: "Retry" height: 44 margin: 12}
-        services_panel := View {visible: false width: Fill height: Fit flow: Down padding: Inset{left: 16 right: 16 bottom: 12} spacing: 10
+        rename_panel := View {visible: false width: Fill height: Fit flow: Down padding: Inset{left: 16 right: 16 top: 12 bottom: 12} spacing: 10
+            rename_back := RinxBackButton {}
+            Label {width: Fill height: Fit text: #(crate::i18n::tr("Room name")) i18n_text: "Room name"
+                draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_bold{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}}
+            rename_input := RinxInput {width: Fill height: (44 * mod.widgets.RINX_TEXT_SCALE) padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
+                draw_bg +: {border_size: 0 border_radius: 5} draw_text.text_style.font_size: (12 * mod.widgets.RINX_TEXT_SCALE)
+                empty_text: #(crate::i18n::tr("Room name")) i18n_empty_text: "Room name"}
+            rename_status := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
+            rename_save := RobrixPositiveIconButton {text: #(crate::i18n::tr("Save")) i18n_text: "Save" width: Fill height: 40 padding: 10 icon_walk: Walk{width: 0 height: 0}}
+        }
+        nick_panel := View {visible: false width: Fill height: Fit flow: Down padding: Inset{left: 16 right: 16 top: 12 bottom: 12} spacing: 10
+            nick_back := RinxBackButton {}
+            Label {width: Fill height: Fit text: #(crate::i18n::tr("My nickname in this room")) i18n_text: "My nickname in this room"
+                draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_bold{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}}
+            Label {width: Fill height: Fit flow: Flow.Right{wrap: true}
+                text: #(crate::i18n::tr("Only this room shows this name. Leave it empty to use your account's name."))
+                i18n_text: "Only this room shows this name. Leave it empty to use your account's name."
+                draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular{font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}}
+            nick_input := RinxInput {width: Fill height: (44 * mod.widgets.RINX_TEXT_SCALE) padding: Inset{left: 12 right: 12 top: 10 bottom: 10}
+                draw_bg +: {border_size: 0 border_radius: 5} draw_text.text_style.font_size: (12 * mod.widgets.RINX_TEXT_SCALE)
+                empty_text: #(crate::i18n::tr("Nickname")) i18n_empty_text: "Nickname"}
+            nick_status := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
+            nick_save := RobrixPositiveIconButton {text: #(crate::i18n::tr("Save")) i18n_text: "Save" width: Fill height: 40 padding: 10 icon_walk: Walk{width: 0 height: 0}}
+        }
+        services_panel := View {visible: false width: Fill height: Fit flow: Down padding: Inset{left: 16 right: 16 top: 12 bottom: 12} spacing: 10
             services_back := RinxBackButton {}
             Label {width: Fill height: Fit text: #(crate::i18n::tr("Room Agent services")) i18n_text: "Room Agent services"
                 draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_bold{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}}
@@ -70,54 +119,28 @@ script_mod! {
                 refresh_services := RobrixNeutralIconButton {text: #(crate::i18n::tr("Refresh")) height: 36 padding: Inset{left: 10 right: 10 top: 0 bottom: 0} icon_walk: Walk{width: 0 height: 0}}
             }
         }
-        member_controls := View {visible: false width: Fill height: Fit flow: Down padding: Inset{left: 12 right: 12 bottom: 12} spacing: 8
-            View {width: Fill height: 32 flow: Right spacing: 6
-                invite_people := RobrixNeutralIconButton {text: #(crate::i18n::tr("Invite people")) i18n_text: "Invite people" width: Fill height: 32 padding: 6 spacing: 5
-                    icon_walk: Walk{width: 14 height: 14} draw_icon.svg: ICON_ADD_USER}
-                invite_my_agent := RobrixNeutralIconButton {text: #(crate::i18n::tr("Add agent")) i18n_text: "Add agent" width: Fill height: 32 padding: 6 spacing: 5
-                    icon_walk: Walk{width: 14 height: 14} draw_icon.svg: ICON_ROBOT}
-            }
-            members_empty := Label {visible: false width: Fill height: Fit text: #(crate::i18n::tr("No members available.")) draw_text.color: mod.widgets.RINX_MUTED}
-        }
-        ownership_status := Label {visible: false width: Fill height: Fit margin: Inset{left: 16 right: 16 bottom: 8}
-            flow: Flow.Right{wrap: true}
-            text: #(crate::i18n::tr("Some Agent ownership could not be verified. Unmatched members are shown separately."))
-            i18n_text: "Some Agent ownership could not be verified. Unmatched members are shown separately."
-            draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular{font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}}
         information_list := View {width: Fill height: Fill
             list := PortalList {
                 width: Fill height: Fill flow: Down
-                Header := mod.widgets.MobileSection {
-                    padding: Inset{left: 16 right: 16 top: 4 bottom: 12} spacing: 6 margin: 0
-                    Label {width: Fill text: #(crate::i18n::tr("Room details")) draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_bold{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)}}}
+                MemberRow := mod.widgets.MobileSection {
+                    flow: Right padding: Inset{left: 12 right: 12}
+                    c0 := InfoMemberCell {} c1 := InfoMemberCell {} c2 := InfoMemberCell {}
+                    c3 := InfoMemberCell {} c4 := InfoMemberCell {} c5 := InfoMemberCell {}
+                }
+                AddChoice := mod.widgets.MobileSection {
+                    flow: Right spacing: 6 padding: Inset{left: 12 right: 12 top: 4 bottom: 10}
+                    invite_people := RobrixNeutralIconButton {text: #(crate::i18n::tr("Invite people")) i18n_text: "Invite people" width: Fill height: 32 padding: 6 spacing: 5
+                        icon_walk: Walk{width: 14 height: 14} draw_icon.svg: ICON_ADD_USER}
+                    invite_my_agent := RobrixNeutralIconButton {text: #(crate::i18n::tr("Add agent")) i18n_text: "Add agent" width: Fill height: 32 padding: 6 spacing: 5
+                        icon_walk: Walk{width: 14 height: 14} draw_icon.svg: ICON_ROBOT}
+                }
+                Gap := View {width: Fill height: 8}
+                Topic := mod.widgets.MobileSection {
+                    padding: Inset{left: 20 right: 20 top: 12 bottom: 12} spacing: 6 margin: 0
+                    Label {width: Fill text: #(crate::i18n::tr("Topic")) i18n_text: "Topic"
+                        draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular{font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}}
                     topic := Label {width: Fill height: Fit flow: Flow.Right{wrap: true}
                         draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_regular{font_size: (11 * mod.widgets.RINX_TEXT_SCALE)}}}
-                    View {width: Fill height: 28 flow: Right spacing: 6 align: Align{y: 0.5}
-                        room_id := Label {width: Fill height: Fit max_lines: 1 text_overflow: Ellipsis
-                            draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular{font_size: (9 * mod.widgets.RINX_TEXT_SCALE)}}}
-                        copy_room_id := NavigationBarButton {width: 28 height: 28 padding: 6 tooltip_text: #(crate::i18n::tr("Copy Room ID"))
-                            Icon {icon_walk: Walk{width: 14 height: 14} draw_icon +: {svg: ICON_COPY color: mod.widgets.RINX_MUTED}}}
-                    }
-                }
-                Member := mod.widgets.MobileSection {
-                    // Clicking a member opens their profile (DM, block, ...).
-                    row := NavigationBarButton {
-                        width: Fill height: 56 flow: Right spacing: 8 padding: Inset{left: 16 right: 16}
-                        align: Align{y: 0.5}
-                        draw_bg +: {color_hover: mod.widgets.RINX_HOVER color_active: mod.widgets.RINX_HOVER border_radius: 0}
-                        avatar := mod.widgets.MobileAvatar {width: 32 height: 32}
-                        View {
-                            width: Fill height: Fit flow: Down spacing: 2 padding: 0
-                            name := Label {
-                                width: Fill height: Fit padding: 0 max_lines: 1 text_overflow: Ellipsis
-                                draw_text +: {color: mod.widgets.RINX_INK text_style: theme.font_regular {font_size: (11 * mod.widgets.RINX_TEXT_SCALE)}}
-                            }
-                            user_id := Label {
-                                width: Fill height: Fit padding: 0 max_lines: 1 text_overflow: Ellipsis
-                                draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular {font_size: (9 * mod.widgets.RINX_TEXT_SCALE)}}
-                            }
-                        }
-                    }
                 }
                 Back := mod.widgets.MobileSection {
                     padding: Inset{left: 16 right: 16 top: 8 bottom: 8}
@@ -136,9 +159,11 @@ script_mod! {
                             max_lines: 1
                             draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular {font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}
                         }
-                        Icon {
-                            icon_walk: Walk{width: 8 height: 13}
-                            draw_icon +: {color: mod.widgets.RINX_DISABLED svg: ICON_CHEVRON_RIGHT}
+                        chevron := View {width: Fit height: Fit
+                            Icon {
+                                icon_walk: Walk{width: 8 height: 13}
+                                draw_icon +: {color: mod.widgets.RINX_DISABLED svg: ICON_CHEVRON_RIGHT}
+                            }
                         }
                     }
                     mod.widgets.MobileDivider {margin: Inset{left: 20}}
@@ -179,21 +204,140 @@ script_mod! {
     }
 }
 
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-enum InfoTab { #[default] Overview, Members }
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum InfoRow { Overview, Member(usize), Notifications, Mode(usize), Back, AgentServices, Filler }
-fn info_rows(tab: InfoTab, members: usize, choosing: bool) -> usize {
-    match tab {InfoTab::Members => members, InfoTab::Overview if choosing => 6, InfoTab::Overview => 3}
+/// The most member cells one row of the grid can hold: the `MemberRow` template has this many.
+const MAX_COLUMNS: usize = 6;
+/// The fewest cells in a row, however narrow the panel is.
+const MIN_COLUMNS: usize = 4;
+/// The narrowest and the widest a member cell may be.
+const CELL_WIDTHS: (f64, f64) = (62.0, 84.0);
+/// The grid's padding on each side, as in the `MemberRow` template.
+const GRID_SIDE_PADDING: f64 = 12.0;
+
+/// The cells of a `MemberRow`, left to right.
+macro_rules! cell_ids {
+    () => { [ids!(c0), ids!(c1), ids!(c2), ids!(c3), ids!(c4), ids!(c5)] };
 }
-fn info_row(tab: InfoTab, members: usize, choosing: bool, index: usize) -> InfoRow {
-    if index >= info_rows(tab, members, choosing) {return InfoRow::Filler;}
-    match tab {
-        InfoTab::Members => InfoRow::Member(index),
-        InfoTab::Overview if index == 0 => InfoRow::Overview,
-        InfoTab::Overview if choosing => if index <= 4 {InfoRow::Mode(index - 1)} else {InfoRow::Back},
-        InfoTab::Overview => match index {1 => InfoRow::Notifications, 2 => InfoRow::AgentServices, _ => InfoRow::Filler},
+
+/// How many member cells fit side by side in a panel this wide, and how wide each one is.
+fn grid_columns(panel_width: f64) -> (usize, f64) {
+    let available = (panel_width - 2.0 * GRID_SIDE_PADDING).max(MIN_COLUMNS as f64 * CELL_WIDTHS.0);
+    let columns = ((available / CELL_WIDTHS.0) as usize).clamp(MIN_COLUMNS, MAX_COLUMNS);
+    (columns, (available / columns as f64).min(CELL_WIDTHS.1).floor())
+}
+
+/// One cell of the member grid.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfoCell { Member(usize), Add, Remove }
+
+/// What a tap on a drawn grid cell acts on. A member is kept by profile, not by position,
+/// so that a list that changed after the draw can't turn the tap to somebody else.
+#[derive(Clone, Debug)]
+enum CellTarget { Member(UserProfile), Add, Remove }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfoRow {
+    /// A row of the member grid, by the position of its first cell.
+    Members(usize),
+    AddChoice, Gap, Name, Topic, Notifications, Nickname, Mode(usize), Back, AgentServices, Filler,
+}
+
+/// The one page of room information, top to bottom: the member grid, which ends in the tile
+/// that adds and, for a viewer who may remove members, the tile that removes; then the
+/// room's name, its topic when it has one, and its settings: notifications, the viewer's
+/// nickname in the room and, for a viewer with an Agent of their own in the room, that Agent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InfoPage {
+    members: usize,
+    /// Whether the viewer may remove at least one of the members.
+    can_remove: bool,
+    columns: usize,
+    /// Whether the choice between inviting a person and adding an Agent is open.
+    adding: bool,
+    /// Whether the room has a topic to show.
+    topic: bool,
+    /// Whether the notification modes are listed in place of the settings.
+    choosing: bool,
+    /// Whether one of the members is an Agent of the viewer's own.
+    agents: bool,
+}
+impl InfoPage {
+    fn cells(&self) -> usize {
+        self.members + 1 + usize::from(self.can_remove)
     }
+    fn cell(&self, index: usize) -> Option<InfoCell> {
+        if index < self.members {Some(InfoCell::Member(index))}
+        else if index == self.members {Some(InfoCell::Add)}
+        else if index == self.members + 1 && self.can_remove {Some(InfoCell::Remove)}
+        else {None}
+    }
+    fn grid_rows(&self) -> usize {
+        self.cells().div_ceil(self.columns.max(1))
+    }
+    fn rows(&self) -> usize {
+        self.grid_rows() + usize::from(self.adding) + 2 + usize::from(self.topic)
+            + if self.choosing {5} else {2 + usize::from(self.agents)}
+    }
+    fn row(&self, index: usize) -> InfoRow {
+        let grid = self.grid_rows();
+        if index < grid {return InfoRow::Members(index * self.columns.max(1));}
+        let mut index = index - grid;
+        if self.adding {
+            if index == 0 {return InfoRow::AddChoice;}
+            index -= 1;
+        }
+        match index {
+            0 => return InfoRow::Gap,
+            1 => return InfoRow::Name,
+            _ => index -= 2,
+        }
+        if self.topic {
+            if index == 0 {return InfoRow::Topic;}
+            index -= 1;
+        }
+        match (index, self.choosing) {
+            (0..=3, true) => InfoRow::Mode(index),
+            (4, true) => InfoRow::Back,
+            (0, false) => InfoRow::Notifications,
+            (1, false) => InfoRow::Nickname,
+            (2, false) if self.agents => InfoRow::AgentServices,
+            _ => InfoRow::Filler,
+        }
+    }
+}
+
+/// The members `viewer` may remove from the room: those in it whose power level is below the
+/// viewer's, when the viewer's own level allows removing at all. The Hagency service is
+/// never offered, because the room's Agents are invited through it.
+fn removable_members(
+    levels: &RoomPowerLevels, viewer: &UserId, members: &[UserProfile], banned: &HashSet<OwnedUserId>,
+) -> HashSet<OwnedUserId> {
+    members.iter().map(|member| &member.user_id)
+        .filter(|user| !banned.contains(*user) && !is_hagency_service(user, viewer) && levels.user_can_kick_user(viewer, user))
+        .cloned().collect()
+}
+
+/// Whether one of `members` is an Agent of `viewer`'s own, by what is known of who owns whom.
+fn has_own_agent(members: &[UserProfile], owners: &HashMap<OwnedUserId, OwnedUserId>, viewer: &UserId) -> bool {
+    members.iter().any(|member| owners.get(&member.user_id).is_some_and(|owner| owner == viewer))
+}
+
+/// The name `viewer` goes by in the room, when the room's member list gives one.
+fn own_nickname<'a>(members: &'a [UserProfile], viewer: &UserId) -> &'a str {
+    members.iter().find(|member| member.user_id == viewer).and_then(|member| member.username.as_deref()).unwrap_or("")
+}
+
+/// The room a row has for the room's name beside its title in the narrowest panel,
+/// in half widths: a Latin letter takes about one, a Chinese character two.
+const NAME_SHOWN: usize = 12;
+/// `name`, cut to what a row has room for. The whole name is in the field that changes it.
+fn shown_name(name: &str) -> String {
+    let wide = |c: char| if c.is_ascii() {1} else {2};
+    if name.chars().map(wide).sum::<usize>() <= NAME_SHOWN {return name.to_owned();}
+    let mut room = NAME_SHOWN - 1;
+    name.chars().take_while(|c| match room.checked_sub(wide(*c)) {
+        Some(left) => {room = left; true}
+        None => false,
+    }).chain(['…']).collect()
 }
 #[derive(Clone, Debug)]
 pub(crate) struct ChatMembershipChanged {
@@ -208,6 +352,10 @@ struct ChatInfoData {
     topic: String,
     members: Vec<UserProfile>,
     banned_members: HashSet<OwnedUserId>,
+    /// The members the viewer may remove from the room.
+    removable: HashSet<OwnedUserId>,
+    /// Whether the viewer may change the room's name.
+    can_rename: bool,
     /// Members who were invited but have not joined yet.
     invited: HashSet<OwnedUserId>,
     mode: Option<RoomNotificationMode>,
@@ -242,7 +390,8 @@ fn member_count(data: &ChatInfoData) -> String {
     }
 }
 fn group_members(members: &mut Vec<UserProfile>, owners: &HashMap<OwnedUserId, OwnedUserId>) -> HashSet<OwnedUserId> {
-    members.sort_by_key(|p| (p.displayable_name().to_lowercase(), p.user_id.clone()));
+    // The Hagency service takes no part in the room's talk: it comes after everyone else.
+    members.sort_by_key(|p| (p.user_id.localpart() == "_hagency_service", p.displayable_name().to_lowercase(), p.user_id.clone()));
     let present: HashSet<_> = members.iter().map(|p|p.user_id.clone()).collect();
     let grouped: HashSet<_> = members.iter().filter(|p|p.user_id.localpart() != "_hagency_service" && owners.get(&p.user_id).is_some_and(|owner| present.contains(owner) && !owners.contains_key(owner) && owner.localpart() != "_hagency_service" && *owner != p.user_id)).map(|p|p.user_id.clone()).collect();
     let mut ordered = Vec::with_capacity(members.len());
@@ -253,7 +402,7 @@ fn group_members(members: &mut Vec<UserProfile>, owners: &HashMap<OwnedUserId, O
     *members = ordered;
     grouped
 }
-async fn fetch_member_owners(room: &str, owner: &OwnedUserId) -> Result<(HashMap<OwnedUserId, OwnedUserId>, bool), String> {
+pub(crate) async fn fetch_member_owners(room: &str, owner: &OwnedUserId) -> Result<(HashMap<OwnedUserId, OwnedUserId>, bool), String> {
     use crate::hagency::{backend::Service,model::Command};
     let service = Service::for_current()?;
     let roster = service.execute(Command::Agents).await?;
@@ -262,7 +411,11 @@ async fn fetch_member_owners(room: &str, owner: &OwnedUserId) -> Result<(HashMap
     if rows.len()>128 {return Err("room_discovery_incomplete".into());}
     let mut owners = HashMap::new();let mut conflicts = HashSet::new();
     add_member_owners(&mut owners, &mut conflicts, &roster["agents"], Some(owner));
-    let incomplete = match service.agents_for_registered_room(room).await {
+    // That roster holds the personal Agents only. The pool Agents this owner may place in
+    // rooms are the owner's own as well, and are listed with the Agents that can join a room.
+    let placeable = service.execute(Command::RoomAgents).await;
+    if let Ok(placeable) = &placeable {add_member_owners(&mut owners, &mut conflicts, &placeable["agents"], Some(owner));}
+    let incomplete = placeable.is_err() | match service.agents_for_registered_room(room).await {
         Ok(context) => {
             let project = context["projectId"].as_str().filter(|id|!id.is_empty()).ok_or("room_discovery_unavailable")?;
             match service.execute(Command::RoomRoster {project_id:project.into(),room_id:room.into()}).await {
@@ -317,6 +470,29 @@ pub(super) fn agent_binding_error(code: &str) -> &'static str {
         _ => "Could not confirm the binding. Retry to check the original request; no duplicate Agent will be created.",
     }
 }
+/// The answer to a request to change the room's name: the new name, or why it wasn't set.
+#[derive(Debug)]
+struct RoomRenamed {
+    owner: OwnedUserId,
+    origin: String,
+    epoch: u64,
+    room_id: OwnedRoomId,
+    request: u64,
+    result: Result<String, String>,
+}
+
+/// The answer to a request to change the viewer's nickname in the room: the name the room
+/// now shows for them, if any, or why it wasn't set.
+#[derive(Debug)]
+struct NicknameSet {
+    owner: OwnedUserId,
+    origin: String,
+    epoch: u64,
+    room_id: OwnedRoomId,
+    request: u64,
+    result: Result<Option<String>, String>,
+}
+
 #[derive(Debug)]
 struct ChatInfoLoaded {
     owner: OwnedUserId,
@@ -337,7 +513,15 @@ struct RoomServicesLoaded {
     result: Result<serde_json::Value, String>,
 }
 
+/// The Agent and the binding of a listed Agent whose service this owner's devices run, which
+/// is what the page of a service shows. A pool Agent has neither a binding of that kind nor
+/// such a page: the pool runs it.
+fn openable_service(service: &serde_json::Value) -> Option<(&str, &str)> {
+    Some((service["agentId"].as_str()?, service["bindingId"].as_str()?))
+}
+
 fn room_service_status(service: &serde_json::Value) -> String {
+    if service["pool"] == true {return crate::i18n::tr("Runs on a shared resource pool.").into();}
     if service["ownerServicePaused"] == true {return crate::i18n::tr("Paused in this Room. Requests receive a pause notice.").into();}
     if service["bindingState"] == "suspended" {return crate::i18n::tr("Room access unavailable. Check membership and permissions.").into();}
     if service["bindingState"] == "pending" {return crate::i18n::tr("Joining this Room…").into();}
@@ -352,6 +536,11 @@ pub struct MobileChatInfo {
     source: ScriptObjectRef,
     #[deref]
     view: View,
+    /// Set by a room's screen that shows the room's history itself, over its timeline:
+    /// a request for the history then goes to that screen, not to the app, whose view of
+    /// it covers the whole window.
+    #[live]
+    history_in_room: bool,
     #[rust]
     owner: Option<OwnedUserId>,
     #[rust]
@@ -363,24 +552,34 @@ pub struct MobileChatInfo {
     #[rust]
     request: u64,
     #[rust]
+    load_deadline: Option<std::time::Instant>,
+    #[rust] load_timer: Timer,
+    #[rust]
     data: Option<ChatInfoData>,
     #[rust] member_owners: HashMap<OwnedUserId, OwnedUserId>,
-    #[rust] indented_members: HashSet<OwnedUserId>,
-    #[rust] ownership_unavailable: bool,
     #[rust]
     status: String,
     #[rust]
     failed: bool,
     #[rust]
     choosing_notifications: bool,
-    #[rust]
-    tab: InfoTab,
-    #[rust] drawn_tab: InfoTab,
-    /// The tab whose selected look the two tab buttons wear now; `None` when
-    /// they have not been styled since this widget was last applied from script.
-    #[rust] styled_tab: Option<InfoTab>,
+    /// Whether the choice between inviting a person and adding an Agent is open under the grid.
+    #[rust] adding: bool,
+    /// Whether the grid marks the members who can be removed, for one of them to be picked.
+    #[rust] removing: bool,
+    /// Whether the page is replaced by the field that changes the room's name.
+    #[rust] renaming: bool,
+    #[rust] rename_busy: bool,
+    #[rust] rename_request: u64,
+    /// Whether the page is replaced by the field that changes the viewer's nickname in the room.
+    #[rust] nicknaming: bool,
+    #[rust] nick_busy: bool,
+    #[rust] nick_request: u64,
+    /// The field that was just opened and is to take the keys once it has been drawn.
+    #[rust] focus_input: Option<LiveId>,
     #[rust] rendered_rows: HashMap<WidgetUid, InfoRow>,
-    #[rust] rendered_members: HashMap<WidgetUid, UserProfile>,
+    /// What each cell of a drawn grid row stood for, by the row's widget and in cell order.
+    #[rust] rendered_cells: HashMap<WidgetUid, Vec<Option<CellTarget>>>,
     #[rust] agent_request: u64,
     #[rust] agent_busy: bool,
     #[rust] agent_added: bool,
@@ -398,7 +597,7 @@ pub struct MobileChatInfo {
     #[rust] review_mode: bool,
 }
 
-fn is_hagency_service(user: &matrix_sdk::ruma::UserId, owner: &matrix_sdk::ruma::UserId) -> bool {
+pub(crate) fn is_hagency_service(user: &matrix_sdk::ruma::UserId, owner: &matrix_sdk::ruma::UserId) -> bool {
     user.localpart() == "_hagency_service" && user.server_name() == owner.server_name()
 }
 
@@ -420,7 +619,31 @@ fn modes() -> [(Option<RoomNotificationMode>, &'static str); 4] {
     ]
 }
 
+const INFO_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(30);
+
 impl MobileChatInfo {
+    fn expire_pending_load(&mut self, cx: &mut Cx, now: std::time::Instant) {
+        if self.load_deadline.is_some_and(|deadline| now >= deadline) {
+            self.fail_load(cx, crate::i18n::tr("The chat information request timed out."));
+        }
+    }
+
+    fn finish_load(&mut self, cx: &mut Cx) {
+        self.load_deadline = None;
+        cx.stop_timer(std::mem::take(&mut self.load_timer));
+    }
+
+    fn fail_load(&mut self, cx: &mut Cx, error: &str) {
+        self.finish_load(cx);
+        self.data = None;
+        self.close_agent_picker(cx);
+        self.failed = true;
+        self.status = crate::i18n::format(
+            "Could not load chat information: {error}", &[("error", error.to_owned())],
+        );
+        self.view.redraw(cx);
+    }
+
     fn services_response_matches(&self, loaded: &RoomServicesLoaded) -> bool {
         self.owner.as_ref() == Some(&loaded.owner) && self.origin == loaded.origin
             && self.epoch == loaded.epoch && self.services_request == loaded.request
@@ -454,15 +677,222 @@ impl MobileChatInfo {
         });
         self.view.redraw(cx);
     }
-    fn select_tab(&mut self, cx: &mut Cx, tab: InfoTab) {
-        self.close_agent_picker(cx);
-        self.tab = tab;
-        self.choosing_notifications = false;
+    /// Acts on a tap on the room's name: opens the field that changes it, or says who can.
+    fn tap_name(&mut self, cx: &mut Cx) {
+        let Some(data) = self.data.as_ref() else {return;};
+        if !data.can_rename {
+            enqueue_popup_notification(
+                crate::i18n::tr("Only the room's administrators can change its name.").to_owned(), PopupKind::Info, Some(4.0),
+            );
+            return;
+        }
+        let name = data.room.display().into_owned();
+        self.renaming = true;
+        self.rename_busy = false;
+        self.nicknaming = false;
         self.services_open = false;
-        self.view.portal_list(cx, ids!(list)).set_first_id_and_scroll(0, 0.0);
-        // Tabs change layout and controls in draw_walk, outside the cached
-        // children that a partial View redraw would update.
-        cx.redraw_all();
+        self.adding = false;
+        self.removing = false;
+        self.view.text_input(cx, ids!(rename_input)).set_text(cx, &name);
+        self.focus_input = Some(live_id!(rename_input));
+        let mut status = self.view.label(cx, ids!(rename_status));
+        status.set_text(cx, "");
+        script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_MUTED}});
+    }
+    /// Sends the name in the field to the homeserver, unless there is nothing to change.
+    fn save_name(&mut self, cx: &mut Cx) {
+        if self.rename_busy {return;}
+        let Some(data) = self.data.as_ref().filter(|data| data.can_rename) else {return;};
+        let name = self.view.text_input(cx, ids!(rename_input)).text().trim().to_owned();
+        if name.is_empty() {
+            self.view.label(cx, ids!(rename_status)).set_text(cx, crate::i18n::tr("Enter a room name."));
+            self.view.redraw(cx);
+            return;
+        }
+        if name == data.room.display() {
+            self.renaming = false;
+            self.view.redraw(cx);
+            return;
+        }
+        let room_id = data.room.room_id().clone();
+        if !self.pin_is_current() {return;}
+        let (Some(owner), Some(client)) = (self.owner.clone(), get_client()) else {return;};
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let request = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.rename_request = request;
+        self.rename_busy = true;
+        self.view.label(cx, ids!(rename_status)).set_text(cx, crate::i18n::tr("Saving…"));
+        let origin = self.origin.clone();
+        let epoch = self.epoch;
+        spawn_async_task(async move {
+            let result = tokio::time::timeout(INFO_TIMEOUT, async {
+                let room = client.get_room(&room_id).ok_or_else(|| crate::i18n::tr("This chat is no longer available.").to_owned())?;
+                room.set_name(name.clone()).await.map_err(|e| e.to_string())?;
+                Ok(name)
+            }).await.unwrap_or_else(|_| Err(crate::i18n::tr("The chat information request timed out.").into()));
+            Cx::post_action(RoomRenamed {owner, origin, epoch, room_id, request, result});
+        });
+        self.view.redraw(cx);
+    }
+    fn rename_response_matches(&self, renamed: &RoomRenamed) -> bool {
+        self.owner.as_ref() == Some(&renamed.owner) && self.origin == renamed.origin
+            && self.epoch == renamed.epoch && self.rename_request == renamed.request
+            && self.room.as_ref().is_some_and(|room| room.room_id() == &renamed.room_id)
+    }
+    /// Takes the answer to this panel's own request: the page shows the new name at once,
+    /// or the field stays open with the reason the name wasn't set.
+    fn finish_rename(&mut self, cx: &mut Cx, renamed: &RoomRenamed) {
+        self.rename_busy = false;
+        match &renamed.result {
+            Ok(name) => {
+                let room = RoomNameId::new(matrix_sdk::RoomDisplayName::Named(name.clone()), renamed.room_id.clone());
+                if let Some(data) = self.data.as_mut() {data.room = room.clone();}
+                self.room = Some(room);
+                self.renaming = false;
+            }
+            Err(error) => {
+                let mut status = self.view.label(cx, ids!(rename_status));
+                status.set_text(cx, &crate::i18n::format("Could not change the room's name: {error}", &[("error", error.clone())]));
+                script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_DANGER_FG}});
+            }
+        }
+        self.view.redraw(cx);
+    }
+    /// Opens the field that changes the name the viewer goes by in this room.
+    fn tap_nickname(&mut self, cx: &mut Cx) {
+        let (Some(owner), Some(data)) = (self.owner.as_ref(), self.data.as_ref()) else {return;};
+        let name = own_nickname(&data.members, owner).to_owned();
+        self.nicknaming = true;
+        self.nick_busy = false;
+        self.renaming = false;
+        self.services_open = false;
+        self.adding = false;
+        self.removing = false;
+        self.view.text_input(cx, ids!(nick_input)).set_text(cx, &name);
+        self.focus_input = Some(live_id!(nick_input));
+        let mut status = self.view.label(cx, ids!(nick_status));
+        status.set_text(cx, "");
+        script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_MUTED}});
+    }
+    /// Sends the nickname in the field to the homeserver, unless there is nothing to change.
+    /// An empty field asks for the name of the viewer's account.
+    fn save_nickname(&mut self, cx: &mut Cx) {
+        if self.nick_busy {return;}
+        let (Some(owner), Some(data)) = (self.owner.clone(), self.data.as_ref()) else {return;};
+        let name = self.view.text_input(cx, ids!(nick_input)).text().trim().to_owned();
+        if !name.is_empty() && name == own_nickname(&data.members, &owner) {
+            self.nicknaming = false;
+            self.view.redraw(cx);
+            return;
+        }
+        let room_id = data.room.room_id().clone();
+        if !self.pin_is_current() {return;}
+        let Some(client) = get_client() else {return;};
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+        let request = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        self.nick_request = request;
+        self.nick_busy = true;
+        self.view.label(cx, ids!(nick_status)).set_text(cx, crate::i18n::tr("Saving…"));
+        let origin = self.origin.clone();
+        let epoch = self.epoch;
+        spawn_async_task(async move {
+            let result = tokio::time::timeout(INFO_TIMEOUT, async {
+                let room = client.get_room(&room_id).ok_or_else(|| crate::i18n::tr("This chat is no longer available.").to_owned())?;
+                // Matrix keeps one name per room in the person's own membership of it.
+                let name = if name.is_empty() {
+                    client.account().get_display_name().await.map_err(|e| e.to_string())?
+                } else {Some(name)};
+                room.set_own_member_display_name(name.clone()).await.map_err(|e| e.to_string())?;
+                Ok(name)
+            }).await.unwrap_or_else(|_| Err(crate::i18n::tr("The chat information request timed out.").into()));
+            Cx::post_action(NicknameSet {owner, origin, epoch, room_id, request, result});
+        });
+        self.view.redraw(cx);
+    }
+    fn nick_response_matches(&self, set: &NicknameSet) -> bool {
+        self.owner.as_ref() == Some(&set.owner) && self.origin == set.origin
+            && self.epoch == set.epoch && self.nick_request == set.request
+            && self.room.as_ref().is_some_and(|room| room.room_id() == &set.room_id)
+    }
+    /// Takes the answer to this panel's own request: the page and the grid show the new
+    /// nickname at once, or the field stays open with the reason it wasn't set.
+    fn finish_nickname(&mut self, cx: &mut Cx, set: &NicknameSet) {
+        self.nick_busy = false;
+        match &set.result {
+            Ok(name) => {
+                if let Some(data) = self.data.as_mut() {
+                    if let Some(own) = data.members.iter_mut().find(|member| member.user_id == set.owner) {
+                        own.username = name.clone();
+                    }
+                    group_members(&mut data.members, &self.member_owners);
+                }
+                self.nicknaming = false;
+            }
+            Err(error) => {
+                let mut status = self.view.label(cx, ids!(nick_status));
+                status.set_text(cx, &crate::i18n::format("Could not change your nickname: {error}", &[("error", error.clone())]));
+                script_apply_eval!(cx, status, {draw_text +: {color: mod.widgets.RINX_DANGER_FG}});
+            }
+        }
+        self.view.redraw(cx);
+    }
+    fn open_agent_picker(&mut self, cx: &mut Cx) {
+        if self.agent_busy {
+            self.agent_picker_open = true;
+            self.view.modal(cx, ids!(agent_picker_modal)).open(cx);
+            self.view.redraw(cx);
+        } else {
+            self.request_agents(cx, false);
+        }
+    }
+    /// Acts on a tap on a cell of the member grid.
+    fn tap_cell(&mut self, cx: &mut Cx, target: CellTarget) {
+        let Some(data) = self.data.as_ref() else {return;};
+        match target {
+            // While members are being removed, a tap picks one of those who can be.
+            // Nothing is sent before the dialog it opens is confirmed.
+            CellTarget::Member(profile) if self.removing => {
+                if !data.removable.contains(&profile.user_id) {return;}
+                cx.action(ModerationModalAction::Open(ModerationRequest::Member(MemberModeration {
+                    room_id: data.room.room_id().clone(),
+                    room_name: data.room.to_string(),
+                    user_name: profile.displayable_name().to_owned(),
+                    user_id: profile.user_id,
+                    action: MemberAction::Kick,
+                })));
+            }
+            CellTarget::Member(profile) => cx.widget_action(self.widget_uid(), ShowUserProfileAction::ShowUserProfile(
+                UserProfileAndRoomId {user_profile: profile, room_id: data.room.room_id().clone()},
+            )),
+            CellTarget::Add => {
+                // Inviting a person takes the right to invite; an Agent is added through
+                // the Hagency service, so without that right only the Agent picker is left.
+                let choose = data.can_invite && !self.adding;
+                let agent_only = !data.can_invite;
+                self.removing = false;
+                self.adding = choose;
+                if agent_only {self.open_agent_picker(cx);}
+            }
+            CellTarget::Remove => {
+                self.removing = !self.removing && !data.removable.is_empty();
+                self.adding = false;
+            }
+        }
+    }
+    fn update_room(&mut self, cx: &mut Cx, room: RoomNameId, opening: bool) {
+        if !self.pin_is_current()
+            || self.room.as_ref().is_none_or(|current| current.room_id() != room.room_id())
+        {
+            self.load(cx, room);
+        } else if opening {
+            // The hidden pane can miss membership events. Keep its invitation
+            // state, but fetch the roster before showing member actions again.
+            self.data = None;
+            self.adding = false;
+            self.removing = false;
+            self.renaming = false;
+            self.fetch_info(cx, room);
+        }
     }
     fn load(&mut self, cx: &mut Cx, room: RoomNameId) {
         self.clear();
@@ -488,32 +918,39 @@ impl MobileChatInfo {
         let origin = self.origin.clone();
         let epoch = self.epoch;
         let room_id = room.room_id().clone();
-        self.member_owners.clear();self.indented_members.clear();self.ownership_unavailable=false;
+        self.member_owners.clear();
         if let Some(data)=self.data.as_mut() {group_members(&mut data.members,&self.member_owners);}
         let ownership_owner=owner.clone();let ownership_origin=origin.clone();let ownership_room=room_id.clone();
         spawn_async_task(async move {
             let result=tokio::time::timeout(std::time::Duration::from_secs(30),fetch_member_owners(ownership_room.as_str(),&ownership_owner)).await.unwrap_or_else(|_|Err("room_discovery_unavailable".into()));
             Cx::post_action(MemberOwnershipLoaded {owner:ownership_owner,origin:ownership_origin,epoch,room_id:ownership_room,request,result});
         });
+        cx.stop_timer(self.load_timer);
+        self.load_timer = cx.start_timeout(INFO_TIMEOUT.as_secs_f64());
+        self.load_deadline = Some(std::time::Instant::now() + INFO_TIMEOUT);
+        self.failed = false;
         self.status = crate::i18n::tr("Loading chat information…").into();
         self.view
             .portal_list(cx, ids!(list))
             .set_first_id_and_scroll(0, 0.0);
         self.view.redraw(cx);
         spawn_async_task(async move {
-            let result = async {
+            let result = tokio::time::timeout(INFO_TIMEOUT, async {
                 let room = client
                     .get_room(room.room_id())
                     .ok_or(crate::i18n::tr("This chat is no longer available."))?;
+                // The stored list can keep a person who has left: ask the homeserver
+                // each time, and show the stored list when it can't be asked.
+                crate::room_members::reload(&room).await;
                 let members = room
-                    .members(RoomMemberships::JOIN | RoomMemberships::BAN | RoomMemberships::INVITE)
+                    .members_no_sync(RoomMemberships::JOIN | RoomMemberships::BAN | RoomMemberships::INVITE)
                     .await
                     .map_err(|e| e.to_string())?;
-                let banned_members = members.iter().filter(|m| *m.membership() == ruma::events::room::member::MembershipState::Ban)
+                let banned_members: HashSet<OwnedUserId> = members.iter().filter(|m| *m.membership() == ruma::events::room::member::MembershipState::Ban)
                     .map(|m| m.user_id().to_owned()).collect();
                 let invited = members
                     .iter()
-                    .filter(|member| *member.membership() == MembershipState::Invite)
+                    .filter(|member| *member.membership() == ruma::events::room::member::MembershipState::Invite)
                     .map(|member| member.user_id().to_owned())
                     .collect();
                 let mut members: Vec<_> = members
@@ -527,6 +964,13 @@ impl MobileChatInfo {
                     })
                     .collect();
                 members.sort_by_key(|p| (p.displayable_name().to_lowercase(), p.user_id.clone()));
+                // Without the room's power levels nobody is offered for removal
+                // and the name can't be changed.
+                let levels = room.power_levels().await.ok();
+                let removable = levels.as_ref()
+                    .map(|levels| removable_members(levels, &owner, &members, &banned_members))
+                    .unwrap_or_default();
+                let can_rename = levels.as_ref().is_some_and(|levels| levels.user_can_send_state(&owner, StateEventType::RoomName));
                 Ok(ChatInfoData {
                     room: RoomNameId::from_room(&room).await,
                     can_invite: crate::sliding_sync::UserPowerLevels::from_room(&room, &owner).await
@@ -534,11 +978,12 @@ impl MobileChatInfo {
                     topic: room.topic().unwrap_or_default(),
                     members,
                     banned_members,
+                    removable,
+                    can_rename,
                     invited,
                     mode: room.user_defined_notification_mode().await,
                 })
-            }
-            .await;
+            }).await.unwrap_or_else(|_| Err(crate::i18n::tr("The chat information request timed out.").into()));
             Cx::post_action(ChatInfoLoaded {
                 owner,
                 origin,
@@ -683,7 +1128,6 @@ impl MobileChatInfo {
         self.agent_slow=false;
         self.agent_added=false;
         self.agent_pending=false;
-        self.tab=InfoTab::Members;
         self.agent_picker_open=true;
         self.view.label(cx, ids!(agent_room)).set_text(cx, &room.to_string());
         self.view.modal(cx, ids!(agent_picker_modal)).open(cx);
@@ -715,13 +1159,22 @@ impl MobileChatInfo {
         self.epoch = 0;
         self.room = None;
         self.request = 0;
+        self.load_deadline = None;
         self.data = None;
-        self.member_owners.clear();self.indented_members.clear();self.ownership_unavailable=false;
+        self.member_owners.clear();
         self.status.clear();
         self.failed = false;
         self.choosing_notifications = false;
-        self.tab = InfoTab::Overview;
-        self.rendered_rows.clear(); self.rendered_members.clear();
+        self.adding = false;
+        self.removing = false;
+        self.renaming = false;
+        self.rename_busy = false;
+        self.rename_request = 0;
+        self.nicknaming = false;
+        self.nick_busy = false;
+        self.nick_request = 0;
+        self.focus_input = None;
+        self.rendered_rows.clear(); self.rendered_cells.clear();
         self.agent_request = 0;
         self.agent_busy = false;
         self.agent_added = false;
@@ -738,18 +1191,15 @@ impl MobileChatInfo {
     }
 }
 
-impl ScriptHook for MobileChatInfo {
-    fn on_after_apply(&mut self, _vm: &mut ScriptVm, _apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
-        // Applying the panel (creation, a theme or language reload) puts the
-        // template's tab colours back, so the selected look goes on again.
-        self.styled_tab = None;
-    }
-}
+impl ScriptHook for MobileChatInfo {}
 
 impl Widget for MobileChatInfo {
     fn handle_event(&mut self, cx: &mut Cx, event: &Event, scope: &mut Scope) {
         if self.owner.is_some() && !self.pin_is_current() {
             self.clear();
+        }
+        if self.load_timer.is_event(event).is_some() && self.load_deadline.is_some() {
+            self.fail_load(cx, crate::i18n::tr("The chat information request timed out."));
         }
         if matches!(event, Event::Signal) {
             crate::avatar_cache::process_avatar_updates(cx);
@@ -766,6 +1216,12 @@ impl Widget for MobileChatInfo {
         }
         if let Event::Actions(actions) = event {
             for action in actions {
+                if let Some(verified) = action.downcast_ref::<crate::verification::VerificationStateAction>()
+                    && verified.state == matrix_sdk::encryption::VerificationState::Verified
+                    && verified.pin.is_current() && self.pin_is_current()
+                    && (self.failed || self.load_deadline.is_some())
+                    && let Some(room) = self.room.clone()
+                { self.fetch_info(cx, room); }
                 if let Some(loaded) = action.downcast_ref::<RoomServicesLoaded>()
                     && self.pin_is_current() && self.services_response_matches(loaded) {
                     self.services_busy = false;
@@ -776,7 +1232,7 @@ impl Widget for MobileChatInfo {
                             self.view.drop_down(cx, ids!(room_services)).set_labels(cx, labels);
                             let selected = usize::from(!self.services.is_empty());
                             self.view.drop_down(cx, ids!(room_services)).set_selected_item(cx, selected);
-                            let status = self.services.first().map(room_service_status).unwrap_or_else(||crate::i18n::tr("None of your Agents is bound to this Room. Add one in Members.").into());
+                            let status = self.services.first().map(room_service_status).unwrap_or_else(||crate::i18n::tr("None of your Agents is bound to this Room. Add one with + among the members.").into());
                             self.view.label(cx, ids!(services_status)).set_text(cx, &status);
                         }
                         Err(_) => {self.view.label(cx, ids!(services_status)).set_text(cx, crate::i18n::tr("Could not load Agent services. Refresh to retry."));}
@@ -794,6 +1250,13 @@ impl Widget for MobileChatInfo {
                 if let Some(update) = action.downcast_ref::<ChatMembershipChanged>()
                     && update.epoch == self.epoch && self.pin_is_current()
                     && self.room.as_ref().is_some_and(|room| room.room_id() == &update.room_id)
+                    && let Some(room) = self.room.clone()
+                { self.fetch_info(cx, room); }
+                // The viewer's rights in the room changed, or a member was just removed:
+                // either changes who is listed and who can be removed.
+                if let Some(changed) = action.downcast_ref::<MemberAbilitiesInvalidated>()
+                    && changed.epoch == self.epoch && self.pin_is_current()
+                    && self.room.as_ref().is_some_and(|room| room.room_id() == &changed.room_id)
                     && let Some(room) = self.room.clone()
                 { self.fetch_info(cx, room); }
                 if matches!(
@@ -815,35 +1278,37 @@ impl Widget for MobileChatInfo {
                 }
                 if let Some(loaded) = action.downcast_ref::<MemberOwnershipLoaded>() {
                     if self.pin_is_current() && self.ownership_response_matches(loaded) {
-                        match &loaded.result {
-                            Ok((owners,incomplete)) => {self.member_owners=owners.clone();self.ownership_unavailable=*incomplete;},
-                            Err(_) => {self.member_owners.clear();self.ownership_unavailable=true;},
-                        }
-                        if let Some(data)=self.data.as_mut() {self.indented_members=group_members(&mut data.members,&self.member_owners);}
+                        self.member_owners = loaded.result.as_ref().map(|(owners, _)| owners.clone()).unwrap_or_default();
+                        if let Some(data)=self.data.as_mut() {group_members(&mut data.members,&self.member_owners);}
                         self.view.redraw(cx);
                     }
                 }
                 if let Some(loaded) = action.downcast_ref::<ChatInfoLoaded>() {
                     if self.accepts(loaded) {
+                        self.finish_load(cx);
                         match &loaded.result {
                             Ok(data) => {
                                 let mut data=data.clone();
-                                self.indented_members=group_members(&mut data.members,&self.member_owners);
+                                group_members(&mut data.members,&self.member_owners);
+                                // With nobody left to remove there is nothing to pick.
+                                self.removing &= !data.removable.is_empty();
+                                self.adding &= data.can_invite;
+                                self.renaming &= data.can_rename;
                                 self.data = Some(data);
                                 self.failed = false;
                                 self.status.clear();
                             }
-                            Err(error) => {
-                                self.status = crate::i18n::format(
-                                    "Could not load chat information: {error}",
-                                    &[("error", (error).to_string())],
-                                );
-                                self.failed = true;
-                            }
+                            Err(error) => self.fail_load(cx, error),
                         }
                         self.view.redraw(cx);
                     }
                 }
+                if let Some(renamed) = action.downcast_ref::<RoomRenamed>()
+                    && self.pin_is_current() && self.rename_response_matches(renamed)
+                { self.finish_rename(cx, renamed); }
+                if let Some(set) = action.downcast_ref::<NicknameSet>()
+                    && self.pin_is_current() && self.nick_response_matches(set)
+                { self.finish_nickname(cx, set); }
                 if let Some(update) = action.downcast_ref::<RoomNotificationModeUpdated>() {
                     if let Some(data) = self.data.as_mut() {
                         if data.room.room_id() == &update.room_id {
@@ -854,30 +1319,29 @@ impl Widget for MobileChatInfo {
                 }
             }
             if self.view.button(cx, ids!(services_back)).clicked(actions) {self.services_open=false;self.view.redraw(cx);return;}
-            if self.view.button(cx, ids!(overview_tab)).clicked(actions) {self.select_tab(cx, InfoTab::Overview);return;}
-            if self.view.button(cx, ids!(members_tab)).clicked(actions) {self.select_tab(cx, InfoTab::Members);return;}
-            if self.tab == InfoTab::Overview && self.services_open && self.view.button(cx, ids!(refresh_services)).clicked(actions) {self.load_services(cx);return;}
+            if self.view.button(cx, ids!(rename_back)).clicked(actions) {self.renaming=false;self.view.redraw(cx);return;}
+            if self.renaming && (self.view.button(cx, ids!(rename_save)).clicked(actions)
+                || self.view.text_input(cx, ids!(rename_input)).returned(actions).is_some()) {self.save_name(cx);return;}
+            if self.view.button(cx, ids!(nick_back)).clicked(actions) {self.nicknaming=false;self.view.redraw(cx);return;}
+            if self.nicknaming && (self.view.button(cx, ids!(nick_save)).clicked(actions)
+                || self.view.text_input(cx, ids!(nick_input)).returned(actions).is_some()) {self.save_nickname(cx);return;}
+            if self.services_open && self.view.button(cx, ids!(refresh_services)).clicked(actions) {self.load_services(cx);return;}
             if self.view.drop_down(cx, ids!(room_services)).changed(actions).is_some()
                 && let Some(index) = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1)
                 && let Some(service) = self.services.get(index) {
                 self.view.label(cx, ids!(services_status)).set_text(cx, &room_service_status(service));
             }
-            if self.tab == InfoTab::Overview && self.services_open && self.view.button(cx, ids!(configure_service)).clicked(actions) && self.pin_is_current() && !self.services_busy
+            if self.services_open && self.view.button(cx, ids!(configure_service)).clicked(actions) && self.pin_is_current() && !self.services_busy
                 && let Some(index) = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1)
-                && let Some(service) = self.services.get(index)
-                && let (Some(agent), Some(binding)) = (service["agentId"].as_str(),service["bindingId"].as_str()) {
+                && let Some((agent, binding)) = self.services.get(index).and_then(openable_service) {
                 cx.action(crate::hagency::ui::HagencyAction::AgentRun {agent_id:agent.into(),binding_id:binding.into()});
                 return;
             }
             if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) || self.view.navigation_bar_button(cx, ids!(history_media)).clicked(actions) {
                 if self.pin_is_current() && let Some(data) = self.data.as_ref() {
-                    cx.action(super::room_history::RoomHistoryAction::Open {room: data.room.clone(), filter: if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) {super::room_history::HistoryFilter::Messages} else {super::room_history::HistoryFilter::Media}});
+                    let request = super::room_history::RoomHistoryAction::Open {room: data.room.clone(), filter: if self.view.navigation_bar_button(cx, ids!(history_search)).clicked(actions) {super::room_history::HistoryFilter::Messages} else {super::room_history::HistoryFilter::Media}};
+                    if self.history_in_room {cx.widget_action(self.widget_uid(), request);} else {cx.action(request);}
                 }
-                return;
-            }
-            if self.tab == InfoTab::Members && self.data.as_ref().is_some_and(|data| data.can_invite)
-                && self.view.button(cx, ids!(invite_people)).clicked(actions) {
-                if self.pin_is_current() && let Some(data)=self.data.as_ref() {cx.action(InviteModalAction::Open(data.room.clone()));}
                 return;
             }
             if self.view.button(cx, ids!(close_agent_picker)).clicked(actions)
@@ -890,11 +1354,7 @@ impl Widget for MobileChatInfo {
                 self.view.label(cx,ids!(agent_status)).set_text(cx,crate::i18n::tr("Choose an Agent you own to bind to this Room."));
                 cx.redraw_all();
             }
-            if self.tab == InfoTab::Members && self.view.button(cx,ids!(invite_my_agent)).clicked(actions) {
-                if self.agent_busy {self.agent_picker_open=true;self.view.modal(cx,ids!(agent_picker_modal)).open(cx);self.view.redraw(cx);}
-                else {self.request_agents(cx,false);}return;
-            }
-            if self.tab == InfoTab::Members && self.view.button(cx,ids!(invite_selected_agent)).clicked(actions) {self.request_agents(cx,true);return;}
+            if self.view.button(cx,ids!(invite_selected_agent)).clicked(actions) {self.request_agents(cx,true);return;}
             if self.view.button(cx,ids!(resume_agent_requests)).clicked(actions) {self.close_agent_picker(cx);cx.action(crate::hagency::ui::HagencyAction::OpenAgents);return;}
             if self.view.button(cx, ids!(retry)).clicked(actions) {
                 if let Some(room) = self.room.clone() {
@@ -904,35 +1364,44 @@ impl Widget for MobileChatInfo {
             }
             let list = self.view.portal_list(cx, ids!(list));
             for (_index, widget) in list.items_with_actions(actions) {
-                if widget.navigation_bar_button(cx, ids!(copy_room_id)).clicked(actions) {
-                    if self.pin_is_current() && self.tab == self.drawn_tab
-                        && self.rendered_rows.get(&widget.widget_uid()) == Some(&InfoRow::Overview)
-                        && let Some(data) = self.data.as_ref() {
-                        cx.copy_to_clipboard(data.room.room_id().as_str());
-                    }
-                    continue;
-                }
-                if list.was_scrolling()
-                    || !(widget.navigation_bar_button(cx, ids!(row)).clicked(actions) || widget.button(cx, ids!(row)).clicked(actions))
-                {
-                    continue;
-                }
-                if !self.pin_is_current() {continue;}
-                let Some(data) = self.data.as_ref() else {continue;};
-                if self.tab != self.drawn_tab {continue;}
+                if list.was_scrolling() || !self.pin_is_current() {continue;}
                 let Some(row) = self.rendered_rows.get(&widget.widget_uid()).copied() else {continue;};
                 match row {
-                    InfoRow::Member(_) => {
-                        let Some(profile)=self.rendered_members.get(&widget.widget_uid()) else {continue;};
-                        cx.widget_action(self.widget_uid(), ShowUserProfileAction::ShowUserProfile(UserProfileAndRoomId {user_profile:profile.clone(), room_id:data.room.room_id().clone()}));
+                    InfoRow::Members(_) => {
+                        let Some(target) = self.rendered_cells.get(&widget.widget_uid()).and_then(|cells| {
+                            cell_ids!().into_iter().zip(cells).find_map(|(id, target)| {
+                                target.as_ref().filter(|_| widget.navigation_bar_button(cx, id).clicked(actions)).cloned()
+                            })
+                        }) else {continue;};
+                        self.tap_cell(cx, target);
                     }
-                    InfoRow::Notifications => self.choosing_notifications = true,
-                    InfoRow::Mode(mode) => {
-                        if let Some((mode, _))=modes().get(mode) {submit_async_request(MatrixRequest::SetRoomNotificationMode {room_id:data.room.room_id().clone(),mode:*mode});}
+                    InfoRow::AddChoice => {
+                        let Some(data) = self.data.as_ref() else {continue;};
+                        if data.can_invite && widget.button(cx, ids!(invite_people)).clicked(actions) {
+                            cx.action(InviteModalAction::Open(data.room.clone()));
+                            self.adding = false;
+                        } else if widget.button(cx, ids!(invite_my_agent)).clicked(actions) {
+                            self.adding = false;
+                            self.open_agent_picker(cx);
+                        } else {
+                            continue;
+                        }
                     }
-                    InfoRow::Back => self.choosing_notifications = false,
-                    InfoRow::AgentServices => {self.services_open = !self.services_open;if self.services_open {self.load_services(cx);}},
-                    InfoRow::Overview | InfoRow::Filler => continue,
+                    _ => {
+                        if !(widget.navigation_bar_button(cx, ids!(row)).clicked(actions) || widget.button(cx, ids!(row)).clicked(actions)) {continue;}
+                        let Some(data) = self.data.as_ref() else {continue;};
+                        match row {
+                            InfoRow::Name => self.tap_name(cx),
+                            InfoRow::Nickname => self.tap_nickname(cx),
+                            InfoRow::Notifications => self.choosing_notifications = true,
+                            InfoRow::Mode(mode) => {
+                                if let Some((mode, _))=modes().get(mode) {submit_async_request(MatrixRequest::SetRoomNotificationMode {room_id:data.room.room_id().clone(),mode:*mode});}
+                            }
+                            InfoRow::Back => self.choosing_notifications = false,
+                            InfoRow::AgentServices => {self.services_open = !self.services_open;if self.services_open {self.load_services(cx);}},
+                            _ => continue,
+                        }
+                    }
                 }
                 self.view.redraw(cx);
                 // PortalList returns an item once per grouped child action.
@@ -947,37 +1416,32 @@ impl Widget for MobileChatInfo {
         if self.owner.is_some() && !self.pin_is_current() {
             self.clear();
         }
-        let members = self.tab == InfoTab::Members;
-        self.view.label(cx,ids!(ownership_status)).set_visible(cx,members && self.ownership_unavailable);
-        self.view.view(cx, ids!(services_panel)).set_visible(cx, !members && self.services_open);
-        self.view.view(cx, ids!(information_list)).set_visible(cx, members || !self.services_open);
-        let service_selected = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1).is_some_and(|i| i < self.services.len());
-        self.view.button(cx, ids!(configure_service)).set_enabled(cx, service_selected && !self.services_busy && self.pin_is_current());
+        // A covered tab can miss the one-shot result. When it next draws it
+        // must still leave the loading state and offer a new request.
+        self.expire_pending_load(cx, std::time::Instant::now());
+        self.view.view(cx, ids!(rename_panel)).set_visible(cx, self.renaming);
+        self.view.button(cx, ids!(rename_save)).set_enabled(cx, !self.rename_busy);
+        self.view.view(cx, ids!(nick_panel)).set_visible(cx, self.nicknaming);
+        self.view.button(cx, ids!(nick_save)).set_enabled(cx, !self.nick_busy);
+        let editing = self.renaming || self.nicknaming;
+        self.view.view(cx, ids!(services_panel)).set_visible(cx, self.services_open && !editing);
+        self.view.view(cx, ids!(information_list)).set_visible(cx, !self.services_open && !editing);
+        let selected = self.view.drop_down(cx, ids!(room_services)).selected_item().checked_sub(1).and_then(|i| self.services.get(i));
+        // The button is there to be pressed once an Agent is picked, and is gone for a picked
+        // Agent that has no service to open.
+        let openable = selected.is_some_and(|service| openable_service(service).is_some());
+        self.view.button(cx, ids!(configure_service)).set_visible(cx, selected.is_none() || openable);
+        self.view.button(cx, ids!(configure_service)).set_enabled(cx, openable && !self.services_busy && self.pin_is_current());
         self.view.button(cx, ids!(refresh_services)).set_enabled(cx, !self.services_busy);
-        self.view.view(cx, ids!(member_controls)).set_visible(cx, members);
-        self.view.button(cx,ids!(invite_my_agent)).set_visible(cx,members);
-        if !members || !self.agent_picker_open {
+        if !self.agent_picker_open {
             self.close_agent_picker(cx);
         }
-        let can_invite = self.data.as_ref().is_some_and(|data| data.can_invite);
-        self.view.button(cx, ids!(invite_people)).set_visible(cx, members && can_invite);
-        self.view.button(cx, ids!(invite_people)).set_enabled(cx, can_invite && self.owner.is_some());
-        self.view.label(cx, ids!(members_empty)).set_visible(cx, members && self.data.as_ref().is_some_and(|d|d.members.is_empty()));
         let summary_room = self.data.as_ref().map(|data|&data.room).or(self.room.as_ref());
         self.view.label(cx, ids!(summary_name)).set_text(cx, &summary_room.map_or_else(|| crate::i18n::tr("Chat information").to_owned(), |room|room.display().into_owned()));
         let count = self.data.as_ref().map_or_else(|| crate::i18n::tr("Loading members…").to_owned(), member_count);
-        self.view.label(cx, ids!(summary_count)).set_text(cx, &count);
-        // Applying a style asks for a redraw, and this runs on every draw:
-        // restyling the tabs each time kept the open panel drawing for ever.
-        if self.styled_tab != Some(self.tab) {
-            self.styled_tab = Some(self.tab);
-            for (id, selected) in [(ids!(overview_tab), !members), (ids!(members_tab), members)] {
-                let mut button = self.view.button(cx, id);
-                if selected {script_apply_eval!(cx, button, {draw_bg +: {color: mod.widgets.RINX_SELECTED} draw_text +: {color: mod.widgets.RINX_ACCENT}});}
-                else {script_apply_eval!(cx, button, {draw_bg +: {color: mod.widgets.RINX_SURFACE} draw_text +: {color: mod.widgets.RINX_INK}});}
-            }
-        }
-        self.view.button(cx,ids!(invite_my_agent)).set_enabled(cx,self.owner.is_some());
+        let summary_count = self.view.label(cx, ids!(summary_count));
+        summary_count.set_text(cx, &count);
+        summary_count.set_visible(cx, self.data.is_some() || (self.request != 0 && !self.failed));
         let selected=self.view.drop_down(cx,ids!(my_agents)).selected_item().checked_sub(1).is_some_and(|i|i<self.agents.len());
         self.view.button(cx,ids!(invite_selected_agent)).set_enabled(cx,selected && !self.agent_project.is_empty() && !self.agent_busy && !self.agent_added);
         self.view.drop_down(cx,ids!(my_agents)).set_disabled(cx,self.agent_busy);
@@ -990,80 +1454,102 @@ impl Widget for MobileChatInfo {
         self.view
             .button(cx, ids!(retry))
             .set_visible(cx, self.failed);
-        self.drawn_tab = self.tab;
-        self.rendered_rows.clear(); self.rendered_members.clear();
+        let (columns, cell_width) = grid_columns(cx.peek_walk_turtle(walk).size.x);
+        let page = self.data.as_ref().map(|data| InfoPage {
+            members: data.members.len(), can_remove: !data.removable.is_empty(), columns,
+            adding: self.adding, topic: !data.topic.is_empty(), choosing: self.choosing_notifications,
+            agents: self.owner.as_ref().is_some_and(|owner| has_own_agent(&data.members, &self.member_owners, owner)),
+        });
+        self.rendered_rows.clear(); self.rendered_cells.clear();
         while let Some(item) = self.view.draw_walk(cx, scope, walk).step() {
             if let Some(mut list) = item.borrow_mut::<PortalList>() {
-                let count = self.data.as_ref().map_or(0, |d| info_rows(self.tab, d.members.len(), self.choosing_notifications));
+                let count = page.map_or(0, |page| page.rows());
                 list.set_item_range(cx, 0, count);
                 while let Some(index) = list.next_visible_item(cx) {
-                    let Some(data) = self.data.as_mut().filter(|_| index < count) else {
+                    let (Some(page), Some(data)) = (page.filter(|_| index < count), self.data.as_mut()) else {
                         list.item(cx, index, id!(Filler)).draw_all(cx, scope);
                         continue;
                     };
-                    let row = info_row(self.tab, data.members.len(), self.choosing_notifications, index);
+                    let row = page.row(index);
                     let widget = match row {
-                        InfoRow::Overview => {
-                            let widget = list.item(cx, index, id!(Header));
-                            widget.label(cx, ids!(room_id)).set_text(cx, data.room.room_id().as_str());
-                            widget.label(cx, ids!(topic)).set_text(cx, if data.topic.is_empty() {crate::i18n::tr("No topic set.")} else {&data.topic});
+                        InfoRow::Members(first) => {
+                            let widget = list.item(cx, index, id!(MemberRow));
+                            let mut targets = Vec::with_capacity(MAX_COLUMNS);
+                            for (slot, id) in cell_ids!().into_iter().enumerate() {
+                                let cell = widget.widget(cx, id);
+                                let kind = (slot < page.columns).then(|| page.cell(first + slot)).flatten();
+                                if let Some(mut button) = cell.borrow_mut::<NavigationBarButton>() {
+                                    button.view.set_visible(cx, kind.is_some());
+                                    button.view.walk.width = Size::Fixed(cell_width);
+                                }
+                                let member = match kind {
+                                    Some(InfoCell::Member(member)) => data.members.get_mut(member),
+                                    _ => None,
+                                };
+                                cell.view(cx, ids!(photo)).set_visible(cx, member.is_some());
+                                cell.view(cx, ids!(tile)).set_visible(cx, matches!(kind, Some(InfoCell::Add | InfoCell::Remove)));
+                                cell.view(cx, ids!(upright)).set_visible(cx, kind == Some(InfoCell::Add));
+                                let (name, note, marked, target) = match (kind, member) {
+                                    (Some(InfoCell::Member(_)), Some(profile)) => {
+                                        let service = self.owner.as_ref().is_some_and(|owner| is_hagency_service(&profile.user_id, owner));
+                                        let name = if service {crate::i18n::tr("Hagency service")} else {profile.displayable_name()}.to_owned();
+                                        let note = if data.banned_members.contains(&profile.user_id) {crate::i18n::tr("Banned")}
+                                            else if data.invited.contains(&profile.user_id) {crate::i18n::tr("Invited, not joined yet")}
+                                            else {crate::agent_access::framework_label(&profile.user_id).unwrap_or("")};
+                                        let avatar = cell.avatar(cx, ids!(avatar));
+                                        let loaded = profile.avatar_state.update_from_cache(cx).is_some_and(|image| {
+                                            avatar.show_image(cx, None, |cx, img| utils::load_avatar_image(&img, cx, image)).is_ok()
+                                        });
+                                        if !loaded {
+                                            avatar.show_user_text(cx, &profile.user_id, profile.displayable_name());
+                                        }
+                                        let marked = self.removing && data.removable.contains(&profile.user_id);
+                                        (name, note, marked, Some(CellTarget::Member(profile.clone())))
+                                    }
+                                    (Some(InfoCell::Add), _) => (crate::i18n::tr("Add").to_owned(), "", false, Some(CellTarget::Add)),
+                                    (Some(InfoCell::Remove), _) => (
+                                        crate::i18n::tr(if self.removing {"Done"} else {"Kick"}).to_owned(), "", false, Some(CellTarget::Remove),
+                                    ),
+                                    _ => (String::new(), "", false, None),
+                                };
+                                cell.view(cx, ids!(badge)).set_visible(cx, marked);
+                                cell.label(cx, ids!(name)).set_text(cx, &name);
+                                cell.label(cx, ids!(note)).set_text(cx, note);
+                                targets.push(target);
+                            }
+                            self.rendered_cells.insert(widget.widget_uid(), targets);
                             widget
                         }
-                        InfoRow::Member(member) => {
-                            let Some(profile)=data.members.get_mut(member) else {continue;};
-                        let widget = list.item(cx, index, id!(Member));
-                        self.rendered_members.insert(widget.widget_uid(), profile.clone());
-                        if let Some(mut row)=widget.navigation_bar_button(cx,ids!(row)).borrow_mut() {
-                            let agent=self.indented_members.contains(&profile.user_id);
-                            row.view.layout.padding.left=if agent {36.0} else {16.0};
-                            row.view.walk.height=Size::Fixed(if agent {48.0} else {56.0});
-                            row.view.layout.align.y=if agent {0.25} else {0.5};
+                        InfoRow::AddChoice => {
+                            let widget = list.item(cx, index, id!(AddChoice));
+                            widget.button(cx, ids!(invite_people)).set_visible(cx, data.can_invite);
+                            widget.button(cx, ids!(invite_my_agent)).set_enabled(cx, self.owner.is_some());
+                            widget
                         }
-
-                        let service = self.owner.as_ref().is_some_and(|owner| is_hagency_service(&profile.user_id, owner));
-                        widget.label(cx, ids!(name)).set_text(cx, if service {crate::i18n::tr("Hagency service")} else {profile.displayable_name()});
-                        let detail = crate::agent_access::framework_label(&profile.user_id)
-                            .map_or_else(
-                                || profile.user_id.to_string(),
-                                |framework| format!("{framework} · {}", profile.user_id),
-                            );
-                        let detail = if data.banned_members.contains(&profile.user_id) {crate::i18n::format("Banned · {user}", &[("user", detail)])} else {detail};
-                        let detail = if data.invited.contains(&profile.user_id) {
-                            format!("{} · {detail}", crate::i18n::tr("Invited, not joined yet"))
-                        } else {
-                            detail
-                        };
-                        widget.label(cx, ids!(user_id)).set_text(cx, &detail);
-                        let avatar = widget.avatar(cx, ids!(avatar));
-                        let loaded =
-                            profile
-                                .avatar_state
-                                .update_from_cache(cx)
-                                .is_some_and(|image| {
-                                    avatar
-                                        .show_image(cx, None, |cx, img| {
-                                            utils::load_avatar_image(&img, cx, image)
-                                        })
-                                        .is_ok()
-                                });
-                        if !loaded {
-                            avatar.show_user_text(cx, &profile.user_id, profile.displayable_name());
-                        }
-                        widget
+                        InfoRow::Gap => list.item(cx, index, id!(Gap)),
+                        InfoRow::Topic => {
+                            let widget = list.item(cx, index, id!(Topic));
+                            widget.label(cx, ids!(topic)).set_text(cx, &data.topic);
+                            widget
                         }
                         InfoRow::Back => list.item(cx, index, id!(Back)),
                         InfoRow::Filler => list.item(cx, index, id!(Filler)),
                         _ => {
                             let widget = list.item(cx, index, id!(Action));
+                            let name = shown_name(&data.room.display());
+                            let nick = shown_name(self.owner.as_ref().map_or("", |owner| own_nickname(&data.members, owner)));
+                            // The arrow promises that a tap leads somewhere.
+                            widget.view(cx, ids!(chevron)).set_visible(cx, row != InfoRow::Name || data.can_rename);
                             let (title, value) = match row {
+                                InfoRow::Name => (crate::i18n::tr("Room name"), name.as_str()),
                                 InfoRow::Mode(mode) => modes().get(mode).map(|(mode, title)|(*title, if *mode == data.mode {"✓"} else {""})).unwrap_or(("", "")),
-                                InfoRow::Back => (crate::i18n::tr("Back"), ""),
                                 InfoRow::Notifications => (crate::i18n::tr("Notifications"), match data.mode {
                                     Some(RoomNotificationMode::Mute) => crate::i18n::tr("Muted"),
                                     Some(RoomNotificationMode::AllMessages) => crate::i18n::tr("All"),
                                     Some(RoomNotificationMode::MentionsAndKeywordsOnly) => crate::i18n::tr("Mentions"),
                                     None => crate::i18n::tr("Default"),
                                 }),
+                                InfoRow::Nickname => (crate::i18n::tr("My nickname in this room"), nick.as_str()),
                                 InfoRow::AgentServices => (crate::i18n::tr("Room Agent services"), ""),
                                 _ => ("", ""),
                             };
@@ -1076,6 +1562,13 @@ impl Widget for MobileChatInfo {
                     widget.draw_all(cx, scope);
                 }
             }
+        }
+        // A field is hidden until this draw, and what was never drawn can't take the keys:
+        // it gets them now, with its text selected so that typing replaces it.
+        if let Some(id) = self.focus_input.take() {
+            let input = self.view.text_input(cx, &[id]);
+            input.set_key_focus(cx);
+            if let Some(mut input) = input.borrow_mut() {input.select_all(cx);}
         }
         DrawStep::done()
     }
@@ -1092,10 +1585,8 @@ impl MobileChatInfoRef {
         panel.origin="https://example.invalid/".into();
         let room: OwnedRoomId="!review:example.invalid".try_into().unwrap();
         panel.room=Some(RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Team room".into()),room.clone()));
-        panel.tab=InfoTab::Members;
         if scenario=="members" {
-            panel.data=Some(ChatInfoData {can_invite:true,room:panel.room.clone().unwrap(),topic:String::new(),members:Vec::new(),banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
-            panel.select_tab(cx,InfoTab::Members);
+            panel.data=Some(ChatInfoData {can_invite:true,room:panel.room.clone().unwrap(),topic:String::new(),members:Vec::new(),banned_members:HashSet::new(),removable:HashSet::new(),can_rename:false,invited:HashSet::new(),mode:None});
             panel.view.redraw(cx);
             return;
         }
@@ -1121,15 +1612,15 @@ impl MobileChatInfoRef {
         self.borrow()
             .and_then(|inner| inner.room.as_ref().map(|room| room.room_id().clone()))
     }
-    pub fn ensure_room(&self, cx: &mut Cx, room: RoomNameId) {
-        if let Some(mut inner) = self.borrow_mut()
-            && (!inner.pin_is_current()
-                || inner
-                    .room
-                    .as_ref()
-                    .is_none_or(|current| current.room_id() != room.room_id()))
-        {
-            inner.load(cx, room);
+    pub fn update_room(&self, cx: &mut Cx, room: RoomNameId, opening: bool) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.update_room(cx, room, opening);
+        }
+    }
+
+    pub fn close_picker(&self, cx: &mut Cx) {
+        if let Some(mut inner) = self.borrow_mut() {
+            inner.close_agent_picker(cx);
         }
     }
     pub fn show(&self, cx: &mut Cx, room: RoomNameId) {
@@ -1155,7 +1646,7 @@ mod information_target_tests {
     fn member_count_names_pending_invitations() {
         let room=RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap());
         let members=vec![member("@a:s","A"),member("@b:s","B"),member("@c:s","C")];
-        let mut data=ChatInfoData {can_invite:true,room,topic:String::new(),members,banned_members:HashSet::new(),invited:HashSet::new(),mode:None};
+        let mut data=ChatInfoData {can_invite:true,room,topic:String::new(),members,banned_members:HashSet::new(),invited:HashSet::new(),removable:HashSet::new(),can_rename:false,mode:None};
         assert_eq!(member_count(&data),"3 members");
         data.invited.insert(OwnedUserId::try_from("@c:s").unwrap());
         assert_eq!(member_count(&data),"2 members · 1 invited");
@@ -1172,39 +1663,99 @@ mod information_target_tests {
         ]),None);
         let indented=group_members(&mut members,&owners);
         let ids:Vec<_>=members.iter().map(|p|p.user_id.as_str()).collect();
-        assert_eq!(ids,vec!["@alice:s","@a:s","@bob:s","@b:s","@external:s","@_hagency_service:s","@orphan:s"]);
+        assert_eq!(ids,vec!["@alice:s","@a:s","@bob:s","@b:s","@external:s","@orphan:s","@_hagency_service:s"],"the service comes last");
         assert_eq!(indented.len(),2);
         assert!(indented.contains(&OwnedUserId::try_from("@a:s").unwrap()));
         assert!(!indented.contains(&OwnedUserId::try_from("@orphan:s").unwrap()));
         assert_eq!(group_members(&mut members,&owners),indented,"refresh preserves grouping");
-        let mut cx=Cx::new(Box::new(|_,_|{}));
-        let mut info=cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);crate::app::register_widgets(vm);
+    }
+    fn new_panel(cx: &mut Cx) -> MobileChatInfo {
+        cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);vm.bx.captured_errors=Some(Vec::new());crate::app::register_widgets(vm);
             let value=script_eval!(vm,{mod.widgets.MobileChatInfo {}});
-            MobileChatInfo::script_from_value(vm,value)
-        });
-        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap()),topic:String::new(),members,banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
-        info.indented_members=indented;
-        info.select_tab(&mut cx,InfoTab::Members);draw_information(&mut info,&mut cx);
+            let info=MobileChatInfo::script_from_value(vm,value);assert!(vm.take_errors().is_empty());info
+        })
+    }
+    fn user(id: &str) -> OwnedUserId {OwnedUserId::try_from(id).unwrap()}
+    #[test]
+    fn members_fill_a_grid_that_ends_in_the_add_tile_and_for_a_remover_the_remove_tile() {
+        let mut members=vec![member("@alice:s","Alice"),member("@a:s","Z agent"),member("@bob:s","Bob"),member("@b:s","A agent"),member("@carol:s","Carol")];
+        group_members(&mut members,&HashMap::new());
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=new_panel(&mut cx);
+        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(OwnedRoomId::try_from("!r:s").unwrap()),topic:String::new(),members,banned_members:HashSet::from([user("@carol:s")]),removable:HashSet::new(),can_rename:false,invited:HashSet::new(),mode:None});
+        draw_information(&mut info,&mut cx);
         let list=info.view.portal_list(&mut cx,ids!(list));
-        let parent=list.item(&mut cx,0,id!(Member)).avatar(&mut cx,ids!(avatar)).area().rect(&cx);
-        let child=list.item(&mut cx,1,id!(Member)).avatar(&mut cx,ids!(avatar)).area().rect(&cx);
-        assert_eq!(parent.size,dvec2(32.0,32.0));assert_eq!(child.size,parent.size);
-        assert_eq!(child.pos.x-parent.pos.x,20.0);
-        assert_eq!(child.pos.y-parent.pos.y,48.0,"Agent sits closer to its owner");
-        let next_owner=list.item(&mut cx,2,id!(Member)).avatar(&mut cx,ids!(avatar)).area().rect(&cx);
-        assert_eq!(next_owner.pos.y-child.pos.y,56.0,"keep the gap before the next owner");
-        for index in [0,1] {
-            let widget=list.item(&mut cx,index,id!(Member));
-            let name=widget.label(&mut cx,ids!(name)).area().rect(&cx);
-            let user_id=widget.label(&mut cx,ids!(user_id)).area().rect(&cx);
-            let avatar=widget.avatar(&mut cx,ids!(avatar)).area().rect(&cx);
-            assert!((name.pos.x-(avatar.pos.x+avatar.size.x)-8.0).abs()<0.1,"avatar and text use a compact 8px gap");
-            let gap=user_id.pos.y-(name.pos.y+name.size.y);
-            assert!((gap-2.0).abs()<0.1,"name and Matrix ID stay together: {gap}");
+        // What a cell shows: (shown at all, photo, tile, the tile's upright bar, badge, name, note).
+        let cell=|cx:&mut Cx,row:usize,slot:usize| {
+            let cell=list.item(cx,row,id!(MemberRow)).widget(cx,cell_ids!()[slot]);
+            let shown=cell.borrow::<NavigationBarButton>().unwrap().view.visible();
+            (shown,cell.view(cx,ids!(photo)).visible(),cell.view(cx,ids!(tile)).visible(),cell.view(cx,ids!(upright)).visible(),
+                cell.view(cx,ids!(badge)).visible(),cell.label(cx,ids!(name)).text(),cell.label(cx,ids!(note)).text())
+        };
+        let rect=|cx:&mut Cx,row:usize,slot:usize| list.item(cx,row,id!(MemberRow)).widget(cx,cell_ids!()[slot]).area().rect(cx);
+        // A 280 wide panel holds four cells to a row: five members and the tile that adds.
+        for (slot,name) in ["A agent","Alice","Bob","Carol"].into_iter().enumerate() {
+            let note=if name=="Carol" {"Banned"} else {""};
+            assert_eq!(cell(&mut cx,0,slot),(true,true,false,false,false,name.to_owned(),note.to_owned()));
+            let here=rect(&mut cx,0,slot);
+            assert_eq!((here.pos.x,here.size.x,here.size.y),(12.0+64.0*slot as f64,64.0,84.0));
         }
-        cx.with_vm(|vm|assert!(vm.take_errors().is_empty()));
+        for slot in [4,5] {assert!(!cell(&mut cx,0,slot).0,"a row holds no more than its columns");}
+        let avatar=list.item(&mut cx,0,id!(MemberRow)).widget(&mut cx,ids!(c0)).avatar(&mut cx,ids!(avatar)).area().rect(&cx);
+        assert_eq!(avatar.size,dvec2(40.0,40.0));
+        assert_eq!(cell(&mut cx,1,0),(true,true,false,false,false,"Z agent".to_owned(),String::new()));
+        assert_eq!(cell(&mut cx,1,1),(true,false,true,true,false,"Add".to_owned(),String::new()));
+        assert!(!cell(&mut cx,1,2).0,"nobody here can be removed, so no tile offers it");
+        assert_eq!(rect(&mut cx,1,0).pos.y-rect(&mut cx,0,0).pos.y,84.0);
+        assert_eq!(info.rendered_rows.values().filter(|row|matches!(row,InfoRow::Members(_))).count(),2);
 
+        // The viewer may remove Bob and the Agent: the tile that removes follows the tile that adds.
+        info.data.as_mut().unwrap().removable=HashSet::from([user("@bob:s"),user("@a:s")]);
+        draw_information(&mut info,&mut cx);
+        assert_eq!(cell(&mut cx,1,2),(true,false,true,false,false,"Kick".to_owned(),String::new()));
+        assert!(!cell(&mut cx,0,2).4,"nobody is marked before the tile is tapped");
+        // A tap on a member opens their profile; nothing is asked of the homeserver.
+        let bob=member("@bob:s","Bob");
+        let opened=cx.capture_actions(|cx|info.tap_cell(cx,CellTarget::Member(bob.clone())));
+        assert!(opened.iter().all(|action|action.downcast_ref::<ModerationModalAction>().is_none()));
+
+        info.tap_cell(&mut cx,CellTarget::Remove);
+        assert!(info.removing && !info.adding);
+        draw_information(&mut info,&mut cx);
+        let marked:Vec<_>=[(0,0),(0,1),(0,2),(0,3),(1,0)].into_iter().map(|(row,slot)|cell(&mut cx,row,slot).4).collect();
+        assert_eq!(marked,[false,false,true,false,true],"only the members who can be removed are marked");
+        assert_eq!(cell(&mut cx,1,2).5,"Done");
+        // Now a tap on a marked member asks for confirmation, naming that member and this room.
+        let asked=cx.capture_actions(|cx|info.tap_cell(cx,CellTarget::Member(bob)));
+        let asked:Vec<_>=asked.iter().filter_map(|action|action.downcast_ref::<ModerationModalAction>()).collect();
+        assert!(matches!(asked.as_slice(),[ModerationModalAction::Open(ModerationRequest::Member(MemberModeration {room_id,user_id,action:MemberAction::Kick,..}))]
+            if room_id.as_str()=="!r:s" && user_id.as_str()=="@bob:s"),"{asked:?}");
+        // A tap on anyone else does nothing while members are being removed.
+        let ignored=cx.capture_actions(|cx|info.tap_cell(cx,CellTarget::Member(member("@alice:s","Alice"))));
+        assert!(ignored.is_empty());
+        info.tap_cell(&mut cx,CellTarget::Remove);
+        assert!(!info.removing);
+        cx.with_vm(|vm|assert!(vm.take_errors().is_empty()));
+    }
+    #[test]
+    fn only_members_below_the_viewer_can_be_removed_and_never_the_service() {
+        use matrix_sdk::ruma::{events::room::power_levels::RoomPowerLevelsEventContent, int, user_id};
+        use ruma::room_version_rules::AuthorizationRules;
+        let mut content=RoomPowerLevelsEventContent::new(&AuthorizationRules::V1);
+        content.users.insert(user_id!("@owner:s").to_owned(),int!(100));
+        content.users.insert(user_id!("@peer:s").to_owned(),int!(100));
+        let levels=RoomPowerLevels::new(content.into(),&AuthorizationRules::V1,[]);
+        let members=vec![member("@owner:s","Owner"),member("@peer:s","Peer"),member("@bob:s","Bob"),member("@agent:s","Agent"),
+            member("@gone:s","Gone"),member("@_hagency_service:s","Hagency service")];
+        let banned=HashSet::from([user("@gone:s")]);
+        let sorted=|users:HashSet<OwnedUserId>| {let mut users:Vec<_>=users.into_iter().map(String::from).collect();users.sort();users};
+        // The room's owner: people and Agents alike, but not an equal, not themselves,
+        // not someone already out of the room, and not the service that invites Agents.
+        assert_eq!(sorted(removable_members(&levels,user_id!("@owner:s"),&members,&banned)),["@agent:s","@bob:s"]);
+        // Anyone else in the room: nobody.
+        assert!(removable_members(&levels,user_id!("@bob:s"),&members,&banned).is_empty());
+        assert!(removable_members(&levels,user_id!("@agent:s"),&members,&banned).is_empty());
     }
     #[test]
     fn conflicting_ownership_and_cycles_never_create_false_grouping() {
@@ -1275,21 +1826,42 @@ mod information_target_tests {
         info.clear();assert!(!info.services_response_matches(&result));
     }
     #[test]
-    fn overview_actions_and_member_indices_never_share_notification_or_profile_targets() {
-        for members in [0, 1, 5, 200] {
-            for choosing in [false, true] {
-                assert_eq!(info_row(InfoTab::Members, members, choosing, members), InfoRow::Filler);
-                for index in 0..members {assert_eq!(info_row(InfoTab::Members, members, choosing, index), InfoRow::Member(index));}
-                assert_eq!(info_row(InfoTab::Overview, members, choosing, 0), InfoRow::Overview);
+    fn every_cell_and_row_of_the_page_has_one_meaning() {
+        assert_eq!(grid_columns(280.0),(4,64.0));
+        assert_eq!(grid_columns(390.0),(5,73.0));
+        assert_eq!(grid_columns(1000.0),(6,84.0));
+        assert_eq!(grid_columns(0.0),(4,62.0),"a panel not laid out yet still gets a usable grid");
+        for members in [0, 1, 3, 4, 5, 200] {
+            for variant in 0..96 {
+                let (can_remove, adding, choosing, topic, columns, agents) = (variant & 1 == 1, variant & 2 == 2, variant & 4 == 4, variant & 8 == 8, 4 + variant % 48 / 16, variant >= 48);
+                let page = InfoPage {members, can_remove, columns, adding, topic, choosing, agents};
+                // Members in their order, then the tile that adds, then the tile that removes.
+                for index in 0..members {assert_eq!(page.cell(index), Some(InfoCell::Member(index)));}
+                assert_eq!(page.cell(members), Some(InfoCell::Add));
+                assert_eq!(page.cell(members + 1), can_remove.then_some(InfoCell::Remove));
+                assert_eq!(page.cell(members + 2), None);
+                // The grid's rows hold every cell once and no row is empty.
+                let grid = page.grid_rows();
+                assert!(grid * columns >= page.cells() && (grid - 1) * columns < page.cells());
+                for row in 0..grid {assert_eq!(page.row(row), InfoRow::Members(row * columns));}
+                let mut next = grid;
+                if adding {assert_eq!(page.row(next), InfoRow::AddChoice);next += 1;}
+                assert_eq!(page.row(next), InfoRow::Gap);
+                assert_eq!(page.row(next + 1), InfoRow::Name);
+                next += 2;
+                if topic {assert_eq!(page.row(next), InfoRow::Topic);next += 1;}
                 if choosing {
-                    for mode in 0..4 {assert_eq!(info_row(InfoTab::Overview, members, true, mode+1), InfoRow::Mode(mode));}
-                    assert_eq!(info_row(InfoTab::Overview, members, true, 5), InfoRow::Back);
-                    assert_eq!(info_row(InfoTab::Overview, members, true, 6), InfoRow::Filler);
+                    for mode in 0..4 {assert_eq!(page.row(next + mode), InfoRow::Mode(mode));}
+                    assert_eq!(page.row(next + 4), InfoRow::Back);
+                    assert_eq!(page.rows(), next + 5);
                 } else {
-                    assert_eq!(info_row(InfoTab::Overview, members, false, 1), InfoRow::Notifications);
-                    assert_eq!(info_row(InfoTab::Overview, members, false, 2), InfoRow::AgentServices);
-                    assert_eq!(info_row(InfoTab::Overview, members, false, 3), InfoRow::Filler);
+                    assert_eq!(page.row(next), InfoRow::Notifications);
+                    assert_eq!(page.row(next + 1), InfoRow::Nickname);
+                    // The row of the viewer's own Agents is there only for a viewer who has one in the room.
+                    if agents {assert_eq!(page.row(next + 2), InfoRow::AgentServices);}
+                    assert_eq!(page.rows(), next + 2 + usize::from(agents));
                 }
+                assert_eq!(page.row(page.rows()), InfoRow::Filler);
             }
         }
     }
@@ -1311,60 +1883,391 @@ mod information_target_tests {
         overlay.end(&mut cx2d);cx2d.end_pass_sized_turtle();list.end(&mut cx2d);cx2d.end_pass(&pass);
     }
     #[test]
-    fn registered_room_tabs_keep_summary_fixed_and_original_invitation_intent() {
-        let mut cx=Cx::new(Box::new(|_,_|{}));
-        let mut info=cx.with_vm(|vm| {
-            makepad_widgets::script_mod(vm);vm.bx.captured_errors=Some(Vec::new());crate::app::register_widgets(vm);
-            let value=script_eval!(vm,{mod.widgets.MobileChatInfo {}});
-            let info=MobileChatInfo::script_from_value(vm,value);assert!(vm.take_errors().is_empty());info
+    fn verified_session_reloads_room_information_and_ignores_previous_device() {
+        use crate::matrix_context::SessionPin;
+        use crate::settings::crypto_settings::test_support::{Server, install_link_client};
+        use crate::verification::VerificationStateAction;
+        use std::{cell::RefCell, rc::Rc};
+
+        const TEST: &str = "home::mobile_chat_info::information_target_tests::verified_session_reloads_room_information_and_ignores_previous_device";
+        if std::env::var_os("HAGENCY_INFO_VERIFY_TEST").is_none() {
+            let profile = tempfile::tempdir().unwrap();
+            let result = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", TEST, "--test-threads=1"])
+                .env("HAGENCY_INFO_VERIFY_TEST", "1")
+                .env("HAGENCY_DESKTOP_DATA_DIR", profile.path())
+                .env("HAGENCY_NATIVE_CREDENTIAL_IO", "deny")
+                .output().unwrap();
+            assert!(result.status.success(), "{}\n{}", String::from_utf8_lossy(&result.stdout), String::from_utf8_lossy(&result.stderr));
+            assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            return;
+        }
+
+        crate::sliding_sync::backend_runtime().block_on(async {
+            let server = Server::with_handler(false, std::sync::Arc::new(|_| None));
+            let old = server.room().await.client();
+            install_link_client(Some(old.clone()));
+            let old_pin = SessionPin::capture(&old).unwrap();
+            let room = server.room().await;
+            let current = room.client();
+            install_link_client(Some(current.clone()));
+
+            let panel = Rc::new(RefCell::new(None::<MobileChatInfo>));
+            let listener = Rc::clone(&panel);
+            let mut cx = Cx::new(Box::new(move |cx, event| {
+                if matches!(event, Event::Actions(_)) && let Some(info) = listener.borrow_mut().as_mut() {
+                    info.handle_event(cx, event, &mut Scope::empty());
+                }
+            }));
+            let mut info = cx.with_vm(|vm| {
+                makepad_widgets::script_mod(vm);
+                crate::app::register_widgets(vm);
+                let value = script_eval!(vm, {mod.widgets.MobileChatInfo {}});
+                MobileChatInfo::script_from_value(vm, value)
+            });
+            info.room = Some(RoomNameId::empty(room.room_id().to_owned()));
+            info.owner = current.user_id().map(ToOwned::to_owned);
+            info.epoch = crate::account_session::epoch();
+            info.origin = current.homeserver().to_string();
+            info.fail_load(&mut cx, "offline");
+            let verified = |pin| Event::Actions(vec![Box::new(VerificationStateAction {
+                pin, state: matrix_sdk::encryption::VerificationState::Verified,
+            })]);
+            info.handle_event(&mut cx, &verified(old_pin), &mut Scope::empty());
+            assert!(info.failed && info.load_deadline.is_none());
+            info.handle_event(&mut cx, &verified(SessionPin::capture(&current).unwrap()), &mut Scope::empty());
+            assert!(!info.failed && info.load_deadline.is_some());
+            *panel.borrow_mut() = Some(info);
+            async fn wait_for_info(cx: &mut Cx, panel: &RefCell<Option<MobileChatInfo>>) {
+                tokio::time::timeout(INFO_TIMEOUT, async {
+                    loop {
+                        cx.handle_action_receiver();
+                        if panel.borrow().as_ref().unwrap().load_deadline.is_none() { break; }
+                        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+                    }
+                }).await.expect("the current room must receive a terminal response");
+            }
+            wait_for_info(&mut cx, &panel).await;
+            {
+                let mut loaded = panel.borrow_mut();
+                let info = loaded.as_mut().unwrap();
+                assert!(!info.failed, "{}", info.status);
+                assert_eq!(info.data.as_ref().unwrap().room.room_id(), room.room_id());
+                let selected = info.room.clone().unwrap();
+                info.data.as_mut().unwrap().members.push(member("@stale:example.org", "Stale"));
+                let previous = info.request;
+                let command = ("agent".to_owned(), "original-key".to_owned());
+                info.agent_command = Some(command.clone());
+                info.update_room(&mut cx, selected.clone(), false);
+                assert_eq!(info.request, previous);
+                assert!(info.data.as_ref().unwrap().members.iter().any(|m| m.user_id.as_str() == "@stale:example.org"));
+                info.update_room(&mut cx, selected.clone(), true);
+                assert!(info.data.is_none() && info.load_deadline.is_some());
+                assert_ne!(info.request, previous);
+                assert_eq!(info.agent_command, Some(command));
+                let refresh = info.request;
+                info.update_room(&mut cx, selected, false);
+                assert_eq!(info.request, refresh);
+            }
+            wait_for_info(&mut cx, &panel).await;
+            assert!(panel.borrow().as_ref().unwrap().data.as_ref().unwrap().members
+                .iter().all(|m| m.user_id.as_str() != "@stale:example.org"));
+            install_link_client(None);
         });
+    }
+
+    #[test]
+    fn returning_to_a_pane_that_missed_its_reply_shows_retry_and_ends_loading() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let mut info = cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            let value = script_eval!(vm, {mod.widgets.MobileChatInfo {}});
+            MobileChatInfo::script_from_value(vm, value)
+        });
+        info.room = Some(RoomNameId::empty(ruma::owned_room_id!("!room:example.org")));
+        info.request = 1;
+        info.load_deadline = Some(std::time::Instant::now());
+        draw_information(&mut info, &mut cx);
+        assert!(info.failed && info.load_deadline.is_none());
+        assert!(info.view.button(&cx, ids!(retry)).visible());
+        assert!(!info.view.label(&cx, ids!(summary_count)).visible());
+        assert!(info.status.contains(crate::i18n::tr("The chat information request timed out.")));
+    }
+
+    #[test]
+    fn one_page_keeps_the_summary_fixed_and_the_original_invitation_intent() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=new_panel(&mut cx);
         let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),matrix_sdk::ruma::room_id!("!a:server").to_owned());
-        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:"A topic".into(),members:vec![],banned_members:HashSet::new(),invited:HashSet::new(),mode:None,can_invite:true});
+        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:"A topic".into(),members:vec![],banned_members:HashSet::new(),removable:HashSet::new(),can_rename:false,invited:HashSet::new(),mode:None,can_invite:true});
         info.agent_command=Some(("exact-original-input".into(),"original-key".into()));
         draw_information(&mut info,&mut cx);
         assert_eq!(info.view.label(&mut cx,ids!(summary_name)).text(),"Room A");
         assert!(!info.view.modal(&mut cx,ids!(agent_picker_modal)).is_open());
-        assert!(!info.view.view(&mut cx,ids!(member_controls)).visible());
         assert!(!info.view.navigation_bar_button(&mut cx,ids!(history_search)).is_empty());
         let summary=info.view.view(&mut cx,ids!(summary)).area().rect(&cx);
-        info.select_tab(&mut cx,InfoTab::Members);draw_information(&mut info,&mut cx);
-        let controls=info.view.view(&mut cx,ids!(member_controls)).area().rect(&cx);
-        assert!(controls.pos.y>=summary.pos.y+summary.size.y-1.0,"picker follows fixed summary");
+        let page=info.view.portal_list(&mut cx,ids!(list)).area().rect(&cx);
+        assert!(page.pos.y>=summary.pos.y+summary.size.y-1.0,"the page follows the fixed summary");
+        assert!(page.size.y>200.0,"the summary must leave space for the page");
+        // Members, room details and settings are on the one page: no tab hides any of them.
+        let rows:Vec<_>=(0..5).map(|index|InfoPage {members:0,can_remove:false,columns:4,adding:false,topic:true,choosing:false,agents:false}.row(index)).collect();
+        assert_eq!(rows,[InfoRow::Members(0),InfoRow::Gap,InfoRow::Name,InfoRow::Topic,InfoRow::Notifications]);
+        let mut drawn:Vec<_>=info.rendered_rows.values().copied().collect();
+        drawn.sort_by_key(|row|format!("{row:?}"));
+        assert_eq!(drawn,[InfoRow::Gap,InfoRow::Members(0),InfoRow::Name,InfoRow::Nickname,InfoRow::Notifications,InfoRow::Topic],
+            "nobody's Agent is in the room: no row for the viewer's own Agents");
+
+        // The tile that adds opens the choice between a person and an Agent, right under the grid.
+        info.tap_cell(&mut cx,CellTarget::Add);
+        assert!(info.adding);
+        draw_information(&mut info,&mut cx);
+        let list=info.view.portal_list(&mut cx,ids!(list));
+        let choice=list.item(&mut cx,1,id!(AddChoice));
+        let invite=choice.button(&mut cx,ids!(invite_people)).area().rect(&cx);
+        let agent=choice.button(&mut cx,ids!(invite_my_agent)).area().rect(&cx);
+        assert!((invite.pos.y-agent.pos.y).abs()<1.0,"the two ways to add share a compact row");
+        assert!(invite.size.y<=32.1 && agent.size.y<=32.1);
+        assert!(invite.pos.x+invite.size.x<=agent.pos.x && agent.pos.x+agent.size.x<=280.0);
+        let grid=list.item(&mut cx,0,id!(MemberRow)).area().rect(&cx);
+        assert!((invite.pos.y-(grid.pos.y+grid.size.y)).abs()<=5.0,"the choice sits right under the grid");
+        info.tap_cell(&mut cx,CellTarget::Add);
+        assert!(!info.adding,"a second tap puts the choice away");
+        // Without the right to invite people there is no choice to show: only an Agent can be added.
+        info.data.as_mut().unwrap().can_invite=false;
+        info.tap_cell(&mut cx,CellTarget::Add);
+        assert!(!info.adding);
+        info.data.as_mut().unwrap().can_invite=true;
+        // With nobody the viewer may remove, the tile that removes does nothing.
+        info.tap_cell(&mut cx,CellTarget::Remove);
+        assert!(!info.removing);
+        info.data.as_mut().unwrap().removable=HashSet::from([user("@bob:server")]);
+        info.tap_cell(&mut cx,CellTarget::Remove);
+        assert!(info.removing);
+        info.tap_cell(&mut cx,CellTarget::Add);
+        assert!(info.adding && !info.removing,"adding and removing are never open together");
+        assert_eq!(info.agent_command,Some(("exact-original-input".into(),"original-key".into())),"moving about the page doesn't duplicate or discard the invitation key");
+
+        draw_information(&mut info,&mut cx);
         let members_list = info.view.portal_list(&mut cx, ids!(list)).area().rect(&cx);
         info.agent_picker_open = true;
         info.view.modal(&mut cx, ids!(agent_picker_modal)).open(&mut cx);
         draw_information(&mut info, &mut cx);
         assert!(info.view.modal(&mut cx, ids!(agent_picker_modal)).is_open());
         assert_eq!(info.view.portal_list(&mut cx, ids!(list)).area().rect(&cx), members_list,
-            "opening the overlay must not move or shrink the members list");
+            "opening the overlay must not move or shrink the page");
         let dialog = info.view.view(&mut cx, ids!(agent_picker_modal.content)).area().rect(&cx);
         assert!(dialog.size.x > 200.0 && dialog.size.x <= 400.0);
-        // A taller dialog can start above the member buttons and still be
-        // centered. Check its center and bounds instead of a background row.
         assert!((dialog.pos.y + dialog.size.y * 0.5 - 775.0 * 0.5).abs() <= 1.0,
             "dialog is centered in the window: {dialog:?}");
         assert!(dialog.pos.y >= 0.0 && dialog.pos.y + dialog.size.y <= 775.0);
-        let invite=info.view.button(&mut cx,ids!(invite_people)).area().rect(&cx);
-        let agent=info.view.button(&mut cx,ids!(invite_my_agent)).area().rect(&cx);
-        assert!((invite.pos.y-agent.pos.y).abs()<1.0,"member actions share a compact row");
-        assert!(invite.size.y<=32.1 && agent.size.y<=32.1);
-        assert!(invite.pos.x+invite.size.x<=agent.pos.x && agent.pos.x+agent.size.x<=280.0);
-        assert!(info.view.portal_list(&mut cx,ids!(list)).area().rect(&cx).size.y>200.0,"invitation controls must leave space for members");
-        info.choosing_notifications=true;info.select_tab(&mut cx,InfoTab::Overview);draw_information(&mut info,&mut cx);
-        assert!(!info.choosing_notifications);
-        assert!(!info.view.modal(&mut cx,ids!(agent_picker_modal)).is_open());
-        assert_eq!(info.agent_command,Some(("exact-original-input".into(),"original-key".into())),"tab navigation doesn't duplicate or discard invitation key");
+        info.close_agent_picker(&mut cx);
         assert_eq!(info.view.view(&mut cx,ids!(summary)).area().rect(&cx),summary);
         cx.with_vm(|vm|assert!(vm.take_errors().is_empty()));
+
         info.services_open=true;draw_information(&mut info,&mut cx);
         assert!(info.view.view(&mut cx,ids!(services_panel)).visible());
         assert!(!info.view.view(&mut cx,ids!(information_list)).visible());
         assert_eq!(info.view.button(&mut cx,ids!(services_back)).text(),crate::i18n::tr("Back"));
-        info.select_tab(&mut cx,InfoTab::Members);draw_information(&mut info,&mut cx);
-        assert!(!info.services_open);
+        // The button that opens a service is there before an Agent is picked and for an Agent
+        // with a service on this owner's devices, and gone for one a pool runs.
+        assert!(info.view.button(&mut cx,ids!(configure_service)).visible());
+        info.services=vec![serde_json::json!({"agentId":"own","bindingId":"b","displayName":"Own"}),serde_json::json!({"agentId":"pool","displayName":"Pool","pool":true})];
+        let picker=info.view.drop_down(&mut cx,ids!(room_services));
+        picker.set_labels(&mut cx,vec!["Choose an Agent".into(),"Own".into(),"Pool".into()]);
+        picker.set_selected_item(&mut cx,1);draw_information(&mut info,&mut cx);
+        assert!(info.view.button(&mut cx,ids!(configure_service)).visible());
+        picker.set_selected_item(&mut cx,2);draw_information(&mut info,&mut cx);
+        assert!(!info.view.button(&mut cx,ids!(configure_service)).visible());
+        picker.set_selected_item(&mut cx,0);draw_information(&mut info,&mut cx);
+        assert!(info.view.button(&mut cx,ids!(configure_service)).visible());
+        info.services.clear();
+        info.services_open=false;draw_information(&mut info,&mut cx);
         assert!(!info.view.view(&mut cx,ids!(services_panel)).visible());
         assert!(info.view.view(&mut cx,ids!(information_list)).visible());
-        info.clear();assert_eq!(info.tab,InfoTab::Overview);assert!(info.agent_command.is_none());
+        info.removing=true;
+        info.clear();
+        assert!(!info.adding && !info.removing && info.agent_command.is_none());
+    }
+    #[test]
+    fn a_panel_inside_a_rooms_screen_asks_that_screen_for_the_history_and_not_the_app() {
+        use super::super::room_history::{HistoryFilter, RoomHistoryAction};
+        use crate::shared::navigation_bar_button::NavigationBarButtonAction;
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=new_panel(&mut cx);
+        let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),matrix_sdk::ruma::room_id!("!a:server").to_owned());
+        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:String::new(),members:vec![],banned_members:HashSet::new(),removable:HashSet::new(),can_rename:false,invited:HashSet::new(),mode:None,can_invite:true});
+        #[cfg(feature = "onboarding-test-support")]
+        {info.review_mode=true;}
+        if !info.pin_is_current() {return;}
+        let uid=info.widget_uid();
+        for (id,filter) in [(ids!(history_search),HistoryFilter::Messages),(ids!(history_media),HistoryFilter::Media)] {
+            let button=info.view.navigation_bar_button(&mut cx,id).widget_uid();
+            for in_room in [false,true] {
+                info.history_in_room=in_room;
+                let click=cx.capture_actions(|cx|cx.widget_action(button,NavigationBarButtonAction::Clicked));
+                let out=cx.capture_actions(|cx|info.handle_event(cx,&Event::Actions(click),&mut Scope::empty()));
+                let to_app=out.iter().any(|action|matches!(action.downcast_ref(),Some(RoomHistoryAction::Open{filter:actual,..}) if *actual==filter));
+                let to_screen=out.iter().filter_map(|action|action.as_widget_action()).any(|action|action.widget_uid==uid
+                    && matches!(action.action.downcast_ref(),Some(RoomHistoryAction::Open{filter:actual,..}) if *actual==filter));
+                assert_eq!((to_app,to_screen),(!in_room,in_room),"{filter:?} in a room's screen: {in_room}");
+            }
+        }
+    }
+    #[test]
+    fn the_row_of_own_agents_is_for_a_viewer_with_an_agent_in_the_room() {
+        let me=user("@me:server");
+        let members=vec![member("@me:server","Me"),member("@_hagency_agt_mine:server","Mine"),member("@_hagency_agt_theirs:server","Theirs"),member("@zed:server","Zed")];
+        let mut owners=HashMap::new();
+        assert!(!has_own_agent(&members,&owners,&me),"nothing is known of who owns whom");
+        owners.insert(user("@_hagency_agt_theirs:server"),user("@zed:server"));
+        assert!(!has_own_agent(&members,&owners,&me));
+        owners.insert(user("@_hagency_agt_gone:server"),me.clone());
+        assert!(!has_own_agent(&members,&owners,&me),"an Agent of the viewer's that is not in this room");
+        owners.insert(user("@_hagency_agt_mine:server"),me.clone());
+        assert!(has_own_agent(&members,&owners,&me));
+        assert!(!has_own_agent(&members,&owners,&user("@other:server")));
+        // A pool Agent has no service of the personal kind to report.
+        let pool=serde_json::json!({"agentId":"a","displayName":"Pool","pool":true});
+        assert_eq!(room_service_status(&pool),crate::i18n::tr("Runs on a shared resource pool."));
+        assert_eq!(openable_service(&pool),None,"the pool runs it: no service of this owner's devices to open");
+        assert_eq!(openable_service(&serde_json::json!({"agentId":"a","bindingId":"b"})),Some(("a","b")));
+        assert_eq!(openable_service(&serde_json::json!({"bindingId":"b"})),None);
+    }
+    #[test]
+    fn a_person_sets_the_name_they_go_by_in_one_room() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=new_panel(&mut cx);
+        let room_id=matrix_sdk::ruma::room_id!("!a:server").to_owned();
+        let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),room_id.clone());
+        let me=user("@me:server");
+        info.room=Some(room.clone());
+        info.data=Some(ChatInfoData{room,topic:String::new(),members:vec![member("@me:server","Me"),member("@zed:server","Zed")],banned_members:HashSet::new(),removable:HashSet::new(),can_rename:false,invited:HashSet::new(),mode:None,can_invite:true});
+        assert_eq!(own_nickname(&info.data.as_ref().unwrap().members,&me),"Me");
+        assert_eq!(own_nickname(&info.data.as_ref().unwrap().members,&user("@nobody:server")),"");
+        draw_information(&mut info,&mut cx);
+        let list=info.view.portal_list(&mut cx,ids!(list));
+        // Under the grid's one row, the gap, the room's name and the notifications.
+        let row=list.item(&mut cx,4,id!(Action));
+        assert_eq!(info.rendered_rows.get(&row.widget_uid()),Some(&InfoRow::Nickname));
+        assert_eq!(row.label(&mut cx,ids!(title)).text(),"My nickname in this room");
+        assert!(row.view(&mut cx,ids!(chevron)).visible());
+        info.tap_nickname(&mut cx);
+        assert!(!info.nicknaming,"without a signed-in viewer there is nobody to name");
+
+        info.owner=Some(me.clone());info.origin="https://server/".into();info.epoch=4;
+        info.renaming=true;
+        info.tap_nickname(&mut cx);
+        assert!(info.nicknaming && !info.renaming,"one field at a time");
+        assert_eq!(info.view.text_input(&mut cx,ids!(nick_input)).text(),"Me","the field starts from the present name");
+        assert_eq!(info.focus_input,Some(live_id!(nick_input)),"the field takes the keys once it is drawn");
+        // The present name closes the field without a request.
+        info.view.text_input(&mut cx,ids!(nick_input)).set_text(&mut cx," Me ");
+        info.save_nickname(&mut cx);
+        assert!(!info.nicknaming && !info.nick_busy && info.nick_request==0);
+
+        // Only the answer to this panel's own request ends a change.
+        info.tap_nickname(&mut cx);info.nick_request=8;info.nick_busy=true;
+        let mut set=NicknameSet{owner:me.clone(),origin:"https://server/".into(),epoch:4,room_id:room_id.clone(),request:8,result:Err("not allowed".into())};
+        assert!(info.nick_response_matches(&set));
+        set.request=7;assert!(!info.nick_response_matches(&set));set.request=8;
+        set.epoch=3;assert!(!info.nick_response_matches(&set));set.epoch=4;
+        set.origin="https://other/".into();assert!(!info.nick_response_matches(&set));set.origin="https://server/".into();
+        set.room_id=matrix_sdk::ruma::room_id!("!other:server").to_owned();assert!(!info.nick_response_matches(&set));set.room_id=room_id;
+        set.owner=user("@other:server");assert!(!info.nick_response_matches(&set));set.owner=me.clone();
+        info.finish_nickname(&mut cx,&set);
+        assert!(info.nicknaming && !info.nick_busy,"a refused change keeps the field open");
+        assert!(info.view.label(&mut cx,ids!(nick_status)).text().contains("not allowed"));
+        set.result=Ok(Some("阿明".into()));
+        info.finish_nickname(&mut cx,&set);
+        assert!(!info.nicknaming);
+        let members=&info.data.as_ref().unwrap().members;
+        assert_eq!(own_nickname(members,&me),"阿明");
+        assert_eq!(members.iter().map(|m|m.displayable_name().to_owned()).collect::<Vec<_>>(),["Zed","阿明"],"the grid is in order by the new name");
+        // An account without a name leaves this person without one in the room.
+        set.result=Ok(None);
+        info.finish_nickname(&mut cx,&set);
+        assert_eq!(own_nickname(&info.data.as_ref().unwrap().members,&me),"");
+        // The field replaces the page while it is open.
+        info.owner=None;info.nicknaming=true;info.focus_input=Some(live_id!(nick_input));
+        info.view.text_input(&mut cx,ids!(nick_input)).set_text(&mut cx,"Me");
+        draw_information(&mut info,&mut cx);
+        assert!(info.focus_input.is_none());
+        let field=info.view.text_input(&mut cx,ids!(nick_input));
+        assert_eq!(field.borrow().unwrap().selected_text(),"Me","typing replaces the name that is there");
+        assert!(info.view.view(&mut cx,ids!(nick_panel)).visible());
+        assert!(!info.view.view(&mut cx,ids!(information_list)).visible());
+        info.nicknaming=false;
+        draw_information(&mut info,&mut cx);
+        assert!(!info.view.view(&mut cx,ids!(nick_panel)).visible());
+        assert!(info.view.view(&mut cx,ids!(information_list)).visible());
+        cx.with_vm(|vm|assert!(vm.take_errors().is_empty()));
+    }
+    #[test]
+    fn the_room_is_shown_by_its_name_which_only_those_allowed_can_change() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let mut info=new_panel(&mut cx);
+        let room_id=matrix_sdk::ruma::room_id!("!a:server").to_owned();
+        let room=RoomNameId::new(matrix_sdk::RoomDisplayName::Named("Room A".into()),room_id.clone());
+        info.room=Some(room.clone());info.data=Some(ChatInfoData{room,topic:String::new(),members:vec![],banned_members:HashSet::new(),removable:HashSet::new(),can_rename:false,invited:HashSet::new(),mode:None,can_invite:true});
+        draw_information(&mut info,&mut cx);
+        let list=info.view.portal_list(&mut cx,ids!(list));
+        // Under the grid's one row and the gap: the room by its name, not by its Matrix ID.
+        let name=list.item(&mut cx,2,id!(Action));
+        assert_eq!(name.label(&mut cx,ids!(title)).text(),"Room name");
+        assert_eq!(name.label(&mut cx,ids!(value)).text(),"Room A");
+        assert!(!name.view(&mut cx,ids!(chevron)).visible(),"no arrow for someone who can't change the name");
+        assert!(!info.rendered_rows.values().any(|row|*row==InfoRow::Topic),"a room without a topic has no topic row");
+        info.tap_name(&mut cx);
+        assert!(!info.renaming,"a tap only says who can change the name");
+
+        info.data.as_mut().unwrap().can_rename=true;
+        draw_information(&mut info,&mut cx);
+        assert!(list.item(&mut cx,2,id!(Action)).view(&mut cx,ids!(chevron)).visible());
+        info.tap_name(&mut cx);
+        assert!(info.renaming);
+        assert_eq!(info.view.text_input(&mut cx,ids!(rename_input)).text(),"Room A","the field starts from the present name");
+        draw_information(&mut info,&mut cx);
+        assert!(info.view.view(&mut cx,ids!(rename_panel)).visible());
+        assert!(!info.view.view(&mut cx,ids!(information_list)).visible());
+        // A name of spaces is not sent.
+        info.view.text_input(&mut cx,ids!(rename_input)).set_text(&mut cx,"   ");
+        info.save_name(&mut cx);
+        assert!(info.renaming && !info.rename_busy);
+        assert_eq!(info.view.label(&mut cx,ids!(rename_status)).text(),"Enter a room name.");
+        // The present name closes the field without a request.
+        info.view.text_input(&mut cx,ids!(rename_input)).set_text(&mut cx," Room A ");
+        info.save_name(&mut cx);
+        assert!(!info.renaming && !info.rename_busy && info.rename_request==0);
+
+        // Only the answer to this panel's own request ends a change.
+        info.owner=Some(user("@owner:server"));info.origin="https://server/".into();info.epoch=4;
+        info.tap_name(&mut cx);info.rename_request=8;info.rename_busy=true;
+        let mut renamed=RoomRenamed{owner:user("@owner:server"),origin:"https://server/".into(),epoch:4,room_id:room_id.clone(),request:8,result:Err("not allowed".into())};
+        assert!(info.rename_response_matches(&renamed));
+        renamed.request=7;assert!(!info.rename_response_matches(&renamed));renamed.request=8;
+        renamed.epoch=3;assert!(!info.rename_response_matches(&renamed));renamed.epoch=4;
+        renamed.origin="https://other/".into();assert!(!info.rename_response_matches(&renamed));renamed.origin="https://server/".into();
+        renamed.room_id=matrix_sdk::ruma::room_id!("!other:server").to_owned();assert!(!info.rename_response_matches(&renamed));renamed.room_id=room_id;
+        renamed.owner=user("@other:server");assert!(!info.rename_response_matches(&renamed));renamed.owner=user("@owner:server");
+        info.finish_rename(&mut cx,&renamed);
+        assert!(info.renaming && !info.rename_busy,"a refused change keeps the field open");
+        assert!(info.view.label(&mut cx,ids!(rename_status)).text().contains("not allowed"));
+        renamed.result=Ok("Room B".into());
+        info.finish_rename(&mut cx,&renamed);
+        assert!(!info.renaming);
+        assert_eq!(info.data.as_ref().unwrap().room.display(),"Room B");
+        assert_eq!(info.room.as_ref().unwrap().display(),"Room B");
+        // A panel of a signed-in account draws only while that sign-in is the current one.
+        info.owner=None;
+        draw_information(&mut info,&mut cx);
+        assert_eq!(list.item(&mut cx,2,id!(Action)).label(&mut cx,ids!(value)).text(),"Room B","the page shows the new name at once");
+        assert_eq!(shown_name("一二三四五六"),"一二三四五六");
+        assert_eq!(shown_name("一二三四五六七"),"一二三四五…");
+        assert_eq!(shown_name("Project room"),"Project room");
+        assert_eq!(shown_name("Project rooms"),"Project roo…");
+        assert_eq!(shown_name("A一二三四五六"),"A一二三四五…");
+        cx.with_vm(|vm|assert!(vm.take_errors().is_empty()));
     }
     #[test]
     fn room_agent_picker_results_cannot_cross_room_account_or_original_call() {
@@ -1416,7 +2319,7 @@ mod information_target_tests {
         let owner=matrix_sdk::ruma::user_id!("@owner:server").to_owned();
         let room=matrix_sdk::ruma::room_id!("!target:server").to_owned();
         info.owner=Some(owner.clone());info.origin="https://server/".into();info.epoch=4;info.room=Some(RoomNameId::empty(room.clone()));info.agent_request=8;
-        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(room.clone()),topic:String::new(),members:vec![member("@owner:server","Owner"),member("@reviewer:server","Reviewer")],banned_members:HashSet::new(),invited:HashSet::new(),mode:None});
+        info.data=Some(ChatInfoData {can_invite:true,room:RoomNameId::empty(room.clone()),topic:String::new(),members:vec![member("@owner:server","Owner"),member("@reviewer:server","Reviewer")],banned_members:HashSet::new(),invited:HashSet::new(),removable:HashSet::new(),can_rename:false,mode:None});
         let agents=serde_json::json!([
             {"id":"a-review","displayName":"Reviewer","state":"active","puppetMxid":"@reviewer:server"},
             {"id":"a-impl","displayName":"Implementer","state":"active","puppetMxid":"@implementer:server"}
@@ -1464,8 +2367,7 @@ mod information_target_tests {
                 can_invite: true,
                 room: RoomNameId::empty(room_a),
                 topic: String::new(),
-                members: vec![], banned_members: HashSet::new(),
-                invited: HashSet::new(),
+                members: vec![], banned_members: HashSet::new(), removable: HashSet::new(), can_rename: false, invited: HashSet::new(),
                 mode: None,
             }),
         };

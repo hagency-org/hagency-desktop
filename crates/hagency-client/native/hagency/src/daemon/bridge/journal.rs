@@ -94,6 +94,13 @@ impl Journal {
     }
     #[cfg(any(unix, test))]
     pub fn admit(&self, id: &str, fingerprint: &str) -> Result<Admission, NativeError> {
+        self.admit_with(id, fingerprint, |_| false)
+    }
+
+    #[cfg(any(unix, test))]
+    pub(super) fn admit_with(
+        &self, id: &str, fingerprint: &str, settled: impl FnOnce(&Failure) -> bool,
+    ) -> Result<Admission, NativeError> {
         // If persistence failed after completion, retry only the receipt write.
         // The native operation must never be invoked a second time.
         let completed = self.2.lock().map_err(|_| error(503, "daemon_bridge_journal_unavailable"))?.get(id).cloned();
@@ -117,7 +124,16 @@ impl Journal {
             Some((_, _, version)) if version != 1 => return Err(error(503, "daemon_bridge_journal_unavailable")),
             Some((old, _, _)) if old != fingerprint => return Err(error(409, "request_id_reused")),
             Some((_, Some(response), _)) => {
-                let result=serde_json::from_str(&response).map_err(|_|error(503,"daemon_bridge_journal_unavailable"))?;
+                let mut result: Result<Value, Failure> = serde_json::from_str(&response)
+                    .map_err(|_| error(503, "daemon_bridge_journal_unavailable"))?;
+                if let Err(failure) = &mut result
+                    && !failure.terminal && settled(failure)
+                {
+                    failure.terminal = true;
+                    let raw = serde_json::to_string(&result).map_err(|_| error(503, "daemon_bridge_journal_unavailable"))?;
+                    tx.execute("UPDATE calls SET response=?1 WHERE id=?2", params![raw, id])
+                        .map_err(|_| error(503, "daemon_bridge_journal_unavailable"))?;
+                }
                 if super::terminal_receipt(&result) {Admission::Result(result)} else {Admission::RecoveryRequired}
             },
             Some((_, None, _)) => {
@@ -230,6 +246,29 @@ impl Journal {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn recorded_prepare_denial_settles_without_reexecuting_a_command() {
+        use super::super::grants::OwnerOperation;
+        let dir = tempfile::tempdir().unwrap();
+        let journal = Journal::open(&dir.path().join("journal.sqlite3")).unwrap();
+        for (id, operation, code, terminal) in [
+            ("prepare", OwnerOperation::PrepareGrant, "management_access_required", true),
+            ("scope", OwnerOperation::PrepareGrant, "management_scope_changed", true),
+            ("confirm", OwnerOperation::ConfirmGrant, "management_access_required", false),
+            ("unknown", OwnerOperation::PrepareGrant, "management_outcome_unknown", false),
+        ] {
+            assert!(matches!(journal.admit(id, "scope").unwrap(), Admission::New));
+            let status = if code == "management_outcome_unknown" { 409 } else { 401 };
+            journal.finish(id, &Err(Failure { status, code: code.into(), terminal: false })).unwrap();
+            let result = journal.admit_with(id, "scope", |f| operation.settled_prepare_denial(f)).unwrap();
+            if terminal {
+                assert!(matches!(result, Admission::Result(Err(f)) if f.terminal && f.code == code));
+                assert!(matches!(journal.admit(id, "scope").unwrap(), Admission::Result(Err(_))));
+            } else {
+                assert!(matches!(result, Admission::RecoveryRequired));
+            }
+        }
+    }
     #[test]
     fn original_command_survives_reopen_and_is_not_executed_twice() {
         let temp = tempfile::tempdir().unwrap();

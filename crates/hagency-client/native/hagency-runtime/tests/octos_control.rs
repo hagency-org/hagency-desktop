@@ -11,7 +11,7 @@ use hagency_runtime::{
 };
 use serde_json::{Value, json};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     fs,
     path::{Path, PathBuf},
     time::Duration,
@@ -54,6 +54,8 @@ struct Run {
     _root: tempfile::TempDir,
     marker: PathBuf,
     runner: OwnedOctosSession,
+    /// What Octos sent before the host saw its own answer written.
+    early: VecDeque<Event>,
 }
 async fn start(mode: &str, owner_wait_ms: u64) -> Run {
     let root = tempfile::tempdir().unwrap();
@@ -83,6 +85,7 @@ async fn start(mode: &str, owner_wait_ms: u64) -> Run {
         _root: root,
         marker,
         runner,
+        early: VecDeque::new(),
     }
 }
 impl Run {
@@ -113,23 +116,52 @@ impl Run {
     async fn answer(&mut self, id: &str, decision: PermissionDecision) {
         let mut prepared = self.runner.prepare_approval(id, decision).unwrap();
         assert!(self.runner.prepared_admissible(&prepared));
-        // Nothing arrives while the answer is written: Octos waits for it.
-        match self
-            .runner
-            .send_prepared_approval(&mut prepared)
-            .await
-            .unwrap()
-        {
-            PreparedUpdate::WriteAccepted(write) => assert!(write.flushed),
-            PreparedUpdate::Event(_) => panic!("no event before the answer leaves"),
+        // Octos goes on as soon as it has the answer's bytes, and the session
+        // reads before it looks at its own write. On a busy machine the rest
+        // of the turn can arrive before the write is confirmed. As in the
+        // product's turn loop, it is kept for after the answer.
+        loop {
+            match self
+                .runner
+                .send_prepared_approval(&mut prepared)
+                .await
+                .unwrap()
+            {
+                PreparedUpdate::WriteAccepted(write) => {
+                    assert!(write.flushed);
+                    break;
+                }
+                PreparedUpdate::Event(event) => {
+                    let ended = matches!(event, Event::Idle(_));
+                    self.early.push_back(event);
+                    assert!(self.early.len() <= 64, "Octos sends on and on before the answer leaves");
+                    // The turn is over, so Octos had the answer.
+                    if ended {
+                        break;
+                    }
+                }
+            }
         }
         assert!(!self.runner.prepared_admissible(&prepared));
+    }
+    /// The next event that is not a tool's start or end. What arrived while
+    /// the answer was written comes first.
+    async fn next(&mut self) -> Event {
+        loop {
+            let event = match self.early.pop_front() {
+                Some(event) => event,
+                None => self.runner.next().await.unwrap(),
+            };
+            if !matches!(event, Event::Tool { .. }) {
+                return event;
+            }
+        }
     }
     /// The rest of the session: the decision's echo and Octos's answer are
     /// consumed, never events.
     async fn reply(&mut self) -> Option<String> {
         loop {
-            match next_event(&mut self.runner).await {
+            match self.next().await {
                 Event::Idle(idle) => return idle.reply,
                 Event::TurnEnded { .. } => {}
                 _ => panic!("nothing between the answer and the reply"),

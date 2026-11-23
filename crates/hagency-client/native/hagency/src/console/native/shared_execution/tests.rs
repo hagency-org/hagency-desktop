@@ -59,6 +59,8 @@ pub(crate) struct State {
     refuse_renewal: bool,
     delay_renewal_reply: bool,
     delay_start_reply: bool,
+    delay_demand_binding: bool,
+    ack_epoch: Option<u64>,
     delay_run_card_device: bool,
     run_card_device_requested: std::sync::atomic::AtomicBool,
     process_writes: usize,
@@ -67,6 +69,7 @@ pub(crate) struct State {
     false_start: bool,
     lose_work_result: bool,
     lose_completed_work_result: bool,
+    refuse_next_reply_authorization: bool,
     work_recover_calls: usize,
     session_routes: usize,
     forged_work: bool,
@@ -76,6 +79,10 @@ pub(crate) struct State {
     stopped_before_reply: bool,
 }
 pub(crate) fn idle_boundary_delay(path: &str, s: &State) -> Option<Duration> {
+    if s.delay_demand_binding && (path.ends_with("/work/poll") || path.ends_with("/demand")) {
+        // Each read fits within a fixture lease (25s), but both together do not.
+        return Some(Duration::from_secs(13));
+    }
     if s.delay_run_card_device && path.ends_with("/crypto/device") {
         s.run_card_device_requested.store(true, std::sync::atomic::Ordering::SeqCst);
         return Some(Duration::from_secs(30));
@@ -132,6 +139,9 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
     }
     if path.ends_with("/crypto/send") {
         assert_eq!(body["workId"], s.shared.work.as_ref().unwrap().id);
+        if std::mem::take(&mut s.shared.refuse_next_reply_authorization) {
+            return Some(json!({"fixtureStatus":503, "code":"domain_writer_busy"}));
+        }
         return Some(json!({"observedAtMs":now()}));
     }
     #[cfg(feature="shared-budget-execution")]
@@ -264,6 +274,8 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         return Some(json!({"work":w,"observedAtMs":at}));
     }
     if path.ends_with("/work/ack") {
+        assert_eq!(body["authority"]["epoch"], s.shared.activity_epoch);
+        s.shared.ack_epoch = Some(s.shared.activity_epoch);
         assert_eq!(body["workDigest"], wh);
         return Some(json!({"acknowledged":true,"observedAtMs":at}));
     }
@@ -325,7 +337,7 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
 }
 async fn fixture() -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) {
     let _ = tracing_subscriber::fmt()
-        .with_env_filter("hagency::console::native::shared_execution=debug,hagency_runtime::owned=info")
+        .with_env_filter("hagency::console::native::shared_execution=debug,hagency_store::domain::owner_resources::capacity::managed_agents::custody::shared_execution::attempt=info,hagency_runtime::owned=info")
         .with_test_writer()
         .try_init();
     let (f, t, c) =
@@ -333,8 +345,7 @@ async fn fixture() -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) 
     runtime_fixture(f, t, c).await
 }
 
-#[tokio::test]
-async fn native_shared_recurring_expired_initial_command_uploads_exact_nonissuance_proof() {
+async fn recurring_fixture() -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) {
     use hagency_core::recurring_quota::{Cadence, Calendar, RenewalMode};
     let f = Fixture::with_provider_budget_calendar("openai.chatgpt", "fixture_account", 1000, 700, 60000,
         Some(Calendar {cadence:Cadence::Daily,time_zone:"America/Los_Angeles".into()})).await;
@@ -357,7 +368,12 @@ async fn native_shared_recurring_expired_initial_command_uploads_exact_nonissuan
     c.validate("@owner:test").unwrap();
     f.state.lock().unwrap().agent=Some(serde_json::to_value(&c).unwrap());
     let transport = ManagedAgentTransport::new(f.owner.management(package(1)).await.unwrap());
-    let (f,t,mut command)=runtime_fixture(f,transport,c).await;
+    runtime_fixture(f, transport, c).await
+}
+
+#[tokio::test]
+async fn native_shared_recurring_expired_initial_command_uploads_exact_nonissuance_proof() {
+    let (f, t, mut command) = recurring_fixture().await;
     command.issued_at_ms=now()-50;
     command.expires_at_ms=now()-1;
     {
@@ -458,7 +474,7 @@ fn rows(f: &Fixture, table: &str) -> u64 {
     db.query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |r| r.get(0))
         .unwrap()
 }
-async fn stopped(f: &Fixture) {
+async fn wait_original_stopped(f: &Fixture) {
     tokio::time::timeout(Duration::from_secs(15), async {
         loop {
             if f.state
@@ -476,6 +492,9 @@ async fn stopped(f: &Fixture) {
     })
     .await
     .expect("retained process stops with exact receipt");
+}
+async fn stopped(f: &Fixture) {
+    wait_original_stopped(f).await;
     f.owner.0.shared_execution.drain().await.unwrap();
 }
 #[tokio::test]

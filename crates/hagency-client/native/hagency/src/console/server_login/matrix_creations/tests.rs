@@ -161,6 +161,7 @@ async fn matrix_calls_use_only_current_oauth_grant_and_fail_closed_after_expiry(
             refresh_token: None,
             oauth_expires: now + Duration::from_secs(300),
             authorized_until: now + Duration::from_secs(30),
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: super::super::Binding {
                 origin: base,
@@ -284,6 +285,7 @@ async fn fixture_with_status_and_hook(
             refresh_token: None,
             oauth_expires: now + Duration::from_secs(300),
             authorized_until: now + Duration::from_secs(30),
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: super::super::Binding {
                 origin: base,
@@ -441,4 +443,25 @@ async fn binding_does_not_invite_on_owner_policy_denial_or_uncertain_response() 
         assert_eq!(error.code,code);
         tokio::time::timeout(Duration::from_secs(5),task).await.unwrap().unwrap();
     }
+}
+#[tokio::test]
+async fn binding_a_private_agent_to_a_project_room_makes_it_public_once_with_the_original_key() {
+    let body = json!({"projectId":"prj_1","roomId":"!room:example.test","idempotencyKey":"original"});
+    let (login, task) = fixture_with_status_and_hook(vec![
+        ("POST /hagency/api/v1/agents/agt_1/bindings", 401, json!({"code":"private_agent_owner_direct_only"}), Some(body.clone())),
+        ("PUT /hagency/api/v1/agents/agt_1/visibility", 200, json!({"agent":{"id":"agt_1","visibility":"public"}}), Some(json!({"visibility":"public"}))),
+        ("POST /hagency/api/v1/agents/agt_1/bindings", 200, json!({"commandState":"pending"}), Some(body.clone())),
+    ], |_|{}).await;
+    let reply = login.bind_agent_room("cookie", "agt_1".into(), "prj_1".into(), "!room:example.test".into(), "original".into()).await.unwrap();
+    assert_eq!(reply.value["commandState"], "pending");
+    tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
+
+    // A refused visibility change is reported as it is, and the binding is not tried again.
+    let (login, task) = fixture_with_status_and_hook(vec![
+        ("POST /hagency/api/v1/agents/agt_1/bindings", 401, json!({"code":"private_agent_owner_direct_only"}), Some(body.clone())),
+        ("PUT /hagency/api/v1/agents/agt_1/visibility", 409, json!({"code":"agent_retired"}), Some(json!({"visibility":"public"}))),
+    ], |_|{}).await;
+    let error = login.bind_agent_room("cookie", "agt_1".into(), "prj_1".into(), "!room:example.test".into(), "original".into()).await.err().expect("expected refusal");
+    assert_eq!(error.code, "agent_retired");
+    tokio::time::timeout(Duration::from_secs(5), task).await.unwrap().unwrap();
 }

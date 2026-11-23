@@ -129,14 +129,16 @@ impl ProfileAuthority {
         Ok(self)
     }
     fn check(&self) -> Result<(), Error> {
-        if !self.live.load(Ordering::Acquire)
-            || Instant::now() >= self.expires
-            || self.native_gate.as_ref().is_some_and(|gate| !gate())
-        {
-            Err(Error::LocalAuthority)
+        if !self.live.load(Ordering::Acquire) {
+            tracing::info!("Pool profile authority retired");
+        } else if Instant::now() >= self.expires {
+            tracing::info!(overdue_ms = self.expires.elapsed().as_millis() as u64, "Pool profile authority expired");
+        } else if self.native_gate.as_ref().is_some_and(|gate| !gate()) {
+            tracing::info!("Pool profile native gate rejected");
         } else {
-            Ok(())
+            return Ok(());
         }
+        Err(Error::LocalAuthority)
     }
     pub fn account(&self) -> &str {
         &self.account
@@ -595,10 +597,10 @@ fn authorize_resource(db: &Connection, profile: &ProfileAuthority, id: &str) -> 
 
 impl DomainRepository {
     fn bind_owner_registry(&mut self, root: &Path) -> Result<String, Error> {
-        let directory = cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?;
-        let identity = serde_json::to_string(&hagency_platform::directory_identity(
-            &directory.into_std_file(),
-        )?)?;
+        let directory =
+            cap_std::fs::Dir::open_ambient_dir(root, cap_std::ambient_authority())?.into_std_file();
+        let identity =
+            serde_json::to_string(&hagency_platform::registry_directory_identity(&directory)?)?;
         let tx = self
             .db
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
@@ -618,6 +620,21 @@ impl DomainRepository {
             .optional()?;
         let id = match stored {
             Some((id, old)) if old == identity => id,
+            #[cfg(target_os = "macos")]
+            Some((id, old))
+                if old
+                    == serde_json::to_string(&hagency_platform::directory_identity(
+                        &directory,
+                    )?)? =>
+            {
+                // Upgrade only while the full legacy identity still matches
+                // the same open directory. An inode alone is not sufficient.
+                tx.execute(
+                    "UPDATE owner_resource_identity SET root_identity=?1 WHERE singleton=1",
+                    [&identity],
+                )?;
+                id
+            }
             Some(_) => return Err(Error::Private),
             None => {
                 let mut bytes = [0; 32];

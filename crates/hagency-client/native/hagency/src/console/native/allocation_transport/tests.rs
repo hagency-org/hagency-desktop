@@ -148,6 +148,7 @@ struct State {
     short_ticket: bool,
     delay_result: bool,
     delay_contribution_until: Option<Instant>,
+    contribution_latency: Option<Duration>,
     #[cfg(feature="shared-intake")]
     unavailable_contribution: bool,
     generation: u64,
@@ -500,7 +501,9 @@ async fn server(state: Arc<Mutex<State>>) -> (String, tokio::task::JoinHandle<()
                     tokio::time::sleep(delay).await;
                 }
                 let contribution_delay = if path.ends_with("/contributions/con_fixture") {
-                    state.lock().unwrap().delay_contribution_until
+                    let state = state.lock().unwrap();
+                    state.contribution_latency.map(|delay| Instant::now() + delay)
+                        .or(state.delay_contribution_until)
                 } else {
                     None
                 };

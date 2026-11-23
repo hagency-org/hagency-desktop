@@ -196,7 +196,7 @@ through the same path a human click takes. It asserts the card renders, clicks a
 decision button, and then checks the homeserver for the resulting verdict event.
 
 ```bash
-MAKEPAD_REMOTE=8099 ./target/debug/rinx &
+MAKEPAD_REMOTE=8099 ./target/debug/hagency &
 # Sign in through Rinx, then substitute this isolated test's room and request.
 python3 tools/agentchat-probe/probe_approval.py \
     --bridge 8099 --homeserver http://127.0.0.1:8128 \

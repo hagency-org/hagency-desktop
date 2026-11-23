@@ -49,6 +49,9 @@ callback({is_ok:false error:"resource_enrollment_cancelled"}) assert(H.command==
 assert(H.notice==A.t("Resource review closed. Existing saved requests are unchanged.","已关闭资源确认，已有的保存请求保持不变。"))
 callback({is_ok:true data:{commands:[{commandId:"original" operation:"enroll_account_resource" hasReply:false}]}})
 assert(H.saved_commands.len()==1 && H.saved_commands[0].commandId=="original")''',
+ 'container_choice_not_kept': '''H.command={service:"hagency.accounts.enroll" args:{commandId:"original" containers:true}} A.retry_command() assert(sent.len()==1)
+callback({is_ok:false error:"pool_containers_unavailable"}) assert(H.command==nil && !H.busy && sent.len()==2 && sent[1].service=="hagency.intent.pending")
+assert(H.notice==A.error_text("pool_containers_unavailable") && H.notice!=A.error_text("some_other_code"))''',
  'unsupported_quota_not_retry_loop': '''H.command={service:"hagency.accounts.enroll" args:{commandId:"original"}} A.retry_command()
 callback({is_ok:false error:"provider_identity_unavailable"}) assert(H.command==nil && !H.busy && sent.len()==2 && sent[1].service=="hagency.intent.acknowledge")
 assert(H.notice==A.enrollment_error("provider_identity_unavailable"))''',

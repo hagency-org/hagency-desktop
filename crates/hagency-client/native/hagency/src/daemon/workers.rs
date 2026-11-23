@@ -105,6 +105,8 @@ pub const ORDER: [Step; 14] = [
 /// step's own journal; an error keeps the previous cursor.
 pub trait PassIo: Send + Sync {
     fn enabled(&self, step: Step) -> bool;
+    /// An already discovered offer may run at the next safe step boundary.
+    fn ready(&self, _step: Step) -> bool { false }
     fn run(&self, step: Step, after: Option<String>) -> StepFuture<'_>;
 }
 
@@ -157,7 +159,12 @@ pub async fn pass(
     admission: &Admission,
 ) -> PassReport {
     let mut report = PassReport::default();
-    for step in ORDER {
+    // Stop recovery runs first. All launches still share this single consumer.
+    for step in ORDER.into_iter().flat_map(|scheduled| {
+        [Step::IntakeDemand, Step::BudgetDemand].into_iter()
+            .filter(move |step| scheduled != Step::DemandStop && *step != scheduled && io.ready(*step))
+            .chain(std::iter::once(scheduled))
+    }) {
         if !live() {
             return report;
         }
@@ -215,6 +222,7 @@ pub async fn pass(
 pub struct Control {
     pub retired: AtomicBool,
     pub wake: tokio::sync::Notify,
+    retiring: tokio::sync::Notify,
 }
 
 #[derive(Default)]
@@ -226,6 +234,7 @@ pub struct Worker {
 impl Worker {
     pub fn retire(&self) {
         self.control.retired.store(true, Ordering::Release);
+        self.control.retiring.notify_waiters();
         self.control.wake.notify_one();
     }
     pub fn retired(&self) -> bool {
@@ -427,6 +436,8 @@ pub mod native {
     }
 
     /// Shared-execution loop. Mirrors Desktop's `shared_worker::run`.
+    mod discovery;
+
     #[allow(clippy::too_many_arguments)]
     pub async fn run_shared(
         owner: NativeOwner,
@@ -439,73 +450,83 @@ pub mod native {
         executor_slot: Arc<tokio::sync::Mutex<Option<Arc<CurrentSharedExecutor>>>>,
     ) {
         let live = || !control.retired.load(Ordering::Acquire) && gate();
-        let mut cursors = Cursors::default();
-        let mut grant_access: Option<crate::native_owner::OwnerGrantAccess> = None;
-        let mut next_renewal = std::time::Instant::now();
-        let mut renewal_error = None;
-        while live() {
-            if std::time::Instant::now() >= next_renewal {
-                if let Some(_admission) = admission.enter() {
-                    if grant_access.as_ref().is_none_or(|a| a.retired()) {
-                        let control = Arc::downgrade(&control);
-                        let gate = gate.clone();
-                        grant_access = match selection.grant_access(&owner, package(b"hagency-owner-daemon-calendar-worker-v1", epoch)).await {
-                            Ok(access) => access.restrict_to_host(move || control.upgrade().is_some_and(|c| !c.retired.load(Ordering::Acquire)) && gate()).ok(),
-                            Err(error) => { renewal_error = Some(error.code); None }
+        let ordinary = discovery::Inbox::default();
+        let budget = discovery::Inbox::default();
+        let maintenance = async {
+            let mut cursors = Cursors::default();
+            let mut grant_access: Option<crate::native_owner::OwnerGrantAccess> = None;
+            let mut next_renewal = std::time::Instant::now();
+            let mut renewal_error = None;
+            while live() {
+                let executor = {
+                    let mut slot = executor_slot.lock().await;
+                    if slot.is_none() && live() {
+                        let worker_gate: Gate = {
+                            let control = Arc::downgrade(&control);
+                            let gate = gate.clone();
+                            Arc::new(move || {
+                                control
+                                    .upgrade()
+                                    .is_some_and(|c| !c.retired.load(Ordering::Acquire))
+                                    && gate()
+                            })
                         };
-                    }
-                    if let Some(access) = &grant_access {
-                        renewal_error = match access.renew_recurring().await {
-                            Ok(_) => None,
+                        match selection
+                            .shared_executor(
+                                &owner,
+                                package(b"hagency-owner-daemon-shared-worker-v1", epoch),
+                                worker_gate,
+                            )
+                            .await
+                        {
+                            Ok(executor) if live() => *slot = Some(Arc::new(executor)),
+                            Ok(executor) => executor.retire(),
                             Err(error) => {
-                                tracing::debug!(code=%error.code,"Recurring capacity awaits authorization or settlement");
-                                Some(error.code)
+                                *health.lock().unwrap_or_else(|p| p.into_inner()) = Some(error.code);
                             }
-                        };
-                    }
-                }
-                next_renewal = std::time::Instant::now() + Duration::from_secs(30);
-            }
-            let executor = {
-                let mut slot = executor_slot.lock().await;
-                if slot.is_none() && live() {
-                    let worker_gate: Gate = {
-                        let control = Arc::downgrade(&control);
-                        let gate = gate.clone();
-                        Arc::new(move || {
-                            control
-                                .upgrade()
-                                .is_some_and(|c| !c.retired.load(Ordering::Acquire))
-                                && gate()
-                        })
-                    };
-                    match selection
-                        .shared_executor(
-                            &owner,
-                            package(b"hagency-owner-daemon-shared-worker-v1", epoch),
-                            worker_gate,
-                        )
-                        .await
-                    {
-                        Ok(executor) if live() => *slot = Some(Arc::new(executor)),
-                        Ok(executor) => executor.retire(),
-                        Err(error) => {
-                            *health.lock().unwrap_or_else(|p| p.into_inner()) = Some(error.code);
                         }
                     }
+                    slot.clone()
+                };
+                if let Some(executor) = executor.as_ref() {
+                    let io = discovery::Consumer { executor, ordinary: &ordinary, budget: &budget };
+                    let report = pass(&io, &mut cursors, live, &admission).await;
+                    *health.lock().unwrap_or_else(|p| p.into_inner()) = report.last_error.or_else(|| renewal_error.clone());
                 }
-                slot.clone()
-            };
-            if let Some(executor) = executor.as_ref() {
-                let report = pass(executor.as_ref(), &mut cursors, live, &admission).await;
-                *health.lock().unwrap_or_else(|p| p.into_inner()) = report.last_error.or_else(|| renewal_error.clone());
+                if std::time::Instant::now() >= next_renewal {
+                    if let Some(_admission) = admission.enter() {
+                        if grant_access.as_ref().is_none_or(|a| a.retired()) {
+                            let control = Arc::downgrade(&control);
+                            let gate = gate.clone();
+                            grant_access = match selection.grant_access(&owner, package(b"hagency-owner-daemon-calendar-worker-v1", epoch)).await {
+                                Ok(access) => access.restrict_to_host(move || control.upgrade().is_some_and(|c| !c.retired.load(Ordering::Acquire)) && gate()).ok(),
+                                Err(error) => { renewal_error = Some(error.code); None }
+                            };
+                        }
+                        if let Some(access) = &grant_access {
+                            renewal_error = match access.renew_recurring().await {
+                                Ok(_) => None,
+                                Err(error) => {
+                                    tracing::debug!(code=%error.code,"Recurring capacity awaits authorization or settlement");
+                                    Some(error.code)
+                                }
+                            };
+                        }
+                    }
+                    next_renewal = std::time::Instant::now() + Duration::from_secs(30);
+                }
+                if !live() {
+                    break;
+                }
+                idle(&control, Duration::from_secs(5)).await;
             }
-            if !live() {
-                break;
-            }
-            idle(&control, Duration::from_secs(5)).await;
-        }
-        if let Some(access) = grant_access { access.retire(); }
+            if let Some(access) = grant_access { access.retire(); }
+        };
+        tokio::join!(
+            maintenance,
+            discovery::poll(false, &ordinary, &executor_slot, &admission, &control, &live),
+            discovery::poll(true, &budget, &executor_slot, &admission, &control, &live)
+        );
         if let Some(executor) = executor_slot.lock().await.take() {
             executor.retire();
         }

@@ -6,6 +6,7 @@ use std::{collections::{HashMap, HashSet}, sync::Arc};
 use crate::settings::app_preferences::{AppPreferencesAction, AppPreferencesGlobal};
 use crate::{app::{AppState, AppStateAction, SavedDockState, SelectedRoom}, home::{navigation_tab_bar::{NavigationBarAction, SelectedTab}, rooms_list::RoomsListRef, space_lobby::SpaceLobbyScreenWidgetRefExt}, utils::RoomNameId};
 use super::{invite_screen::InviteScreenWidgetRefExt, room_screen::RoomScreenWidgetRefExt, rooms_list::{AcceptedInviteKind, RoomsListAction}, spaces_bar::SpacesBarAction};
+use crate::moments::ui::{MomentsAction, MomentsPanelWidgetRefExt};
 
 #[cfg(test)]
 #[path = "chat_layout_tests.rs"]
@@ -63,6 +64,7 @@ script_mod! {
             // Below are the templates of widgets that can be created within dock tabs.
             rooms_sidebar := mod.widgets.RoomsSideBar {}
             welcome_screen := mod.widgets.WelcomeScreen {}
+            moments_panel := mod.widgets.MomentsPanel { padding: 0 }
             room_screen := mod.widgets.RoomScreen {
                 desktop_chat_header +: { visible: true }
                 // A desktop chat column keeps its messages and its input box
@@ -127,6 +129,9 @@ pub struct MainDesktopUI {
     /// and at most one room stays open, so selecting a room replaces the open chat.
     #[rust]
     tabbed_chats: bool,
+
+    /// Moments temporarily occupies a chat pane without changing the saved chats.
+    #[rust] moments_open: bool,
 }
 
 impl ScriptHook for MainDesktopUI {
@@ -169,6 +174,37 @@ impl Widget for MainDesktopUI {
 }
 
 impl MainDesktopUI {
+    fn open_moments(&mut self, cx: &mut Cx, action: &MomentsAction) {
+        let dock = self.view.dock(cx, ids!(dock));
+        if !self.moments_open {
+            let (pane, after) = self.most_recently_selected_room.as_ref()
+                .and_then(|room| dock.find_tab_bar_of_tab(room.tab_id()))
+                .or_else(|| dock.find_tab_bar_of_tab(id!(home_tab)))
+                .expect("chat dock has a home tab");
+            if dock.create_and_select_tab(cx, pane, id!(moments_tab), id!(moments_panel),
+                crate::i18n::tr("Moments").to_owned(), id!(CloseableTab), Some(after)).is_none()
+            {
+                return;
+            }
+            self.moments_open = true;
+        }
+        dock.select_tab(cx, id!(moments_tab));
+        dock.item(id!(moments_tab)).as_moments_panel().action(cx, None, action);
+        self.apply_tab_bar_visibility(cx);
+        cx.action(AppStateAction::FocusNone);
+        self.redraw(cx);
+    }
+
+    fn close_moments(&mut self, cx: &mut Cx) {
+        if !self.moments_open { return; }
+        let dock = self.view.dock(cx, ids!(dock));
+        dock.item(id!(moments_tab)).as_moments_panel().action(cx, None, &MomentsAction::Close);
+        dock.close_tab(cx, id!(moments_tab));
+        self.moments_open = false;
+        let previous = self.most_recently_selected_room.clone();
+        self.select_room(cx, previous);
+    }
+
     /// The root pane contains the room browser. Below a usable width it snaps
     /// shut instead of inheriting Dock's generic 50-point minimum sliver.
     fn normalize_rooms_width(&mut self, cx: &mut Cx, align: SplitterAlign, total: f64, save: bool) {
@@ -205,6 +241,7 @@ impl MainDesktopUI {
     ///
     /// Updates the room order, current selection, and app state.
     fn select_room(&mut self, cx: &mut Cx, room: Option<SelectedRoom>) {
+        self.close_moments(cx);
         let dock = self.view.dock(cx, ids!(dock));
         if let Some(room) = room {
             dock.select_tab(cx, room.tab_id());
@@ -222,6 +259,7 @@ impl MainDesktopUI {
 
     /// Focuses on a room if it is already open, otherwise creates a new tab for the room.
     fn focus_or_create_tab(&mut self, cx: &mut Cx, room: SelectedRoom) {
+        self.close_moments(cx);
         // Do nothing if the room to select is already created and focused.
         if self.most_recently_selected_room.as_ref().is_some_and(|sr| sr == &room) {
             return;
@@ -301,6 +339,10 @@ impl MainDesktopUI {
 
     /// Closes a tab in the dock and selects the next most recently viewed tab.
     fn close_tab(&mut self, cx: &mut Cx, tab_id: LiveId) {
+        if tab_id == id!(moments_tab) {
+            self.close_moments(cx);
+            return;
+        }
         let dock = self.view.dock(cx, ids!(dock));
 
         let Some(room_being_closed) = self.open_rooms.get(&tab_id).cloned() else {
@@ -385,6 +427,7 @@ impl MainDesktopUI {
 
     /// Switches between single-pane and tabbed mode.
     fn set_tabbed_chats(&mut self, cx: &mut Cx, tabbed: bool) {
+        self.close_moments(cx);
         self.tabbed_chats = tabbed;
         if !tabbed {
             self.close_background_tabs(cx);
@@ -397,6 +440,7 @@ impl MainDesktopUI {
 
     /// Closes all tabs
     pub fn close_all_tabs(&mut self, cx: &mut Cx) {
+        self.close_moments(cx);
         let dock = self.view.dock(cx, ids!(dock));
         for (tab_id, room) in self.open_rooms.iter() {
             room.close_thread_timeline(cx);
@@ -486,8 +530,26 @@ impl MainDesktopUI {
     /// An inner function that creates a `SavedDockState` from the current contents of this widget. 
     fn save_dock_state(&self, cx: &mut Cx) -> SavedDockState {
         let dock = self.view.dock(cx, ids!(dock));
+        let mut dock_items = dock.clone_state().unwrap_or_default();
+        // The temporary Moments pane is never restored as an empty room tab.
+        dock_items.remove(&id!(moments_tab));
+        let previous = self.most_recently_selected_room.as_ref().map(SelectedRoom::tab_id)
+            .unwrap_or(id!(home_tab));
+        for item in dock_items.values_mut() {
+            if let DockItem::Tabs {tabs, selected, ..} = item
+                && let Some(index) = tabs.iter().position(|tab| *tab == id!(moments_tab))
+            {
+                let was_selected = *selected == index;
+                tabs.remove(index);
+                *selected = if was_selected {
+                    tabs.iter().position(|tab| *tab == previous).unwrap_or(0)
+                } else {
+                    selected.saturating_sub(usize::from(*selected > index))
+                };
+            }
+        }
         SavedDockState {
-            dock_items: dock.clone_state().unwrap_or_default(),
+            dock_items,
             open_rooms: self.open_rooms.clone(),
             room_order: self.room_order.clone(),
             selected_room: self.most_recently_selected_room.clone(),
@@ -499,6 +561,7 @@ impl MainDesktopUI {
     /// If the saved state is empty (has no open rooms), we use the default dock layout
     /// defined in the DSL: one splitter with the RoomsList on the left and a Welcome tab on the right.
     fn load_dock_state_from(&mut self, cx: &mut Cx, app_state: &mut AppState) {
+        self.close_moments(cx);
         let dock = self.view.dock(cx, ids!(dock));
 
         let saved_ref: Option<&SavedDockState> = if let Some(ss) = self.selected_space.as_ref() {
@@ -662,7 +725,26 @@ impl WidgetMatchEvent for MainDesktopUI {
     fn handle_actions(&mut self, cx: &mut Cx, actions: &Actions, scope: &mut Scope) {
         let mut should_save_dock_action: bool = false;
         for action in actions {
-            if matches!(action.downcast_ref(),Some(NavigationBarAction::GoToHome)) {self.reveal_rooms(cx);}
+            if let Some(action) = action.downcast_ref::<MomentsAction>() {
+                if matches!(action, MomentsAction::Close) {
+                    self.close_moments(cx);
+                } else {
+                    if !self.drawn_previously {
+                        self.tabbed_chats = cx.global::<AppPreferencesGlobal>().0.tabbed_chats;
+                        self.load_dock_state_from(cx, scope.data.get_mut::<AppState>().unwrap());
+                        self.drawn_previously = true;
+                    }
+                    if self.selected_space.is_some() {
+                        self.switch_dock_to_space(cx, scope.data.get_mut::<AppState>().unwrap(), None);
+                    }
+                    self.open_moments(cx, action);
+                }
+                continue;
+            }
+            if matches!(action.downcast_ref(),Some(NavigationBarAction::GoToHome)) {
+                self.close_moments(cx);
+                self.reveal_rooms(cx);
+            }
             if matches!(action.downcast_ref(), Some(MainDesktopUiAction::ShowChats)) {
                 if self.selected_space.is_some() {
                     self.switch_dock_to_space(cx, scope.data.get_mut::<AppState>().unwrap(), None);
@@ -699,6 +781,7 @@ impl WidgetMatchEvent for MainDesktopUI {
             }
 
             if let Some(crate::logout::logout_confirm_modal::LogoutAction::ClearAppState { .. }) = action.downcast_ref() {
+                self.close_moments(cx);
                 let dock = self.view.dock(cx, ids!(dock));
                 for (tab, room) in self.open_rooms.drain() {
                     room.close_thread_timeline(cx);
@@ -777,7 +860,7 @@ impl WidgetMatchEvent for MainDesktopUI {
                     should_save_dock_action = true;
                 }
                 // When dragging a tab, allow it to be dragged
-                DockAction::ShouldTabStartDrag(tab_id) => {
+                DockAction::ShouldTabStartDrag(tab_id) if tab_id != id!(moments_tab) => {
                     self.view.dock(cx, ids!(dock)).tab_start_drag(
                         cx,
                         tab_id,

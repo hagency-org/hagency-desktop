@@ -10,12 +10,16 @@ use sha2::{Digest, Sha256};
 use std::{
     path::{Path, PathBuf},
     sync::atomic::{AtomicBool, Ordering},
-    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant},
 };
+#[cfg(test)]
+use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
 pub(super) mod matrix_creations;
 mod profiles;
+mod proof_clock;
+use proof_clock::ProofClock;
 mod sdk_resume;
 mod shared_matrix;
 mod room_binding;
@@ -54,6 +58,11 @@ struct RemoteSession {
     refresh_token: Option<String>,
     oauth_expires: Instant,
     authorized_until: Instant,
+    /// How far the end of the window, as the local clock reads it, lies beyond
+    /// `authorized_until`: what the proof clock left out. Each renewal sets it;
+    /// it is zero before the first one, which keeps the lease comparison the
+    /// stricter one.
+    clock_allowance: Duration,
     invalidated: bool,
     binding: Binding,
     checked: Instant,
@@ -71,6 +80,7 @@ pub struct AuthorizedDevice {
     subject: String,
     user_id: String,
     valid_until: Instant,
+    clock_allowance: Duration,
     revoked: std::sync::Arc<AtomicBool>,
     stopped: std::sync::Arc<AtomicBool>,
 }
@@ -92,6 +102,7 @@ pub(super) fn fixture_device(
             generation: 1,
             token: "e".repeat(64),
             valid_until: Instant::now() + Duration::from_secs(30),
+            clock_allowance: Duration::ZERO,
             revoked: revoked.clone(),
             stopped: std::sync::Arc::new(AtomicBool::new(false)),
         },
@@ -133,6 +144,21 @@ impl AuthorizedDevice {
     }
     pub fn valid_until(&self) -> Instant {
         self.valid_until
+    }
+    /// The end of the authorization window for a deadline the server derived
+    /// from that window and the host reads with its local clock, such as an
+    /// execution lease: `valid_until` plus what the proof clock left out of
+    /// the window. Every use of the credential itself keeps to `valid_until`.
+    pub fn window_until(&self) -> Instant {
+        self.valid_until + self.clock_allowance
+    }
+    /// A device whose window ends `window` from now and whose proof clock
+    /// left `taken` of it out.
+    #[cfg(test)]
+    pub(super) fn with_fixture_window(mut self, window: Duration, taken: Duration) -> Self {
+        self.valid_until = Instant::now() + window - taken;
+        self.clock_allowance = taken;
+        self
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -438,6 +464,7 @@ impl ServerLogin {
         }
         let mut device = session.device.clone().ok_or(Error::Unauthorized)?;
         device.valid_until = session.authorized_until;
+        device.clock_allowance = session.clock_allowance;
         device.stopped = self.stopped.clone();
         Ok(device)
     }
@@ -610,20 +637,6 @@ fn invalidate(session: &mut RemoteSession) {
     session.refresh_token = None;
     session.token.clear();
 }
-fn deadline(value: &Value) -> Result<Instant, &'static str> {
-    let now = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_err(|_| "invalid_local_clock")?
-        .as_millis() as u64;
-    let until = value["validUntilMs"]
-        .as_u64()
-        .ok_or("invalid_server_response")?;
-    let remaining = until
-        .checked_sub(now)
-        .filter(|ms| *ms > 0 && *ms <= 31_000)
-        .ok_or("sign_in_required")?;
-    Ok(Instant::now() + Duration::from_millis(remaining))
-}
 fn oauth_credentials(tokens: &Value) -> Result<(String, Option<String>, Duration), &'static str> {
     if tokens["token_type"]
         .as_str()
@@ -744,6 +757,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             return Err(Error::Unauthorized);
         }
     }
+    let request_started = Instant::now();
     let renewal_response = client
         .post(
             server
@@ -764,8 +778,8 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             renewal_response.status().as_u16()
         );
     }
-    let renewed = response(renewal_response).await.map_err(renewal_error)?;
-    let mut until = deadline(&renewed).map_err(|_| Error::Unavailable)?;
+    let (renewed, clock) = proof_response(request_started, renewal_response).await.map_err(renewal_error)?;
+    let (mut until, mut taken) = clock.bounds(&renewed).map_err(|_| Error::Unavailable)?;
     if until <= Instant::now() + Duration::from_secs(20)
         && let Some(source) = &session.matrix_source
     {
@@ -783,6 +797,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
         if refreshed.client_id != session.binding.client_id || refreshed.access_token.is_empty() {
             return Err(Error::Unauthorized);
         }
+        let request_started = Instant::now();
         let response = client
             .post(
                 server
@@ -800,13 +815,15 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 response.status().as_u16()
             );
         }
-        let refreshed = self::response(response).await.map_err(renewal_error)?;
-        until = deadline(&refreshed).map_err(|_| Error::Unavailable)?;
+        let (refreshed, clock) = proof_response(request_started, response).await.map_err(renewal_error)?;
+        let bounds = clock.bounds(&refreshed).map_err(|_| Error::Unavailable)?;
+        until = bounds.0;
+        taken = bounds.1;
     }
-    let identity = get(
+    let (identity, clock) = get_identity(
         &client,
-        server.join("/hagency/api/v1/identity").unwrap(),
-        Some(&session.token),
+        &server,
+        &session.token,
     )
     .await
     .map_err(|code| {
@@ -816,7 +833,11 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     if !identity_matches(&identity, &session.binding) || identity["userId"] != session.user_id {
         return Err(Error::Unauthorized);
     }
-    let identity_until = deadline(&identity).map_err(|_| Error::Unavailable)?;
+    let (identity_until, identity_taken) =
+        clock.bounds(&identity).map_err(|_| Error::Unavailable)?;
+    // The same window as the local clock alone reads it. A lease the server
+    // cuts to this window is read that way too.
+    let mut window = (until + taken).min(identity_until + identity_taken);
     if let Some(source) = &session.matrix_source {
         let after = source.access_token().await.map_err(|error| {
             let code = super::native::sdk_source_failure(error);
@@ -831,8 +852,11 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             return Err(Error::Unauthorized);
         }
         session.oauth_expires = until.min(identity_until);
+    } else {
+        window = window.min(session.oauth_expires);
     }
     session.authorized_until = until.min(identity_until).min(session.oauth_expires);
+    session.clock_allowance = window.saturating_duration_since(session.authorized_until);
     session.checked = Instant::now();
     Ok(())
 }
@@ -902,12 +926,15 @@ async fn response(response: reqwest::Response) -> Result<Value, &'static str> {
     }
     Ok(value)
 }
-async fn get(client: &Client, url: Url, token: Option<&str>) -> Result<Value, &'static str> {
-    let mut request = client.get(url);
-    if let Some(token) = token {
-        request = request.bearer_auth(token);
-    }
-    response(request.send().await.map_err(|_| "server_unavailable")?).await
+async fn proof_response(started: Instant, reply: reqwest::Response) -> Result<(Value, ProofClock), &'static str> {
+    let clock = ProofClock::new(started, reply.headers());
+    Ok((response(reply).await?, clock))
+}
+async fn get_identity(client: &Client, server: &Url, token: &str) -> Result<(Value, ProofClock), &'static str> {
+    let started = Instant::now();
+    let reply = client.get(server.join("/hagency/api/v1/identity").unwrap())
+        .bearer_auth(token).send().await.map_err(|_| "server_unavailable")?;
+    proof_response(started, reply).await
 }
 fn cookie(req: &Request, name: &str) -> Option<String> {
     req.headers()
@@ -1263,7 +1290,8 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
     let (token, refresh_token, oauth_lifetime) = oauth_credentials(&tokens)?;
     let mut issued_session = String::new();
     let completed = async {
-        let grant = response(
+        let (grant, grant_clock) = proof_response(
+            Instant::now(),
             client
                 .post(server.join("/hagency/api/v1/sessions/pasion").unwrap())
                 .json(&json!({"accessToken":token}))
@@ -1278,13 +1306,8 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
             .ok_or("invalid_server_response")?;
         issued_session = session_token.to_owned();
         let verified = async {
-            let identity = get(
-                &client,
-                server.join("/hagency/api/v1/identity").unwrap(),
-                Some(session_token),
-            )
-            .await?;
-            let authorized_until = deadline(&grant)?.min(deadline(&identity)?);
+            let (identity, identity_clock) = get_identity(&client, &server, session_token).await?;
+            let authorized_until = grant_clock.deadline(&grant)?.min(identity_clock.deadline(&identity)?);
             identity["userId"]
                 .as_str()
                 .filter(|v| !v.is_empty() && v.len() <= 128)
@@ -1390,6 +1413,7 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
                 refresh_token: refresh_token.clone(),
                 oauth_expires: Instant::now() + oauth_lifetime,
                 authorized_until: authorized_until.min(Instant::now() + oauth_lifetime),
+                clock_allowance: std::time::Duration::ZERO,
                 invalidated: false,
                 binding: pending.binding.clone(),
                 checked: Instant::now(),
@@ -1443,7 +1467,8 @@ async fn register_device(
     binding: &Binding,
     user_id: &str,
 ) -> Result<(Value, AuthorizedDevice), &'static str> {
-    let value = response(
+    let (value, clock) = proof_response(
+        Instant::now(),
         client
             .post(server.join("/hagency/api/v1/devices").unwrap())
             .bearer_auth(token)
@@ -1475,7 +1500,8 @@ async fn register_device(
             issuer: format!("{}auth/", binding.origin),
             subject: binding.subject.clone().ok_or("invalid_server_response")?,
             user_id: user_id.into(),
-            valid_until: deadline(&value)?,
+            valid_until: clock.deadline(&value)?,
+            clock_allowance: Duration::ZERO,
             revoked: std::sync::Arc::new(AtomicBool::new(false)),
             stopped: std::sync::Arc::new(AtomicBool::new(false)),
         },
@@ -1545,6 +1571,10 @@ pub(super) enum OwnerOperation {
         room: String,
     },
     Bindings {
+        agent: String,
+    },
+    /// Lets the owner's Agent serve project Rooms.
+    MakePublic {
         agent: String,
     },
     Binding {
@@ -1792,6 +1822,14 @@ impl OwnerOperation {
                 operation_id(&agent)?;
                 (Method::GET, format!("agents/{agent}/bindings"), None)
             }
+            Self::MakePublic { agent } => {
+                operation_id(&agent)?;
+                (
+                    Method::PUT,
+                    format!("agents/{agent}/visibility"),
+                    Some(json!({"visibility":"public"})),
+                )
+            }
             Self::Binding { .. }
             | Self::PauseBinding { .. }
             | Self::ResumeBinding { .. }
@@ -1931,6 +1969,7 @@ impl ServerLogin {
                 .as_mut()
                 .ok_or_else(|| OwnerError::new(401, "device_authorization_required"))?;
             device.valid_until = session.authorized_until;
+            device.clock_allowance = session.clock_allowance;
             device
                 .bearer()
                 .map_err(|_| OwnerError::new(401, "device_authorization_required"))?
@@ -2183,6 +2222,7 @@ mod oauth_refresh_tests {
             refresh_token: Some("retained-refresh".into()),
             oauth_expires: now,
             authorized_until: now,
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: Binding {
                 origin: origin.clone(),

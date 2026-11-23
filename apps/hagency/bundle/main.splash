@@ -221,6 +221,8 @@ A.project_state_text = fn(state){
     return state
 }
 A.error_text = fn(code){
+    if code=="pool_containers_unavailable" {return A.t("This computer could not keep the container choice, so the pool was not created. Check the Hosting dashboard, or turn containers off and create it again.","这台电脑无法保存容器选项，因此没有创建资源池。请查看托管控制台，或关闭容器后重新创建。")}
+    if code == "authorization_time_window_unavailable" {return A.t("The server authorization is outside its time window. Check the device and server clocks, then retry.","服务器授权不在有效时间内。请核对本机和服务器的时钟后重试。")}
     if code=="pool_agent_resource_mismatch" && H.entry_role=="owner" {return A.t("This request is above the pool’s current per-request limit, so it can’t be approved. Decline it, or raise the per-request limit first.","这个申请超过了资源池现在的每次申请上限，不能批准。可以拒绝，或先调高每次申请上限。")}
     if code == "native_resume_missing" || code == "native_resume_revoked" {return A.t("Sign in again with this Matrix account to restore Hagency access. Existing records and saved requests stay on this device.", "请使用当前 Matrix 账号重新登录以恢复 Hagency 访问。此设备上的已有记录和已保存请求会保留。")}
 
@@ -2277,7 +2279,7 @@ A.server_status=fn(c){
     if cap.id==c.id && (cap.state=="ready" || cap.state=="missing") {return {text:A.t("Not published","未发布") tone:"waiting" step:3}}
     return {text:A.t("Connected","已连接") tone:"elsewhere" step:3}
 }
-A.server_runtime=fn(runtime){if runtime=="codex" {return "Codex"} if runtime=="claude" {return "Claude"} return ""+runtime}
+A.server_runtime=fn(runtime){if runtime=="codex" {return "Codex"} if runtime=="claude" {return "Claude"} if runtime=="octos" {return "Octos"} return ""+runtime}
 A.server_caps=fn(caps){let acc={text:""} for cap in caps {acc.text=acc.text+(if acc.text=="" {""} else {"、"})+A.capability_label(cap)} return acc.text}
 // Publishing happens on the pool page, where the per-request limit is set.
 A.server_publish=fn(c){
@@ -3813,22 +3815,33 @@ A.owner_review_finish=fn(accepted){
 A.owner_review_open=fn(){
     let pending=H.owner_review_pending
     if pending==nil || H.session==nil {return}
-    if pending.owner!=H.session.account || !A.entry_allowed("owner") || !A.nav_free() || H.command!=nil || A.local_leaving("owner_approvals") {
+    let role=pending.role
+    let page=if pending.request=="" {"owner_approvals"} else {"pool_agent"}
+    if pending.owner!=H.session.account || !A.entry_allowed(role) || !A.nav_free() || H.command!=nil || A.local_leaving(page) {
         A.owner_review_finish(false) return
     }
     A.read_cancel()
-    H.entry_role="owner" H.entry_choosing=false
+    H.entry_role=role H.entry_choosing=false
+    if pending.request!="" {
+        H.pool_detail=nil H.reqs.result=nil
+        A.open_pool_agent(pending.request)
+        A.owner_review_finish(true) return
+    }
     H.page="owner_approvals" H.notice="" H.ux.origin="" H.confirm=""
     A.redraw()
     A.owner_review_finish(true)
 }
-let on_owner_approvals_requested=fn(owner,nonce){
+A.request_review_landing=fn(owner,nonce,request,role){
     if H.owner_review_pending!=nil {A.owner_review_finish(false)}
-    H.owner_review_pending={owner:owner nonce:nonce}
+    H.owner_review_pending={owner:owner nonce:nonce request:request role:role}
     start_timeout(55,||{
         if H.owner_review_pending!=nil && H.owner_review_pending.nonce==nonce {A.owner_review_finish(false)}
     })
     A.owner_review_open()
+}
+let on_owner_approvals_requested=fn(owner,nonce){A.request_review_landing(owner,nonce,"","owner")}
+let on_pool_request_requested=fn(owner,nonce,id,role){
+    if id!="" && (role=="manager" || role=="owner"){A.request_review_landing(owner,nonce,id,role)}
 }
 let on_owner_approvals_cancelled=fn(nonce){
     if H.owner_review_pending!=nil && H.owner_review_pending.nonce==nonce {H.owner_review_pending=nil}
@@ -6400,6 +6413,8 @@ A.pool_grant_error=fn(code){
     if code=="pool_grant_device_required" {return A.t("This computer can’t publish now. Open This Computer at the bottom of Resource Pools, or use the computer that published before.","这台电脑现在不能发布。请在「资源池」底部的「这台电脑」里处理，或在原来发布的电脑上操作。")}
     if code=="owner_grant_prior_intent_required" {return A.readmission_error(code)}
     if code=="current_profile_required" || code=="management_outcome_unknown" || code=="onboarding_unavailable" {return A.onboarding_reason(code)}
+    if code=="octos_profile_changed" {return A.t("The Octos profile this pool uses changed after the pool was created. Put the profile’s model and settings back in Octos, then publish again.","此资源池使用的 Octos 配置在创建后有变化。请在 Octos 中恢复该配置的模型和设置，然后重新发布。")}
+    if code=="octos_pool_platform_unsupported" {return A.t("Octos pools can be published only from a Mac.","Octos 资源池只能从 Mac 发布。")}
     return A.error_text(code)
 }
 // A busy request whose callback also sees failures, for pages that explain them inline.
@@ -7441,7 +7456,7 @@ A.pool_create_model=fn(model){
     // Only a Codex sign-in folder makes further pools from an existing one.
     let {sharedQuota=nil}=c.models.provider
     let initial=if row.runtime=="octos" && sharedQuota!=nil && sharedQuota<1000000 {sharedQuota} else {1000000}
-    let d={account:{accountId:row.id expectedRevision:row.revision} model:model models:c.models.provider.models reasoning:model.sharedDefaultReasoning tokens:""+initial sourceRequired:resourceCount>0 && row.kind=="managed_namespace" source:nil name:A.pool_model_label(model) named:false}
+    let d={account:{accountId:row.id expectedRevision:row.revision} model:model models:c.models.provider.models reasoning:model.sharedDefaultReasoning tokens:""+initial sourceRequired:resourceCount>0 && row.kind=="managed_namespace" source:nil name:A.pool_model_label(model) named:false containers:false}
     H.enrollment_draft=d A.redraw()
     if d.sourceRequired && resources.len()>0 {
         let id=resources[0].id
@@ -7613,6 +7628,42 @@ A.enrollment_model_pick=fn(name){
         H.enrollment_models_open=false H.notice="" A.redraw() return
     }}
 }
+// A Claude pool can be created with its Agents in containers, on a computer that offers them.
+A.pool_containers_offered=fn(row){
+    if row==nil || row.runtime!="claude" {return false}
+    if H.session==nil {return false}
+    let {poolContainers=false}=H.session
+    return poolContainers==true
+}
+A.pool_containers_chosen=fn(d){
+    if d==nil {return false}
+    let {containers=false}=d
+    return containers==true
+}
+A.pool_containers_toggle=fn(){
+    let d=H.enrollment_draft
+    if d==nil || H.busy || H.command!=nil {return}
+    d.containers=!A.pool_containers_chosen(d) A.redraw()
+}
+// What came of the choice, said after the note of a pool just created.
+A.pool_containers_note=fn(word){
+    if word=="preparing" {return A.t(" Its Agents will run in containers. The container image is being prepared, which takes a few minutes the first time.","其 Agent 将在容器中运行。正在准备容器镜像，首次需要几分钟。")}
+    if word=="no_runtime" {return A.t(" Its Agents are set to run in containers, but no Docker-compatible app was found on this computer, so they cannot start yet. Install and start Docker Desktop, OrbStack or Colima, then open this pool on the Hosting dashboard and choose Try again.","其 Agent 已设为在容器中运行，但这台电脑上未找到 Docker 兼容的应用，暂时无法启动。请安装并启动 Docker Desktop、OrbStack 或 Colima，然后在托管控制台打开此资源池并点「重试」。")}
+    if word=="unsaved" {return A.t(" The container choice could not be saved, so its Agents would run in the sandbox. Before publishing this pool, turn containers on for it on the Hosting dashboard.","容器选项未能保存，其 Agent 会在沙盒中运行。发布前，请在托管控制台为此资源池开启容器。")}
+    return ""
+}
+A.pool_containers_noted=fn(data){
+    let {containers=nil}=data
+    let note=H.pool_saved
+    if containers==nil || note==nil {return}
+    H.pool_saved={rid:note.rid at:note.at tone:if containers=="preparing" {note.tone} else {"attention"} text:note.text+A.pool_containers_note(containers)}
+}
+// The same, for a pool that a saved request created.
+A.pool_containers_recovered=fn(data){
+    let {containers=nil}=data
+    if containers==nil {return}
+    H.pool_saved={rid:data.resourceId at:"top" tone:if containers=="preparing" {"running"} else {"attention"} text:A.pool_containers_note(containers).trim()}
+}
 A.enroll_account = fn(){
     if H.busy || H.command!=nil || H.enrollment_draft==nil {return}
     let d=H.enrollment_draft let valid=false
@@ -7626,8 +7677,14 @@ A.enroll_account = fn(){
     H.pool_name_after=if chosen!="" && chosen!=d.model.model {{rid:"" name:chosen}} else {nil}
     if sourceRequired {
         if source==nil{H.notice=A.t("Return to this account and refresh its resources before confirming.","请返回账号刷新已有资源后，再确认创建。") A.redraw() return}
-        A.submit("hagency.resources.create",{sourceResourceId:source.id expectedRevision:source.revision profile:{kind:"select" model:d.model.model reasoning:d.reasoning} ceiling:{kind:"monthly" tokens:tokens}})
-    }else{A.submit("hagency.accounts.enroll",{account:d.account model:d.model.model reasoning:d.reasoning monthlyTokens:tokens})}
+        let args={sourceResourceId:source.id expectedRevision:source.revision profile:{kind:"select" model:d.model.model reasoning:d.reasoning} ceiling:{kind:"monthly" tokens:tokens}}
+        if A.pool_containers_chosen(d) {args.containers=true}
+        A.submit("hagency.resources.create",args)
+    }else{
+        let args={account:d.account model:d.model.model reasoning:d.reasoning monthlyTokens:tokens}
+        if A.pool_containers_chosen(d) {args.containers=true}
+        A.submit("hagency.accounts.enroll",args)
+    }
 }
 A.enrollment_tokens_changed=fn(text){
     if H.busy || H.command!=nil || H.enrollment_draft==nil{return}
@@ -7871,7 +7928,7 @@ A.recover_native = fn(row){
         if row.operation=="clear_workspace_dirty" && (reply.operation!=row.operation || !A.valid_workspace_result(data,row.input)) {H.notice=A.error_text("management_outcome_unknown") return}
         if row.operation=="edit_execution_policy" && (reply.operation!=row.operation || !A.valid_policy_result(data,row.input)) {H.notice=A.error_text("management_outcome_unknown") return}
         H.command = nil
-        if reply.operation == "enroll_account_resource" {H.enrollment_draft=nil H.page="resource_detail" H.resource_id=data.resourceId H.resource_detail=nil}
+        if reply.operation == "enroll_account_resource" {H.enrollment_draft=nil H.page="resource_detail" H.resource_id=data.resourceId H.resource_detail=nil A.pool_containers_recovered(data)}
         else if reply.operation == "retire_account" {A.account_prepared(data)}
         else if reply.operation == "prepare_account" {A.account_prepared(data)}
         else if reply.operation == "login_account" {
@@ -7887,7 +7944,7 @@ A.recover_native = fn(row){
         else if reply.operation == "retire_approval_binding" {A.binding_received(data)}
         else if reply.operation == "triage_resource_alert" {H.page="resource_alert" H.alert_resource=data.resourceId H.alert_id=data.id H.alert_detail=nil H.alert_draft=nil}
         else if reply.operation == "edit_local_resource" {H.page="resource_detail" H.resource_id=data.resourceId H.resource_detail=nil H.resource_edit_draft=nil}
-        else if reply.operation == "create_resource_configuration" {H.page="resource_detail" H.resource_id=data.resourceId H.resource_detail=nil H.resource_create_draft=nil if H.enrollment_draft!=nil{let {source=nil}=H.enrollment_draft if source!=nil && source.id==row.input.sourceResourceId{H.enrollment_draft=nil}}}
+        else if reply.operation == "create_resource_configuration" {H.page="resource_detail" H.resource_id=data.resourceId H.resource_detail=nil H.resource_create_draft=nil A.pool_containers_recovered(data) if H.enrollment_draft!=nil{let {source=nil}=H.enrollment_draft if source!=nil && source.id==row.input.sourceResourceId{H.enrollment_draft=nil}}}
         else if reply.operation == "rename_resource" {H.page="resource_detail" H.resource_id=data.resourceId H.resource_detail=nil H.resource_name_mode="" H.resource_name_draft=nil}
         else if reply.operation == "personal_agent_policy" {A.personal_saved(data)}
         else if reply.operation == "personal_agent_observation" {A.personal_observation_received(data)}
@@ -7994,11 +8051,11 @@ A.retry_command = fn(){
             if command.service == "hagency.accounts.prepare" || command.service == "hagency.accounts.login" || command.service == "hagency.accounts.retire" {A.account_prepared(r.data)}
             if command.service == "hagency.resources.edit" {H.resource_edit_draft=nil H.resource_detail=nil H.pool_edit=nil H.pool_saved=A.pool_saved_note(command.args,r.data)}
             if (command.service == "hagency.resources.create" || command.service=="hagency.accounts.enroll") && H.pool_name_after!=nil {H.pool_name_after.rid=r.data.resourceId}
-            if command.service == "hagency.resources.create" {H.pool_saved=A.pool_created_note(r.data.resourceId,A.pool_created_name(A.pool_created_model(command.args)),A.recipient_optional(A.recipient_optional(command.args,"ceiling"),"tokens")) H.resource_create_draft=nil H.resource_detail=nil H.pool_create=nil if H.enrollment_draft!=nil{let {source=nil}=H.enrollment_draft if source!=nil && source.id==command.args.sourceResourceId{H.enrollment_draft=nil}}}
+            if command.service == "hagency.resources.create" {H.pool_saved=A.pool_created_note(r.data.resourceId,A.pool_created_name(A.pool_created_model(command.args)),A.recipient_optional(A.recipient_optional(command.args,"ceiling"),"tokens")) A.pool_containers_noted(r.data) H.resource_create_draft=nil H.resource_detail=nil H.pool_create=nil if H.enrollment_draft!=nil{let {source=nil}=H.enrollment_draft if source!=nil && source.id==command.args.sourceResourceId{H.enrollment_draft=nil}}}
             if command.service == "hagency.resources.rename" {H.resource_name_mode="" H.resource_name_draft=nil H.resource_detail=nil if H.pool_name_note!=nil {H.pool_saved={rid:r.data.resourceId at:"top" tone:H.pool_name_note.tone text:H.pool_name_note.text} H.pool_name_note=nil}}
             if command.service == "hagency.personal_agents.policy.save" {A.personal_saved(r.data)}
             if command.service == "hagency.personal_agents.observe" {A.personal_observation_received(r.data)}
-            if command.service=="hagency.accounts.enroll" {H.enrollment_draft=nil H.pool_create=nil H.page="resource_detail" H.resource_id=r.data.resourceId H.resource_detail=nil H.pool_saved=A.pool_created_note(r.data.resourceId,A.pool_created_name(A.recipient_optional(command.args,"model")),A.recipient_optional(command.args,"monthlyTokens"))}
+            if command.service=="hagency.accounts.enroll" {H.enrollment_draft=nil H.pool_create=nil H.page="resource_detail" H.resource_id=r.data.resourceId H.resource_detail=nil H.pool_saved=A.pool_created_note(r.data.resourceId,A.pool_created_name(A.recipient_optional(command.args,"model")),A.recipient_optional(command.args,"monthlyTokens")) A.pool_containers_noted(r.data)}
             if command.service == "hagency.connections.create" {H.wizard.admission = r.data.admission H.wizard.step = 4 H.page = "wizard"}
             if command.service=="hagency.connections.reoffer" {H.reoffer_draft=nil}
             if command.service == "hagency.inbox.decide" || command.service == "hagency.connections.revoke" || command.service=="hagency.connections.reoffer" {H.selected = r.data.admission H.confirm = "" H.page = "action"}
@@ -8098,8 +8155,8 @@ A.retry_command = fn(){
                 A.redraw() return
             }
             if command.service=="hagency.resources.create" {
-                if r.error=="resource_create_cancelled" || r.error=="provider_confirmation_expired" {
-                    H.command=nil H.notice=A.t("Creation review closed. Existing saved requests remain available for recovery.","已关闭创建确认，已有的保存请求仍可恢复。") A.save()
+                if r.error=="resource_create_cancelled" || r.error=="provider_confirmation_expired" || r.error=="pool_containers_unavailable" {
+                    H.command=nil H.notice=if r.error=="pool_containers_unavailable" {A.error_text(r.error)} else {A.t("Creation review closed. Existing saved requests remain available for recovery.","已关闭创建确认，已有的保存请求仍可恢复。")} A.save()
                     host.request("hagency.intent.pending",{},fn(pending){if pending.is_ok {H.saved_commands=pending.data.commands} A.redraw()})
                 } else {
                     H.notice=A.resource_create_error(r.error)
@@ -8116,7 +8173,7 @@ A.retry_command = fn(){
                 H.command=nil H.notice=A.retirement_error(r.error)
                 if A.save(){A.acknowledge(command.args.commandId)} A.redraw() return
             }
-            if command.service=="hagency.accounts.enroll" && (r.error=="resource_enrollment_cancelled" || r.error=="provider_confirmation_expired" || r.error=="device_setup_required") {
+            if command.service=="hagency.accounts.enroll" && (r.error=="resource_enrollment_cancelled" || r.error=="provider_confirmation_expired" || r.error=="device_setup_required" || r.error=="pool_containers_unavailable") {
                 H.command=nil H.notice=if r.error=="resource_enrollment_cancelled" {A.t("Resource review closed. Existing saved requests are unchanged.","已关闭资源确认，已有的保存请求保持不变。")}else if r.error=="device_setup_required" {A.t("Finish device setup before enrolling resources from this account.","请先完成设备设置，再从此账号登记资源。")}else{A.error_text(r.error)}
                 A.save()
                 host.request("hagency.intent.pending",{},fn(pending){if pending.is_ok {H.saved_commands=pending.data.commands} A.redraw()})
@@ -8872,6 +8929,7 @@ A.pool_amount=fn(value){return if H.entry_role=="owner" {A.tokens(value)+" token
 A.load_pools=fn(after){A.request("hagency.pools.list",{after:after},fn(v){H.pool_rows=v.items H.pool_after=v.nextAfter if after==nil && H.entry_role=="manager" {A.load_pool_agents(nil)}})}
 A.load_pool_agents=fn(after){
     if H.entry_role=="manager" && H.page=="pool_agents" && after==nil {A.load_local_list()}
+    if !A.pool_enabled() {return}
     H.owner.requestAfter=after
     let args={after:after needsMyAction:H.page=="inbox" && H.entry_role=="owner" && H.needs_action}
     let pool=if H.entry_role=="owner"{H.owner.poolId}else{""}
@@ -8981,6 +9039,14 @@ A.pool_cadence=fn(c){
 }
 A.pool_renewal=fn(r){if A.recipient_optional(r,"renewalMode")!="automatic" && A.recipient_optional(r,"renewalMode")!="owner" {return A.t("Owner renewal · legacy pool","资源 owner 手动续期 · 历史资源池")} return if A.recipient_optional(r,"renewalMode")=="automatic" {A.t("Automatic renewal","自动续期")} else {A.t("Resource owner renews","资源 owner 手动续期")}}
 A.pool_period=fn(r){return A.recipient_optional(r,"currentPeriod")}
+A.pool_allowance_notice=fn(r){
+    let n=A.recipient_optional(r,"allowanceNotice")
+    if n==nil{return ""}
+    if n.state=="exhausted"{return A.t("An Agent message could not start because its allowance was used up.","一条 Agent 消息因额度已用完而未能启动。")}
+    if n.state=="usage_unresolved"{return A.t("An Agent message is waiting for previous usage to settle.","一条 Agent 消息正在等待上次用量结算。")}
+    if n.state=="unavailable"{return A.t("An Agent message could not start with the available allowance.","一条 Agent 消息因可用额度不足而未能启动。")}
+    return ""
+}
 A.pool_period_state=fn(r){
     let request_state=A.recipient_optional(r,"state")
     if request_state=="rejected" {return A.t("Request declined","申请已拒绝")}
@@ -9528,9 +9594,49 @@ A.render_page = fn(){
 
     if H.ready && (H.page=="pools" || H.page=="pool_apply" || H.page=="pool_agents" || H.page=="pool_agent") {
 
+    if H.entry_role=="manager" && H.page=="pool_agents" {View{width:Fill height:Fit flow:Down spacing:6
+        mod.widgets.HagencyLargeTitle{text:A.t("My Agents","我的 Agent")}
+        let local_here=A.local_here()
+        let local_some=H.local_list!=nil && H.local_list.len()>0
+        if !local_here && !local_some {mod.widgets.HagencyCard{
+            mod.widgets.HagencySectionTitle{text:A.t("Run a local Agent","运行本地 Agent")}
+            mod.widgets.HagencyCopy{text:A.local_need_text()}
+            mod.widgets.HagencyHint{text:A.t("Open Hosting at the top of this panel to check this computer’s setup and account. Once this account is hosted here, return to My Agents and choose Add Local Agent.","点击面板顶部的「Hosting／资源托管」，检查本机设置与托管账号。当前账号在本机完成托管后，返回「我的 Agent」并选择「添加本地 Agent」。")}
+        }}
+        if local_here || local_some {View{width:Fill height:Fit flow:Down spacing:6
+        mod.widgets.HagencyListLabel{text:A.t("LOCAL AGENTS","本地 Agent")}
+        mod.widgets.HagencyList{
+            if H.local_list==nil {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("Loading…","正在读取…")}}}}
+            if local_here && H.local_list!=nil && H.local_list.len()==0 {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("No local agents yet","还没有本地 Agent")}}}}
+            if H.local_list!=nil {for index row in H.local_list {View{width:Fill height:Fit flow:Down
+                if index>0 {mod.widgets.HagencyListDivider{margin:Inset{left:66}}}
+                mod.widgets.HagencyListTall{
+                    local_agent_open := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.open_personal_agent(row.id)}
+                    mod.widgets.HagencyListBody{
+                        mod.widgets.HagencyAvatarSmall{mod.widgets.HagencyAvatarSmallGlyph{}}
+                        mod.widgets.HagencyListText{
+                            mod.widgets.HagencyListTitle{text:row.displayName}
+                            mod.widgets.HagencyListSubtitle{text:if row.local==nil {A.t("Checking…","正在检查…")} else if row.local.service.state=="no_host" {A.local_state_text("no_host")} else if row.local.here {A.local_state_text(row.local.service.state)+A.t(" · This device"," · 本机")} else {A.local_state_text("elsewhere")}}
+                        }
+                        if row.local!=nil {mod.widgets.HagencyPillDot{draw_bg.color:A.local_tone_fg(row.local.service.state)}}
+                        mod.widgets.HagencyChevron{}
+                    }
+                }
+            }}}
+            if local_here && H.local_list!=nil {View{width:Fill height:Fit flow:Down
+                mod.widgets.HagencyListDivider{margin:Inset{left:14}}
+                mod.widgets.HagencyListRow{
+                    local_add := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.native_open("local_agents")}
+                    mod.widgets.HagencyListBody{mod.widgets.HagencyAccentText{text:A.t("Add Local Agent","添加本地 Agent")}}
+                }
+            }}
+        }
+        local_list_note := mod.widgets.HagencyListNote{text:if local_here {A.t("Run on your own device with your own model account.","在你自己的设备上运行，使用你自己的模型账号。")} else {A.local_need_text()}}
+        }}
+    }}
     if !A.pool_enabled(){mod.widgets.HagencyCard{
         mod.widgets.HagencyTitle{text:A.t("Resource pools","资源池")}
-        mod.widgets.HagencyCopy{text:A.t("This server needs the resource-pool Agent update before accepting new requests.","此服务器需要更新资源池 Agent 流程后才能接受新申请。")}
+        mod.widgets.HagencyCopy{text:A.t("Compatible resource-pool requests are not enabled on this server. Ask its administrator to check the resource-pool settings and supported server version.","此服务器未启用兼容的资源池 Agent 申请。请管理员检查资源池配置与支持的服务器版本。")}
     }} else {
     if H.page=="pools"{View{width:Fill height:Fit align:Align{x:0.5} padding:Inset{bottom:28} mod.widgets.HagencyColumn{
         mod.widgets.HagencyLargeTitle{text:A.t("Resource Pools","资源池")}
@@ -9656,41 +9762,8 @@ A.render_page = fn(){
     }
     if H.page=="pool_agents"{
         if H.entry_role=="owner"{mod.widgets.HagencyTitle{text:A.t("Agent requests","Agent 申请")}}
-        else {mod.widgets.HagencyLargeTitle{text:A.t("My Agents","我的 Agent")}}
         if H.entry_role=="owner"{mod.widgets.HagencyHint{text:A.t("Review capacity requests for resources you own.","审核使用你所拥有资源的容量申请。")}}
         if H.entry_role=="manager" && H.page=="pool_agents"{View{width:Fill height:Fit flow:Down spacing:6
-            let local_here=A.local_here()
-            let local_some=H.local_list!=nil && H.local_list.len()>0
-            if local_here || local_some {View{width:Fill height:Fit flow:Down spacing:6
-            mod.widgets.HagencyListLabel{text:A.t("LOCAL AGENTS","本地 Agent")}
-            mod.widgets.HagencyList{
-                if H.local_list==nil {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("Loading…","正在读取…")}}}}
-                if local_here && H.local_list!=nil && H.local_list.len()==0 {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:A.t("No local agents yet","还没有本地 Agent")}}}}
-                if H.local_list!=nil {for index row in H.local_list {View{width:Fill height:Fit flow:Down
-                    if index>0 {mod.widgets.HagencyListDivider{margin:Inset{left:66}}}
-                    mod.widgets.HagencyListTall{
-                        local_agent_open := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.open_personal_agent(row.id)}
-                        mod.widgets.HagencyListBody{
-                            mod.widgets.HagencyAvatarSmall{mod.widgets.HagencyAvatarSmallGlyph{}}
-                            mod.widgets.HagencyListText{
-                                mod.widgets.HagencyListTitle{text:row.displayName}
-                                mod.widgets.HagencyListSubtitle{text:if row.local==nil {A.t("Checking…","正在检查…")} else if row.local.service.state=="no_host" {A.local_state_text("no_host")} else if row.local.here {A.local_state_text(row.local.service.state)+A.t(" · This device"," · 本机")} else {A.local_state_text("elsewhere")}}
-                            }
-                            if row.local!=nil {mod.widgets.HagencyPillDot{draw_bg.color:A.local_tone_fg(row.local.service.state)}}
-                            mod.widgets.HagencyChevron{}
-                        }
-                    }
-                }}}
-                if local_here && H.local_list!=nil {View{width:Fill height:Fit flow:Down
-                    mod.widgets.HagencyListDivider{margin:Inset{left:14}}
-                    mod.widgets.HagencyListRow{
-                        local_add := mod.widgets.HagencyListTap{enabled:!H.busy on_click: || A.native_open("local_agents")}
-                        mod.widgets.HagencyListBody{mod.widgets.HagencyAccentText{text:A.t("Add Local Agent","添加本地 Agent")}}
-                    }
-                }}
-            }
-            local_list_note := mod.widgets.HagencyListNote{text:if local_here {A.t("Run on your own device with your own model account.","在你自己的设备上运行，使用你自己的模型账号。")} else {A.local_need_text()}}
-            }}
             mod.widgets.HagencyListLabel{text:A.t("PROJECT AGENTS","项目 Agent · 组织资源池")}
             mod.widgets.HagencyList{
                 if A.pool_agent_rows().len()==0 {mod.widgets.HagencyListRow{mod.widgets.HagencyListBody{mod.widgets.HagencyListValue{text:if H.busy{A.t("Loading…","正在读取…")}else if !H.ux.inboxReady{A.t("Couldn’t load project Agents","项目 Agent 暂时无法加载")}else{A.t("No project Agents yet","还没有项目 Agent")}}}}}
@@ -9702,7 +9775,7 @@ A.render_page = fn(){
                             mod.widgets.HagencyAvatarSmall{draw_bg.color:mod.widgets.RINX_INFO_BG mod.widgets.HagencyAvatarSmallGlyph{draw_icon.color:mod.widgets.RINX_INFO_FG}}
                             mod.widgets.HagencyListText{
                                 mod.widgets.HagencyListTitle{text:r.definition.name}
-                                mod.widgets.HagencyListSubtitle{text:A.local_pool_state(r)}
+                                mod.widgets.HagencyListSubtitle{text:if A.pool_allowance_notice(r)!=""{A.pool_allowance_notice(r)}else{A.local_pool_state(r)}}
                             }
                             mod.widgets.HagencyListValue{text:A.local_tokens(r.requestedTokens)+A.t(" tokens"," token")}
                             mod.widgets.HagencyChevron{}
@@ -9810,6 +9883,9 @@ A.render_page = fn(){
                     pool_authority_detail := mod.widgets.HagencyWrapSubtitle{text:A.pool_reason(r.blockingReason)}
                 }
             }}}
+            if A.pool_allowance_notice(r)!="" {
+                mod.widgets.HagencyHint{text:A.pool_allowance_notice(r)}
+            }
             if A.pool_reinvite_notice(r)!="" {mod.widgets.HagencyList{mod.widgets.HagencySwitchRow{
                 mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_WARNING_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.info draw_icon.color:mod.widgets.RINX_WARNING_FG}}
                 mod.widgets.HagencyListText{
@@ -10463,6 +10539,17 @@ A.render_page = fn(){
                 mod.widgets.HagencyListNote{text:A.t("Higher reasoning thinks longer and uses more of the pool.","推理强度越高，思考越久，也更耗额度。")}
                 }}
                 if c.account.runtime=="octos" {mod.widgets.HagencyListNote{text:A.t("Octos uses the reasoning settings in this profile.","Octos 使用该配置中的推理设置。")}}
+                if A.pool_containers_offered(c.account) {View{width:Fill height:Fit flow:Down spacing:6
+                mod.widgets.HagencyListLabel{text:A.t("RUNS IN","运行环境")}
+                mod.widgets.HagencyList{
+                    mod.widgets.HagencySwitchRow{
+                        mod.widgets.HagencyListTitle{text:A.t("Run Agents in containers","在容器中运行 Agent")}
+                        pool_create_containers := mod.widgets.HagencySwitch{draw_bg.selected:if A.pool_containers_chosen(d){1.0}else{0.0} enabled:!H.busy && H.command==nil on_click: || A.pool_containers_toggle()}
+                    }
+                }
+                if A.pool_containers_chosen(d) {mod.widgets.HagencyListNote{text:A.t("Each Agent of this pool runs in its own container and sees only its own folders. Until containers are ready on this computer its Agents do not start; they never fall back to the sandbox. You can change this later on the Hosting dashboard.","此资源池的每个 Agent 都在自己的容器中运行，只能看到自己的文件夹。这台电脑的容器就绪之前，Agent 不会启动，也不会改用沙盒。之后可在托管控制台更改。")}}
+                if !A.pool_containers_chosen(d) {mod.widgets.HagencyListNote{text:A.t("Off: this pool’s Agents run in this computer’s sandbox. Turn this on to run each one in its own container (Docker Desktop, OrbStack or Colima) that sees only its own folders.","关闭时，此资源池的 Agent 在这台电脑的沙盒中运行。开启后，每个 Agent 会在自己的容器（Docker Desktop、OrbStack 或 Colima）中运行，只能看到自己的文件夹。")}}
+                }}
                 mod.widgets.HagencyListLabel{text:A.t("MONTHLY MAXIMUM","每月上限")}
                 mod.widgets.HagencyList{View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:16 right:16 top:12 bottom:12}
                     pool_create_tokens := mod.widgets.HagencyNumberInput{minimum:1 maximum:quota text:d.tokens empty_text:A.t("e.g. 1.5","例如 1.5") on_change:|text| A.pool_create_tokens(text)}

@@ -12,7 +12,7 @@
 	<key>CFBundleDisplayName</key>
 	<string>Rinx</string>
 	<key>CFBundleExecutable</key>
-	<string>rinx</string>
+	<string>hagency</string>
 	<key>CFBundleIconFile</key>
 	<string>Rinx.icns</string>
 	<key>CFBundleIdentifier</key>

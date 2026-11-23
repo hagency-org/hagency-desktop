@@ -86,6 +86,17 @@ impl SharedExecutionTransport {
         after: Option<String>,
         launch: Option<super::super::managed_runtime::PreparedLaunch>,
     ) -> Result<SharedDemandPoll, NativeError> {
+        let reply = self.fetch_demand(after).await?;
+        let outcome = match reply.value.demand {
+            Some(s) => self.consume_demand(r, s, reply.observed, launch).await,
+            None => Ok(SharedDemandProgress::Idle),
+        };
+        Ok(SharedDemandPoll {
+            next_after: reply.value.next_after,
+            outcome,
+        })
+    }
+    async fn fetch_demand(&self, after: Option<String>) -> Result<Timed<demand_io::PollReply>, NativeError> {
         enabled()?;
         let b = self.io.bound().await?;
         demand_io::require_pair(&b).await?;
@@ -102,15 +113,14 @@ impl SharedExecutionTransport {
         if let Some(id) = &reply.value.next_after {
             super::super::key(id)?;
         }
-        let outcome = match reply.value.demand {
-            Some(s) => self.consume_demand(r, s, reply.observed, launch).await,
-            None => Ok(SharedDemandProgress::Idle),
-        };
-        Ok(SharedDemandPoll {
-            next_after: reply.value.next_after,
-            outcome,
-        })
+        Ok(reply)
     }
+
+    pub(in crate::console::native) async fn discover_demand(&self, after: Option<String>) -> Result<(Option<String>, Option<(String,String)>), NativeError> {
+        let reply = self.fetch_demand(after).await?.value;
+        Ok((reply.next_after, reply.demand.map(|s| (s.offer.demand_id,s.demand_digest))))
+    }
+
     /// Recover only an immutable original offer. No new demand/start identity is
     /// selected, even when the original POST or its reply was lost.
     pub async fn resume_next_demand(
@@ -148,30 +158,33 @@ impl SharedExecutionTransport {
         };
         let id = saved.intent().offer().demand_id.clone();
         let expected = saved.intent().offer().digest().map_err(store)?;
-        let outcome = async {
-            let reply: Timed<demand_io::RecoverReply> = b
-                .request(
-                    DemandAction::Recover {
-                        id: id.clone(),
-                        digest: expected.clone(),
-                        retries: demand_io::retries(&b).await?,
-                    }
-                    .into(),
-                    false,
-                )
-                .await?;
-            let s = reply.value.demand.ok_or_else(invalid)?;
-            if s.offer.demand_id != id || s.demand_digest != expected {
-                return Err(invalid());
-            }
-            self.consume_demand(r, s, reply.observed, None).await
-        }
-        .await;
+        let outcome = self.consume_demand_ref(r, &id, &expected).await;
         Ok(Some(SharedDemandResume {
             demand_id: id,
             outcome,
         }))
     }
+    pub(in crate::console::native) async fn consume_demand_ref(&self, r: &OwnerResourceRegistry, id: &str, expected: &str) -> Result<SharedDemandProgress, NativeError> {
+        let b = self.io.bound().await?;
+
+        let reply: Timed<demand_io::RecoverReply> = b
+            .request(
+                DemandAction::Recover {
+                    id: id.to_owned(),
+                    digest: expected.to_owned(),
+                    retries: demand_io::retries(&b).await?,
+                }
+                .into(),
+                false,
+            )
+            .await?;
+        let s = reply.value.demand.ok_or_else(invalid)?;
+        if s.offer.demand_id != id || s.demand_digest != expected {
+            return Err(invalid());
+        }
+        self.consume_demand(r, s, reply.observed, None).await
+    }
+
     async fn consume_demand(
         &self,
         r: &OwnerResourceRegistry,
@@ -291,19 +304,7 @@ impl SharedExecutionTransport {
                     .shared_demand_submission(proof, target.original().clone())
                     .await
                     .map_err(store)?;
-                demand_io::require_pair(&b).await?;
-                submission.check().map_err(store)?;
-                let progress = self
-                    .process_attempt(
-                        r,
-                        attempt_io::AttemptAction::DemandStart {
-                            id: id.clone(),
-                            input: submission.input().clone(),
-                        },
-                        None,
-                        launch,
-                    )
-                    .await?;
+                let progress = self.submit_attempt(r, &b, &target, &s, observed, submission, launch).await?;
                 Ok(SharedDemandProgress::Execution {
                     demand_id: id,
                     progress,
@@ -382,23 +383,64 @@ impl SharedExecutionTransport {
                 });
             }
         };
-        demand_io::require_pair(b).await?;
-        submission.check().map_err(store)?;
-        let progress = self
-            .process_attempt(
-                r,
-                attempt_io::AttemptAction::DemandStart {
-                    id: id.clone(),
-                    input: submission.input().clone(),
-                },
-                None,
-                launch,
-            )
-            .await?;
+        let progress = self.submit_attempt(r, b, target, &s, observed, submission, launch).await?;
         Ok(SharedDemandProgress::Execution {
             demand_id: id,
             progress,
         })
+    }
+}
+impl SharedExecutionTransport {
+    async fn submit_attempt(
+        &self, r: &OwnerResourceRegistry, bound: &Bound, target: &SharedSuccessorSelection,
+        status: &Status, observed: u64, mut submission: SharedDemandSubmission,
+        launch: Option<super::super::managed_runtime::PreparedLaunch>,
+    ) -> Result<SharedExecutionProgress, NativeError> {
+        let original = target.original();
+        let input = submission.input().clone();
+        let mut launch = launch.map(launch::Launch::from);
+        let inspected = matches!(status.state.as_str(), "offered" | "retry_offered")
+            && original.runtime().map_err(store)? == "codex";
+        if inspected {
+            // Inspect the selected provider's policy and account availability.
+            // The execution process still requires H1's matching command.
+            submission.check().map_err(store)?;
+            let started = Instant::now();
+            let b = self.io.bound().await?;
+            let mut selected = self.select_attempt_launch(r, &b, original, input.start.web_search,
+                input.start.tool_policy.as_ref().map(|p| p.mode.as_str()), launch).await?;
+            if let launch::Launch::Codex(prepared) = &mut selected {
+                prepared.inspect_account_before_ticket();
+            }
+            let until = b.scope.deadline;
+            let process_io = selected.io(&self.io);
+            let check = b.preparation_check(&process_io, original.clone());
+            launch = Some(selected.prepare(&self.manager, until, check).await?);
+            tracing::info!(demand_id = %status.offer.demand_id,
+                elapsed_ms = started.elapsed().as_millis() as u64, "Shared demand provider inspection before ticket");
+            // Obtain a current submission for the same saved intent after the
+            // inspection. Slow inspection never consumes the H1 start ticket.
+            let fresh = self.io.bound().await?;
+            let proof = offer_proof(&fresh, r, original, status, observed).await?;
+            submission = if let Some(n) = status.retry {
+                match r.prepare_shared_demand_retry(proof, original.clone(), target.predecessor().cloned(), n).await.map_err(store)? {
+                    SharedDemandRetry::Start(s) => s,
+                    _ => return Err(failure(409, "shared_demand_changed")),
+                }
+            } else {
+                r.shared_demand_submission(proof, original.clone()).await.map_err(store)?
+            };
+            if digest(&input)? != digest(submission.input())? {
+                return Err(invalid());
+            }
+            demand_io::require_pair(&fresh).await?;
+        } else {
+            demand_io::require_pair(bound).await?;
+        }
+        let plan = super::attempts::DemandPreparation { submission, inspected, original_digest: digest(original)? };
+        self.process_attempt_scoped(r, attempt_io::AttemptAction::DemandStart {
+            id: status.offer.demand_id.clone(), input,
+        }, None, launch, None, Some(plan)).await
     }
 }
 /// Promotion is descriptive. Store binding is durable before inbox/ACK, and the

@@ -230,10 +230,25 @@ pub struct ResourceUsage {
     pub counts: TokenCounts,
 }
 
+/// Resource ids of a personal (local) Agent's usage begin with this. Such a
+/// row is the history of an Agent the owner runs for themself, not a hosted
+/// pool.
+pub const PERSONAL_RESOURCE_PREFIX: &str = "personal-agent:";
+
+/// The resource id that a personal Agent's usage is recorded under.
+pub fn personal_resource_id(agent_id: &str) -> String {
+    format!("{PERSONAL_RESOURCE_PREFIX}{agent_id}")
+}
+
 impl ResourceUsage {
     /// Token cache-hit ratio over this resource's measured scope.
     pub fn cache_hit_ratio(&self) -> Option<f64> {
         cache_hit_ratio(&self.counts)
+    }
+
+    /// A personal Agent's usage row rather than a hosted pool's.
+    pub fn is_personal(&self) -> bool {
+        self.id.starts_with(PERSONAL_RESOURCE_PREFIX)
     }
 }
 

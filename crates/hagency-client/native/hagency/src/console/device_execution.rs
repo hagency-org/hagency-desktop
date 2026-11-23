@@ -279,6 +279,38 @@ impl ProcessingReceipt {
         Ok(())
     }
 }
+
+/// A server proof for sending one message on an already configured route.
+/// This proof grants no authority to start or continue provider work.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AgentMessageAuthorization {
+    pub agent_id: String,
+    pub binding_id: String,
+    pub binding_generation: i64,
+    pub room_id: String,
+    pub puppet_mxid: String,
+    pub encrypted: bool,
+    pub lease_epoch: i64,
+    pub device_generation: i64,
+    pub valid_until_ms: i64,
+}
+impl AgentMessageAuthorization {
+    pub(super) fn validate(&self, lease: &LeaseRef, binding: &str, generation: i64,
+        room: &str, puppet: &str, device_generation: u64, now: i64) -> Result<(), DeviceError> {
+        if self.agent_id != lease.agent_id || self.binding_id != binding
+            || self.binding_generation != generation || self.room_id != room
+            || self.puppet_mxid != puppet || self.lease_epoch != lease.epoch
+            || u64::try_from(self.device_generation).ok() != Some(device_generation)
+            || self.valid_until_ms <= now || self.valid_until_ms > now.saturating_add(60_000)
+        {
+            return Err(error(502, "execution_scope_mismatch"));
+        }
+        matrix(&self.room_id, '!')?;
+        matrix(&self.puppet_mxid, '@')?;
+        Ok(())
+    }
+}
 pub enum DeviceOperation {
     History {
         agent_id: String,
@@ -322,6 +354,14 @@ pub enum DeviceOperation {
         dispatch_id: String,
         execution_id: String,
     },
+    AuthorizeMessage {
+        lease: LeaseRef,
+        binding_id: String,
+        binding_generation: i64,
+        /// Expected values are held by the host, not chosen by the model.
+        room_id: String,
+        puppet_mxid: String,
+    },
     Finish {
         lease: LeaseRef,
         dispatch_id: String,
@@ -360,6 +400,7 @@ pub enum DeviceResponse {
     Started(ExecutionStart),
     Processing(ProcessingReceipt),
     ToolAuthorized(Dispatch),
+    MessageAuthorized(AgentMessageAuthorization),
     Finished,
     ReplyQueued(ReplyReceipt),
     E2eeDevice(E2eeDeviceGrant),
@@ -377,6 +418,7 @@ impl DeviceOperation {
             | Self::Start { lease, .. }
             | Self::Processing { lease, .. }
             | Self::AuthorizeTool { lease, .. }
+            | Self::AuthorizeMessage { lease, .. }
             | Self::Finish { lease, .. }
             | Self::Reply { lease, .. }
             | Self::E2eeCandidates { lease, .. }
@@ -496,6 +538,14 @@ impl DeviceOperation {
                     "events/authorize-tool",
                     json!({"lease":lease,"dispatchId":dispatch_id,"executionId":execution_id}),
                 )
+            }
+            Self::AuthorizeMessage { lease, binding_id, binding_generation, room_id, puppet_mxid } => {
+                id(binding_id)?;
+                if *binding_generation <= 0 { return Err(error(400, "invalid_execution_arguments")); }
+                matrix(room_id, '!')?;
+                matrix(puppet_mxid, '@')?;
+                ("messages/authorize", json!({"lease":lease,"bindingId":binding_id,
+                    "bindingGeneration":binding_generation}))
             }
             Self::Finish {
                 lease,
@@ -792,8 +842,12 @@ fn parse_response(
                 || lease.device_generation
                     != i64::try_from(device.generation()).map_err(|_| invalid())?
                 || lease.epoch < 1
+                // The server cuts a lease to the device's authorization
+                // window. `remaining` is that end by the local clock, so it is
+                // measured against the window read the same way: the device's
+                // own deadline is earlier by what its proof clock left out.
                 || std::time::Instant::now() + Duration::from_millis(remaining as u64)
-                    > device.valid_until() + Duration::from_secs(1)
+                    > device.window_until() + Duration::from_secs(1)
                 || operation
                     .lease()
                     .is_some_and(|reference| reference.epoch != lease.epoch)
@@ -861,6 +915,12 @@ fn parse_response(
                 return Err(error(502, "execution_scope_mismatch"));
             }
             Ok(DeviceResponse::ToolAuthorized(dispatch))
+        }
+        DeviceOperation::AuthorizeMessage { lease, binding_id, binding_generation, room_id, puppet_mxid } => {
+            let authorization: AgentMessageAuthorization = decode(&value, "authorization")?;
+            authorization.validate(lease, binding_id, *binding_generation, room_id, puppet_mxid,
+                device.generation(), now_ms()?)?;
+            Ok(DeviceResponse::MessageAuthorized(authorization))
         }
         DeviceOperation::Reply {
             lease,
@@ -1097,6 +1157,67 @@ impl Console {
 #[cfg(test)]
 mod processing_tests {
     use super::*;
+    #[test]
+    fn a_lease_is_measured_against_the_window_the_proof_clock_shortened() {
+        let renew = DeviceOperation::Renew {
+            lease: LeaseRef { agent_id: "agent-a".into(), epoch: 3 },
+            ttl_ms: 30_000,
+        };
+        let answer = |remaining_ms: i64| json!({"lease":{
+            "agentId":"agent-a","ownerUserId":"owner-subject","deviceId":"fixture_device",
+            "deviceGeneration":1,"epoch":3,"expiresAtMs":now_ms().unwrap() + remaining_ms
+        }});
+        let device = |window_ms: u64, taken_ms: u64| {
+            super::super::server_login::fixture_device(
+                "https://example.test/", "owner-subject", "@owner:example.test",
+            )
+            .0
+            .with_fixture_window(Duration::from_millis(window_ms), Duration::from_millis(taken_ms))
+        };
+        let refused = |device: &AuthorizedDevice| {
+            let error = parse_response(&renew, answer(30_000), device).err().unwrap();
+            (error.status, error.code)
+        };
+        // The server cut the lease to the end of the device's window. The proof
+        // clock ended the device's own deadline 1.3 s before that end.
+        assert!(parse_response(&renew, answer(30_000), &device(30_000, 1_300)).is_ok());
+        // Measured against that deadline alone, the same lease was refused.
+        assert_eq!(
+            refused(&device(28_700, 0)),
+            (502, "execution_scope_mismatch".to_owned())
+        );
+        // A lease that outlives the window itself by more than a second still is.
+        assert_eq!(
+            refused(&device(28_000, 500)),
+            (502, "execution_scope_mismatch".to_owned())
+        );
+    }
+    #[test]
+    fn message_authorization_pins_the_host_route_and_expires() {
+        let lease = LeaseRef { agent_id: "agent-a".into(), epoch: 3 };
+        let op = DeviceOperation::AuthorizeMessage {
+            lease: lease.clone(), binding_id: "binding-a".into(), binding_generation: 4,
+            room_id: "!room:example.test".into(), puppet_mxid: "@agent:example.test".into(),
+        };
+        let (route, body) = op.request().unwrap();
+        assert_eq!(route, "messages/authorize");
+        assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({
+            "lease":{"agentId":"agent-a","epoch":3},"bindingId":"binding-a","bindingGeneration":4
+        }));
+        let proof: AgentMessageAuthorization = serde_json::from_value(json!({
+            "agentId":"agent-a","bindingId":"binding-a","bindingGeneration":4,
+            "roomId":"!room:example.test","puppetMxid":"@agent:example.test",
+            "encrypted":true,"leaseEpoch":3,"deviceGeneration":2,"validUntilMs":12000
+        })).unwrap();
+        let validate = |room: &str, puppet: &str, generation: i64, device: u64, now: i64|
+            proof.validate(&lease, "binding-a", generation, room, puppet, device, now);
+        assert!(validate("!room:example.test", "@agent:example.test", 4, 2, 10_000).is_ok());
+        assert!(validate("!other:example.test", "@agent:example.test", 4, 2, 10_000).is_err());
+        assert!(validate("!room:example.test", "@other:example.test", 4, 2, 10_000).is_err());
+        assert!(validate("!room:example.test", "@agent:example.test", 5, 2, 10_000).is_err());
+        assert!(validate("!room:example.test", "@agent:example.test", 4, 3, 10_000).is_err());
+        assert!(validate("!room:example.test", "@agent:example.test", 4, 2, 12_000).is_err());
+    }
     #[test]
     fn encrypted_candidate_confirmation_accepts_real_matrix_event_ids() {
         let operation = |event: &str, root: Option<&str>| DeviceOperation::E2eeConfirm {

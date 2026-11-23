@@ -87,8 +87,8 @@ messages! {
     IncompatibleTitle => "Update required", "需要更新";
     AuthExpiredTitle => "Sign-in needed", "需要重新登录";
     AuthExpiredBody => "The hosting service's owner sign-in has expired. Sign in again to keep accepting work.", "托管服务的所有者登录已过期。请重新登录以继续接收任务。";
-    OwnerMismatchTitle => "Hosting belongs to another account", "托管服务属于其他账号";
-    OwnerMismatchBody => "The hosting service on this Mac serves another account, so its data isn't shown here. One Mac user can host one account's resource pool at a time.", "这台 Mac 上的托管服务属于另一个账号，因此不在此显示其数据。一个 Mac 用户同一时间只能托管一个账号的资源池。";
+    OwnerMismatchTitle => "Hosting identity mismatch", "托管身份不匹配";
+    OwnerMismatchBody => "The service reported a different identity for this account. Its dashboard is hidden.", "服务为当前账号返回了不匹配的身份，已隐藏托管面板。";
     FailedTitle => "Can't reach the hosting service", "无法连接托管服务";
     ShowingLastKnown => "Showing the last known status.", "当前显示的是最后一次获取的状态。";
     SetUpHosting => "Set up hosting", "设置托管";
@@ -224,8 +224,8 @@ messages! {
     SetupBody => "Hagency hosts your resource pool with a background service on this Mac, so your rented Agents keep working while Hagency is closed. Setup opens your browser once to sign this Mac in.", "Hagency 通过这台 Mac 上的后台服务托管你的资源池，关闭 Hagency 后出租的 Agent 仍能继续工作。设置时会打开一次浏览器，为这台 Mac 登录。";
     SetupReplaceTitle => "Set up hosting again", "重新设置托管";
     SetupReplaceBody => "An earlier hosting sign-in on this Mac uses a different resource folder. Setting up again signs it out and hosts this account's resources.", "这台 Mac 上较早的托管登录使用了另一个资源目录。重新设置会退出该登录，并托管此账号的资源。";
-    SetupOtherOwnerTitle => "Hosting serves another account", "托管服务属于其他账号";
-    SetupOtherOwnerBody => "The hosting service on this Mac hosts another account's resource pool. One Mac user can host one account's resource pool at a time. To host this account here, sign the other account out of Hagency on this Mac first.", "这台 Mac 上的托管服务正在托管另一个账号的资源池。一个 Mac 用户同一时间只能托管一个账号的资源池。如需在这里托管当前账号，请先在这台 Mac 的 Hagency 中退出另一个账号。";
+    SetupOtherOwnerTitle => "Check the enrollment identity", "请核对托管登记身份";
+    SetupOtherOwnerBody => "The enrollment for this account has a different identity. Check the homeserver and full Matrix ID before continuing.", "当前账号的托管登记身份不匹配。请核对服务器地址和完整 Matrix ID 后再继续。";
     SetupPreparing => "Preparing hosting setup…", "正在准备托管设置…";
     SetupSigningIn => "Complete sign-in in your browser…", "请在浏览器中完成登录…";
     SetupRegistering => "Signed in. Registering this Mac’s executor…", "已登录，正在登记这台 Mac 的执行端…";
@@ -235,9 +235,24 @@ messages! {
     KeepRunningTitle => "Keep the resource pool running after Desktop quits", "关闭桌面端后继续运行资源池";
     KeepRunningOn => "Rented Agents keep working while Hagency is closed.", "关闭 Hagency 后，出租的 Agent 仍会继续工作。";
     KeepRunningOff => "Hagency pauses hosting when it quits and resumes it the next time it starts.", "Hagency 退出时会暂停托管，下次启动时恢复。";
+    ContainersTitle => "Run this resource's Agents in containers", "在容器中运行此资源的 Agent";
+    ContainersOff => "This resource's Agents run on this Mac in its sandbox. Turn this on to run each one in its own container (Docker Desktop, OrbStack or Colima) that sees only its own folders.", "此资源的 Agent 在这台 Mac 的沙盒中运行。开启后，每个 Agent 会在自己的容器（Docker Desktop、OrbStack 或 Colima）中运行，只能看到自己的文件夹。";
+    ContainersTurningOn => "Preparing the container image. The first time takes a few minutes…", "正在准备容器镜像，首次需要几分钟…";
+    ContainersOn => "From their next run, this resource's Agents run in their own container and see only their own folders. Each resource keeps its own setting.", "从下一次运行起，此资源的 Agent 会在自己的容器中运行，只能看到自己的文件夹。每个资源各自设置。";
+    ContainersUnavailable => "Containers are not available for this resource, so its Agents cannot start. Turn this off to use the sandbox, or off and on again to use the container app you have now.", "此资源的容器不可用，其 Agent 无法启动。关闭此项可改用沙盒；或关闭后重新开启，以使用当前的容器应用。";
+    ContainersNoRuntime => "No Docker-compatible app was found. Install and start Docker Desktop, OrbStack or Colima, then turn this on again.", "未找到 Docker 兼容的应用。请安装并启动 Docker Desktop、OrbStack 或 Colima，然后再次开启。";
+    ContainersEngineStopped => "The container engine isn't running. Start your container app, then turn this on again.", "容器引擎未运行。请启动容器应用，然后再次开启。";
+    ContainersBuildFailed => "The Agent image could not be built. Check that your container app can reach the internet, then turn this on again.", "无法构建 Agent 镜像。请确认容器应用可以访问网络，然后再次开启。";
+    ContainersFailed => "Containers could not be turned on. This resource's Agents keep running in the sandbox.", "无法开启容器。此资源的 Agent 仍在沙盒中运行。";
+    ContainersNotReady => "Containers are chosen for this resource but not ready, so its Agents cannot start. Start your container app (Docker Desktop, OrbStack or Colima) and try again, or turn this off to use the sandbox.", "此资源已选择容器，但容器尚未就绪，其 Agent 无法启动。请启动容器应用（Docker Desktop、OrbStack 或 Colima）后重试；或关闭此项，改用沙盒。";
+    ContainersWaitingNoRuntime => "No Docker-compatible app was found, so this resource's Agents cannot start. Install and start Docker Desktop, OrbStack or Colima, then try again. Turn this off to use the sandbox instead.", "未找到 Docker 兼容的应用，此资源的 Agent 无法启动。请安装并启动 Docker Desktop、OrbStack 或 Colima，然后重试。如需改用沙盒，请关闭此项。";
+    ContainersWaitingEngineStopped => "The container engine isn't running, so this resource's Agents cannot start. Start your container app, then try again. Turn this off to use the sandbox instead.", "容器引擎未运行，此资源的 Agent 无法启动。请启动容器应用，然后重试。如需改用沙盒，请关闭此项。";
+    ContainersWaitingBuildFailed => "The Agent image could not be built, so this resource's Agents cannot start. Check that your container app can reach the internet, then try again. Turn this off to use the sandbox instead.", "无法构建 Agent 镜像，此资源的 Agent 无法启动。请确认容器应用可以访问网络，然后重试。如需改用沙盒，请关闭此项。";
+    ContainersWaiting => "Containers could not be prepared, so this resource's Agents cannot start. Try again, or turn this off to use the sandbox instead.", "无法准备容器，此资源的 Agent 无法启动。请重试；如需改用沙盒，请关闭此项。";
+    ContainersTryAgain => "Try again", "重试";
     UninstallService => "Uninstall hosting service", "卸载托管服务";
     UninstallConfirmTitle => "Uninstall the hosting service?", "卸载托管服务？";
-    UninstallConfirmBody => "Hosting stops until you start the service again. Your setup, sign-in and resources are kept.", "在重新启动服务前，托管会停止。你的设置、登录和资源都会保留。";
+    UninstallConfirmBody => "Hosting for all accounts stops until you start the service again. Your setup, sign-in and resources are kept.", "在重新启动服务前，本机所有账号的托管都会停止。你的设置、登录和资源都会保留。";
     Uninstall => "Uninstall", "卸载";
     ForeignService => "The hosting service runs from another app, such as an earlier Hagency Hosting. Use this app's service so hosting updates with Hagency.", "托管服务由另一个应用（例如早期的 Hagency Hosting）运行。请改用本应用的服务，使托管随 Hagency 一起更新。";
     UseThisService => "Use this app's service", "使用本应用的服务";
@@ -431,8 +446,8 @@ pub mod phrase {
     pub fn setup_failure(locale: Locale, code: &str) -> &'static str {
         let zh = locale == Locale::ZhHans;
         match (code, zh) {
-            ("daemon_other_owner_enrolled" | "matrix_account_mismatch", false) => "This Mac's hosting service belongs to another account. Sign in with the account shown here, or sign the other account out of Hagency on this Mac first.",
-            ("daemon_other_owner_enrolled" | "matrix_account_mismatch", true) => "这台 Mac 的托管服务属于另一个账号。请使用这里显示的账号登录，或先在这台 Mac 的 Hagency 中退出另一个账号。",
+            ("daemon_other_owner_enrolled" | "matrix_account_mismatch", false) => "The enrollment identity differs from this account. Check the homeserver and full Matrix ID.",
+            ("daemon_other_owner_enrolled" | "matrix_account_mismatch", true) => "托管登记与当前账号身份不匹配。请核对服务器地址和完整 Matrix ID。",
             ("daemon_logout_pending", false) => "The previous sign-out is still finishing. Keep Hagency connected until it completes, then retry.",
             ("daemon_logout_pending", true) => "上次退出尚未完成。请保持 Hagency 连接直到完成，然后重试。",
             ("setup_timed_out", false) => "Setup timed out. Check the server connection, then retry.",

@@ -558,7 +558,7 @@ impl MentionablePopupRef {
 
 /// Registers the app-level popup as a global on Cx.
 pub fn set_global_mention_popup(cx: &mut Cx, parent_ref: &WidgetRef) {
-    Cx::set_global(cx, parent_ref.mentionable_popup(cx, ids!(mention_popup)));
+    *cx.global::<MentionablePopupRef>() = parent_ref.mentionable_popup(cx, ids!(mention_popup));
 }
 
 fn build_row(cx: &mut Cx, list: &mut PortalList, index: usize, item: &MentionItem, fully_drawn: &mut bool) -> WidgetRef {

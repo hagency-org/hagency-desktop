@@ -23,8 +23,15 @@ mod octos;
 pub use octos::{OwnedOctosSession, SharedOctosPolicy, SharedOctosShell};
 mod claude;
 mod claude_shared;
-pub use claude_shared::SharedClaudePolicy;
+pub use claude_shared::{SharedClaudeIsolation, SharedClaudePolicy};
 pub use claude::OwnedClaudeSession;
+/// Pool Agents' Claude in a Docker-compatible container.
+pub mod container {
+    pub use super::claude_shared::container::{
+        ContainerIsolation, DOCKERFILE, IMAGE_TAG_PREFIX, ProbeError, current_endpoint, find_client,
+        image_tag, prepare_image,
+    };
+}
 
 /// Exact platform observations, deliberately distinct from upstream completion.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

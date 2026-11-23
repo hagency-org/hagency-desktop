@@ -40,6 +40,19 @@ fn invited_agent_command(context: &Value, room: &str, user: &str) -> Result<Comm
     })})
 }
 
+/// The pool Agents of an owner that are in a room. `placeable` lists the Agents the owner may
+/// place in rooms, the personal ones among them; a pool Agent keeps no binding of the
+/// personal kind, so it is in the room when its account is one of the `joined` members.
+fn pool_agents_in_room(personal: &Value, placeable: &Value, joined: &std::collections::HashSet<String>) -> Vec<Value> {
+    let personal: std::collections::HashSet<&str> =
+        personal.as_array().into_iter().flatten().filter_map(|agent| agent["id"].as_str()).collect();
+    placeable.as_array().into_iter().flatten()
+        .filter(|agent| agent["id"].as_str().is_some_and(|id| !id.is_empty() && !personal.contains(id)))
+        .filter(|agent| agent["puppetMxid"].as_str().is_some_and(|puppet| joined.contains(puppet)))
+        .map(|agent| serde_json::json!({"agentId":agent["id"],"displayName":agent["displayName"],"pool":true}))
+        .collect()
+}
+
 fn invited_agent_joined(value: &Value, agent: &str, room: &str) -> Result<bool, String> {
     let binding = &value["creation"]["binding"];
     if binding["roomId"] != room || binding["agentId"] != agent {
@@ -60,7 +73,7 @@ pub(super) fn management_read(command: &Command) -> bool {
     matches!(command,
         Command::Projects | Command::ProjectRooms {..} | Command::SpaceCandidates {..}
         | Command::RoomRoster {..} | Command::Agents | Command::RoomAgents | Command::Bindings {..}
-        | Command::Devices | Command::AgentDetails {..} | Command::AgentConfigurationStatus {..}
+        | Command::Devices | Command::LocalApprovals | Command::AgentDetails {..} | Command::AgentConfigurationStatus {..}
         | Command::AgentOwnerDirectStatus {..} | Command::ScopeServiceState {..}
         | Command::LoginStatus | Command::AgentCommands | Command::Creations | Command::Creation {..}
         | Command::Binding {action: BindingAction::Status, ..}
@@ -115,6 +128,7 @@ fn recovery_error_code(code: &str) -> &'static str {
         "device_transport_unavailable" => "device_transport_unavailable",
         "matrix_account_changed" => "matrix_account_changed",
         "matrix_authorization_unavailable" => "matrix_authorization_unavailable",
+        "authorization_time_window_unavailable" => "authorization_time_window_unavailable",
         "matrix_authorization_required" => "matrix_authorization_required",
         "matrix_oauth_sign_in_required" => "matrix_oauth_sign_in_required",
         "runtime_recovery_state_unavailable" => "runtime_recovery_state_unavailable",
@@ -534,7 +548,8 @@ impl Service {
         self.check()?;
         result
     }
-    /// Read this owner's existing Room services without adopting or starting any.
+    /// Read this owner's Agents in the Room without adopting or starting any: the personal
+    /// ones bound to it with their service, and the pool Agents that are members of it.
     pub async fn room_agent_services(&self, room_id: &str) -> Result<Value, String> {
         self.check()?;
         let client = crate::sliding_sync::get_client().ok_or("matrix_sign_in_required")?;
@@ -558,6 +573,10 @@ impl Service {
                 } else {Ok(Value::Null)};
                 services.push(serde_json::json!({"agentId":id,"bindingId":binding_id,"bindingState":binding["state"],"ownerServicePaused":binding["ownerServicePaused"],"service":runtime.as_ref().ok().and_then(|v|v.get("service")),"displayName":agent["displayName"],"thisDevice":here,"runtime":runtime.as_ref().ok().and_then(|v|v.get("runtime")),"statusAvailable":runtime.is_ok()}));
             }
+            let placeable = self.execute(Command::RoomAgents).await?;
+            let joined = room.members_no_sync(matrix_sdk::RoomMemberships::JOIN).await.map_err(|_| "room_discovery_unavailable")?
+                .iter().map(|member| member.user_id().to_string()).collect();
+            services.extend(pool_agents_in_room(&roster["agents"], &placeable["agents"], &joined));
             Ok(serde_json::json!({"roomId":room_id,"services":services}))
         }).await.map_err(|_|"room_discovery_unavailable")?;
         self.check()?;
@@ -720,6 +739,27 @@ impl Service {
         manager.retire();
         self.check()?;
         result
+    }
+    /// The tool requests of this owner's local Agents that wait for an answer,
+    /// for the app-wide reminder. Only an owner that already runs is asked
+    /// (the daemon that hosts this account, or this app's own owner): the
+    /// reminder never starts one. `None` when nothing runs here.
+    pub async fn local_approvals(&self) -> Result<Option<Value>, String> {
+        self.check()?;
+        use crate::hagency::hosting::Execution;
+        let running = match self.execution()? {
+            Execution::Daemon { .. } => true,
+            // Busy opening or closing: asked again on the next round.
+            Execution::InProcess => match self.0.native.try_lock() {
+                Ok(native) => native.is_some(),
+                Err(_) => return Err("native_owner_busy".into()),
+            },
+            Execution::Setup(_) => false,
+        };
+        if !running {
+            return Ok(None);
+        }
+        self.execute(Command::LocalApprovals).await.map(Some)
     }
     pub async fn shared_permissions(&self, command: ::hagency::native_owner::ManagementCommand) -> Result<Value,String> {
         use ::hagency::native_owner::{ManagementCommand,ManagementPackage,ManagementPermission};
@@ -895,6 +935,24 @@ mod binding_recovery_tests {
         assert_eq!(invited_agent_command(&json!({"roomId":"!r:s","agents":[]}),"!r:s",puppet.as_str()).unwrap_err(),"invalid_server_response");
         let mut retired=context;retired["agents"][0]["state"]=json!("retired");
         assert_eq!(invited_agent_command(&retired,"!r:s",puppet.as_str()).unwrap_err(),"agent_retired");
+    }
+    #[test]
+    fn a_pool_agent_is_in_a_room_when_its_account_is_a_member() {
+        let personal = json!([{"id":"own","puppetMxid":"@_hagency_agt_own:s"}]);
+        let placeable = json!([
+            {"id":"own","puppetMxid":"@_hagency_agt_own:s","displayName":"Own"},
+            {"id":"pool","puppetMxid":"@_hagency_agt_pool:s","displayName":"Pool"},
+            {"id":"elsewhere","puppetMxid":"@_hagency_agt_elsewhere:s","displayName":"Elsewhere"},
+            {"id":"","puppetMxid":"@_hagency_agt_unnamed:s"},
+            {"id":"no-account"}
+        ]);
+        let joined: std::collections::HashSet<String> = ["@_hagency_agt_own:s","@_hagency_agt_pool:s","@_hagency_agt_unnamed:s","@person:s"]
+            .into_iter().map(str::to_owned).collect();
+        // The personal Agent is listed through its binding, not here; an Agent that is not
+        // a member of this room is not in it.
+        assert_eq!(pool_agents_in_room(&personal,&placeable,&joined),[json!({"agentId":"pool","displayName":"Pool","pool":true})]);
+        assert!(pool_agents_in_room(&personal,&placeable,&Default::default()).is_empty());
+        assert!(pool_agents_in_room(&personal,&Value::Null,&joined).is_empty());
     }
     #[test]
     fn invitation_success_requires_confirmed_binding_for_exact_agent_and_room() {

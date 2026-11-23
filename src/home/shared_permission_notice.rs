@@ -6,15 +6,66 @@ use ::hagency::native_owner::ManagementCommand;
 
 #[derive(Debug)]
 struct PermissionResult {identity:String,room:String,thread:String,nonce:u64,value:Result<Value,String>}
+#[derive(Default)]
+struct RoomAllowances {
+    supported: bool,
+    requested: bool,
+    cursor: String,
+    next: Option<String>,
+    checked: Option<std::time::Instant>,
+    text: String,
+}
+impl RoomAllowances {
+    fn request(&mut self) -> Option<String> {
+        self.requested=self.supported && self.checked.is_none_or(|t| t.elapsed()>=std::time::Duration::from_secs(30));
+        self.requested.then(|| self.cursor.clone())
+    }
+    fn receive(&mut self, value:&Value) {
+        if value["roomAllowanceSupported"]!=true { *self=Self::default(); return; }
+        self.supported=true;
+        if !self.requested { return; }
+        self.requested=false;
+        self.checked=Some(std::time::Instant::now());
+        let page=&value["roomAllowancePage"];
+        self.next=page["next"].as_str().filter(|s| !s.is_empty() && s.len()<=255).map(str::to_owned);
+        let rows=page["items"].as_array().into_iter().flatten();
+        self.text=rows.filter_map(|r|{
+            let agent=r["agentMxid"].as_str().filter(|id| id.starts_with('@') && id.len()<=255 && !id.chars().any(char::is_control))?;
+            let msg=match r["state"].as_str()? {
+                "exhausted"=>"{agent}: allowance used up.",
+                "usage_unresolved"=>"{agent}: waiting for usage to settle.",
+                "renewal_waiting_capacity"=>"{agent}: waiting for pool capacity to renew.",
+                "unavailable"=>"{agent}: allowance currently unavailable.",
+                _=>return None,
+            };
+            Some(crate::i18n::format(msg,&[("agent",agent.to_owned())]))
+        }).take(8).collect::<Vec<_>>().join("\n");
+        if self.next.is_none() && self.text.is_empty() { self.cursor.clear(); }
+    }
+    fn turn_page(&mut self) {
+        self.cursor=self.next.take().unwrap_or_default();
+        self.text.clear();
+        self.checked=None;
+    }
+}
 fn execution_row<'a>(value:&'a Value,room:&str,thread:&str)->Option<&'a Value> {
     value["executions"].as_array()?.iter().find(|r|
         r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread))
+}
+fn pool_request(row: &Value) -> Option<(String, String)> {
+    if row["reason"] != "budget_blocked" { return None; }
+    let link = &row["resourceRecovery"];
+    let id = link["requestId"].as_str()?;
+    let role = link["role"].as_str()?;
+    if id.is_empty() || id.len() > 256 || !matches!(role, "manager" | "owner") { return None; }
+    Some((id.to_owned(), role.to_owned()))
 }
 fn execution_busy(value:&Value,room:&str,thread:&str)->bool {
     execution_row(value,room,thread).is_some_and(|row|
         row["reason"]!="budget_blocked" && matches!(row["state"].as_str(),Some("started"|"pending"|"queued"|"acknowledged"|"bound"|"reply_pending")))
 }
-fn execution_notice(value:&Value,room:&str,thread:&str)->Option<&'static str> {
+/// `stopped` says whether the run card for a message shows its run stopped.
+fn execution_notice(value:&Value,room:&str,thread:&str,stopped:impl Fn(&str)->bool)->Option<&'static str> {
     let row=execution_row(value,room,thread)?;
     if row["reason"]=="owner_daemon_update_required" {
         return Some("Message has not started. The resource owner needs to update Hagency and start its service; the same message can then continue.");
@@ -34,6 +85,8 @@ fn execution_notice(value:&Value,room:&str,thread:&str)->Option<&'static str> {
         "started"=>Some("Agent is working…"),
         "pending"|"queued"|"acknowledged"|"bound"=>Some("Message queued; waiting for Agent."),
         "unknown"=>Some("Run interrupted; no final answer confirmed. Send the message again if you still need it."),
+        // The Agent records a stopped run as failed; its run card tells them apart.
+        "failed" if row["eventId"].as_str().is_some_and(&stopped)=>Some("Run stopped."),
         "failed"=>Some("Agent run failed."),
         "blocked"=>Some("Message could not start. Check the resource and Agent connection."),
         "paused"=>Some("Agent is paused."),
@@ -55,6 +108,8 @@ script_mod! {
             title := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_INK}
         }
         context := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
+        room_allowances := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_INK visible: false}
+        allowance_page := Button {text: #(crate::i18n::tr("Other room Agents")) i18n_text: "Other room Agents" visible: false}
         request_details := ScrollYView {width: Fill height: Fit{max: FitBound.Abs(130.0)}
             details := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_INK}
         }
@@ -64,6 +119,7 @@ script_mod! {
             session := Button {width: Fill text: #(crate::i18n::tr("Always approve for this session")) i18n_text: "Always approve for this session"}
             deny := Button {width: Fill text: #(crate::i18n::tr("Deny")) i18n_text: "Deny"}
         }
+        allowance := Button {text: #(crate::i18n::tr("View original pool request")) i18n_text: "View original pool request" visible: false}
         next := Button {text: #(crate::i18n::tr("Next request")) i18n_text: "Next request" visible: false}
     }
 }
@@ -98,8 +154,11 @@ pub struct SharedPermissionNotice {
     #[rust] loading:bool,
     #[rust] timer:Timer,
     #[rust] active:bool,
+    #[rust] execution_thread_filter:bool,
     #[rust] rows:Vec<Value>,
     #[rust] selected:usize,
+    #[rust] room_allowances:RoomAllowances,
+    #[rust] original_request:Option<(String,String)>,
     #[rust] execution_text:String,
     #[rust] execution_busy:bool,
     #[rust] waiting:bool,
@@ -194,7 +253,12 @@ impl SharedPermissionNotice {
         let shown=self.display();
         self.waiting=shown.waiting;
         self.sync_animation(cx);
-        self.view.set_visible(cx,shown.visible);
+        let notices=&self.room_allowances;
+        let has_page=notices.next.is_some() || !notices.cursor.is_empty();
+        self.view.set_visible(cx,shown.visible || !notices.text.is_empty() || has_page);
+        self.view.label(cx,ids!(room_allowances)).set_text(cx,&notices.text);
+        self.view.widget(cx,ids!(room_allowances)).set_visible(cx,!notices.text.is_empty());
+        self.view.widget(cx,ids!(allowance_page)).set_visible(cx,has_page);
         self.view.label(cx,ids!(title)).set_text(cx,&shown.title);
         for (id,text) in [(ids!(context),&shown.context),(ids!(details),&shown.details),(ids!(hint),&shown.hint)] {
             self.view.label(cx,id).set_text(cx,text);
@@ -210,8 +274,24 @@ impl SharedPermissionNotice {
             button.set_enabled(cx,offered);
         }
         self.view.widget(cx,ids!(actions)).set_visible(cx,shown.once || shown.session || shown.deny);
+        self.view.widget(cx,ids!(allowance)).set_visible(cx,self.original_request.is_some() && self.rows.is_empty() && self.error.is_empty());
         self.view.widget(cx,ids!(next)).set_visible(cx,shown.next);
         self.view.redraw(cx);
+    }
+    /// Take in one read of the room's requests and the run's state. `stopped`
+    /// says whether a message's run card shows its run stopped.
+    fn read_status(&mut self,value:&Value,stopped:impl Fn(&str)->bool) {
+        self.error.clear();
+        if self.active {self.room_allowances.receive(value);}
+        self.original_request=execution_row(value,&self.room,&self.thread).and_then(pool_request);
+        self.execution_thread_filter = value["executionThreadFilter"] == true;
+        self.execution_busy=execution_busy(value,&self.room,&self.thread);
+        // The run the last decision belonged to has ended: a later run must
+        // not show it as its own last or previous request.
+        if !self.execution_busy {self.last_decision=None;}
+        self.execution_text=execution_notice(value,&self.room,&self.thread,stopped).unwrap_or_default().into();
+        self.rows=value["approvals"].as_array().cloned().unwrap_or_default().into_iter().filter(|r|r["approval"]["roomId"]==self.room && (self.thread.is_empty() || r["approval"]["threadRoot"]==self.thread)).take(16).collect();
+        if self.selected>=self.rows.len(){self.selected=0;}
     }
     /// Read the room's requests and the run's state again.
     fn poll(&mut self,_cx:&mut Cx) {
@@ -220,8 +300,10 @@ impl SharedPermissionNotice {
         if service.identity()!=self.identity{return;}
         self.loading=true;self.nonce=self.nonce.wrapping_add(1);
         let identity=self.identity.clone();let room=self.room.clone();let thread=self.thread.clone();let nonce=self.nonce;
+        let room_allowance_after=self.room_allowances.request();
+        let execution_thread = (self.execution_thread_filter && !thread.is_empty()).then(|| thread.clone());
         crate::sliding_sync::spawn_async_task(async move {
-            let value=service.shared_permissions(ManagementCommand::SharedApprovals{room_id:Some(room.clone())}).await;
+            let value=service.shared_permissions(ManagementCommand::SharedApprovals{room_id:Some(room.clone()),execution_thread,room_allowance_after}).await;
             Cx::post_action(PermissionResult{identity,room,thread,nonce,value});
         });
     }
@@ -241,7 +323,7 @@ impl SharedPermissionNotice {
 impl Widget for SharedPermissionNotice {
     fn handle_event(&mut self,cx:&mut Cx,event:&Event,scope:&mut Scope) {
         use crate::hagency::pending_approvals::{PendingApprovalDecided,PendingApprovalsChanged};
-        if !Service::for_current().is_ok_and(|s|s.identity()==self.identity){self.execution_busy=false;self.waiting=false;self.sync_animation(cx);self.view.set_visible(cx,false);self.rows.clear();return;}
+        if !Service::for_current().is_ok_and(|s|s.identity()==self.identity){self.execution_busy=false;self.waiting=false;self.sync_animation(cx);self.room_allowances=RoomAllowances::default();self.view.set_visible(cx,false);self.rows.clear();return;}
         if self.timer.is_event(event).is_some(){self.timer=Timer::default();self.poll(cx);}
         if let Event::Actions(actions)=event {
             for action in actions {
@@ -249,18 +331,14 @@ impl Widget for SharedPermissionNotice {
                     self.loading=false;
                     match &done.value {
                         Ok(value)=>{
-                            self.error.clear();
-                            self.tracked|=execution_row(value,&self.room,&self.thread).is_some();
-                            self.execution_busy=execution_busy(value,&self.room,&self.thread);
-                            self.execution_text=execution_notice(value,&self.room,&self.thread).unwrap_or_default().into();
-                            self.rows=value["approvals"].as_array().cloned().unwrap_or_default().into_iter().filter(|r|r["approval"]["roomId"]==self.room && (self.thread.is_empty() || r["approval"]["threadRoot"]==self.thread)).take(16).collect();
-                            if self.selected>=self.rows.len(){self.selected=0;}
-                            self.tracked|=!self.rows.is_empty();
+                            let room=self.room.clone();
+                            self.read_status(value,|event|crate::hagency::run_controls::stopped(&room,event));
+                            self.tracked|=execution_row(value,&self.room,&self.thread).is_some() || !self.rows.is_empty();
                             // The cards on the messages read the same requests.
                             if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){cx.action(PendingApprovalsChanged);}
                             self.render(cx);
                         },
-                        Err(_)=>{self.on_failure();self.render(cx);},
+                        Err(_)=>{self.room_allowances=RoomAllowances::default();self.execution_thread_filter=false;self.on_failure();self.render(cx);},
                     }
                     if self.active{self.timer=cx.start_timeout(2.0);}
                 }
@@ -276,6 +354,16 @@ impl Widget for SharedPermissionNotice {
             for (id,decision) in [(ids!(once),"approve_once"),(ids!(session),"approve_session"),(ids!(deny),"deny")] {
                 if self.view.button(cx,id).clicked(actions){self.decide(cx,decision);}
             }
+            if self.view.button(cx,ids!(allowance_page)).clicked(actions) && self.active && !self.loading {
+                self.room_allowances.turn_page();self.render(cx);self.poll(cx);
+            }
+            if self.view.button(cx,ids!(allowance)).clicked(actions) && self.active && self.error.is_empty() && self.rows.is_empty()
+                && let Some((request_id,role))=&self.original_request
+                && let Some(account)=crate::sliding_sync::current_user_id() {
+                cx.action(crate::miniapps::MiniAppsAction::ReviewPoolRequest {
+                    owner:account.to_string(), request_id:request_id.clone(), role:role.clone(),
+                });
+            }
             if self.view.button(cx,ids!(next)).clicked(actions) && !self.rows.is_empty(){self.selected=(self.selected+1)%self.rows.len();self.render(cx);}
         }
         self.view.handle_event(cx,event,scope);
@@ -283,18 +371,46 @@ impl Widget for SharedPermissionNotice {
     fn draw_walk(&mut self,cx:&mut Cx2d,scope:&mut Scope,walk:Walk)->DrawStep{self.view.draw_walk(cx,scope,walk)}
 }
 impl SharedPermissionNoticeRef {
-    pub fn set_active(&self,cx:&mut Cx,active:bool){if let Some(mut this)=self.borrow_mut(){if this.active!=active{this.active=active;this.sync_animation(cx);}if !active{cx.stop_timer(this.timer);this.timer=Timer::default();}}}
+    pub fn set_active(&self,cx:&mut Cx,active:bool){if let Some(mut this)=self.borrow_mut(){if this.active!=active{this.active=active;this.sync_animation(cx);}if !active{this.room_allowances=RoomAllowances::default();this.render(cx);cx.stop_timer(this.timer);this.timer=Timer::default();}}}
     pub fn set_room(&self,cx:&mut Cx,room:&str,thread:&str){
         let Some(mut this)=self.borrow_mut()else{return};
         let identity=Service::for_current().map(|s|s.identity()).unwrap_or_default();
         if this.identity!=identity || this.room!=room || this.thread!=thread {
-            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.tracked=false;this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
+            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_thread_filter=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.tracked=false;this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
         }else if this.active && !this.loading && this.timer.is_empty(){this.poll(cx);}
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn room_allowance_updates_are_optional_scoped_and_replaced_on_refresh() {
+        let mut state=super::RoomAllowances::default();
+        assert!(state.request().is_none());
+        state.receive(&serde_json::json!({"roomAllowanceSupported":true}));
+        assert_eq!(state.request().as_deref(),Some(""));
+        state.receive(&serde_json::json!({"roomAllowanceSupported":true,"roomAllowancePage":{
+            "items":[{"agentMxid":"@agent:example","state":"exhausted"}],"next":"next_page"}}));
+        assert!(state.text.contains("@agent:example"));
+        assert!(state.request().is_none());
+        state.turn_page();
+        assert_eq!(state.request().as_deref(),Some("next_page"));
+        state.receive(&serde_json::json!({"roomAllowanceSupported":true,"roomAllowancePage":{"items":[],"next":null}}));
+        assert!(state.text.is_empty() && state.cursor.is_empty());
+        state.receive(&serde_json::json!({}));
+        assert!(!state.supported && state.next.is_none());
+    }
+    #[test]
+    fn original_pool_request_requires_a_current_block_and_a_known_role() {
+        let mut row = serde_json::json!({"reason":"budget_blocked","resourceRecovery":{"requestId":"request_1","role":"manager"}});
+        assert_eq!(super::pool_request(&row), Some(("request_1".into(), "manager".into())));
+        row["resourceRecovery"]["role"] = "admin".into();
+        assert!(super::pool_request(&row).is_none());
+        row["resourceRecovery"]["role"] = "owner".into();
+        row["reason"] = serde_json::Value::Null;
+        assert!(super::pool_request(&row).is_none());
+    }
+
     use super::*;
     use serde_json::json;
     #[test]
@@ -307,17 +423,17 @@ mod tests {
                 {"roomId":"!other","threadRoot":"$thread","state":"started"},
                 {"roomId":"!room","threadRoot":"$thread","eventId":"$original","state":"blocked","reason":reason}
             ]});
-            let notice = execution_notice(&value, "!room", "$thread").unwrap();
+            let notice = execution_notice(&value, "!room", "$thread", |_| false).unwrap();
             assert!(notice.starts_with("Message has not started."));
             assert!(notice.contains(explanation));
             assert!(!notice.contains("Send the message again"));
             assert!(!execution_busy(&value, "!room", "$thread"));
-            assert!(execution_notice(&value, "!room", "$unrelated").is_none());
+            assert!(execution_notice(&value, "!room", "$unrelated", |_| false).is_none());
             assert!(!execution_busy(&value, "!room", "$unrelated"));
         }
         // The same retained event can become eligible when its daemon returns.
         let current = json!({"executions":[{"roomId":"!room","threadRoot":"$thread","eventId":"$original","state":"pending","reason":null}]});
-        assert_eq!(execution_notice(&current, "!room", "$thread"), Some("Message queued; waiting for Agent."));
+        assert_eq!(execution_notice(&current, "!room", "$thread", |_| false), Some("Message queued; waiting for Agent."));
         assert!(execution_busy(&current, "!room", "$thread"));
     }
 
@@ -328,16 +444,53 @@ mod tests {
             {"roomId":"!room","threadRoot":"$old","state":"unknown"},
             {"roomId":"!room","threadRoot":"$done","state":"replied"}
         ]});
-        assert!(execution_notice(&v,"!room","").unwrap().contains("unsettled calls"));
-        assert!(execution_notice(&v,"!room","$old").unwrap().contains("interrupted"));
-        assert!(execution_notice(&v,"!room","$done").is_none());
-        assert!(execution_notice(&v,"!room","$foreign").is_none());
-        assert!(execution_notice(&v,"!foreign","").is_none());
+        let never=|_:&str|false;
+        assert!(execution_notice(&v,"!room","",never).unwrap().contains("unsettled calls"));
+        assert!(execution_notice(&v,"!room","$old",never).unwrap().contains("interrupted"));
+        assert!(execution_notice(&v,"!room","$done",never).is_none());
+        assert!(execution_notice(&v,"!room","$foreign",never).is_none());
+        assert!(execution_notice(&v,"!foreign","",never).is_none());
         for (state, expected) in [("usage_unresolved","previous call"),("exhausted","used")] {
             let v=json!({"executions":[{"roomId":"!room","state":"blocked","reason":"budget_blocked","budgetState":state}]});
-            assert!(execution_notice(&v,"!room","").unwrap().contains(expected));
+            assert!(execution_notice(&v,"!room","",never).unwrap().contains(expected));
             assert!(!execution_busy(&v,"!room",""));
         }
+    }
+
+    /// The Agent records a stopped run as failed. When the run card for that
+    /// message shows it stopped, the person who sent it reads that, not a failure.
+    #[test]
+    fn a_stopped_run_reads_as_stopped_not_failed() {
+        let v=json!({"executions":[{"roomId":"!room","threadRoot":"$thread","eventId":"$message","state":"failed"}]});
+        assert_eq!(execution_notice(&v,"!room","$thread",|event|event=="$message"),Some("Run stopped."));
+        assert_eq!(execution_notice(&v,"!room","$thread",|event|event=="$other"),Some("Agent run failed."));
+        // Without its message, a row cannot be matched to a run card.
+        let v=json!({"executions":[{"roomId":"!room","threadRoot":"$thread","state":"failed"}]});
+        assert_eq!(execution_notice(&v,"!room","$thread",|_|true),Some("Agent run failed."));
+        // Other states keep their own text.
+        let v=json!({"executions":[{"roomId":"!room","eventId":"$message","state":"unknown"}]});
+        assert!(execution_notice(&v,"!room","",|_|true).unwrap().contains("interrupted"));
+    }
+
+    /// The last decision belongs to its run. Once that run ends, a later run
+    /// shows neither its "last request" hint nor "previous request" context.
+    #[test]
+    fn the_last_decision_is_forgotten_when_its_run_ends() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        let mut n=widget.borrow_mut().unwrap();
+        (n.active,n.room)=(true,"!room".into());
+        let working=json!({"executions":[{"roomId":"!room","state":"started"}],"approvals":[]});
+        n.read_status(&working,|_|false);
+        n.last_decision=Some(("sap_1".into(),"approve_once".into()));
+        n.read_status(&working,|_|false);
+        assert_eq!(n.display().hint,"Last request: Approved once. The Agent is continuing.");
+        n.read_status(&json!({"executions":[{"roomId":"!room","state":"replied"}],"approvals":[]}),|_|false);
+        assert!(n.last_decision.is_none());
+        n.read_status(&working,|_|false);
+        let next=n.display();
+        assert_eq!(next.title,"Agent is working…");
+        assert!(next.hint.is_empty(),"a new run shows no earlier decision: {}",next.hint);
     }
 
     #[test]

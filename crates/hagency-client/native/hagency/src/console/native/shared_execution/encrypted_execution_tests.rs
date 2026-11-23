@@ -66,6 +66,73 @@ async fn run(f: &Fixture, t: &SharedExecutionTransport, successor: bool) {
     if successor { attempts::wait_stopped(f).await; } else { stopped(f).await; }
 }
 
+async fn reply_after_writer_contention(release_room: bool) {
+    let (f, t, _) = Box::pin(recurring_fixture()).await;
+    t.poll_fixture(&f.registry, launch(&f, "text-usage")).await.unwrap();
+    wait_original_stopped(&f).await;
+    demands::activate(&f);
+    demands::offer(&f, 1);
+    let work = {
+        let mut state = f.state.lock().unwrap();
+        state.shared.refuse_next_reply_authorization = true;
+        let work = state.shared.work.as_mut().unwrap();
+        work.encrypted = true;
+        work.body = work.event_id.clone();
+        work.body_digest = format!("{:x}", Sha256::digest(work.body.as_bytes()));
+        if release_room {
+            work.room_id = "!release:test".into();
+            work.room_binding = Some(SharedRoomBinding {
+                id: "srb_release".into(),
+                generation: 1,
+                assignment_id: work.assignment_id.clone(),
+                room_id: work.room_id.clone(),
+                space_id: "!project:test".into(),
+            });
+        }
+        work.clone()
+    };
+    let (t, sent) = t.with_crypto_fixture(Some(PROMPT.into()));
+    let (t, _) = t.with_history_fixture(work.room_id.clone(), work.event_id.clone(), vec![]);
+    let prepared = launch(&f, "text-workspace-standard-usage").shared_fixture();
+    let progress = t.poll_demand_fixture(&f.registry, None, Some(prepared)).await.unwrap();
+    assert!(matches!(progress.outcome.unwrap(), crate::console::native::SharedDemandProgress::Execution {
+        progress: SharedExecutionProgress::Running { .. }, ..
+    }));
+    attempts::wait_stopped(&f).await;
+
+    assert_eq!(demands::count_methods(&f, "turn/start"), 1);
+    let db = rusqlite::Connection::open(f._root.path().join("registry/domain.sqlite3")).unwrap();
+    let completed: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_shared_work_observations
+                       WHERE work_id = ?1 AND json_extract(payload, '$.state') = 'completed')",
+        [&work.id], |row| row.get(0),
+    ).unwrap();
+    assert!(completed, "the provider result was durable before retrying delivery");
+    let receipt = {
+        let state = f.state.lock().unwrap();
+        assert!(!state.shared.refuse_next_reply_authorization, "final send reached authorization");
+        assert_eq!(sent.lock().unwrap().len(), 1, "completed turn must send one final reply");
+        state.shared.receipts.values().find(|r| r.state == "completed").unwrap().clone()
+    };
+    let wire: Value = serde_json::from_str(receipt.body.as_ref().unwrap()).unwrap();
+    assert_eq!(wire["delivery"], "sent");
+    assert_eq!(wire["roomId"], work.room_id);
+    assert_eq!(wire["eventId"], format!("$encrypted_reply_{}:test", work.id));
+    f.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit offline supervised runtime probe"]
+async fn native_shared_encrypted_writer_contention_in_direct_chat() {
+    Box::pin(reply_after_writer_contention(false)).await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit offline supervised runtime probe"]
+async fn native_shared_encrypted_writer_contention_in_release_room() {
+    Box::pin(reply_after_writer_contention(true)).await;
+}
+
 #[tokio::test]
 #[ignore = "requires explicit offline supervised runtime probe"]
 async fn native_shared_encrypted_original_and_successor_keep_plaintext_local() {

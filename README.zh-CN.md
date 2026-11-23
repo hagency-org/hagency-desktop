@@ -92,7 +92,7 @@ Matrix Room、别名和消息链接在应用内打开；未加入的 Room 先显
 
 ```sh
 .jit/sources.sh    # 获取固定版本的 makepad 检出；.jit/sources.lock 变化后需重新执行
-cargo run --locked --bin rinx
+cargo run --locked --bin hagency
 cargo test --locked --lib
 ```
 

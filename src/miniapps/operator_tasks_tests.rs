@@ -501,3 +501,87 @@ fn bundle_uses_the_owner_vocabulary() {
         assert!(source.contains(pattern), "the bundle doesn't say {pattern}");
     }
 }
+
+/// The New Pool page of a Claude account in the real widgets. The choice of
+/// containers is one switch row with its note, offered only where the session
+/// says this computer runs them. Choosing it changes the note and leaves the
+/// row where it was when the page renders again.
+#[test]
+fn new_pool_page_offers_containers_for_a_claude_pool_where_the_computer_runs_them() {
+    fn has_text(widget: &WidgetRef, expected: &str) -> bool {
+        let mut found = widget.text() == expected;
+        widget.children(&mut |_, child| found |= has_text(&child, expected));
+        found
+    }
+    fn shown(card: &SplashRef, expected: &str) -> bool {
+        let mut found = false;
+        card.borrow().unwrap().view.children(&mut |_, child| found |= has_text(&child, expected));
+        found
+    }
+    for cn in [false, true] {
+        let source = include_str!("../../apps/hagency/bundle/main.splash");
+        let localized = if cn {
+            source.replace("if mod.rinx_i18n.language() == \"zh-CN\"", "if true")
+        } else {
+            source.into()
+        };
+        let title = if cn { "在容器中运行 Agent" } else { "Run Agents in containers" };
+        let off = if cn {
+            "关闭时，此资源池的 Agent 在这台电脑的沙盒中运行。开启后，每个 Agent 会在自己的容器（Docker Desktop、OrbStack 或 Colima）中运行，只能看到自己的文件夹。"
+        } else {
+            "Off: this pool’s Agents run in this computer’s sandbox. Turn this on to run each one in its own container (Docker Desktop, OrbStack or Colima) that sees only its own folders."
+        };
+        let on = if cn {
+            "此资源池的每个 Agent 都在自己的容器中运行，只能看到自己的文件夹。这台电脑的容器就绪之前，Agent 不会启动，也不会改用沙盒。之后可在托管控制台更改。"
+        } else {
+            "Each Agent of this pool runs in its own container and sees only its own folders. Until containers are ready on this computer its Agents do not start; they never fall back to the sandbox. You can change this later on the Hosting dashboard."
+        };
+        for offered in [false, true] {
+            let session = if offered { "poolContainers:true" } else { "" };
+            let open = format!(
+                r#"
+let task_fixture_open=fn(){{
+ H.ready=true H.busy=false H.command=nil H.entry_role="owner"
+ H.session={{account:"@owner:test" features:[] {session}}}
+ let claude={{id:"account_claude_code" kind:"local_configuration" runtime:"claude" state:"active" revision:"revision" readiness:"subscription" resourceCount:0}}
+ let pick={{id:"open-model-a" model:"open-model-a" label:"Open model A" sharedReasoning:["medium","high"] sharedDefaultReasoning:"medium"}}
+ H.page="pool_create" H.pool_create={{epoch:1 account:claude accounts:[claude] error:"" models:{{accountId:"account_claude_code" revision:"revision" enrollmentReady:true provider:{{runtime:"claude" connected:true models:[pick]}}}} modelsError:"" loadingModels:false}}
+ H.enrollment_draft={{account:{{accountId:"account_claude_code" expectedRevision:"revision"}} model:pick models:[pick] reasoning:"medium" tokens:"1000000" sourceRequired:false source:nil name:"Open model A" named:false containers:false}}
+ A.redraw()
+}}
+let pool_containers_fixture_toggle=fn(){{A.pool_containers_toggle()}}
+"#
+            );
+            let (mut cx, card) = fixture_with_open(&localized, &open);
+            draw_card(&mut cx, &card);
+            // The rest of the form is there either way.
+            for id in [id!(pool_create_name), id!(pool_create_tokens)] {
+                assert_eq!(targets(&card, id).len(), 1, "{id:?} cn={cn} offered={offered}");
+            }
+            let switches = targets(&card, id!(pool_create_containers));
+            assert_eq!(switches.len(), usize::from(offered), "cn={cn}");
+            assert_eq!(shown(&card, title), offered, "cn={cn}");
+            assert_eq!(shown(&card, off), offered, "cn={cn}");
+            assert!(!shown(&card, on));
+            if offered {
+                let before = switches[0].area().rect(&cx);
+                assert!(before.size.x >= 30. && before.size.y >= 20. && before.pos.x >= 0. && before.pos.x + before.size.x <= 1000.5, "{before:?}");
+                // Chosen: the note says what the choice means, and the row
+                // is where it was after the page rendered again.
+                assert!(card.call_script_fn(&mut cx, id!(pool_containers_fixture_toggle), &[]));
+                cx.handle_script_tasks();
+                draw_card(&mut cx, &card);
+                let switches = targets(&card, id!(pool_create_containers));
+                assert_eq!(switches.len(), 1);
+                assert!(shown(&card, on) && !shown(&card, off) && shown(&card, title), "cn={cn}");
+                let after = switches[0].area().rect(&cx);
+                assert_eq!((after.pos.x, after.size.x, after.size.y), (before.pos.x, before.size.x, before.size.y), "cn={cn}");
+                // And back.
+                assert!(card.call_script_fn(&mut cx, id!(pool_containers_fixture_toggle), &[]));
+                cx.handle_script_tasks();
+                assert!(shown(&card, off) && !shown(&card, on), "cn={cn}");
+            }
+            card.set_text(&mut cx, "");
+        }
+    }
+}

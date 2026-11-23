@@ -489,6 +489,19 @@ impl NativeManagement {
     pub(super) async fn authorized(
         &self,
     ) -> Result<(service::HostContext, service::Session), NativeError> {
+        self.authorized_for_cookie(None).await
+    }
+
+    pub(super) async fn authorized_for_cookie(
+        &self, expected_cookie: Option<&str>,
+    ) -> Result<(service::HostContext, service::Session), NativeError> {
+        let (context, session, _) = self.authorized_device_for_cookie(expected_cookie).await?;
+        Ok((context, session))
+    }
+    /// The permissions and the device credential have the same authenticated origin and deadline.
+    pub(super) async fn authorized_device_for_cookie(
+        &self, expected_cookie: Option<&str>,
+    ) -> Result<(service::HostContext, service::Session, crate::console::AuthorizedDevice), NativeError> {
         if let Some(reason) = self.retired_reason() {
             return Err(authorization_failed(reason, failure(401, "management_access_required")));
         }
@@ -502,6 +515,9 @@ impl NativeManagement {
         let raw = cookie
             .strip_prefix("hagency_console=")
             .ok_or_else(|| failure(401, "owner_authorization_required"))?;
+        if expected_cookie.is_some_and(|expected| expected != raw) {
+            return Err(failure(401, "management_scope_changed"));
+        }
         self.owner
             .0
             .host
@@ -585,7 +601,7 @@ impl NativeManagement {
             && session.is_live()
             && session.valid_until() == expires
         {
-            return Ok((context, session.clone()));
+            return Ok((context, session.clone(), device));
         }
         // A fresh operation uses the current authenticated deadline. Drop only
         // the cache's strong reference; queued/in-flight copies keep their own
@@ -602,7 +618,7 @@ impl NativeManagement {
         self.owner.0.management.remember(session.clone())?;
         current.issued.push(session.authority().downgrade());
         current.current = Some((context.clone(), session.clone()));
-        Ok((context, session))
+        Ok((context, session, device))
     }
     pub(super) async fn finish<T>(
         &self,

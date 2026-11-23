@@ -298,22 +298,55 @@ mod unix {
             owner: &str,
             existing_root: Option<&Path>,
         ) -> Result<PathBuf, RootError> {
-            if let Some(root) = self.lookup(origin, owner)? {
+            if let Some(root) = self.registered_for_use(origin, owner)? {
                 return Ok(root);
             }
             let root = match existing_root.map(existing).transpose()?.flatten() {
                 Some(root) => root,
-                None => {
-                    private_directory(&self.base)?;
-                    let base = self
-                        .base
-                        .canonicalize()
-                        .map_err(|_| RootError::Unavailable)?;
-                    private_directory(&base.join(OWNERS))?;
-                    base.join(OWNERS).join(key(origin, owner))
-                }
+                None => self.prepare_canonical_root(origin, owner)?,
             };
             self.register(origin, owner, &root)
+        }
+
+        // Read-only status uses lookup(). An actual sign-in or setup may also
+        // repair the known canonical parents, including for a registered root.
+        fn registered_for_use(&self, origin: &str, owner: &str) -> Result<Option<PathBuf>, RootError> {
+            #[cfg(target_os = "macos")]
+            {
+                check_identity(origin, owner)?;
+                hagency_platform::private_state::prepare_owner_parents(&self.base, false)
+                    .map_err(|_| RootError::Unavailable)?;
+            }
+            let registered = self.lookup(origin, owner)?;
+            #[cfg(target_os = "macos")]
+            if let Some(root) = &registered {
+                let base = self.base.canonicalize().map_err(|_| RootError::Unavailable)?;
+                if *root == base.join(OWNERS).join(key(origin, owner)) {
+                    self.prepare_canonical_root(origin, owner)?;
+                }
+            }
+            Ok(registered)
+        }
+
+        /// Management sign-in opens an owner host but does not register an executor.
+        pub fn management_root(&self, origin: &str, owner: &str) -> Result<PathBuf, RootError> {
+            match self.registered_for_use(origin, owner)? {
+                Some(root) => Ok(root),
+                None => self.prepare_canonical_root(origin, owner),
+            }
+        }
+
+        fn prepare_canonical_root(&self, origin: &str, owner: &str) -> Result<PathBuf, RootError> {
+            #[cfg(target_os = "macos")]
+            hagency_platform::private_state::prepare_owner_parents(&self.base, true)
+                .map_err(|_| RootError::Unavailable)?;
+            #[cfg(not(target_os = "macos"))]
+            {
+                private_directory(&self.base)?;
+                private_directory(&self.base.join(OWNERS))?;
+            }
+            let base = self.base.canonicalize().map_err(|_| RootError::Unavailable)?;
+            Ok(base.join(OWNERS).join(key(origin, owner)))
         }
 
         fn register(&self, origin: &str, owner: &str, root: &Path) -> Result<PathBuf, RootError> {
@@ -506,6 +539,57 @@ mod tests {
             .resolve("https://t.example", OWNER, Some(&missing))
             .unwrap();
         assert!(fresh.starts_with(roots.base().canonicalize().unwrap().join(OWNERS)));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn widened_canonical_parents_recover_before_and_after_registration() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let (_temp, roots) = registry();
+        let origin = "https://s.example";
+        let owners = roots.base().join(OWNERS);
+        for path in [roots.base(), owners.as_path()] {
+            std::fs::create_dir(path).unwrap();
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let root = roots.management_root(origin, OWNER).unwrap();
+        assert_eq!(std::fs::metadata(roots.base()).unwrap().mode() & 0o7777, 0o700);
+        assert_eq!(std::fs::metadata(&owners).unwrap().mode() & 0o7777, 0o700);
+        assert!(roots.lookup(origin, OWNER).unwrap().is_none());
+        assert!(!root.exists());
+        assert_eq!(roots.resolve(origin, OWNER, None).unwrap(), root);
+        let record = roots.base().join(RECORDS).join(format!("{}.json", key(origin, OWNER)));
+        let saved = std::fs::read(&record).unwrap();
+        let inode = std::fs::metadata(&owners).unwrap().ino();
+        let sentinel = owners.join("unrelated");
+        std::fs::write(&sentinel, b"preserved").unwrap();
+        std::fs::set_permissions(&sentinel, std::fs::Permissions::from_mode(0o640)).unwrap();
+        for setup in [false, true] {
+            std::fs::set_permissions(&owners, std::fs::Permissions::from_mode(0o751)).unwrap();
+            let selected = if setup { roots.resolve(origin, OWNER, None) } else { roots.management_root(origin, OWNER) };
+            assert_eq!(selected.unwrap(), root);
+            let stat = std::fs::metadata(&owners).unwrap();
+            assert_eq!((stat.ino(), stat.mode() & 0o7777), (inode, 0o700));
+            assert_eq!(std::fs::read(&record).unwrap(), saved);
+            assert_eq!(std::fs::read(&sentinel).unwrap(), b"preserved");
+            assert_eq!(std::fs::metadata(&sentinel).unwrap().mode() & 0o7777, 0o640);
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn widened_owner_parents_with_an_allow_acl_require_separate_review() {
+        use std::os::unix::fs::{MetadataExt, PermissionsExt};
+        let (_temp, roots) = registry();
+        let origin = "https://s.example";
+        let root = roots.resolve(origin, OWNER, None).unwrap();
+        let owners = root.parent().unwrap();
+        std::fs::set_permissions(owners, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert!(std::process::Command::new("/bin/chmod")
+            .args(["+a", "everyone allow list"]).arg(owners).status().unwrap().success());
+        assert!(roots.management_root(origin, OWNER).is_err());
+        assert_eq!(std::fs::metadata(owners).unwrap().mode() & 0o7777, 0o755);
+        assert!(!root.exists());
     }
 
     #[test]

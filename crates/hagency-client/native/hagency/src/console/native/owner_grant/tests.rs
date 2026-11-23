@@ -154,7 +154,8 @@ async fn server() -> (
                     }
                     "/hagency/api/v1/sessions/current/renew" => json!({"validUntilMs":at+30000}),
                     "/hagency/api/v1/management/session" => {
-                        let state = publications.lock().unwrap();
+                        let mut state = publications.lock().unwrap();
+                        state.session_reads += 1;
                         let mut features = if state.allocations_disabled { vec![] }
                         else if state.admission_receipts && state.monthly_regrant {
                             vec!["admission-bound-grants-v2", "pool-monthly-regrant-v1"]
@@ -169,6 +170,10 @@ async fn server() -> (
                         json!({"features": features})
                     }
                     "/hagency/api/v1/management/contributions/fixture_contribution" => {
+                        let delay = publications.lock().unwrap().contribution_delay;
+                        if !delay.is_zero() {
+                            tokio::time::sleep(delay).await;
+                        }
                         let mut state = publications.lock().unwrap();
                         state.contribution_reads += 1;
                         state.invalidate("contribution");
@@ -276,6 +281,56 @@ impl Fixture {
         reasoning: Option<String>,
         runtime: &str,
     ) -> Self {
+        let model = model.to_owned();
+        Self::with_prepared(runtime, move |registry, profile| async move {
+            registry
+                .prepare_enrollment(
+                    profile,
+                    "intent_resource".into(),
+                    provider,
+                    model,
+                    reasoning,
+                    1000,
+                    Instant::now() + Duration::from_secs(30),
+                )
+                .unwrap()
+                .approve()
+                .await
+                .unwrap()
+                .resource_id
+        })
+        .await
+    }
+    /// The same fixture around an Octos pool on profile `coding` in `home`,
+    /// for its model `test-model`.
+    #[cfg(target_os = "macos")]
+    async fn new_octos(home: PathBuf) -> Self {
+        Self::with_prepared("octos", move |registry, profile| async move {
+            let expiry = Instant::now() + Duration::from_secs(30);
+            let observed = registry
+                .observe_octos_profile(
+                    hagency_runtime::octos::profile_binding::ProfileBinding::observe_model(
+                        &home, "coding", "test-model", expiry,
+                    )
+                    .unwrap(),
+                )
+                .await
+                .unwrap();
+            registry
+                .prepare_octos_enrollment(profile, "intent_resource".into(), observed, 1000, expiry)
+                .unwrap()
+                .approve()
+                .await
+                .unwrap()
+                .resource_id
+        })
+        .await
+    }
+    async fn with_prepared<F, Fut>(runtime: &str, prepare: F) -> Self
+    where
+        F: FnOnce(OwnerResourceRegistry, hagency_store::owner_resources::ProfileAuthority) -> Fut,
+        Fut: std::future::Future<Output = String>,
+    {
         let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
         let (origin, task, admission, publications) = server().await;
         let source = Arc::new(AtomicBool::new(true));
@@ -295,21 +350,7 @@ impl Fixture {
             .io(&cookie, Permission::ConsentGrants)
             .await
             .unwrap();
-        let resource = registry
-            .prepare_enrollment(
-                io.profile.clone(),
-                "intent_resource".into(),
-                provider,
-                model.into(),
-                reasoning,
-                1000,
-                Instant::now() + Duration::from_secs(30),
-            )
-            .unwrap()
-            .approve()
-            .await
-            .unwrap()
-            .resource_id;
+        let resource = prepare(registry.clone(), io.profile.clone()).await;
         let revision = registry
             .resource(&io.profile, resource.clone())
             .await
@@ -1164,6 +1205,10 @@ async fn native_owner_grant_review_snapshot_changed_budget_requires_same_intent_
         .approve()
         .await
         .unwrap();
+    let OwnerGrantReviewResult::Review(changed) = f.service.review_existing(
+        &f.registry, f.enrollment().await, original.intent_id.clone(),
+    ).await.unwrap() else { panic!("original must still be reviewable"); };
+    assert!(!changed.same_terms(&review));
     assert_eq!(
         f.service
             .confirm(&f.registry, review)

@@ -508,10 +508,14 @@ where
 /// How long a running process waits out a transient authority failure.
 const RUNNING_CHECK_SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// Codes the owner's management boundary reports while its SDK credentials or
-/// management session are being renewed.
+/// The service could not acquire the domain writer within its admission window.
+pub(super) fn writer_busy(error: &NativeError) -> bool {
+    error.status == 503 && error.code == "domain_writer_busy"
+}
+
+/// A renewable management scope or a temporarily occupied domain writer.
 fn transient_boundary(error: &NativeError) -> bool {
-    matches!(
+    writer_busy(error) || matches!(
         error.code.as_str(),
         "management_scope_changed"
             | "management_outcome_unknown"
@@ -522,6 +526,28 @@ fn transient_boundary(error: &NativeError) -> bool {
     )
 }
 impl Bound {
+    /// Preparation only inspects provider configuration. Pin all its checks to
+    /// the delivery scope, including its expiry, and the selected launch gates.
+    /// A running process still obtains new scopes through its own Io.
+    pub(super) fn preparation_check(
+        mut self,
+        launch: &Io,
+        command: SharedRuntimeCommand,
+    ) -> super::super::managed_runtime::LiveCheck {
+        self.namespace = launch.namespace.clone();
+        self.provider_gate = launch.provider_gate.clone();
+        let bound = Arc::new(self);
+        let command = Arc::new(command);
+        Arc::new(move || {
+            let b = bound.clone();
+            let command = command.clone();
+            Box::pin(async move {
+                b.transport.check_scope(&b.scope, false).await?;
+                binding(&b.scope, &command, true)?;
+                b.check_namespace(&command).await
+            })
+        })
+    }
     async fn check_namespace(&self, c: &SharedRuntimeCommand) -> Result<(), NativeError> {
         if self.provider_gate.as_ref().is_some_and(|gate| !gate()) {
             return Err(failure(409, "provider_account_changed"));
@@ -821,6 +847,13 @@ mod settle_tests {
         } else {
             Ok(call)
         }
+    }
+
+    #[test]
+    fn only_the_writer_contention_response_is_retryable_as_writer_contention() {
+        assert!(transient_boundary(&failure(503, "domain_writer_busy")));
+        assert!(!transient_boundary(&failure(403, "domain_writer_busy")));
+        assert!(!transient_boundary(&failure(503, "shared_room_send_authority_changed")));
     }
 
     #[tokio::test(start_paused = true)]

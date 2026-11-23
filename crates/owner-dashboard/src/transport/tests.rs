@@ -343,7 +343,7 @@ fn replies_allow_large_complete_snapshots_but_remain_bounded() {
 fn retiring_after_connect_prevents_an_advisory_or_mutating_write() {
     let (stream,mut peer)=UnixStream::pair().unwrap();
     peer.set_nonblocking(true).unwrap();
-    let mut connection=DaemonConnection{stream};
+    let mut connection=DaemonConnection{stream,scope:None};
     let retired=std::sync::atomic::AtomicBool::new(true);
     let request=Request{version:API_VERSION,request_id:"retired".into(),owner_id:Some("@o:s".into()),expected_revision:None,command:Command::StopHosting};
     assert_eq!(connection.call_guarded(&request,Duration::from_secs(1),Some(&retired)),Err(TransportError::Unavailable));

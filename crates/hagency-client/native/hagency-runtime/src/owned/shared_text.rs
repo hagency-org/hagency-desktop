@@ -328,6 +328,13 @@ impl OwnedSession {
         self.discover_policy_for_tools(path, instructions_for(web, mode), web, mode.is_some())
             .await
     }
+    /// Probe the selected account while the demand is still offered. No
+    /// observation from the inspector is used to qualify the execution process.
+    pub async fn check_shared_account_readiness(&mut self) -> Result<(), Error> {
+        let metadata = self.qualification_read(QualificationRead::Account).await?;
+        super::managed::account(&metadata)?;
+        Ok(())
+    }
     pub async fn qualify_shared_text(
         &mut self,
         instructions: &Path,

@@ -1,12 +1,15 @@
 //! Explicit owner-started, chat-only Codex host. No legacy execution fallback.
 mod drain;
+mod idle_turns;
 pub(in crate::console) mod messages;
 pub(in crate::console) mod e2ee;
 mod provider_custody;
 pub(in crate::console) mod questions;
+mod roles;
 mod room_tools;
 pub(in crate::console) mod run_controls;
 mod service;
+mod wakeups;
 #[cfg(unix)]
 mod working_directory;
 use super::lifecycle::{RetainedTask, TaskCustody};
@@ -398,12 +401,27 @@ pub(super) struct ApprovalView {
     pub proposal_id: String,
     pub args_digest: String,
     pub proposal: hagency_agent_local::ToolProposal,
+    /// The message whose run asks, and that message's thread, so the app can
+    /// show the request on it. Neither is part of the approved request.
+    pub event_id: String,
+    pub thread_root: String,
 }
 type DevicePin = super::device_execution::DeviceIdentity;
 struct ApprovalSlot {
     view: ApprovalView,
     pending: codex::PendingApproval,
     device: DevicePin,
+}
+/// How long an expired request is held, unlisted, for a wait that has not
+/// ended yet. Every wait has its own bound, a second or so after the request
+/// expires; this only bounds a slot whose wait never ends.
+const EXPIRED_APPROVAL_HELD_SECS: i64 = 30;
+/// Whether to keep holding a request. Dropping it closes the Agent's wait,
+/// which then reads as a refusal: an expired request stays held until the wait
+/// ends by itself, so the Agent is told nobody answered.
+fn hold_approval(slot: &ApprovalSlot, at: i64) -> bool {
+    !slot.pending.is_closed()
+        && slot.view.proposal.expires.saturating_add(EXPIRED_APPROVAL_HELD_SECS) > at
 }
 struct BindingHandle {
     cancel: watch::Sender<bool>,
@@ -446,6 +464,25 @@ impl Entry {
         self.bindings
             .get(binding)
             .is_some_and(|b| !*b.cancel.borrow() && b.status.borrow().phase != "stopped")
+    }
+    /// The requests that still wait for the owner. Answered requests and those
+    /// of stopped Rooms are dropped; an expired one stays held, unlisted,
+    /// until its wait ends (`hold_approval`).
+    fn waiting_approvals(&mut self, at: i64) -> Vec<ApprovalView> {
+        self.approvals.retain(|_, slot| hold_approval(slot, at));
+        let active: BTreeSet<_> = self
+            .bindings
+            .iter()
+            .filter(|(_, b)| !*b.cancel.borrow() && b.status.borrow().phase != "stopped")
+            .map(|(id, _)| id.clone())
+            .collect();
+        self.approvals
+            .retain(|_, slot| active.contains(&slot.view.proposal.scope.binding));
+        self.approvals
+            .values()
+            .filter(|slot| slot.view.proposal.expires > at)
+            .map(|slot| slot.view.clone())
+            .collect()
     }
     fn take_approval(
         &mut self,
@@ -819,6 +856,8 @@ impl OwnedRuntime {
         console: &Console,
         expected: &DevicePin,
         pending: codex::PendingApproval,
+        event_id: &str,
+        thread_root: &str,
     ) -> Result<(), RuntimeError> {
         use sha2::{Digest, Sha256};
         let device = console.authorized_device().await.map_err(device_error)?;
@@ -831,9 +870,8 @@ impl OwnedRuntime {
         let entry = entries
             .get_mut(&identity(&device, agent))
             .ok_or(RuntimeError::Authorization)?;
-        entry
-            .approvals
-            .retain(|_, slot| slot.view.proposal.expires > now() && !slot.pending.is_closed());
+        let at = now();
+        entry.approvals.retain(|_, slot| hold_approval(slot, at));
         if *entry.cancel.borrow()
             || entry.task.is_finished()
             || entry.device != DevicePin::from(&device)
@@ -856,6 +894,8 @@ impl OwnedRuntime {
             proposal_id: proposal_id.clone(),
             args_digest,
             proposal: pending.proposal.clone(),
+            event_id: event_id.into(),
+            thread_root: thread_root.into(),
         };
         entry.approvals.insert(
             proposal_id,
@@ -884,22 +924,20 @@ impl OwnedRuntime {
         {
             return Err(RuntimeError::Authorization);
         }
-        entry
-            .approvals
-            .retain(|_, slot| slot.view.proposal.expires > now() && !slot.pending.is_closed());
-        let active: BTreeSet<_> = entry
-            .bindings
-            .iter()
-            .filter(|(_, b)| !*b.cancel.borrow() && b.status.borrow().phase != "stopped")
-            .map(|(id, _)| id.clone())
-            .collect();
-        entry
-            .approvals
-            .retain(|_, slot| active.contains(&slot.view.proposal.scope.binding));
-        Ok(entry
-            .approvals
-            .values()
-            .map(|slot| slot.view.clone())
+        Ok(entry.waiting_approvals(now()))
+    }
+    /// The requests of every local Agent that runs on this device for this
+    /// owner, for the app-wide reminder. An Agent that is stopping is skipped.
+    pub async fn pending_all(&self, console: &Console) -> Result<Vec<ApprovalView>, RuntimeError> {
+        let device = console.authorized_device().await.map_err(device_error)?;
+        device.bearer().map_err(|_| RuntimeError::Authorization)?;
+        let pin = DevicePin::from(&device);
+        let at = now();
+        let mut entries = self.entries_for(&device).await?;
+        Ok(entries
+            .values_mut()
+            .filter(|entry| entry.device == pin && !*entry.cancel.borrow() && !entry.task.is_finished())
+            .flat_map(|entry| entry.waiting_approvals(at))
             .collect())
     }
     #[allow(clippy::too_many_arguments)]
@@ -1399,6 +1437,27 @@ fn device_error(error: super::Error) -> RuntimeError {
         RuntimeError::Authorization
     }
 }
+/// Sets the profile's program to the coding tool as it is found now, and
+/// returns the path it replaces, if any. Updates move the resolved file:
+/// Homebrew keeps each version in its own folder, Claude Code's updater points
+/// its launcher at a new version, and a newer build may be installed earlier
+/// on the search path. A path saved when a service started made `start` refuse
+/// every later retry, and a deleted one failed every new process.
+fn current_program(
+    profile: &mut Profile,
+    reference: &str,
+) -> Result<Option<PathBuf>, RuntimeError> {
+    let kind = runtime::kind(reference);
+    // Unit tests name their fake program directly and never look for an
+    // installed one; a child test that needs the lookup sets its variable.
+    #[cfg(test)]
+    if std::env::var_os(format!("HAGENCY_{}_BINARY", kind.name().to_ascii_uppercase())).is_none() {
+        return Ok(None);
+    }
+    let program = super::owner_provider::external::executable(kind)
+        .map_err(|error| RuntimeError::Execution(error.code))?;
+    Ok((program != profile.executable).then(|| std::mem::replace(&mut profile.executable, program)))
+}
 fn failure_code(result: &Result<(), RuntimeError>) -> Option<&'static str> {
     match result {
         Ok(()) | Err(RuntimeError::Stopped) => None,
@@ -1846,6 +1905,9 @@ async fn execution_loop_with_gate<T: Transport>(
 ) -> Result<(), RuntimeError> {
     let mut reported = BTreeSet::new();
     let mut sessions = provider_custody::Sessions::default();
+    // Runs that hold reports of a turn the native CLI started by itself.
+    let mut undelivered = idle_turns::recover(console, lease, ledger, owner, config);
+    let mut timers = wakeups::Clock::new();
     let mut reply_cursor = String::new();
     let mut finish_cursors = [String::new(), String::new(), String::new()];
     loop {
@@ -1937,6 +1999,21 @@ async fn execution_loop_with_gate<T: Transport>(
         if console.supports_group_crypto() {
             e2ee::pump_candidates(console, lease, config, cancel).await?;
         }
+        // A parked session may have started a turn by itself (a timer, a peer
+        // message). It runs before the next request is taken, so a request
+        // never meets a session that is in the middle of such a turn.
+        idle_turns::pump(
+            console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
+        )
+        .await?;
+        // A timer the Agent set with the host is due: its turn runs here,
+        // between requests, like the turn above.
+        wakeups::pump(
+            console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
+            &mut timers,
+        )
+        .await?;
+        idle_turns::deliver(console, lease, config, cancel, &mut undelivered).await?;
         let events = match operation(
             console,
             cancel,
@@ -2278,6 +2355,48 @@ async fn fresh_running<T: Transport>(
         tokio::select! {biased; _=canceled(cancel)=>return false, _=tokio::time::sleep(Duration::from_secs(2))=>{}}
     }
 }
+
+/// Legacy run messages still require the original running dispatch. A new
+/// report instead obtains fresh delivery-only authority for its exact route;
+/// that proof cannot start or extend the model's work.
+async fn send_personal_message<T: Transport>(
+    transport: &T,
+    lease: &LeaseRef,
+    dispatch: &inbox::Dispatch,
+    execution: &str,
+    messages: &messages::Outbox,
+    device: &e2ee::AgentDevice,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<bool, ()> {
+    let Some(pending) = messages.next()? else { return Ok(false); };
+    let encrypted = messages.request_encrypted(dispatch);
+    if !pending.is_report() {
+        if !fresh_running(transport, lease, dispatch, execution, cancel).await { return Err(()); }
+        return messages.send_next(device, encrypted, None, Some(pending.sequence)).await;
+    }
+    // A report that stays in custody says at which step it was held. The
+    // step is the host's own word; nothing of the report is logged.
+    let held = |stage: &'static str| {
+        tracing::warn!(code = "agent_report_held", stage,
+            "A report of an Agent's own turn was not sent at this step; it stays in custody");
+    };
+    let host = transport.approval_host().ok_or(())?;
+    let puppet = device.approval_client().user_id().ok_or(())?.to_string();
+    let response = operation(transport, cancel, Op::AuthorizeMessage {
+        lease: lease.clone(), binding_id: dispatch.binding_id.clone(),
+        binding_generation: dispatch.binding_generation, room_id: dispatch.room_id.clone(),
+        puppet_mxid: puppet.clone(),
+    }).await.map_err(|error| {
+        if !matches!(error, RuntimeError::Stopped) { held("authority_request"); }
+    })?;
+    let Response::MessageAuthorized(proof) = response else { held("authority_answer"); return Err(()); };
+    let permit = messages::PersonalReportPermit::new(
+        &proof, lease, dispatch, execution, host.pin.generation, &puppet, wall_ms(),
+    ).inspect_err(|_| held("authority_proof"))?;
+    if *cancel.borrow() { return Err(()); }
+    messages.send_next(device, encrypted, Some(&permit), Some(pending.sequence)).await
+        .inspect_err(|_| if !*cancel.borrow() { held(if encrypted { "send_encrypted" } else { "send" }) })
+}
 struct LiveToolGate {
     console: PinnedConsole,
     lease: LeaseRef,
@@ -2536,12 +2655,19 @@ async fn run_turn<T: Transport>(
         },
     };
     #[cfg(not(unix))]
-    let profile = config.profile.clone();
+    let mut profile = config.profile.clone();
     #[cfg(unix)]
     let space = space_project(transport, owner, config, &scope).await;
     #[cfg(unix)]
-    let (profile, workspace) = working_directory::for_turn(
+    let owner_directory = if config.host_files || config.shared_workspace {
+        Some(e2ee::owner_directory(transport, lease, config)?)
+    } else {
+        None
+    };
+    #[cfg(unix)]
+    let (mut profile, workspace) = working_directory::for_turn(
         &config.profile,
+        owner_directory.as_deref(),
         owner,
         &scope,
         config.host_files,
@@ -2584,6 +2710,8 @@ async fn run_turn<T: Transport>(
             None
         };
     let has_approval_host = host.is_some();
+    // The message whose run this is: the app shows its requests on it.
+    let asking = (prepared.dispatch.event_id.clone(), prepared.dispatch.thread_root.clone());
     let bridge = host.clone().map(|console| {
         tokio::spawn(async move {
             while let Some(pending) = receiver.recv().await {
@@ -2591,7 +2719,7 @@ async fn run_turn<T: Transport>(
                     .console
                     .0
                     .owned_runtime
-                    .offer_approval(&console.console, &console.pin, pending)
+                    .offer_approval(&console.console, &console.pin, pending, &asking.0, &asking.1)
                     .await
                     .is_err()
                 {
@@ -2641,7 +2769,7 @@ async fn run_turn<T: Transport>(
             let room_folder = working_directory::for_room_files(&config.profile, &profile, owner, &scope, config.shared_workspace)?;
             #[cfg(not(unix))]
             let room_folder = profile.cwd.clone();
-            let host = room_tools::Host::new(gate, config, &room_folder)?;
+            let host = room_tools::Host::new(gate, config, &room_folder)?.for_owner(owner);
             let (channel, receiver) = hagency_agent_local::room_tools::room_queue(&scope, &prepared.dispatch.id)
                 .map_err(|_| RuntimeError::Profile)?;
             queue = queue.with_room_tools(channel);
@@ -2662,7 +2790,23 @@ async fn run_turn<T: Transport>(
         .approval_host()
         .map(|host| host.console.0.owned_runtime.tasks.clone())
         .unwrap_or_default();
+    // An update may have deleted the program this Room started with. A new
+    // process then runs the coding tool as it is found now (`current_program`);
+    // an idle one started from the deleted file is stopped instead of reused,
+    // and the conversation resumes from disk. If nothing is found, the start
+    // below reports the missing program as before.
+    let replaced = if profile.executable.is_file() {
+        None
+    } else {
+        current_program(&mut profile, &config.credential_ref).unwrap_or(None)
+    };
     let session_key = provider_custody::SessionKey::new(owner, &prepared.dispatch, &profile, config);
+    if let Some(executable) = replaced {
+        let stale = Profile { executable, ..profile.clone() };
+        if let Some(mut provider) = sessions.take(&provider_custody::SessionKey::new(owner, &prepared.dispatch, &stale, config)) {
+            provider.stop().await.map_err(|_| RuntimeError::Provider)?;
+        }
+    }
     let cached = if let Some(mut provider) = sessions.take(&session_key) {
         let prepared = tokio::select! { biased;
             _ = canceled(cancel) => return Err(RuntimeError::Stopped),
@@ -2672,11 +2816,19 @@ async fn run_turn<T: Transport>(
                 provider.session.continue_context(ledger, &scope, &profile).await
             }) => result.unwrap_or(Err(codex::Error::Timeout)),
         };
-        if prepared.is_ok() { Some(provider) } else {
-            // No new model input or reservation has been sent. A dead cached
-            // process may be replaced for this newly admitted dispatch only.
-            provider.stop().await.map_err(|_| RuntimeError::Provider)?;
-            None
+        match prepared {
+            Ok(()) => Some(provider),
+            Err(error) => {
+                // Includes a turn the native CLI started by itself while parked
+                // (a peer message, a timer): ADR 0013 admits none of those yet.
+                let (kind, detail) = error.diagnostic();
+                tracing::warn!(code = "agent_retained_session_replaced", kind, detail,
+                    event = error.diagnostic_event(), "A retained native session failed its reuse check");
+                // No new model input or reservation has been sent. A dead cached
+                // process may be replaced for this newly admitted dispatch only.
+                provider.stop().await.map_err(|_| RuntimeError::Provider)?;
+                None
+            }
         }
     } else { None };
     let retained = cached.is_some();
@@ -2745,7 +2897,7 @@ async fn run_turn<T: Transport>(
     });
     let binding = hagency_metering::dashboard::ledger::ExecutionBinding {
         execution_id: prepared.execution_id.clone(),
-        resource_id: format!("personal-agent:{}", config.agent_id),
+        resource_id: hagency_metering::dashboard::personal_resource_id(&config.agent_id),
         account_id: None,
         allocation_id: None,
         agent_id: Some(config.agent_id.clone()),
@@ -2783,7 +2935,7 @@ async fn run_turn<T: Transport>(
             provider.session.verify_host_environment().await.inspect_err(|error|{provider_failure("provider_environment", error);})?;
             provider.session.require_local_account().await.inspect_err(|error|{provider_failure("provider_account", error);})?;
             if room_tools {
-                provider.session.enable_room_tools(hagency_runtime::room_tools::RoomTools::history_and_files()).await
+                provider.session.enable_room_tools(hagency_runtime::room_tools::RoomTools::history_and_files().with_timers().with_roles()).await
                     .inspect_err(|error|{provider_failure("provider_room_tools", error);})?;
             }
             provider.session.open_context(ledger,&scope,&profile).await.inspect_err(|error|{provider_failure("provider_context", error);})?;
@@ -2885,7 +3037,12 @@ async fn run_turn<T: Transport>(
         &prepared.execution_id,
         reply,
     ))?;
-    if retain { sessions.retain(session_key, provider); }
+    if retain {
+        sessions.retain(session_key, provider, provider_custody::Anchor {
+            dispatch: prepared.dispatch.clone(),
+            execution: prepared.execution_id.clone(),
+        });
+    }
     Ok(None)
 }
 
@@ -2905,7 +3062,11 @@ async fn flush_record_messages<T: Transport>(
         let Some(route) = messages::Route::personal(&record.dispatch, execution) else { return Ok(true) };
         let root = e2ee::message_root(console, lease, config)?;
         if messages::Outbox::exists_for_route(&root, &route) {
-            let messages = messages::Outbox::open_route(&root, route).map_err(|_| RuntimeError::Profile)?;
+            let mut messages = messages::Outbox::open_route(&root, route).map_err(|_| RuntimeError::Profile)?;
+            // A failed or unknown run's settled record has lost its body by now.
+            if !record.request_encrypted {
+                messages.request_came_in_clear();
+            }
             if messages.next().map_err(|_| RuntimeError::Profile)?.is_some() {
                 let device = match e2ee::device(console, lease, config, cancel).await {
                     Ok(device) => device,
@@ -2913,8 +3074,8 @@ async fn flush_record_messages<T: Transport>(
                     Err(_) => return Ok(false),
                 };
                 while messages.next().map_err(|_| RuntimeError::Profile)?.is_some() {
-                    if !fresh_running(console, lease, &record.dispatch, execution, cancel).await
-                        || messages.send_next(&device, record.dispatch.body.is_empty()).await.is_err()
+                    if send_personal_message(console, lease, &record.dispatch, execution,
+                        &messages, &device, cancel).await.is_err()
                     {
                         tracing::warn!(code = "agent_message_delivery_pending", "Native message awaits its original room authority");
                         return Ok(false);
@@ -4911,6 +5072,8 @@ for raw in sys.stdin:
                         proposal_id: "nonce".into(),
                         args_digest: "exact-proposal-digest".into(),
                         proposal,
+                        event_id: "$event-a".into(),
+                        thread_root: "$event-a".into(),
                     },
                     pending,
                     device: pin.clone(),
@@ -5026,6 +5189,98 @@ for raw in sys.stdin:
         assert_eq!(count, 1);
         assert!(decision.await.unwrap());
         entry.lock().await.task.abort();
+    }
+    /// An expired request leaves the list at once but stays held until the
+    /// Agent's own wait ends, so that wait reads "nobody answered", never the
+    /// refusal of a closed channel.
+    #[tokio::test]
+    async fn an_expired_request_is_unlisted_but_held_until_its_wait_ends() {
+        let pin = DevicePin {
+            origin: "https://server.test".into(),
+            issuer: "https://server.test/auth/".into(),
+            subject: "subject-a".into(),
+            owner: OWNER.into(),
+            user: "subject-a".into(),
+            id: "device-a".into(),
+            generation: 4,
+        };
+        let request = |id: &str, binding: &str, expires: i64| {
+            let mut scope = event().scope();
+            scope.binding = binding.into();
+            let proposal = hagency_agent_local::ToolProposal {
+                scope,
+                dispatch: "dispatch-a".into(),
+                tool: "octos.shell".into(),
+                arguments: serde_json::json!({"command":"ls"}),
+                canonical_directory: "/tmp/room".into(),
+                risk: "high".into(),
+                policy_revision: [1, 0, 0],
+                expires,
+            };
+            let (pending, decision) = codex::pending_approval(proposal.clone());
+            let slot = ApprovalSlot {
+                view: ApprovalView {
+                    proposal_id: id.into(),
+                    args_digest: "d".repeat(64),
+                    proposal,
+                    event_id: "$asked".into(),
+                    thread_root: "$asked".into(),
+                },
+                pending,
+                device: pin.clone(),
+            };
+            ((id.to_owned(), slot), decision)
+        };
+        let (open, mut open_wait) = request("open", "binding-a", 100);
+        let (expired, mut expired_wait) = request("expired", "binding-a", 50);
+        let (stale, mut stale_wait) = request("stale", "binding-a", 50 - EXPIRED_APPROVAL_HELD_SECS);
+        let (ended, ended_wait) = request("ended", "binding-a", 100);
+        let (stopped, mut stopped_wait) = request("stopped", "binding-b", 100);
+        drop(ended_wait);
+        let (cancel, _receiver) = watch::channel(false);
+        let (_status, status) = watch::channel(RuntimeStatus::new("agent-a", "test", None));
+        let (_stopped_status, stopped_status) =
+            watch::channel(RuntimeStatus::new("agent-a", "stopped", None));
+        let handle = |status: &watch::Receiver<RuntimeStatus>| BindingHandle {
+            cancel: watch::channel(false).0,
+            status: status.clone(),
+        };
+        let mut entry = Entry {
+            commands: mpsc::unbounded_channel().0,
+            bindings: BTreeMap::from([
+                ("binding-a".into(), handle(&status)),
+                ("binding-b".into(), handle(&stopped_status)),
+            ]),
+            cancel,
+            status,
+            task: TaskCustody::default().track(tokio::spawn(std::future::pending())),
+            device: pin.clone(),
+            approvals: BTreeMap::from([open, expired, stale, ended, stopped]),
+        };
+        let listed = entry.waiting_approvals(60);
+        assert_eq!(listed.iter().map(|v| v.proposal_id.as_str()).collect::<Vec<_>>(), ["open"]);
+        assert_eq!((listed[0].event_id.as_str(), listed[0].thread_root.as_str()), ("$asked", "$asked"));
+        // Still held, so its wait is still open: the Agent's own timeout ends it.
+        assert!(entry.approvals.contains_key("expired"));
+        assert!(expired_wait.try_recv().is_err_and(|e| e == tokio::sync::oneshot::error::TryRecvError::Empty));
+        // An expired request cannot be approved any more.
+        assert!(matches!(
+            entry.take_approval(&pin, "agent-a", "expired", &"d".repeat(64), &[], 60),
+            Err(RuntimeError::Approval)
+        ));
+        // Held past the bound, ended, or in a stopped Room: dropped.
+        for gone in ["stale", "ended", "stopped"] {
+            assert!(!entry.approvals.contains_key(gone), "{gone}");
+        }
+        use tokio::sync::oneshot::error::TryRecvError;
+        assert!(matches!(stale_wait.try_recv(), Err(TryRecvError::Closed)));
+        assert!(matches!(stopped_wait.try_recv(), Err(TryRecvError::Closed)));
+        assert!(matches!(open_wait.try_recv(), Err(TryRecvError::Empty)));
+        // Once the Agent stops waiting, the held request goes too.
+        drop(expired_wait);
+        assert!(entry.waiting_approvals(61).iter().all(|v| v.proposal_id == "open"));
+        assert!(!entry.approvals.contains_key("expired"));
+        entry.task.abort();
     }
     struct RequestFacts {
         expected: inbox::Dispatch,

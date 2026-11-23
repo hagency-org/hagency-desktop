@@ -461,7 +461,12 @@ async fn host_round(
                             .count()
                             >= baseline_polls + 2
                 } else if unknown {
+                    // The host records a reply on its own disk after the
+                    // server has taken it. Stopping in between leaves the
+                    // record one step behind what is asserted afterwards.
                     s.events.len() == 2 && s.events[1]["state"] == "replied"
+                        && Ledger::open_scoped(&local_path, OWNER, &device_profile).unwrap()
+                            .inbox_record(OWNER, "dispatch-b").is_ok_and(|r| r.state == State::Replied)
                 } else if s.continuous {
                     s.events.len() == 3 && s.events.iter().all(|d| d["state"] == "replied")
                         && Ledger::open_scoped(&local_path, OWNER, &device_profile).unwrap()

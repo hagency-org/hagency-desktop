@@ -1,5 +1,5 @@
 #![cfg(unix)]
-use hagency_agent_local::codex::{self, BudgetMode, Error, Profile};
+use hagency_agent_local::codex::{self, BudgetMode, Error, Profile, TurnStatus};
 use hagency_agent_local::runtime::*;
 use hagency_agent_local::{
     Budget, Layer, Ledger, Limit, Period, Policy, RequestPolicy, Scope, ToolPolicy,
@@ -37,6 +37,18 @@ mod resume_kept;
 mod owner_command;
 #[path = "runtime/messages.rs"]
 mod messages;
+#[path = "runtime/self_started.rs"]
+mod self_started;
+
+/// The native process-custody helper of these tests. Under the Makepad JIT
+/// the compile-time path names a JIT instance, which cannot start in the
+/// guardian's sealed environment: name an existing native build of the probe
+/// in HAGENCY_TEST_GUARDIAN there.
+fn guardian() -> PathBuf {
+    std::env::var_os("HAGENCY_TEST_GUARDIAN")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_hagency-local-probe")))
+}
 
 struct Fixture {
     root: tempfile::TempDir,
@@ -139,9 +151,7 @@ impl Fixture {
         }
     }
     async fn process(&mut self) -> Process {
-        let guardian = std::env::var_os("HAGENCY_TEST_GUARDIAN")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from(env!("CARGO_BIN_EXE_hagency-local-probe")));
+        let guardian = guardian();
         let mut process = spawn_for_scope_with_guardian(
             &self.profile,
             &self.reference,
@@ -192,6 +202,34 @@ async fn octos_missing_turn_usage_stays_unsettled_when_session_has_earlier_total
     process.stop().await.unwrap();
 }
 
+#[tokio::test]
+async fn octos_dispatch_after_a_stopped_turn_is_charged_exactly() {
+    let mut f = Fixture::new(Kind::Octos, "octos_stop_then_next", ToolPolicy::Deny);
+    let mut reported = Vec::new();
+    for call in ["first", "stopped", "next"] {
+        let mut process = f.process().await;
+        process.session.open_context(&mut f.ledger, &f.scope, &f.profile).await.unwrap();
+        let (queue, _) = codex::approval_queue(1).unwrap();
+        let reply = process.session.run_with_started(
+            &mut f.ledger, "@owner:test", &f.scope, call, call, "hello",
+            BudgetMode::Postpaid, &queue, None,
+        ).await.unwrap();
+        reported.push((reply.status, reply.usage.is_reported().then_some((reply.usage.input, reply.usage.output))));
+        process.stop().await.unwrap();
+        f.ledger = Ledger::open(f.path("ledger"), "@owner:test").unwrap();
+    }
+    // The stopped turn reported nothing, so its charge stays unknown; the
+    // next dispatch was unknown too while a stop dropped the session's
+    // counters, and is now charged its own turn.
+    assert_eq!(reported, [
+        (TurnStatus::Completed, Some((17, 7))),
+        (TurnStatus::Interrupted, None),
+        (TurnStatus::Completed, Some((17, 7))),
+    ]);
+    assert_eq!(f.spent(), (48, 0));
+    let outstanding = f.ledger.outstanding_calls("@owner:test").unwrap();
+    assert_eq!(outstanding.iter().map(|call| call.state.as_str()).collect::<Vec<_>>(), ["unknown"]);
+}
 #[tokio::test]
 async fn both_runtimes_settle_cache_inclusive_totals_and_preserve_context_after_reopen() {
     for kind in [Kind::Claude, Kind::Octos] {
@@ -953,7 +991,8 @@ async fn claude_unsupported_version_is_actionable_without_prompt_or_fresh_retry(
         .unwrap();
     process.stop().await.unwrap();
     fs::write(f.path("cli-version"), "2.1.321").unwrap();
-    let guardian = std::path::Path::new(env!("CARGO_BIN_EXE_hagency-local-probe"));
+    let guardian = guardian();
+    let guardian = guardian.as_path();
     let error = spawn_for_scope_with_guardian(
         &f.profile,
         &f.reference,

@@ -75,3 +75,56 @@ fn existing_rinx_sidebar_is_not_duplicated_and_lost_room_ref_is_repaired() {
     verify(&mut saved, &[room]);
     assert_eq!(saved.dock_items.values().filter(|item| matches!(item, DockItem::Splitter {..})).count(), 1);
 }
+
+fn desktop() -> (Cx, MainDesktopUI) {
+    let mut cx = Cx::new(Box::new(|_, _| {}));
+    let desktop = cx.with_vm(|vm| {
+        makepad_widgets::script_mod(vm);
+        crate::app::register_widgets(vm);
+        let value = script_eval!(vm, { mod.widgets.MainDesktopUI {} });
+        MainDesktopUI::script_from_value(vm, value)
+    });
+    (cx, desktop)
+}
+
+#[test]
+fn moments_uses_the_chat_pane_without_changing_saved_conversations_or_windows() {
+    let (mut cx, mut desktop) = desktop();
+    let room = room("current");
+    desktop.focus_or_create_tab(&mut cx, room.clone());
+    let before = desktop.save_dock_state(&mut cx);
+    let windows = cx.windows.len();
+    desktop.open_moments(&mut cx, &MomentsAction::Open {author: None});
+    let dock = desktop.view.dock(&cx, ids!(dock));
+    assert!(desktop.moments_open);
+    assert!(!dock.item(id!(moments_tab)).is_empty());
+    assert_eq!(dock.find_tab_bar_of_tab(id!(moments_tab)).map(|p| p.0),
+        dock.find_tab_bar_of_tab(room.tab_id()).map(|p| p.0));
+    assert_eq!(cx.windows.len(), windows, "Moments must not create a window");
+    let during = desktop.save_dock_state(&mut cx);
+    assert!(!during.dock_items.contains_key(&id!(moments_tab)));
+    assert_eq!(during.selected_room, before.selected_room);
+    assert_eq!(during.room_order, before.room_order);
+    assert_eq!(during.open_rooms, before.open_rooms);
+    desktop.close_moments(&mut cx);
+    assert!(!desktop.moments_open);
+    assert!(dock.item(id!(moments_tab)).is_empty());
+    assert_eq!(desktop.most_recently_selected_room.as_ref(), Some(&room));
+}
+
+#[test]
+fn choosing_the_same_chat_or_another_chat_leaves_moments() {
+    let (mut cx, mut desktop) = desktop();
+    let first = room("first");
+    let second = room("second");
+    desktop.focus_or_create_tab(&mut cx, first.clone());
+    for next in [first, second] {
+        desktop.open_moments(&mut cx, &MomentsAction::Open {author: None});
+        desktop.focus_or_create_tab(&mut cx, next.clone());
+        assert!(!desktop.moments_open);
+        assert_eq!(desktop.most_recently_selected_room.as_ref(), Some(&next));
+        let dock = desktop.view.dock(&cx, ids!(dock));
+        assert!(dock.item(id!(moments_tab)).is_empty());
+        assert!(!dock.item(next.tab_id()).is_empty());
+    }
+}

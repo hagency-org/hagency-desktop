@@ -53,7 +53,8 @@ impl ServerLogin {
             elapsed_ms = started.elapsed().as_millis() as u64,
             "Requesting owner session"
         );
-        let grant = response(
+        let (grant, grant_clock) = proof_response(
+            Instant::now(),
             client
                 .post(server.join("/hagency/api/v1/sessions/pasion").unwrap())
                 .json(&json!({"accessToken":snapshot.access_token}))
@@ -79,14 +80,14 @@ impl ServerLogin {
             .to_owned();
         let result = async {
             tracing::debug!(stage="owner_adoption_identity",elapsed_ms=started.elapsed().as_millis() as u64,"Checking owner identity");
-            let identity = get(&client, server.join("/hagency/api/v1/identity").unwrap(), Some(&token)).await?;
+            let (identity, identity_clock) = get_identity(&client, &server, &token).await?;
             let subject = identity["subject"].as_str().filter(|s| !s.is_empty() && s.len() <= 255).ok_or("invalid_server_response")?;
             let user = identity["userId"].as_str().filter(|s| !s.is_empty() && s.len() <= 128).ok_or("invalid_server_response")?;
             if identity["mxid"] != expected_owner || identity["issuer"] != server.join("/auth/").unwrap().as_str() || identity["clientId"] != snapshot.client_id || grant["mxid"] != identity["mxid"] || grant["userId"] != identity["userId"] { return Err("matrix_account_mismatch"); }
             let previous = self.binding.lock().await.clone();
             if let Some(previous) = &previous && previous.origin == expected_origin && previous.owner.as_deref() == Some(expected_owner) && previous.subject.as_deref().is_some_and(|s| s != subject) { return Err("matrix_account_mismatch"); }
             let binding = Binding { origin: expected_origin.into(), client_id: snapshot.client_id.clone(), installation_id: previous.as_ref().filter(|p| p.origin == expected_origin && p.client_id == snapshot.client_id && p.owner.as_deref() == Some(expected_owner) && p.subject.as_deref() == Some(subject)).map(|p| p.installation_id.clone()).unwrap_or(random()?), name: "Hagency Desktop".into(), owner: Some(expected_owner.into()), subject: Some(subject.into()) };
-            let until = deadline(&grant)?.min(deadline(&identity)?);
+            let until = grant_clock.deadline(&grant)?.min(identity_clock.deadline(&identity)?);
             tracing::debug!(stage="owner_adoption_device",elapsed_ms=started.elapsed().as_millis() as u64,"Registering execution device");
             if explicit && (!source.permits_explicit_reenrollment() || !source.consume_explicit_reenrollment()) { return Err("matrix_account_changed"); }
             self.sdk_resume.registering(&binding, user, &token, &self.stopped, replaces.as_deref())?;
@@ -105,7 +106,7 @@ impl ServerLogin {
             if self.stopped.load(Ordering::Acquire) { return Err("matrix_account_changed"); }
             for previous in sessions.values_mut() { self.queue_revocation(previous).await; }
             sessions.clear();
-            sessions.insert(session_key(&cookie), RemoteSession { matrix_source: Some(source), token: token.clone(), oauth_token: String::new(), user_id: user.into(), device: Some(device), refresh_token: None, oauth_expires: until, authorized_until: until, invalidated: false, binding, checked: Instant::now(), expires: Instant::now() + Duration::from_secs(900) });
+            sessions.insert(session_key(&cookie), RemoteSession { matrix_source: Some(source), token: token.clone(), oauth_token: String::new(), user_id: user.into(), device: Some(device), refresh_token: None, oauth_expires: until, authorized_until: until, clock_allowance: Duration::ZERO, invalidated: false, binding, checked: Instant::now(), expires: Instant::now() + Duration::from_secs(900) });
             *self.status.lock().await = json!({"state":"device_authorized","deviceAuthorized":true,"transportOnline":false});
             Self::start_worker(console);
             tracing::info!(stage="owner_adoption",elapsed_ms=started.elapsed().as_millis() as u64,"SDK owner authorization ready");
@@ -219,6 +220,7 @@ mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     include!("sdk_resume_tests.rs");
+    const SERVER_CLOCK_32_SECONDS_AHEAD: u16 = 13;
     struct Source {
         token: std::sync::Mutex<String>,
         current: Arc<AtomicBool>,
@@ -399,7 +401,12 @@ mod tests {
                     {
                         flag.store(false, Ordering::Release);
                     }
-                    let until = SystemTime::now()
+                    let server_now = if behavior.load(Ordering::Acquire) == SERVER_CLOCK_32_SECONDS_AHEAD {
+                        SystemTime::now() + Duration::from_secs(32)
+                    } else {
+                        SystemTime::now()
+                    };
+                    let until = server_now
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_millis() as u64
@@ -445,6 +452,7 @@ mod tests {
                             json!({"recorded":true,"project":{"id":"project_1","state":"revoked","allocationStatus":"none"}})
                         }
                         "/hagency/api/v1/projects" => json!({"projects":[]}),
+                        "/hagency/api/v1/projects/adopt" => json!({"id":"project_1"}),
                         "/_matrix/client/v3/joined_rooms" => json!({"joined_rooms":[]}),
                         _ => json!({"code":"unexpected_request"}),
                     };
@@ -485,8 +493,13 @@ mod tests {
                         json!({"code":if status==401 {"sign_in_required"} else {"server_unavailable"}})
                     };
                     let body = value.to_string();
+                    let proof_headers = if mode == SERVER_CLOCK_32_SECONDS_AHEAD {
+                        format!("Date: {}\r\nCache-Control: no-store\r\n", httpdate::fmt_http_date(server_now))
+                    } else {
+                        String::new()
+                    };
                     let response = format!(
-                        "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} Fixture\r\n{proof_headers}Content-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;

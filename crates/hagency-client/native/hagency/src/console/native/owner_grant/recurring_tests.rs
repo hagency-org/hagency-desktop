@@ -280,7 +280,9 @@ async fn pool_owner_renewal_policy_is_in_receipt_and_cannot_be_changed_by_replay
         }).await.unwrap();
         let original=review.original.clone();let id=review.summary().intent_id;
         assert_eq!(review.summary().renewal_mode,Some(mode));
+        let reads_before_confirm = f.publications.lock().unwrap().session_reads;
         f.service.confirm(&f.registry,review).await.unwrap();
+        assert_eq!(f.publications.lock().unwrap().session_reads - reads_before_confirm, 1);
         let review=f.publication_review(&id).await;
         f.service.publication_apply(&f.registry,id.clone(),Some(review)).await.unwrap();
         let h=f.history().await;let record=&h.data.records[h.index(&id).unwrap()];

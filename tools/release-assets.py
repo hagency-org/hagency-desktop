@@ -57,11 +57,15 @@ def check_one_binary_target():
     manifest = (ROOT/'Cargo.toml').read_text() + '\n['
     def tables(header):
         return re.findall(r'^' + re.escape(header) + r'[ \t]*\n(.*?)(?=^\[)', manifest, re.M | re.S)
-    def name(table):
-        found = re.search(r'^name\s*=\s*"([^"]+)"', table, re.M)
-        return found[1] if found else table.strip()
-    app = next((name(table) for table in tables('[package]')), None)
-    extra = [name(table) for table in tables('[[bin]]') if name(table) != app]
+    def field(table, key):
+        found = re.search(r'^' + key + r'\s*=\s*"([^"]+)"', table, re.M)
+        return found[1] if found else None
+    package, = tables('[package]')
+    app = field(package, 'default-run') or field(package, 'name')
+    declared = [field(table, 'name') for table in tables('[[bin]]')]
+    if declared and declared.count(app) != 1:
+        raise SystemExit(f'Expected a single binary target named {app}.')
+    extra = [binary for binary in declared if binary != app]
     if (ROOT/'src'/'bin').is_dir():
         extra += sorted(p.stem for p in (ROOT/'src'/'bin').iterdir())
     if extra:
@@ -85,6 +89,14 @@ def sha(path):
     return digest.hexdigest()
 
 
+def kernel_receipt():
+    """What tools/package-octos.py recorded about the kernel in this installer:
+    its pinned revision and checksum, whether this run compiled it or took the
+    one an earlier release run compiled, and which run that was."""
+    receipts = sorted((ROOT/'dist'/'runtime').glob('octos-*.json'))
+    return json.loads(receipts[0].read_text()) if len(receipts) == 1 else None
+
+
 def collect(platform, arch):
     out = ROOT/'release-assets'
     out.mkdir(exist_ok=True)
@@ -97,6 +109,9 @@ def collect(platform, arch):
         assets.append(destination)
     sums = {p.name: sha(p) for p in assets}
     report = dict(metadata(), platform=platform, arch=arch, assets=sums)
+    kernel = kernel_receipt()
+    if kernel:
+        report['kernel'] = kernel
     (out/f'build-{platform}-{arch}.json').write_text(json.dumps(report, indent=2)+'\n')
     (out/f'SHA256SUMS-{platform}-{arch}.txt').write_text(''.join(f'{v}  {k}\n' for k,v in sums.items()))
 

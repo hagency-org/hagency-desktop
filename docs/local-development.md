@@ -16,8 +16,8 @@ see the dependency list in the [upstream build notes](robrix-upstream-readme.md)
 Use the committed Cargo lockfile. Do not copy server target artifacts into Desktop.
 
 ```sh
-cargo build --locked -p rinx --bin rinx
-cargo run --locked --bin rinx
+cargo build --locked -p rinx --bin hagency
+cargo run --locked --bin hagency
 ```
 
 The package/binary is `rinx`; the application is Hagency Desktop. Default features
@@ -27,7 +27,7 @@ are sufficient for native Hagency management. On macOS Cargo uses
 bundle. The launcher forwards logs and shutdown to its own app process.
 
 For debugger attachment or a stalled LaunchServices launch, run directly from the
-checkout with `RINX_DEV_NO_BUNDLE=1 cargo run --locked --bin rinx`. Native permission
+checkout with `RINX_DEV_NO_BUNDLE=1 cargo run --locked --bin hagency`. Native permission
 prompts may then be attributed to the terminal. A build or launch PID alone does
 not prove the app initialized, logged in or loaded Projects.
 
@@ -36,7 +36,7 @@ not prove the app initialized, logged in or loaded Projects.
 ```sh
 mkdir -p .run
 HAGENCY_DESKTOP_DATA_DIR="$PWD/.run/desktop-test-profile" \
-cargo run --locked --bin rinx
+cargo run --locked --bin hagency
 ```
 
 Use the same absolute path for later starts. It isolates app data and cache;

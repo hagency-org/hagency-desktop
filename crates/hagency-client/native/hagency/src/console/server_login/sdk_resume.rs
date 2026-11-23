@@ -357,6 +357,7 @@ impl ServerLogin {
                 .ok_or("native_resume_unavailable")?,
             user_id: record.user_id.clone(),
             valid_until: now,
+            clock_allowance: std::time::Duration::ZERO,
             revoked: std::sync::Arc::new(AtomicBool::new(false)),
             stopped: self.stopped.clone(),
         };
@@ -369,6 +370,7 @@ impl ServerLogin {
             refresh_token: None,
             oauth_expires: now,
             authorized_until: now,
+            clock_allowance: std::time::Duration::ZERO,
             invalidated: false,
             binding: record.binding.clone(),
             checked: now,
@@ -380,6 +382,7 @@ impl ServerLogin {
         })?;
         let client = http()?;
         let server = origin(expected_origin)?;
+        let started = Instant::now();
         let response = client
             .get(server.join("/hagency/api/v1/devices/current").unwrap())
             .bearer_auth(&d.token)
@@ -396,7 +399,7 @@ impl ServerLogin {
                 .map_err(|_| "local_state_unavailable")?;
             return Err("sign_in_required");
         }
-        let value = super::response(response).await.map_err(|code| match code {
+        let (value, clock) = proof_response(started, response).await.map_err(|code| match code {
             "sign_in_required" | "authorization_expired" | "authentication_required" => {
                 "sign_in_required"
             }
@@ -418,7 +421,7 @@ impl ServerLogin {
         // the answer was slow, not that the owner signed out. Renewal treats
         // the same miss as unavailable; so does this restore.
         session.authorized_until = session.authorized_until.min(
-            deadline(&json!({"validUntilMs":proof.valid_until_ms}))
+            clock.deadline_ms(proof.valid_until_ms)
                 .map_err(|_| "native_resume_unavailable")?,
         );
         let after = source

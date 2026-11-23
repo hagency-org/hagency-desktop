@@ -229,6 +229,23 @@ pub(super) async fn wait_stopped(f: &Fixture) {
 }
 #[tokio::test]
 #[ignore = "requires explicit offline supervised runtime probe"]
+async fn shared_successor_claim_survives_slow_contribution_reads() {
+    let (f, t, c) = Box::pin(predecessor()).await;
+    prepare_lost_start(&f, &t, &c).await;
+    // A 20 s execution ticket leaves 8 s for preparation at the 12 s gate.
+    // Four serial reads take 9.2 s even with an instantaneous provider.
+    f.state.lock().unwrap().contribution_latency = Some(Duration::from_millis(2300));
+    let outcome = t.poll_successor_fixture(&f.registry, launch(&f, "text-usage")).await;
+    f.state.lock().unwrap().contribution_latency = None;
+    let progress = outcome.expect("a fresh lease must reach the normal claim path");
+    assert!(matches!(progress, SharedExecutionProgress::Running { .. }));
+    wait_stopped(&f).await;
+    assert_eq!(rows(&f, "owner_shared_successor_attempts"), 1);
+    f.stop().await;
+}
+
+#[tokio::test]
+#[ignore = "requires explicit offline supervised runtime probe"]
 async fn native_shared_successor_lost_start_replays_journal_and_one_exact_model_call() {
     let (f, t, c) = Box::pin(predecessor()).await;
     prepare_lost_start(&f, &t, &c).await;

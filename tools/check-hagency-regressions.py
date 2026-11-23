@@ -4,38 +4,220 @@
 python3 tools/check-hagency-regressions.py --output .run/regressions
 Includes the in-tree Client library HTTP loss/replay tests.
 Server PostgreSQL integration tests must separately use a disposable database.
+
+--jobs N runs up to N checks side by side; the default is one after another.
+The commands, their logs and the report are the same either way. Cargo itself
+lets only one command at a time build into a target folder, so side by side
+it is the tests that overlap, not the builds. Two commands that build the
+programs of the same package never overlap: Cargo keeps one copy of such a
+program per target folder and replaces it when the features differ.
+Side by side as one after another, a check gets what the checks listed
+before it built for it (the script VM, the two probe programs) and nothing
+of a check listed after it.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import json
 import os
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import threading
+import time
 
 ROOT = Path(__file__).resolve().parents[1]
 CLIENT = ROOT / "crates/hagency-client"
 
 
+def build_seconds(text):
+    """How long Cargo says it took until everything was built, from a check's
+    log. Side by side this includes waiting for another command's build."""
+    total = 0.0
+    # Where Cargo is told to colour its output, as in CI, "Finished" is wrapped
+    # in escape codes.
+    text = re.sub(r"\x1b\[[0-9;]*m", "", text)
+    for minutes, seconds in re.findall(r"^\s*Finished .* in (?:(\d+)m )?([\d.]+)s\s*$", text, re.M):
+        total += int(minutes or 0) * 60 + float(seconds)
+    return total
+
+
 def main():
-    parser = argparse.ArgumentParser(description=__doc__)
+    parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cargo-config", type=Path,
                         help="Optional pinned framework config for the Desktop root checks")
     parser.add_argument("--start-at", help="Resume at this failed check; earlier recorded passes must be unaffected by the fix")
+    parser.add_argument("--jobs", type=int, default=int(os.environ.get("HAGENCY_REGRESSION_JOBS") or 1),
+                        help="How many checks run side by side (default 1, or HAGENCY_REGRESSION_JOBS)")
+    parser.add_argument("--second-run", action="store_true",
+                        help="Run a check once more when its tests ran and one failed; it passes if that run "
+                             "passes, and the report and the end of the output name it. For the checks of a "
+                             "pull request. A release leaves this out: there every check passes the first time.")
     args = parser.parse_args()
+    if args.jobs < 1:
+        parser.error("--jobs must be at least 1")
+    if args.jobs > 1 and args.cargo_config:
+        # That mode compares Cargo.lock before and after each command.
+        parser.error("--cargo-config runs the checks one after another; leave --jobs at 1")
     output = args.output.resolve()
     output.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
     env.setdefault("RUST_MIN_STACK", "16777216")
-    results = []
     previous = {}
     if args.start_at:
         previous = {row['check']: row for row in json.loads((output / 'report.json').read_text())}
     reached_start = not bool(args.start_at)
+    started = time.monotonic()
+    pool = ThreadPoolExecutor(max_workers=args.jobs)
+    lock = threading.Lock()
+    rows = {}        # place in the list -> report row, for every check that ended
+    logs = {}        # place in the list -> its log file
+    futures = {}     # check name -> its future
+    failed = []      # places of the checks that failed
+    programs = {}    # (folder, package) -> lock held while its programs are in use
+    handed = {}      # variables a check hands to the checks listed after it
+    handing = []     # the checks that hand something on: later ones wait for them
+    second = []      # the checks that passed only on their second run, and the tests that had failed
+    order = 0
 
-    def run(name, command, cwd=ROOT, rust_tests=False):
-        nonlocal reached_start
+    def stopped(index):
+        # Checks start in list order. Once one fails, none listed after it
+        # starts, and every check listed before it still runs to its end: so
+        # the first failed check in the list is the one to resume at.
+        with lock:
+            return bool(failed) and index > min(failed)
+
+    def record(index, row):
+        with lock:
+            rows[index] = row
+            if not row["passed"]:
+                failed.append(index)
+            (output / "report.json").write_text(json.dumps([rows[i] for i in sorted(rows)], indent=2) + "\n")
+            took = row.get("seconds")
+            print(row["check"], "PASS" if row["passed"] else "FAIL", "" if took is None else f"{took:.0f}s", flush=True)
+
+    def builds_programs_of(command, cwd):
+        # An integration test starts its package's programs from the one place
+        # Cargo keeps them. A command that builds them with other features
+        # replaces them there, so such commands take turns per package.
+        if command[0] != "cargo" or not {"--test", "--all-targets", "--bin"} & set(command):
+            return None
+        package = command[command.index("-p") + 1] if "-p" in command else ""
+        manifest = command[command.index("--manifest-path") + 1] if "--manifest-path" in command else ""
+        return (str(cwd), package, manifest)
+
+    def execute(index, *check):
+        try:
+            return check_once(index, *check)
+        except BaseException:
+            # Not a failed check but a fault of this script: start nothing more.
+            with lock:
+                failed.append(index)
+            raise
+
+    def check_once(index, name, command, cwd, rust_tests, run_env, native_lock, needs, late, hands_on):
+        for need in needs:
+            futures[need].result()
+        if late:
+            with lock:
+                run_env.update(handed)
+        key = builds_programs_of(command, cwd)
+        with lock:
+            turn = programs.setdefault(key, threading.Lock()) if key else None
+        if turn:
+            turn.acquire()
+        try:
+            if stopped(index):
+                return None
+            log = logs[index]
+            begin = time.monotonic()
+
+            def once():
+                with log.open("w") as stream:
+                    try:
+                        return subprocess.run(command, cwd=cwd, env=run_env, stdout=stream, stderr=subprocess.STDOUT).returncode
+                    except OSError as error:
+                        stream.write(f"Could not start {command[0]}: {error}\n")
+                        return 127
+
+            code = once()
+            text = log.read_text()
+            failed_first = None
+            if code != 0 and args.second_run and re.search(r"^test result: FAILED\.", text, re.M):
+                # The tests ran and one failed: not a build that failed, which
+                # would fail again. One test now and then misses a time limit
+                # while other checks use the machine. Still this package's turn.
+                failed_first = re.findall(r"^test (\S+) \.\.\. FAILED", text, re.M)
+                print(f"{name} tests failed, running it once more: {', '.join(failed_first) or 'no test named'}", flush=True)
+                log.replace(output / (name + ".first.log"))
+                code = once()
+                text = log.read_text()
+            took = time.monotonic() - begin
+            if code == 0 and hands_on:
+                # Still this package's turn: what was built is what is kept.
+                try:
+                    hands_on(text)
+                except ValueError as error:
+                    with log.open("a") as stream:
+                        stream.write(f"\n{error}\n")
+                    code = 1
+        finally:
+            if turn:
+                turn.release()
+        count = sum(int(n) for n in re.findall(r"test result: ok\. (\d+) passed;", text))
+        unchanged = native_lock is None or native_lock == (ROOT / 'Cargo.lock').read_bytes().split(b'[[patch.unused]]', 1)[0]
+        passed = code == 0 and unchanged and (not rust_tests or count > 0)
+        if not unchanged:
+            with log.open('a') as stream:
+                stream.write('\nNative framework check changed resolved Cargo.lock packages; reconcile and review before retrying.\n')
+        row = {"check": name, "passed": passed, "tests": count if rust_tests else None,
+               "seconds": round(took, 1), "build_seconds": round(build_seconds(text), 1)}
+        if failed_first is not None:
+            row["failed_first"] = failed_first
+            if passed:
+                with lock:
+                    second.append((index, name, failed_first))
+        record(index, row)
+        return text
+
+    def name_second_runs():
+        with lock:
+            found = sorted(second)
+            second.clear()
+        for _, name, tests in found:
+            print(f"Passed only on a second run: {name} ({', '.join(tests) or 'no test named'})", flush=True)
+            print(f"::warning title=Passed only on a second run::{name}: {', '.join(tests) or 'no test named'} "
+                  "failed and passed when the check ran once more.", flush=True)
+
+    def finish():
+        """Wait for every check started so far; stop here if one failed."""
+        for future in list(futures.values()):
+            future.result()
+        with lock:
+            bad = sorted(failed)
+        if not bad:
+            return
+        name_second_runs()
+        pool.shutdown()
+        log = logs[bad[0]]
+        # Failed-check files disappear with ephemeral CI runners.
+        print(f"Last 200 lines of {log.name}:", flush=True)
+        print("\n".join(log.read_text().splitlines()[-200:]), flush=True)
+        if len(bad) > 1:
+            print("Also failed:", ", ".join(rows[i]["check"] for i in bad[1:]), flush=True)
+        raise SystemExit(f"Inspect {log}; no release until this check passes")
+
+    def run(name, command, cwd=ROOT, rust_tests=False, needs=None, hands_on=None):
+        """Start one check. `needs` names a check that must end first.
+        `hands_on` is called with the check's log once it has passed, fills
+        `handed` for every check listed after this one, and raises ValueError
+        when the log lacks what it looks for. Returns the kept log of a check
+        that an earlier run passed and this run reuses, otherwise nothing."""
+        nonlocal reached_start, order
+        index = order
+        order += 1
         if not reached_start:
             reached_start = name == args.start_at
             if not reached_start:
@@ -43,7 +225,8 @@ def main():
                 log = output / (name + '.log')
                 if not prior or not prior['passed'] or not log.is_file():
                     raise SystemExit(f'Cannot reuse an unproven check: {name}')
-                results.append(prior)
+                with lock:
+                    rows[index] = prior
                 print(name, 'REUSED', flush=True)
                 return log.read_text()
         # Standalone tool/crate workspaces retain their own pinned lockfiles.
@@ -61,8 +244,10 @@ def main():
             if '--offline' not in command:
                 command.insert(1, '--offline')
             command = [command[0], "--config", str(args.cargo_config.resolve()), *command[1:]]
-        log = output / (name + ".log")
-        run_env = env.copy()
+        logs[index] = output / (name + ".log")
+        # What a check listed before this one handed on, and nothing of a later one.
+        with lock:
+            run_env = {**env, **handed}
         if command[0] == "cargo" and "CARGO_TARGET_DIR" not in run_env and "--manifest-path" not in command:
             # Swift/Clang modules store absolute cache paths. Reusing the same
             # target through its worktree symlink and its real path otherwise
@@ -70,24 +255,17 @@ def main():
             target = cwd / "target"
             if target.is_symlink():
                 run_env["CARGO_TARGET_DIR"] = str(target.resolve())
-        with log.open("w") as stream:
-            result = subprocess.run(command, cwd=cwd, env=run_env, stdout=stream, stderr=subprocess.STDOUT)
-        text = log.read_text()
-        count = sum(int(n) for n in re.findall(r"test result: ok\. (\d+) passed;", text))
-        unchanged = native_lock is None or native_lock == (ROOT / 'Cargo.lock').read_bytes().split(b'[[patch.unused]]', 1)[0]
-        passed = result.returncode == 0 and unchanged and (not rust_tests or count > 0)
-        if not unchanged:
-            with log.open('a') as stream:
-                stream.write('\nNative framework check changed resolved Cargo.lock packages; reconcile and review before retrying.\n')
-        results.append({"check": name, "passed": passed, "tests": count if rust_tests else None})
-        (output / "report.json").write_text(json.dumps(results, indent=2) + "\n")
-        print(name, "PASS" if passed else "FAIL", flush=True)
-        if not passed:
-            # Failed-check files disappear with ephemeral CI runners.
-            print(f"Last 200 lines of {log.name}:", flush=True)
-            print("\n".join(text.splitlines()[-200:]), flush=True)
-            raise SystemExit(f"Inspect {log}; no release until this check passes")
-        return text
+        # A check reused from an earlier run is not waited for.
+        needs = [need for need in ([needs] if needs else []) + handing if need in futures]
+        futures[name] = pool.submit(execute, index, name, command, cwd, rust_tests, run_env, native_lock,
+                                    needs, bool(handing), hands_on)
+        if hands_on:
+            handing.append(name)
+        if args.jobs == 1:
+            # One after another, a failed check stops the list where it failed.
+            futures[name].result()
+            finish()
+        return None
 
     run("native-minimal-agent-chat", ["cargo", "check", "--locked", "--no-default-features", "--features", "agent_chat"])
     run("owner-source-pins", ["python3", "tools/check-owner-source-pins.py"])
@@ -96,7 +274,7 @@ def main():
     run("script-vm", ["cargo", "build", "--locked", "--manifest-path", "tools/hagency-script-review/Cargo.toml"])
     vm = ROOT / "tools/hagency-script-review/target/debug/hagency-script-review"
     for name in ["check_full_bundle", "check_agent_budget", "check_agent_control", "check_agent_work", "check_pool_application", "check_entry_workspaces", "check_account_identity", "check_accounts", "check_owner_tasks", "check_encrypted_approvals", "check_pool_fixes", "check_shared_web", "check_settings_stability", "check_background_observations", "check_publication_first", "check_owner_dashboard_approvals", "check_interrupted_calls", "check_admin_admission"]:
-        run(name, ["python3", f"apps/hagency/tests/{name}.py", str(vm), "--output", str(output / name)])
+        run(name, ["python3", f"apps/hagency/tests/{name}.py", str(vm), "--output", str(output / name)], needs="script-vm")
     # Keep these together: a budget fix must not erase rendering, activity or answer actions.
     for name, pattern in [
         ("budget-host", "host::hagency::budget"),
@@ -149,6 +327,8 @@ def main():
         ("system-update-disclosures", "home::room_screen::system_updates::"),
         ("typing-expiry", "room::typing_notice::"),
         ("typing-broadcast", "room::room_input_bar::typing_broadcast_tests"),
+        ("composer-send", "composer_send_tests"),
+        ("trace-backpressure", "trace_backpressure_tests"),
         ("chat-layout", "home::main_desktop_ui::chat_layout_tests"),
         ("miniapp-dock", "mini_apps_side_tests"),
         ("owner-approval-navigation", "owner_approvals::tests"),
@@ -229,16 +409,38 @@ def main():
     run("native-model-qualification", ["cargo", "test", "--locked", "-p", "hagency-core", "--test", "qualification"], cwd=CLIENT, rust_tests=True)
     run("native-model-catalog", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution", "--lib", "resource_onboarding::tests"], cwd=CLIENT, rust_tests=True)
     run("native-resource-creation", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution,resource-adoption", "--lib", "additional_configuration_", "--", "--test-threads=1"], cwd=CLIENT, rust_tests=True)
-    probe_build = run("native-context-probe", ["cargo", "build", "--locked", "-p", "hagency-runtime", "--features", "shared-context", "--bin", "hagency-managed-runtime-probe", "--bin", "hagency-runtime-probe", "--message-format=json"], cwd=CLIENT)
-    artifacts = [json.loads(line) for line in probe_build.splitlines() if line.startswith("{")]
-    probes = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "hagency-managed-runtime-probe" and item.get("executable")]
-    if len(probes) != 1:
-        raise SystemExit("Expected one freshly built offline context probe")
-    env["HAGENCY_TEST_RUNTIME_PROBE"] = probes[0]
-    claude_probes = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == "hagency-runtime-probe" and item.get("executable")]
-    if len(claude_probes) != 1:
-        raise SystemExit("Expected one freshly built offline Claude probe")
-    env["HAGENCY_TEST_CLAUDE_RUNTIME_PROBE"] = claude_probes[0]
+    def keep(executable, fresh):
+        # Later checks build this package with other features, and Cargo then
+        # replaces the program where it stands. The checks that are handed the
+        # program by path get this build of it, whatever is built beside them.
+        kept = output / "programs" / Path(executable).name
+        if fresh or not kept.is_file():
+            kept.parent.mkdir(exist_ok=True)
+            shutil.copy2(executable, kept)
+        return str(kept)
+
+    def hand_on_probes(text, fresh=True):
+        artifacts = [json.loads(line) for line in text.splitlines() if line.startswith("{")]
+        found = {}
+        for variable, target, kind in [
+            ("HAGENCY_TEST_RUNTIME_PROBE", "hagency-managed-runtime-probe", "context"),
+            ("HAGENCY_TEST_CLAUDE_RUNTIME_PROBE", "hagency-runtime-probe", "Claude"),
+        ]:
+            built = [item["executable"] for item in artifacts if item.get("reason") == "compiler-artifact" and item.get("target", {}).get("name") == target and item.get("executable")]
+            if len(built) != 1:
+                raise ValueError(f"Expected one freshly built offline {kind} probe")
+            found[variable] = built[0]
+        with lock:
+            handed.update({variable: keep(path, fresh) for variable, path in found.items()})
+
+    # The checks listed before this build never see its two programs; the
+    # checks listed after it wait for it and are handed the kept copies.
+    reused = run("native-context-probe", ["cargo", "build", "--locked", "-p", "hagency-runtime", "--features", "shared-context", "--bin", "hagency-managed-runtime-probe", "--bin", "hagency-runtime-probe", "--message-format=json"], cwd=CLIENT, hands_on=hand_on_probes)
+    if reused is not None:
+        try:
+            hand_on_probes(reused, fresh=False)
+        except ValueError as error:
+            raise SystemExit(str(error))
     run("native-claude-runtime-protocol", ["cargo", "test", "--locked", "-p", "hagency-runtime", "--lib", "--test", "claude", "--test", "claude_control", "--test", "claude_owned", "--test", "claude_session", "--test", "claude_usage", "--", "--test-threads=1"], cwd=CLIENT, rust_tests=True)
     run("native-shared-claude-custody", ["cargo", "test", "--locked", "-p", "hagency-store", "--features", "shared-budget-execution,resource-adoption", "--lib", "shared_claude", "--", "--include-ignored", "--test-threads=1"], cwd=CLIENT, rust_tests=True)
     run("native-shared-claude-lease", ["cargo", "test", "--locked", "-p", "hagency-runtime", "--test", "claude_owned", "shared_claude"], cwd=CLIENT, rust_tests=True)
@@ -279,6 +481,8 @@ def main():
         ("native-known-usage-recovery", "hagency-store", "recurring_"),
         ("native-never-started-store-recovery", "hagency-store", "shared_demand_v2_"),
         ("native-never-started-message-recovery", "hagency", "native_demand_never_started_attempt_retries_same_event_exactly_once"),
+        ("native-demand-cold-account", "hagency", "cold_account_lookup_completes_the_first_demand"),
+        ("native-demand-slow-binding", "hagency", "slow_demand_binding_renews_before_the_first_work_ack"),
         ("native-demand-late-stop-recovery", "hagency", "native_demand_late_stop_and_logout_keep_unknown_state_and_deny_stale_offer"),
     ]:
         run(name, ["cargo", "test", "--locked", "-p", package, "--features", "shared-budget-execution,resource-adoption", "--lib", pattern, "--", "--include-ignored", "--test-threads=1"], cwd=CLIENT, rust_tests=True)
@@ -316,6 +520,17 @@ def main():
     run("native-postpaid-host", ["cargo", "test", "--locked", "-p", "hagency", "--features", "shared-budget-execution,resource-adoption", "--lib", "--", "--test-threads=1", "typed_http_postpaid_overrun", "typed_http_runtime_unreported_failure", "typed_http_runtime_budget_notice"], cwd=CLIENT, rust_tests=True)
     if not reached_start:
         raise SystemExit(f'Unknown start check: {args.start_at}')
+    finish()
+    pool.shutdown()
+    name_second_runs()
+    timed = [row for row in rows.values() if row.get("seconds") is not None]
+    built = sum(row.get("build_seconds") or 0 for row in timed)
+    print(f"{len(rows)} checks passed in {(time.monotonic() - started) / 60:.1f} min, {args.jobs} at a time. "
+          f"Added up, they took {built / 60:.1f} min until Cargo had built what they run"
+          f"{' (waiting for another command to build included)' if args.jobs > 1 else ''} "
+          f"and {(sum(row['seconds'] for row in timed) - built) / 60:.1f} min to run it. The longest:", flush=True)
+    for row in sorted(timed, key=lambda row: -row["seconds"])[:8]:
+        print(f"  {row['seconds']:6.0f}s  {row['check']}  ({row.get('build_seconds') or 0:.0f}s of it until built)", flush=True)
 
 
 if __name__ == "__main__":

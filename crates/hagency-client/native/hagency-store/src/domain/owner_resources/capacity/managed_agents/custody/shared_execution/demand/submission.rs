@@ -35,6 +35,21 @@ impl SharedDemandSubmission {
     pub fn input(&self) -> &SharedDemandStartInput {
         &self.input
     }
+    /// Reuse this still-live observation only to read the original local
+    /// reservation. It cannot authorize claiming the delivered attempt.
+    pub async fn into_attempt_cleanup(
+        self,
+        registry: &OwnerResourceRegistry,
+        command: &SharedAttemptCommand,
+    ) -> Result<ManagedCleanupAuthority, Error> {
+        self.matches_command(command)?;
+        if !Arc::ptr_eq(&self.registry, &registry.0) {
+            return Err(Error::LocalAuthority);
+        }
+        let until = self.proof.expires;
+        registry.shared_cleanup_authority(self.proof.enrollment, self.original)
+            .await?.restrict_to_deadline(until)
+    }
     pub fn matches_command(&self, command: &SharedAttemptCommand) -> Result<(), Error> {
         self.check()?;
         command.validate(&self.proof.enrollment.profile.account)?;

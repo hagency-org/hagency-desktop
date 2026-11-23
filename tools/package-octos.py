@@ -23,6 +23,10 @@ import sys
 
 ROOT = Path(__file__).resolve().parents[1]
 ANDROID = "aarch64-linux-android"
+# tools/release-kernel.py sets these in a release run that takes the kernel an
+# earlier release run built: the kernel's path, and the run that built it.
+RELEASE_KERNEL = "HAGENCY_RELEASE_KERNEL"
+RELEASE_KERNEL_RUN = "HAGENCY_RELEASE_KERNEL_RUN"
 
 
 def read_lock(root=ROOT):
@@ -116,6 +120,14 @@ def default_android_sdk():
     return makepad / "tools/cargo_makepad" / ("android_33_" + name)
 
 
+def build_args(lock, target):
+    """The cargo command that builds the kernel. tools/release-kernel.py names
+    a kept kernel after it, so a change here is never served by an old one."""
+    return ["cargo", "build", "--locked", "--release", "--target", target,
+            "-p", "octos-cli", "--bin", "octos", "--no-default-features",
+            "--features", ",".join(lock["features"])]
+
+
 def build_kernel(source, lock, work, target, sdk=None, offline=False):
     env = os.environ.copy()
     # Rinx's package/resource flags must not leak into the independent kernel.
@@ -128,16 +140,14 @@ def build_kernel(source, lock, work, target, sdk=None, offline=False):
         if sdk is None:
             sdk = default_android_sdk()
         env.update(android_env(sdk))
-    args = ["cargo", "build", "--locked", "--release", "--target", target,
-            "-p", "octos-cli", "--bin", "octos", "--no-default-features",
-            "--features", ",".join(lock["features"])]
+    args = build_args(lock, target)
     if offline:
         args.append("--offline")
     subprocess.run(args, cwd=source, env=env, check=True)
     return work / "build" / target / "release" / ("octos.exe" if "windows" in target else "octos")
 
 
-def stage(kernel, lock, target, source, out=ROOT / "dist/runtime", prebuilt=False):
+def stage(kernel, lock, target, source, out=ROOT / "dist/runtime", prebuilt=False, built_by_run=None):
     # Android executes this PIE binary out of nativeLibraryDir. Packaging a
     # host binary under liboctos.so would install successfully but fail at run.
     if target == ANDROID:
@@ -157,6 +167,8 @@ def stage(kernel, lock, target, source, out=ROOT / "dist/runtime", prebuilt=Fals
         "revision": lock["revision"], "target": target, "sha256": digest,
         "source": "prebuilt-verified-version" if prebuilt else "pinned-source",
         "features": None if prebuilt else lock["features"],
+        # The CI run that compiled this file, where one is known.
+        "builtByRun": built_by_run,
     }, indent=2) + "\n")
     licenses = out / "licenses"
     licenses.mkdir(exist_ok=True)
@@ -178,7 +190,10 @@ def main(argv=None):
     parser.add_argument("--target", default=os.environ.get("RINX_KERNEL_TARGET") or os.environ.get("CARGO_BUILD_TARGET"))
     parser.add_argument("--sdk", type=Path)
     parser.add_argument("--offline", action="store_true")
-    parser.add_argument("--kernel", type=Path, help="Reuse a native prebuilt kernel after verifying its pinned version")
+    reused = os.environ.get(RELEASE_KERNEL)
+    parser.add_argument("--kernel", type=Path, default=reused or None,
+                        help="Reuse a native prebuilt kernel after verifying its pinned version "
+                             "(a release run names one in " + RELEASE_KERNEL + ")")
     parser.add_argument("--app-binary", type=Path, help="Also stage beside this development executable")
     args = parser.parse_args(argv)
     target = args.target or (ANDROID if args.mode == "android" else host_target())
@@ -196,7 +211,13 @@ def main(argv=None):
             parser.error("Prebuilt kernel does not report the pinned revision")
     else:
         kernel = build_kernel(source, lock, work, target, args.sdk, args.offline)
-    packaged = stage(kernel, lock, target, source, prebuilt=bool(args.kernel))
+    if not args.kernel:
+        built_by_run = os.environ.get("GITHUB_RUN_ID")
+    elif reused and args.kernel == Path(reused):
+        built_by_run = os.environ.get(RELEASE_KERNEL_RUN)
+    else:
+        built_by_run = None
+    packaged = stage(kernel, lock, target, source, prebuilt=bool(args.kernel), built_by_run=built_by_run)
     if args.app_binary:
         destination = args.app_binary.resolve().parent / ("octos.exe" if "windows" in target else "octos")
         shutil.copy2(packaged, destination)

@@ -1108,6 +1108,62 @@ fn legacy_ledger_is_never_silently_adopted_or_recovered() {
     assert_eq!(read(), before);
 }
 
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn registry_upgrades_only_a_matching_legacy_identity() {
+    let temp = tempfile::tempdir().unwrap();
+    let root = temp.path().join("owner");
+    let registry = OwnerResourceRegistry::open_root(&root).unwrap();
+    let id = registry.id().to_owned();
+    registry.shutdown().await.unwrap();
+    drop(registry);
+
+    let dir = std::fs::File::open(&root).unwrap();
+    let legacy = serde_json::to_value(hagency_platform::directory_identity(&dir).unwrap()).unwrap();
+    let stable =
+        serde_json::to_value(hagency_platform::registry_directory_identity(&dir).unwrap()).unwrap();
+    let db = || rusqlite::Connection::open(root.join("domain.sqlite3")).unwrap();
+    let save = |value: &serde_json::Value| {
+        // Serialize via the production type, preserving its on-disk field order.
+        let identity: hagency_platform::DirectoryIdentity =
+            serde_json::from_value(value.clone()).unwrap();
+        db().execute(
+            "UPDATE owner_resource_identity SET root_identity=?1",
+            [serde_json::to_string(&identity).unwrap()],
+        )
+        .unwrap();
+    };
+    let stored = || {
+        let encoded: String = db()
+            .query_row(
+                "SELECT root_identity FROM owner_resource_identity",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        serde_json::from_str::<serde_json::Value>(&encoded).unwrap()
+    };
+
+    save(&legacy);
+    let registry = OwnerResourceRegistry::open_root(&root).unwrap();
+    assert_eq!(registry.id(), id);
+    registry.shutdown().await.unwrap();
+    drop(registry);
+    assert_eq!(stored(), stable);
+
+    for mut foreign in [legacy, stable] {
+        let volume = foreign["volume"].as_str().unwrap();
+        let last = if volume.ends_with('0') { '1' } else { '0' };
+        foreign["volume"] = format!("{}{last}", &volume[..volume.len() - 1]).into();
+        save(&foreign);
+        assert!(matches!(
+            OwnerResourceRegistry::open_root(&root),
+            Err(Error::Private)
+        ));
+        assert_eq!(stored(), foreign);
+    }
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn symlink_and_copied_owner_directory_cannot_claim_the_same_authority() {

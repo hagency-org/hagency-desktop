@@ -8,13 +8,19 @@ pub mod pdf_text;
 #[allow(unsafe_code)] // Narrow getpwuid_r boundary; never inherits HOME for ownership.
 mod owner_home;
 pub mod private_state;
+mod codex_inspection;
+pub use codex_inspection::{codex_inspection_directory, CodexInspectionDirectory};
+#[cfg(windows)]
+pub use owner_home::current_user_profile_dir;
 pub use owner_home::{owner_home, codex_process_home};
 
 mod child_identity;
 pub use child_identity::{ChildIdentity, OwnedChildIdentity, SignalOutcome};
 #[allow(unsafe_code)]
 mod directory_identity;
-pub use directory_identity::{DirectoryIdentity, directory_identity, same_directory};
+pub use directory_identity::{
+    DirectoryIdentity, directory_identity, registry_directory_identity, same_directory,
+};
 #[allow(unsafe_code)]
 mod file_identity;
 pub use file_identity::{same_file, file_identity, FileIdentity};

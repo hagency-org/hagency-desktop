@@ -24,6 +24,8 @@ pub struct OwnedClaudeSession {
     owner: SupervisedProcess,
     cleanup: Cleanup,
     pub(super) shared: Option<super::claude_shared::State>,
+    /// A run in a container: stopping the client alone does not end it.
+    pub(super) container: Option<super::claude_shared::container::ContainerStop>,
 }
 impl OwnedClaudeSession {
     pub(super) fn bind_shared_credential(&mut self, binding: &crate::claude::account::AccountBinding) -> Result<(), Error> {
@@ -68,6 +70,7 @@ impl OwnedClaudeSession {
                 owner,
                 cleanup: Cleanup::Pending,
                 shared: None,
+                container: None,
             }),
             Err(error) => Err(StartError::Uncertain {
                 kind: error.kind(),
@@ -208,6 +211,23 @@ impl OwnedClaudeSession {
         let result = operation.runner.session.prepare_followup(limits).await;
         operation.finish(result)
     }
+    /// See `SessionDriver::poll_idle`. A shared process serves other people's
+    /// admitted calls only and never runs a turn of its own.
+    pub async fn poll_idle(&mut self, limits: Limits) -> Result<bool, Error> {
+        if self.shared.is_some() || !self.session.can_followup() {
+            return Err(Error::State);
+        }
+        let operation = Operation::new(self)?;
+        let result = operation.runner.session.poll_idle(limits).await;
+        operation.finish(result)
+    }
+    pub fn self_started_turn(&self) -> bool {
+        self.session.self_started_turn()
+    }
+    /// See `SessionDriver::outside_input`.
+    pub fn outside_input(&self) -> bool {
+        self.session.outside_input()
+    }
     pub fn usage_snapshot_requested(&self) -> bool {
         self.session.usage_snapshot_requested()
     }
@@ -268,6 +288,14 @@ impl OwnedClaudeSession {
         self.session.close();
         if !matches!(self.cleanup,Cleanup::Observed(report) if report.scope.whole_tree_stopped) {
             self.cleanup = observe_stop(&mut self.owner);
+        }
+        // The client's tree is not the run's: the container is stopped only
+        // once it is gone. Kept to try again at the next stop.
+        if let Some(container) = &self.container {
+            match container.remove() {
+                Ok(()) => self.container = None,
+                Err(kind) => self.cleanup = Cleanup::Unknown { kind },
+            }
         }
         self.cleanup
     }

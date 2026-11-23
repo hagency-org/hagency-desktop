@@ -1837,7 +1837,7 @@ impl MomentsPanelRef {
     /// Applies `action` to this panel.
     ///
     /// `modal` is the modal hosting this panel, which is opened or closed to match;
-    /// it's `None` when the panel lives in its own window instead.
+    /// it's `None` when the panel lives in a desktop chat pane or host window.
     pub fn action(&self, cx: &mut Cx, modal: Option<&ModalRef>, action: &MomentsAction) {
         let Some(mut inner) = self.borrow_mut() else {
             return;

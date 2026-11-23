@@ -187,12 +187,29 @@ fn capacity_blocker(budget: &hagency_core::allocation::Budget) -> Option<String>
     Some(code.into())
 }
 
+/// A declared shared account limit accepts only the fixed UTC calendar of its
+/// own period (the store's `shared_account_calendars_match`), so a form for
+/// such a resource opens on that calendar instead of offering one review must
+/// refuse. Octos resources always declare one, shared by the profile's models.
+fn shared_limit_calendar(
+    budget: &hagency_core::allocation::Budget,
+) -> Option<hagency_core::recurring_quota::Calendar> {
+    if budget.seat.quota.is_none() {
+        return None;
+    }
+    let period = budget.seat.period.clone()?;
+    let cadence = serde_json::from_value(serde_json::Value::String(period)).ok()?;
+    Some(hagency_core::recurring_quota::Calendar { cadence, time_zone: "UTC".into() })
+}
+
 /// Read-only facts for a native publication form. Opening the form creates no
 /// reservation, grant intent, provider login or server publication.
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct OwnerGrantForm {
     #[serde(default)]
     pub awaiting_admission: bool,
+    /// The calendar this publication must use, which the form shows fixed:
+    /// the resource's bound calendar, else the one its shared limit requires.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub calendar: Option<hagency_core::recurring_quota::Calendar>,
     pub contribution_id: String,
@@ -204,6 +221,9 @@ pub struct OwnerGrantForm {
 /// Not Clone or Deserialize. Only prepare/review_existing can produce this,
 /// and only its exact originating management instance may consume it.
 pub struct OwnerGrantReview {
+    // Only the native access that observed the actual provider may offer a
+    // window whose eventual click obtains a new proof for the same terms.
+    native_window: Option<NativeReviewWindow>,
     manager: Arc<NativeManagement>,
     identity: Identity,
     original: Original,
@@ -212,6 +232,10 @@ pub struct OwnerGrantReview {
     context: OwnerGrantReviewContext,
     /// A new UTC month on an admission whose earlier months ended.
     regrant: bool,
+}
+struct NativeReviewWindow {
+    until: Instant,
+    host_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
 }
 impl OwnerGrantReview {
     pub fn summary(&self) -> OwnerGrantSummary {
@@ -227,9 +251,18 @@ impl OwnerGrantReview {
                 .remaining_tokens
                 .is_some_and(|n| n >= self.original.selection.allocated_tokens)
     }
+    fn same_terms(&self, other: &Self) -> bool {
+        self.original == other.original && self.identity == other.identity
+            && self.admission == other.admission && self.regrant == other.regrant
+            && self.consent.same_reviewed_budget(&other.consent)
+    }
     pub fn expired(&self) -> bool {
         self.manager.is_retired()
-            || self.consent.binding().is_err()
+            || match &self.native_window {
+                None => self.consent.binding().is_err(),
+                Some(window) => Instant::now() >= window.until
+                    || window.host_gate.as_ref().is_some_and(|gate| !gate()),
+            }
             || now_ms().map_or(true, |now| now >= self.original.period.end_ms)
     }
 }

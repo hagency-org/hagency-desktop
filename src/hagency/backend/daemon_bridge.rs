@@ -9,7 +9,7 @@ use ::hagency::daemon::bridge::ControllerClient;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum LocalAgentHost {
     Here,
-    /// The daemon on this computer hosts another account.
+    /// The selected enrollment has a different identity.
     OtherAccount,
     /// Hosting is not set up for anyone here (or must be set up again).
     HostingNotSetUp,

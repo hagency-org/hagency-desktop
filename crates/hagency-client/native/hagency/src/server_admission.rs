@@ -155,6 +155,23 @@ pub fn validate_metadata(origin: &str, value: &Value) -> Result<ServerMetadata, 
         issuer,
     })
 }
+fn transport_failure(stage: &'static str, error: reqwest::Error) -> AdmissionError {
+    use std::error::Error;
+    let mut cause = error.source();
+    let mut io_kind = None;
+    let mut os_code = None;
+    while let Some(source) = cause {
+        if let Some(io) = source.downcast_ref::<std::io::Error>() {
+            io_kind = Some(io.kind());
+            os_code = io.raw_os_error().or(os_code);
+        }
+        cause = source.source();
+    }
+    tracing::warn!(stage, code = "hagency_server_unavailable", timeout = error.is_timeout(),
+        connect = error.is_connect(), ?io_kind, ?os_code, "Public Hagency discovery failed");
+    AdmissionError::Unavailable
+}
+
 pub async fn discover(origin: &str) -> Result<ServerMetadata, AdmissionError> {
     let server = normalize_origin(origin)?;
     let client = reqwest::Client::builder()
@@ -163,7 +180,7 @@ pub async fn discover(origin: &str) -> Result<ServerMetadata, AdmissionError> {
         .connect_timeout(Duration::from_secs(10))
         .timeout(Duration::from_secs(15))
         .build()
-        .map_err(|_| AdmissionError::Unavailable)?;
+        .map_err(|e| transport_failure("build", e))?;
     let mut response = client
         .get(
             server
@@ -172,15 +189,14 @@ pub async fn discover(origin: &str) -> Result<ServerMetadata, AdmissionError> {
         )
         .send()
         .await
-        .map_err(|_| AdmissionError::Unavailable)?;
-    if response.status().is_server_error() {
+        .map_err(|e| transport_failure("send", e))?;
+    if response.status().is_server_error() || response.status().as_u16() == 429 {
+        tracing::warn!(stage = "http", code = "hagency_server_unavailable",
+            status = response.status().as_u16(), "Public Hagency discovery failed");
         return Err(AdmissionError::Unavailable);
     }
     if matches!(response.status().as_u16(), 401 | 403) {
         return Err(AdmissionError::RequestRejected);
-    }
-    if response.status().as_u16() == 429 {
-        return Err(AdmissionError::Unavailable);
     }
     if !response.status().is_success() {
         return Err(AdmissionError::UnsupportedServer);
@@ -189,7 +205,7 @@ pub async fn discover(origin: &str) -> Result<ServerMetadata, AdmissionError> {
     while let Some(chunk) = response
         .chunk()
         .await
-        .map_err(|_| AdmissionError::Unavailable)?
+        .map_err(|e| transport_failure("read_body", e))?
     {
         if raw.len() + chunk.len() > 16_384 {
             return Err(AdmissionError::InvalidMetadata);

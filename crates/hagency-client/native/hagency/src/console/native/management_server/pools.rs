@@ -21,13 +21,7 @@ pub struct PoolAgentInput {
 impl PoolAgentInput {
     pub fn validate(&self) -> Result<(), NativeError> {
         self.definition.validate()?;
-        if !self.room_id.starts_with('!')
-            || !self.room_id.contains(':')
-            || self.room_id.len() > 255
-            || self
-                .room_id
-                .chars()
-                .any(|c| c.is_whitespace() || c.is_control())
+        if !hagency_core::identifiers::valid_room_id(&self.room_id)
         {
             return Err(failure(400, "invalid_pool_agent_room"));
         }
@@ -369,6 +363,13 @@ mod recurring_transport_tests {
         let input:PoolAgentInput=serde_json::from_value(recurring.clone()).unwrap();
         assert_eq!(input.renewal_mode,Some(RenewalMode::Owner));
         assert_eq!(serde_json::to_value(input).unwrap(),recurring);
+    }
+    #[test]
+    fn pool_request_accepts_v12_room_ids_but_rejects_malformed_hashes() {
+        let mut input:PoolAgentInput=serde_json::from_value(json!({"roomId":"!Nhcu5BS-UMnFX7hBVfVSoXiD7OgH6iRT-xyIuqDnpYQ","expectedPoolRevision":1,"expectedGrantRevision":1,"definition":{"name":"Helper","capability":"coding","description":"","toolMode":"none"},"requestedTokens":1000})).unwrap();
+        input.validate().unwrap();
+        input.room_id="!broken_hash".into();
+        assert!(input.validate().is_err());
     }
     #[test]
     fn manual_renewal_keeps_period_revision_and_recovery_identity() {

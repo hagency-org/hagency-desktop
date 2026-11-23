@@ -230,6 +230,17 @@ async fn inspect(
                 tracing::debug!(target: "hagency_runtime::owned::managed", ?error, stage = "configuration", "managed inspection rejected");
                 failure(409, "managed_runtime_policy_inspection_failed")
             })?;
+        if prepared.inspect_account {
+            check().await?;
+            let started = Instant::now();
+            process.check_shared_account_readiness().await.map_err(|_| {
+                failure(409, "shared_execution_account_inspection_failed")
+            })?;
+            tracing::debug!(
+                elapsed_ms = started.elapsed().as_millis() as u64,
+                "Shared Codex account responded before ticket"
+            );
+        }
         check().await?;
         Ok(result)
     })

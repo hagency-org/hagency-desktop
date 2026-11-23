@@ -77,6 +77,7 @@ pub enum MiniAppsAction {
     OpenAgent,
     /// Read-only owner review landing; never a personal marker-inbox route.
     ReviewOwnerApprovals { owner: String },
+    ReviewPoolRequest { owner: String, request_id: String, role: String },
     /// The assistant opened the reviewed app: show its review; Run grants it.
     OpenReviewed,
     /// Untrusted notification routing hint; backend authorization remains mandatory.
@@ -2210,7 +2211,11 @@ impl MiniAppsPanelRef {
                     modal.open(cx);
                 }
                 MiniAppsAction::ReviewOwnerApprovals { owner } => {
-                    inner.open_owner_approvals(cx, owner);
+                    inner.open_owner_approvals(cx, owner, None);
+                    modal.open(cx);
+                }
+                MiniAppsAction::ReviewPoolRequest { owner, request_id, role } => {
+                    inner.open_owner_approvals(cx, owner, Some((request_id.clone(), role.clone())));
                     modal.open(cx);
                 }
                 MiniAppsAction::OpenPalpo(id) => {

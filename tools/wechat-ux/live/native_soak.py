@@ -51,7 +51,7 @@ def main():
             log.write(json.dumps(data, ensure_ascii=False) + "\n")
             log.flush()
         record({"kind": "start", "run": run, "minutes": args.minutes,
-                "binary_sha256": hashlib.sha256(Path("target/debug/rinx").read_bytes()).hexdigest(), "at": time.time()})
+                "binary_sha256": hashlib.sha256(Path("target/debug/hagency").read_bytes()).hexdigest(), "at": time.time()})
         try:
             app.start()
             # A freshly restored session must render without a tab switch.

@@ -11,7 +11,7 @@
 //! signals and timers to every surface, so an app in a background tab still
 //! receives its replies. A surface's own `MiniAppsAction::Close` (Back on its
 //! catalog, or handing off to a native app) closes only that surface's tab.
-use makepad_widgets::*;
+use makepad_widgets::{*, next_frame_gate::NextFrameGates};
 use super::ui::{MiniAppsAction, MiniAppsPanelRef, MiniAppsPanelWidgetExt};
 use crate::hagency::ui::{HagencyAction, HagencyPanelWidgetExt};
 use crate::hagency::owner_dashboard::OwnerDashboardHostWidgetExt;
@@ -80,7 +80,7 @@ impl SurfaceKey {
     pub fn for_action(action: &MiniAppsAction) -> Option<Self> {
         match action {
             MiniAppsAction::Open => Some(Self::Catalog),
-            MiniAppsAction::OpenAgent | MiniAppsAction::OpenPalpo(_) | MiniAppsAction::ReviewOwnerApprovals { .. } => Some(Self::App(super::palpo::APP_ID.to_owned())),
+            MiniAppsAction::OpenAgent | MiniAppsAction::OpenPalpo(_) | MiniAppsAction::ReviewOwnerApprovals { .. } | MiniAppsAction::ReviewPoolRequest { .. } => Some(Self::App(super::palpo::APP_ID.to_owned())),
             _ => None,
         }
     }
@@ -251,7 +251,7 @@ impl MiniAppsSurface {
             return;
         }
         match action {
-            MiniAppsAction::ReviewOwnerApprovals { .. } => { self.agent_surface = true; self.owner_page = false; },
+            MiniAppsAction::ReviewOwnerApprovals { .. } | MiniAppsAction::ReviewPoolRequest { .. } => { self.agent_surface = true; self.owner_page = false; },
             MiniAppsAction::OpenAgent | MiniAppsAction::OpenPalpo(_) => self.agent_surface = true,
             MiniAppsAction::Open | MiniAppsAction::OpenReviewed => { self.agent_surface = false; self.owner_page = false; },
             _ => {},
@@ -453,6 +453,8 @@ pub struct MiniAppsSurfaceDeck {
     #[rust]
     surfaces: Vec<(LiveId, WidgetRef)>,
     #[rust]
+    frame_gates: NextFrameGates,
+    #[rust]
     front: Option<LiveId>,
     /// Surfaces whose own panel asked to close, for the host to close.
     #[rust]
@@ -467,6 +469,7 @@ impl ScriptHook for MiniAppsSurfaceDeck {
     fn on_before_apply(&mut self, _vm: &mut ScriptVm, apply: &Apply, _scope: &mut Scope, _value: ScriptValue) {
         if apply.is_reload() {
             self.template = None;
+            self.frame_gates.mark_all_wanting_frame();
         }
     }
 
@@ -534,28 +537,39 @@ impl Widget for MiniAppsSurfaceDeck {
             return;
         }
         for (id, surface) in &self.surfaces {
-            if input && Some(*id) != self.front {
+            let visible = self.visible && Some(*id) == self.front;
+            if input && !visible {
                 continue;
             }
-            let emitted = cx.capture_actions(|cx| surface.handle_event(cx, event, scope));
-            let mut kept = ActionsBuf::new();
-            for action in emitted {
-                if matches!(action.downcast_ref(), Some(MiniAppsAction::Close)) {
-                    if !self.close_requests.contains(id) {
-                        self.close_requests.push(*id);
+            self.frame_gates.get_or_insert(surface.widget_uid()).deliver_event(
+                cx,
+                event,
+                visible,
+                |cx| {
+                    let emitted = cx.capture_actions(|cx| surface.handle_event(cx, event, scope));
+                    let mut kept = ActionsBuf::new();
+                    for action in emitted {
+                        if matches!(action.downcast_ref(), Some(MiniAppsAction::Close)) {
+                            if !self.close_requests.contains(id) {
+                                self.close_requests.push(*id);
+                            }
+                            continue;
+                        }
+                        if matches!(action.downcast_ref(), Some(
+                            MiniAppsAction::OpenSignupApproval(_) | MiniAppsAction::OpenAgentChat(_)
+                            | MiniAppsAction::OpenActionsRoom(_) | MiniAppsAction::OpenToolApprovals(_)
+                        )) {
+                            self.navigated = true;
+                        }
+                        kept.push(action);
                     }
-                    continue;
-                }
-                if matches!(action.downcast_ref(), Some(
-                    MiniAppsAction::OpenSignupApproval(_) | MiniAppsAction::OpenAgentChat(_)
-                    | MiniAppsAction::OpenActionsRoom(_) | MiniAppsAction::OpenToolApprovals(_)
-                )) {
-                    self.navigated = true;
-                }
-                kept.push(action);
-            }
-            cx.extend_actions(kept);
+                    cx.extend_actions(kept);
+                },
+            );
         }
+        self.frame_gates.prune(self.surfaces.len(), |uid| {
+            self.surfaces.iter().any(|(_, surface)| surface.widget_uid() == uid)
+        });
     }
 
     fn draw_walk(&mut self, cx: &mut Cx2d, scope: &mut Scope, walk: Walk) -> DrawStep {
@@ -564,6 +578,7 @@ impl Widget for MiniAppsSurfaceDeck {
         }
         cx.begin_turtle(walk, self.layout);
         if let Some(surface) = self.front_surface() {
+            self.frame_gates.get_or_insert(surface.widget_uid()).mark_drawn(cx);
             surface.draw_all(cx, scope);
         }
         cx.end_turtle_with_area(&mut self.area);

@@ -7,9 +7,18 @@ use ruma::{OwnedEventId, OwnedRoomId, OwnedUserId};
 use crate::article_app::{ArticleAction, ArticlePanelWidgetRefExt};
 use crate::shared::navigation_bar_button::{NavigationBarButtonAction, NavigationBarButtonWidgetExt};
 use super::attachment_download::{DownloadableAttachment, MediaDownloadResult, markdown_source};
+use super::document_preview::DocumentPreview;
 use super::web_browser_session::{ReaderSession, ReaderTab};
 
 const CAPTION_PADDING: f64 = if cfg!(target_os = "macos") { 28.0 } else { 0.0 };
+
+/// A document made in the app itself, which the reader tab that shows it can save as a file.
+/// A chat attachment needs none: its message has the button that downloads it.
+#[derive(Clone, Debug)]
+pub struct SavedCopy {
+    pub filename: String,
+    pub bytes: Arc<[u8]>,
+}
 
 #[derive(Clone, Debug)]
 pub enum WebBrowserAction {
@@ -19,6 +28,14 @@ pub enum WebBrowserAction {
         source: Arc<str>,
         account: Option<OwnedUserId>,
         attachment: Option<DownloadableAttachment>,
+        save: Option<SavedCopy>,
+    },
+    OpenAttachment {
+        title: String,
+        preview: DocumentPreview,
+        account: Option<OwnedUserId>,
+        epoch: u64,
+        save: Option<SavedCopy>,
     },
     ReadArticle {
         room: OwnedRoomId,
@@ -33,8 +50,14 @@ pub enum WebBrowserAction {
 
 impl WebBrowserAction {
     pub fn allowed(&self) -> bool {
-        !matches!(self, Self::OpenMarkdown { account, .. } | Self::Restore { account, .. } if account.as_ref() != crate::sliding_sync::current_user_id().as_ref()
-            || crate::logout::logout_state_machine::is_logout_in_progress())
+        let account = match self {
+            Self::OpenMarkdown { account, .. } | Self::Restore { account, .. } => account,
+            Self::OpenAttachment { account, epoch, .. } if *epoch == crate::account_session::epoch() => account,
+            Self::OpenAttachment { .. } => return false,
+            _ => return true,
+        };
+        account.as_ref() == crate::sliding_sync::current_user_id().as_ref()
+            && !crate::logout::logout_state_machine::is_logout_in_progress()
     }
 }
 
@@ -115,6 +138,7 @@ script_mod! {
                     draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular {font_size: (10 * mod.widgets.RINX_TEXT_SCALE)}}
                 }
             }
+            web_save := mod.widgets.WebBrowserIconButton {visible: false icon.draw_icon.svg: (ICON_DOWNLOAD)}
             web_external := mod.widgets.WebBrowserIconButton {icon.draw_icon.svg: (ICON_EXTERNAL_LINK)}
         }
         SolidView {width: Fill height: 1 draw_bg.color: mod.widgets.RINX_BORDER}
@@ -182,6 +206,8 @@ struct WebTab {
     spawned: bool,
     location: Option<ReaderTab>,
     status: Option<String>,
+    preview: Option<DocumentPreview>,
+    save: Option<SavedCopy>,
 }
 
 impl WebTab {
@@ -304,6 +330,8 @@ impl WebBrowser {
             title: String::new(),
             spawned,
             status: None,
+            preview: None,
+            save: None,
         });
         self.select_tab(cx, self.tabs.len() - 1);
     }
@@ -319,12 +347,30 @@ impl WebBrowser {
         })
     }
 
+    fn open_attachment(&mut self, cx: &mut Cx, title: String, preview: DocumentPreview, save: Option<SavedCopy>) {
+        let id = LiveId::from_str(&format!("rinx.document.tab.{}", LiveId::unique().0));
+        Self::spawn_webview(cx, id, preview.url(), self.session_account.as_ref());
+        self.tabs.push(WebTab {
+            id,
+            original_url: None,
+            article: None,
+            title,
+            spawned: true,
+            location: None,
+            status: None,
+            preview: Some(preview),
+            save,
+        });
+        self.select_tab(cx, self.tabs.len() - 1);
+    }
+
     fn open_document(
         &mut self,
         cx: &mut Cx,
         panel: WidgetRef,
         title: String,
         location: Option<ReaderTab>,
+        save: Option<SavedCopy>,
     ) {
         self.tabs.push(WebTab {
             id: LiveId::from_str(&format!("rinx.document.tab.{}", LiveId::unique().0)),
@@ -334,6 +380,8 @@ impl WebBrowser {
             spawned: false,
             location,
             status: None,
+            preview: None,
+            save,
         });
         self.select_tab(cx, self.tabs.len() - 1);
     }
@@ -353,6 +401,7 @@ impl WebBrowser {
             panel,
             crate::i18n::tr("Read full article").into(),
             Some(ReaderTab::Article { room, event }),
+            None,
         );
     }
 
@@ -386,6 +435,8 @@ impl WebBrowser {
                         spawned: false,
                         location: Some(location.clone()),
                         status: Some(crate::i18n::tr("Loading file preview...").into()),
+                        preview: None,
+                        save: None,
                     });
                     self.select_tab(cx, self.tabs.len() - 1);
                     let account = self.session_account.clone();
@@ -514,6 +565,8 @@ impl WebBrowser {
         let url = tab.original_url.clone();
         let title = tab.title();
         let status = tab.status.clone();
+        let is_attachment = tab.preview.is_some();
+        let can_save = tab.save.is_some();
         let is_web = url.is_some();
         for path in [
             ids!(web_back),
@@ -523,6 +576,7 @@ impl WebBrowser {
         ] {
             self.widget(cx, path).set_visible(cx, is_web);
         }
+        self.widget(cx, ids!(web_save)).set_visible(cx, can_save);
         self.label(cx, ids!(web_status)).set_visible(cx, false);
         let Some(url) = url else {
             if let Some(status) = status {
@@ -531,7 +585,7 @@ impl WebBrowser {
             }
             self.label(cx, ids!(web_title)).set_text(cx, &title);
             self.label(cx, ids!(web_address))
-                .set_text(cx, crate::i18n::tr("Read full article"));
+                .set_text(cx, crate::i18n::tr(if is_attachment { "File preview" } else { "Read full article" }));
             return;
         };
         self.label(cx, ids!(web_title))
@@ -632,8 +686,13 @@ impl Widget for WebBrowser {
                 if let Some(navigation) = action.downcast_ref::<NativeSystemBrowserNavigation>() {
                     if let Some(tab) = self.tabs.iter_mut().find(|tab| tab.id.0 == navigation.browser_id) {
                         if let Some(error) = &navigation.error {
-                            log!("In-app browser failed: {}", error);
-                            tab.status = Some(crate::i18n::tr("Unable to load this page in the app. Use Open in browser.").to_string());
+                            let message = if tab.preview.is_some() {
+                                "File preview unavailable. You can download the original from chat."
+                            } else {
+                                log!("In-app browser failed: {}", error);
+                                "Unable to load this page in the app. Use Open in browser."
+                            };
+                            tab.status = Some(crate::i18n::tr(message).to_owned());
                         } else if navigation.loading {
                             tab.status = None;
                         }
@@ -669,6 +728,7 @@ impl Widget for WebBrowser {
                 (ids!(web_forward), "Forward"),
                 (ids!(web_reopen), "Reopen link"),
                 (ids!(web_external), "Open in browser"),
+                (ids!(web_save), "Save a copy"),
             ] {
                 let button = self.navigation_bar_button(cx, path);
                 if let Some(action) = actions.find_widget_action(button.widget_uid()) {
@@ -739,6 +799,11 @@ impl Widget for WebBrowser {
                     if let Some(url) = &tab.original_url {
                         crate::utils::open_url_external(url.as_str());
                     }
+                }
+            }
+            if self.navigation_bar_button(cx, ids!(web_save)).clicked(actions) {
+                if let Some(copy) = self.active().and_then(|tab| tab.save.clone()) {
+                    super::attachment_download::save_loaded_attachment(copy.filename, copy.bytes);
                 }
             }
         }
@@ -836,6 +901,7 @@ impl WebBrowserRef {
                 title,
                 source,
                 attachment,
+                save,
                 ..
             } => {
                 let panel = WebBrowser::new_article_panel(cx);
@@ -857,7 +923,12 @@ impl WebBrowserRef {
                     attachment
                         .clone()
                         .map(|attachment| ReaderTab::Markdown { attachment }),
+                    save.clone(),
                 );
+                modal.open(cx);
+            }
+            WebBrowserAction::OpenAttachment { title, preview, save, .. } => {
+                inner.open_attachment(cx, title.clone(), preview.clone(), save.clone());
                 modal.open(cx);
             }
             WebBrowserAction::ReadArticle { room, event } => {
@@ -1003,6 +1074,36 @@ mod session_tests {
     }
 
     #[test]
+    fn a_tab_saves_the_document_the_app_made_for_it() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let browser = browser(&mut cx);
+        let open = |title: &str, save: Option<SavedCopy>| WebBrowserAction::OpenMarkdown {
+            title: title.into(),
+            source: format!("# {title}\n\nText.").into(),
+            account: None,
+            attachment: None,
+            save,
+        };
+        let copy = SavedCopy { filename: "answer.md".into(), bytes: Arc::from(&b"# Answer"[..]) };
+        browser.action(&mut cx, ModalRef::default(), &open("Answer", Some(copy)));
+        {
+            let inner = browser.borrow().unwrap();
+            assert_eq!(inner.tabs.len(), 1);
+            assert_eq!(inner.tabs[0].save.as_ref().map(|copy| copy.filename.as_str()), Some("answer.md"));
+            assert!(inner.widget(&mut cx, ids!(web_save)).visible());
+            // What the app made is not a place to go back to after a restart.
+            assert!(inner.session().tabs.is_empty());
+        }
+        // A document out of chat is saved from its message, not from its tab.
+        browser.action(&mut cx, ModalRef::default(), &open("Notes", None));
+        let mut inner = browser.borrow_mut().unwrap();
+        assert_eq!(inner.active_tab, Some(1));
+        assert!(!inner.widget(&mut cx, ids!(web_save)).visible());
+        inner.select_tab(&mut cx, 0);
+        assert!(inner.widget(&mut cx, ids!(web_save)).visible());
+    }
+
+    #[test]
     fn late_markdown_download_cannot_reopen_a_closed_tab_or_switch_the_active_tab() {
         let mut cx = Cx::new(Box::new(|_, _| {}));
         let browser = browser(&mut cx);
@@ -1016,6 +1117,8 @@ mod session_tests {
             spawned: false,
             location: None,
             status: Some("Loading".into()),
+            preview: None,
+            save: None,
         });
         inner.open(&mut cx, "https://example.org".parse().unwrap());
         let result = RestoredMarkdown {
