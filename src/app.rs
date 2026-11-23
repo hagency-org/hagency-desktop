@@ -1199,31 +1199,28 @@ impl MatchEvent for App {
                 Some(DirectMessageRoomAction::DidNotExist { user_profile }) => {
                     let user_profile = user_profile.clone();
                     let body_text = match &user_profile.username {
-                        Some(un) if !un.is_empty() => format!(
-                            "You don't have an existing direct message room with {} ({}).\n\n\
-                            Would you like to create one now?",
-                            un,
-                            user_profile.user_id,
+                        Some(un) if !un.is_empty() => crate::i18n::format(
+                            "You don't have an existing direct message room with {name} ({user_id}).\n\nWould you like to create one now?",
+                            &[("name", un.clone()), ("user_id", user_profile.user_id.to_string())],
                         ),
-                        _ => format!(
-                            "You don't have an existing direct message room with {}.\n\n\
-                            Would you like to create one now?",
-                            user_profile.user_id,
+                        _ => crate::i18n::format(
+                            "You don't have an existing direct message room with {user_id}.\n\nWould you like to create one now?",
+                            &[("user_id", user_profile.user_id.to_string())],
                         ),
                     };
                     positive_confirmation_modal_content.show(
                         cx,
                         ConfirmationModalContent {
-                            title_text: "Create New Direct Message".into(),
+                            title_text: crate::i18n::tr("Create New Direct Message").into(),
                             body_text: body_text.into(),
-                            accept_button_text: Some("Create DM".into()),
+                            accept_button_text: Some(crate::i18n::tr("Create DM").into()),
                             on_accept_clicked: Some(Box::new(move |_cx| {
                                 submit_async_request(MatrixRequest::OpenOrCreateDirectMessage {
                                     user_profile,
                                     allow_create: true,
                                 });
                                 enqueue_popup_notification(
-                                    "Sending request to create DM room...\n\nThe room will be shown once it has been created by the homeserver.".to_string(),
+                                    crate::i18n::tr("Sending request to create DM room...\n\nThe room will be shown once it has been created by the homeserver.").to_string(),
                                     PopupKind::Info,
                                     Some(10.0),
                                 );

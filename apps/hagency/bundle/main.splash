@@ -17189,7 +17189,7 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
 
 mod.widgets.HagencyCard = RoundedView{width:Fill height:Fit flow:Down padding:(20 * mod.widgets.RINX_SPACING) spacing:12
     draw_bg +: {color:mod.widgets.RINX_SURFACE border_color:mod.widgets.RINX_BORDER border_size:0.5 border_radius:(theme.corner_radius + 4)}}
-mod.widgets.HagencyButton = mod.widgets.RinxKeyButton{height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) draw_bg +: {border_size:0.5 color:mod.widgets.RINX_FIELD}}
+mod.widgets.HagencyButton = mod.widgets.RinxKeyButton{width:Fit height:max(44,mod.widgets.RINX_CONTROL_HEIGHT) draw_bg +: {border_size:0.5 color:mod.widgets.RINX_FIELD}}
 mod.widgets.HagencyIconButton = mod.widgets.HagencyButton{width:44 height:44 text:"" icon_walk:Walk{width:18 height:18}}
 mod.widgets.HagencyTitle = mod.widgets.RinxPageTitle{width:Fill padding:0 flow:Flow.Right{wrap:true}}
 mod.widgets.HagencyCopy = mod.widgets.RinxLabel{width:Fill padding:0 flow:Flow.Right{wrap:true}}

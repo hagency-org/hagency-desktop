@@ -1052,7 +1052,11 @@ async fn tick(native: &NativeOwner) -> Result<(), NativeError> {
     }
     let mut completion = match result {
         Ok(v) => json!({"state":"succeeded","result":v,"errorCode":null}),
-        Err(e) => json!({"state":"failed","result":null,"errorCode":stable_error(&e)}),
+        Err(e) => {
+            // The server only learns the stable code; keep the actual one where the owner can find it.
+            tracing::warn!(operation = %w.operation, code = %e.code, reported = stable_error(&e), "execution-device configuration request failed");
+            json!({"state":"failed","result":null,"errorCode":stable_error(&e)})
+        }
     };
     if serde_json::to_vec(&completion)
         .map_err(|_| invalid())?

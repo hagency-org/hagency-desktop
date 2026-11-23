@@ -213,7 +213,11 @@ impl Widget for InviteModal {
                 list.set_item_range(cx, 0, self.offered.len().max(1));
                 while let Some(index) = list.next_visible_item(cx) {
                     if self.offered.is_empty() {
-                        list.item(cx, index, id!(Empty)).draw_all(cx, scope);
+                        // The list hands out rows past its range to fill the
+                        // viewport; show the hint only once.
+                        if index == 0 {
+                            list.item(cx, index, id!(Empty)).draw_all(cx, scope);
+                        }
                         continue;
                     }
                     let Some((id, name)) = self.offered.get(index) else {continue;};
@@ -376,7 +380,7 @@ impl InviteModal {
     fn finish_invite(&mut self, cx: &mut Cx, result: &InviteResultAction) {
         let (room, user, epoch) = match result {
             InviteResultAction::Agent {room_id,user_id,epoch,..} | InviteResultAction::Waiting {room_id,user_id,epoch} => (room_id,user_id,*epoch),
-            InviteResultAction::Sent {room_id,user_id} | InviteResultAction::Failed {room_id,user_id,..} => (room_id,user_id,self.epoch),
+            InviteResultAction::Sent {room_id,user_id,..} | InviteResultAction::Failed {room_id,user_id,..} => (room_id,user_id,self.epoch),
         };
         if self.epoch != crate::account_session::epoch() || epoch != self.epoch
             || self.room_name_id.as_ref().is_none_or(|r| r.room_id() != room)
@@ -389,7 +393,8 @@ impl InviteModal {
             InviteResultAction::Agent {result:Ok(true),..} => (crate::i18n::tr("Agent joined this room. In group chats, @ the Agent to ask it to reply.").to_owned(),false,true,false),
             InviteResultAction::Agent {result:Ok(false),..} => (crate::i18n::tr("The request is saved. The Agent is still joining. You can close this panel or check its status.").to_owned(),false,false,true),
             InviteResultAction::Agent {result:Err(code),..} => (crate::i18n::tr(super::mobile_chat_info::agent_binding_error(code)).to_owned(),true,false,false),
-            InviteResultAction::Sent {..} => (crate::i18n::tr("Invitation sent. Waiting for them to join.").to_owned(),false,true,false),
+            InviteResultAction::Sent {history_not_shared: None, ..} => (crate::i18n::tr("Invitation sent. Waiting for them to join.").to_owned(),false,true,false),
+            InviteResultAction::Sent {history_not_shared: Some(_), ..} => (crate::i18n::tr("Invitation sent. Waiting for them to join. This device could not share the room's earlier encrypted messages (it may not be verified), so they may not see messages from before they join.").to_owned(),false,true,false),
             InviteResultAction::Failed {error,..} => (crate::i18n::format("Failed to send invite.\n\nError: {error}", &[("error", error.to_string())]),true,false,false),
         };
         self.status(cx, &text, error);
@@ -517,7 +522,11 @@ impl InviteModal {
                 };
                 for member in members {
                     let id = member.user_id().to_owned();
-                    if Some(&id) == me.as_ref() || present.contains(&id) || people.iter().any(|(p, _)| p == &id) {
+                    if Some(&id) == me.as_ref()
+                        || present.contains(&id)
+                        || crate::utils::is_hagency_infrastructure(&id)
+                        || people.iter().any(|(p, _)| p == &id)
+                    {
                         continue;
                     }
                     people.push((id, member.display_name().map(str::to_owned)));
@@ -617,7 +626,7 @@ impl InviteModalRef {
         let epoch=inner.epoch;
         let result=match scenario {
             "slow" => InviteResultAction::Waiting {room_id,user_id,epoch},
-            "human" => InviteResultAction::Sent {room_id,user_id},
+            "human" => InviteResultAction::Sent {room_id,user_id,history_not_shared:None},
             "stale" => InviteResultAction::Agent {room_id,user_id,epoch:epoch.wrapping_add(1),result:Ok(true)},
             "other-room" => InviteResultAction::Agent {room_id:"!other:example.invalid".try_into().unwrap(),user_id,epoch,result:Ok(true)},
             _ => InviteResultAction::Agent {room_id,user_id,epoch,result:match scenario {"success"=>Ok(true),"pending"=>Ok(false),code=>Err(code.into())}},

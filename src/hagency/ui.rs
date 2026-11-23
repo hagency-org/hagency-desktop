@@ -481,6 +481,27 @@ fn card_template(count: usize, index: usize) -> LiveId {
 fn array(v: &Value, key: &str) -> Vec<Value> {
     v[key].as_array().cloned().unwrap_or_default()
 }
+/// The server names a Project after its Matrix Space, but sends no name when it
+/// cannot read the Space. Fall back to the Space's name this client has synced,
+/// so the Project picker shows a name rather than only `prj_…`.
+fn fill_project_names(rows: &mut [Value], local_name: impl Fn(&str) -> Option<String>) {
+    for row in rows {
+        if !string(row, "name").is_empty() || !string(row, "displayName").is_empty() {
+            continue;
+        }
+        if let Some(name) = local_name(string(row, "spaceId")).filter(|name| !name.trim().is_empty()) {
+            row["name"] = Value::String(name);
+        }
+    }
+}
+fn projects_with_names(value: &Value) -> Vec<Value> {
+    let mut rows = array(value, "projects");
+    fill_project_names(&mut rows, |space| {
+        let space = matrix_sdk::ruma::RoomId::parse(space).ok()?;
+        crate::sliding_sync::get_client()?.get_room(&space)?.name()
+    });
+    rows
+}
 
 script_mod! {
     use mod.prelude.widgets.*
@@ -2369,7 +2390,7 @@ impl HagencyPanel {
                 self.run(cx, Target::Projects, Command::Projects);
             }
             Target::Projects => {
-                self.projects = array(value, "projects");
+                self.projects = projects_with_names(value);
                 self.labels(cx, ids!(projects), "Select a Project", &self.projects, "id");
                 self.labels(
                     cx,
@@ -2457,7 +2478,7 @@ impl HagencyPanel {
                 self.execution_devices = array(value, "devices");
                 self.current_device_id = string(value, "currentDeviceId").into();
                 self.devices_loaded = value["devices"].is_array() && !self.current_device_id.is_empty();
-                self.projects = array(value, "projects");
+                self.projects = projects_with_names(value);
                 self.refresh_runtime_list(cx);
                 self.labels(cx, ids!(agents), "Select my Agent", &self.agents, "id");
                 self.labels(
@@ -4525,6 +4546,22 @@ mod tests {
         assert_eq!(body["expectedWorkspace"], "/project");
         let parsed: ::hagency::native_owner::RuntimeStartRequest = serde_json::from_value(body).unwrap();
         assert!(parsed.shared_workspace && parsed.expected_workspace.as_deref() == Some("/project"));
+    }
+    #[test]
+    fn project_picker_falls_back_to_the_synced_space_name() {
+        let mut rows = vec![
+            json!({"id":"prj_named","spaceId":"!a:x","name":"Server name"}),
+            json!({"id":"prj_unnamed","spaceId":"!b:x","name":null}),
+            json!({"id":"prj_unknown","spaceId":"!c:x"}),
+        ];
+        super::fill_project_names(&mut rows, |space| match space {
+            "!a:x" => Some("Local A".into()),
+            "!b:x" => Some("GitFab 测试".into()),
+            _ => None,
+        });
+        assert_eq!(rows[0]["name"], "Server name");
+        assert_eq!(rows[1]["name"], "GitFab 测试");
+        assert!(rows[2]["name"].is_null());
     }
     #[test]
     fn web_search_default_toggle_save_and_reload_use_the_agent_profile() {
