@@ -162,7 +162,7 @@ impl Widget for MentionableTextInput {
                 if let Some(results) = action.downcast_ref::<MentionMatches>() {
                     if results.owner == uid && results.request_id == self.request_id
                         && results.epoch == crate::account_session::epoch() {
-                        let empty = self.active_trigger.map_or("", |t| t.kind.empty_message());
+                        let empty = self.active_trigger.map_or("", |t| crate::i18n::tr(t.kind.empty_message()));
                         popup_ref.set_results(cx, uid, results.items.clone(), false, empty);
                     }
                 }
@@ -260,7 +260,7 @@ impl MentionableTextInput {
         let anchor = self.popup_anchor(cx);
         let trigger_start = self.active_trigger.map_or(0, |t| t.start_byte);
         let popup_ref = self.popup_ref(cx);
-        popup_ref.show(cx, uid, anchor, trigger_start, kind.header(), kind.loading_message());
+        popup_ref.show(cx, uid, anchor, trigger_start, crate::i18n::tr(kind.header()), crate::i18n::tr(kind.loading_message()));
 
         match kind {
             TriggerKind::User => self.match_members(cx, &popup_ref, query),
@@ -277,7 +277,7 @@ impl MentionableTextInput {
                     .chain(crate::agent_access::commands::matching(crate::agent_access::commands::enabled(self.room_id.as_deref(), self.room_members.as_deref().map(Vec::as_slice)), query))
                     .map(MentionItem::Command)
                     .collect();
-                popup_ref.set_results(cx, uid, Arc::new(items), false, kind.empty_message());
+                popup_ref.set_results(cx, uid, Arc::new(items), false, crate::i18n::tr(kind.empty_message()));
             }
         }
     }
@@ -293,11 +293,11 @@ impl MentionableTextInput {
                 MentionItem::User {user_id, display_name, ..} => user_match_priority(&display_name.to_lowercase(), &user_id.localpart().to_lowercase(), &query).is_some(),
                 _ => false,
             }).cloned().collect();
-            popup_ref.set_results(cx, uid, Arc::new(items), false, TriggerKind::User.empty_message());
+            popup_ref.set_results(cx, uid, Arc::new(items), false, crate::i18n::tr(TriggerKind::User.empty_message()));
             return;
         }
         // Show the loading spinner while we wait for the member list / ranking.
-        popup_ref.set_results(cx, uid, Arc::new(Vec::new()), true, TriggerKind::User.empty_message());
+        popup_ref.set_results(cx, uid, Arc::new(Vec::new()), true, crate::i18n::tr(TriggerKind::User.empty_message()));
 
         let (Some(_), Some(members)) = (self.room_id.as_ref(), self.room_members.clone()) else {
             // Room members not yet available, just keep showing the loading spinner for now
@@ -324,7 +324,7 @@ impl MentionableTextInput {
         let uid = self.widget_uid();
         self.request_id = self.request_id.wrapping_add(1);
         // Show the loading spinner while the worker task does the rooms/spaces ranking.
-        popup_ref.set_results(cx, uid, Arc::new(Vec::new()), true, TriggerKind::Room.empty_message());
+        popup_ref.set_results(cx, uid, Arc::new(Vec::new()), true, crate::i18n::tr(TriggerKind::Room.empty_message()));
 
         submit_async_request(MatrixRequest::GetMatchingRooms {
             query: query.to_string(),
@@ -712,6 +712,7 @@ fn rank_members(
         .iter()
         .enumerate()
         .filter(|(_, m)| current_user.as_deref() != Some(m.user_id()))
+        .filter(|(_, m)| !crate::utils::is_hagency_infrastructure(m.user_id()))
         .filter_map(|(i, m)| {
             let display_lower = member_display_name(m).to_lowercase();
             let localpart_lower = m.user_id().localpart().to_lowercase();

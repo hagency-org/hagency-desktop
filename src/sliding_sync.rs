@@ -1558,9 +1558,13 @@ async fn matrix_worker_task(
                             }
                         }
                         match invite_result {
-                            Ok(_) => Cx::post_action(InviteResultAction::Sent {
+                            Ok(history) => Cx::post_action(InviteResultAction::Sent {
                                 room_id,
                                 user_id,
+                                history_not_shared: match history {
+                                    crate::utils::InviteHistory::NotShared(reason) => Some(reason),
+                                    _ => None,
+                                },
                             }),
                             Err(error) => Cx::post_action(InviteResultAction::Failed {
                                 room_id,

@@ -17,24 +17,151 @@ use crate::{
 /// The scheme for GEO links, used for location messages in Matrix.
 pub const GEO_URI_SCHEME: &str = "geo:";
 
+/// What an invitation did with the room's encrypted history.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum InviteHistory {
+    /// The room is not encrypted; there is no history to share.
+    NotNeeded,
+    /// The invitation was sent. The SDK shares the room's history on invite when this device has a
+    /// cross-signing identity and the room's history visibility allows it, and otherwise skips it
+    /// silently, so whether history was shared is not known here.
+    Sent,
+    /// The invitation was sent, but the history could not be shared (for example from an
+    /// unverified device); the invitee may not read messages from before they joined.
+    NotShared(String),
+}
+
 /// Unencrypted rooms and Spaces have no E2EE history to share. The pinned SDK
-/// attempts history sharing before every invite when that feature is enabled.
-/// Keep that behavior for encrypted rooms, without making plaintext invitations
-/// depend on the existence of a room-key backup.
+/// attempts history sharing before every invite when that feature is enabled, and
+/// gives up on the invitation when sharing fails. Sharing history is an extra: in an
+/// encrypted room the invitation is still sent, and the caller learns history was not
+/// shared. A failure of the invitation itself (no permission, banned user) is returned.
 pub(crate) async fn invite_room_member(
     room: &matrix_sdk::Room,
     user: &matrix_sdk::ruma::UserId,
-) -> matrix_sdk::Result<()> {
+) -> matrix_sdk::Result<InviteHistory> {
     use matrix_sdk::ruma::api::client::membership::invite_user::v3::{
         InvitationRecipient, InviteUserId, Request,
     };
-    if !matches!(crate::room_encryption::confirmed_state(room).await?, matrix_sdk::EncryptionState::NotEncrypted) {
-        return room.invite_user_by_id(user).await;
+    let send_invite = || async {
+        let recipient = InvitationRecipient::UserId(InviteUserId::new(user.to_owned()));
+        room.client().send(Request::new(room.room_id().to_owned(), recipient)).await?;
+        room.mark_members_missing();
+        Ok::<(), matrix_sdk::Error>(())
+    };
+    if matches!(crate::room_encryption::confirmed_state(room).await?, matrix_sdk::EncryptionState::NotEncrypted) {
+        send_invite().await?;
+        return Ok(InviteHistory::NotNeeded);
     }
-    let recipient = InvitationRecipient::UserId(InviteUserId::new(user.to_owned()));
-    room.client().send(Request::new(room.room_id().to_owned(), recipient)).await?;
-    room.mark_members_missing();
-    Ok(())
+    invite_sharing_history(
+        room.invite_user_by_id(user),
+        || already_invited(room, user),
+        send_invite,
+        |history_error| {
+            makepad_widgets::warning!(
+                "Inviting {user} to {} without sharing history: {history_error}",
+                room.room_id()
+            );
+        },
+    ).await
+}
+
+/// Whether the homeserver already has `user` invited to or joined in `room`. Asked of the server,
+/// not the local store, which may not have synced the invitation yet.
+async fn already_invited(room: &matrix_sdk::Room, user: &matrix_sdk::ruma::UserId) -> matrix_sdk::Result<bool> {
+    use matrix_sdk::{config::RequestConfig, ruma::{api::{client::state::get_state_event_for_key, error::ErrorKind}, events::StateEventType}};
+    let request = get_state_event_for_key::v3::Request::new(room.room_id().to_owned(), StateEventType::RoomMember, user.to_string());
+    match room.client().send(request).with_request_config(RequestConfig::short_retry()).await {
+        Ok(response) => {
+            let content = response.into_content().deserialize_as_unchecked::<serde_json::Value>()?;
+            Ok(matches!(content["membership"].as_str(), Some("invite" | "join")))
+        }
+        Err(error) if error.client_api_error_kind() == Some(&ErrorKind::NotFound) => Ok(false),
+        Err(error) => Err(error.into()),
+    }
+}
+
+/// Tries the SDK invitation that shares history first. If it fails, the SDK may have failed
+/// sharing (nothing was sent) or the invitation itself (it may have reached the server). The
+/// homeserver is asked which: an invitation already there is not sent again; otherwise the plain
+/// invitation is sent once, and its own failure is the caller's error. When the server cannot be
+/// asked, the first error is returned rather than risking a second invitation.
+async fn invite_sharing_history<Check, CheckFut, Plain, PlainFut>(
+    sharing: impl std::future::Future<Output = matrix_sdk::Result<()>>,
+    invited: Check,
+    plain: Plain,
+    on_history_error: impl FnOnce(&matrix_sdk::Error),
+) -> matrix_sdk::Result<InviteHistory>
+where
+    Check: FnOnce() -> CheckFut,
+    CheckFut: std::future::Future<Output = matrix_sdk::Result<bool>>,
+    Plain: FnOnce() -> PlainFut,
+    PlainFut: std::future::Future<Output = matrix_sdk::Result<()>>,
+{
+    match sharing.await {
+        Ok(()) => Ok(InviteHistory::Sent),
+        Err(history_error) => {
+            match invited().await {
+                Ok(true) => return Ok(InviteHistory::Sent),
+                Ok(false) => {}
+                Err(_) => return Err(history_error),
+            }
+            on_history_error(&history_error);
+            plain().await?;
+            Ok(InviteHistory::NotShared(history_error.to_string()))
+        }
+    }
+}
+
+#[cfg(test)]
+mod invite_history_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    async fn run(
+        sharing: matrix_sdk::Result<()>,
+        invited: matrix_sdk::Result<bool>,
+        plain: matrix_sdk::Result<()>,
+    ) -> (matrix_sdk::Result<InviteHistory>, usize) {
+        let plain_sent = AtomicUsize::new(0);
+        let history = invite_sharing_history(
+            async { sharing },
+            || async { invited },
+            || async { plain_sent.fetch_add(1, Ordering::SeqCst); plain },
+            |_| {},
+        ).await;
+        (history, plain_sent.load(Ordering::SeqCst))
+    }
+
+    #[tokio::test]
+    async fn a_failed_history_share_sends_the_plain_invitation_once() {
+        let (history, sent) = run(Err(matrix_sdk::Error::NoOlmMachine), Ok(false), Ok(())).await;
+        assert!(matches!(history, Ok(InviteHistory::NotShared(_))), "{history:?}");
+        assert_eq!(sent, 1);
+    }
+
+    #[tokio::test]
+    async fn an_invitation_already_on_the_server_is_not_sent_again() {
+        let (history, sent) = run(Err(matrix_sdk::Error::NoOlmMachine), Ok(true), Ok(())).await;
+        assert_eq!(history.unwrap(), InviteHistory::Sent);
+        assert_eq!(sent, 0, "no second invitation");
+    }
+
+    #[tokio::test]
+    async fn when_the_server_cannot_be_asked_the_first_error_is_returned_without_resending() {
+        let (history, sent) = run(Err(matrix_sdk::Error::NoOlmMachine), Err(matrix_sdk::Error::InsufficientData), Ok(())).await;
+        assert!(matches!(history, Err(matrix_sdk::Error::NoOlmMachine)), "{history:?}");
+        assert_eq!(sent, 0);
+    }
+
+    #[tokio::test]
+    async fn a_sent_invitation_claims_nothing_about_history_and_a_refused_plain_invite_is_an_error() {
+        let (history, sent) = run(Ok(()), Ok(false), Ok(())).await;
+        assert_eq!(history.unwrap(), InviteHistory::Sent);
+        assert_eq!(sent, 0);
+        let (refused, _) = run(Err(matrix_sdk::Error::NoOlmMachine), Ok(false), Err(matrix_sdk::Error::InsufficientData)).await;
+        assert!(refused.is_err());
+    }
 }
 
 /// Opens the given URL or shows an error popup.
@@ -1779,4 +1906,24 @@ mod tests_ends_with_href {
 pub fn unwrapped_text_width(cx: &mut Cx, draw_text: &makepad_widgets::DrawText, text: &str) -> f64 {
     draw_text.layout(cx, 0.0, 0.0, None, false, makepad_widgets::Align::default(), text).size_in_lpxs.width as f64
         * draw_text.font_scale as f64
+}
+
+/// A Hagency infrastructure account (the server's `_hagency_service` and similar), which people
+/// should neither mention nor invite. Agents (`_hagency_agt_…`) are not infrastructure.
+pub fn is_hagency_infrastructure(user: &matrix_sdk::ruma::UserId) -> bool {
+    let localpart = user.localpart();
+    localpart.starts_with("_hagency_") && !localpart.starts_with("_hagency_agt_")
+}
+
+#[cfg(test)]
+mod infrastructure_account_tests {
+    use super::is_hagency_infrastructure;
+    use matrix_sdk::ruma::user_id;
+
+    #[test]
+    fn the_service_account_is_infrastructure_and_agents_and_people_are_not() {
+        assert!(is_hagency_infrastructure(user_id!("@_hagency_service:river.example")));
+        assert!(!is_hagency_infrastructure(user_id!("@_hagency_agt_01abc:river.example")));
+        assert!(!is_hagency_infrastructure(user_id!("@alex:river.example")));
+    }
 }

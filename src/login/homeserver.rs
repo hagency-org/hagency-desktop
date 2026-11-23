@@ -642,7 +642,14 @@ mod tests {
                     received.lock().unwrap().push((route.clone(), json.clone()));
                     let mut status = "200 OK";
                     let response = if route.contains("/createRoom ") {
-                        serde_json::json!({"room_id":"!plain:localhost"})
+                        // A room created with an encryption state event is the encrypted fixture room.
+                        if json["initial_state"].as_array().is_some_and(|s| s.iter().any(|e| e["type"] == "m.room.encryption")) {
+                            serde_json::json!({"room_id":"!secret:localhost"})
+                        } else {
+                            serde_json::json!({"room_id":"!plain:localhost"})
+                        }
+                    } else if route.contains("/rooms/!secret:localhost/state/m.room.encryption/") {
+                        serde_json::json!({"algorithm":"m.megolm.v1.aes-sha2"})
                     } else if route.contains("/state/m.room.encryption/") {
                         status = "404 Not Found";
                         serde_json::json!({"errcode":"M_NOT_FOUND","error":"No encryption state"})
@@ -729,6 +736,34 @@ mod tests {
             route.starts_with("POST ") && route.contains("/invite ")
                 && body["user_id"] == "@guest:localhost"));
         assert!(!requests.iter().any(|(route, _)| route.contains("/room_keys/")));
+    }
+
+    #[tokio::test]
+    async fn an_encrypted_room_invitation_goes_through_the_history_sharing_invite_once() {
+        // Without a cross-signing identity the SDK skips sharing and invites directly.
+        // The fallback after a failed share is covered in utils::invite_history_tests.
+        use matrix_sdk::ruma::{api::client::room::create_room::v3::Request, events::room::encryption::RoomEncryptionEventContent, serde::Raw, events::InitialStateEvent};
+        let server = Server::new();
+        let client = Client::builder()
+            .homeserver_url(&server.url)
+            .with_enable_share_history_on_invite(true)
+            .request_config(RequestConfig::new().retry_limit(0))
+            .build().await.unwrap();
+        client.matrix_auth().login_username("fixture", "fixture").send().await.unwrap();
+        let mut request = Request::new();
+        request.initial_state = vec![Raw::new(&InitialStateEvent::with_empty_state_key(
+            RoomEncryptionEventContent::with_recommended_defaults(),
+        )).unwrap().cast_unchecked()];
+        let room = client.create_room(request).await.unwrap();
+        let history = crate::utils::invite_room_member(&room, matrix_sdk::ruma::user_id!("@guest:localhost"))
+            .await.unwrap();
+        // Without an identity the SDK skipped sharing; the result says only that the invitation went out.
+        assert_eq!(history, crate::utils::InviteHistory::Sent);
+        let requests = server.requests.lock().unwrap();
+        let invites = requests.iter().filter(|(route, body)|
+            route.starts_with("POST ") && route.contains("!secret:localhost/invite ")
+                && body["user_id"] == "@guest:localhost").count();
+        assert_eq!(invites, 1, "{requests:#?}");
     }
 
     #[tokio::test]

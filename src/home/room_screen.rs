@@ -436,6 +436,7 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_run_card_2 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 octos_action_card := mod.widgets.OctosActionCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                gitfab_stage_card := mod.widgets.GitfabStageCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_reply := mod.widgets.AgentReply {width: Fill}
                 agent_usage := mod.widgets.AgentUsage {width: Fill{max: mod.widgets.RINX_READING_WIDTH} show_toggle: false}
                 link_preview_view := mod.widgets.LinkPreview {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
@@ -488,6 +489,7 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {}
                 agent_run_card_2 := mod.widgets.AgentRunCard {}
                 octos_action_card := mod.widgets.OctosActionCard {}
+                gitfab_stage_card := mod.widgets.GitfabStageCard {}
                 agent_reply := mod.widgets.AgentReply {}
                 agent_usage := mod.widgets.AgentUsage {show_toggle: false}
             link_preview_view := mod.widgets.LinkPreview {font_size: mod.widgets.MOBILE_MESSAGE_FONT_SIZE}
@@ -680,6 +682,7 @@ script_mod! {
                 agent_run_card_1 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_run_card_2 := mod.widgets.AgentRunCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 octos_action_card := mod.widgets.OctosActionCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
+                gitfab_stage_card := mod.widgets.GitfabStageCard {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
                 agent_reply := mod.widgets.AgentReply {width: Fill}
                 agent_usage := mod.widgets.AgentUsage {width: Fill{max: mod.widgets.RINX_READING_WIDTH} show_toggle: false}
                 link_preview_view := mod.widgets.LinkPreview {width: Fill{max: mod.widgets.RINX_READING_WIDTH}}
@@ -1744,7 +1747,7 @@ impl Widget for RoomScreen {
                     // Only handle if this is for the current room.
                     if self.room_name_id.as_ref().is_some_and(|rn| rn.room_id() == room_id) {
                         enqueue_popup_notification(
-                            "Sent invite successfully.",
+                            crate::i18n::tr("Sent invite successfully."),
                             PopupKind::Success,
                             Some(4.0),
                         );
@@ -6226,6 +6229,10 @@ fn populate_message_view(
     if !used_cached_item {
         use crate::agent_chat::octos_card::OctosActionCardWidgetRefExt;
         item.octos_action_card(cx, ids!(content.octos_action_card)).populate(cx, timeline_kind.room_id(), event_tl_item);
+        {
+            use crate::agent_chat::gitfab_card::GitfabStageCardWidgetRefExt;
+            item.gitfab_stage_card(cx, ids!(content.gitfab_stage_card)).populate(cx, event_tl_item);
+        }
         populate_agent_chat_approval_card(
             cx,
             &item,
@@ -7542,6 +7549,8 @@ pub enum InviteResultAction {
     Sent {
         room_id: OwnedRoomId,
         user_id: OwnedUserId,
+        /// Set when the room's encrypted history could not be shared with the invitee.
+        history_not_shared: Option<String>,
     },
     /// The invite failed to be sent.
     ///

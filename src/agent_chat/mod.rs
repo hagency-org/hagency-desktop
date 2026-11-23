@@ -40,6 +40,7 @@ pub mod approval_card;
 pub mod question_card;
 pub mod octos;
 pub mod octos_card;
+pub mod gitfab_card;
 pub mod preferences;
 pub mod ops;
 pub mod reply;
@@ -92,6 +93,7 @@ pub fn script_mod(vm: &mut ScriptVm) {
     approval_card::script_mod(vm);
     question_card::script_mod(vm);
     octos_card::script_mod(vm);
+    gitfab_card::script_mod(vm);
     approval_inbox::script_mod(vm);
     preferences::script_mod(vm);
     reply::script_mod(vm);
