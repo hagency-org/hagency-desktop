@@ -19,6 +19,10 @@ pub(super) struct Intent {
     pub config: CreateRoomConfig,
     pub agent_space: bool,
     pub project: Option<String>,
+    /// The shared project folder asked for with an Agent space. It is not part of the
+    /// room's marker: the server keeps it when the space is registered.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub project_folder: Option<String>,
     pub room: Option<OwnedRoomId>,
     pub complete: bool,
 }
@@ -206,11 +210,21 @@ impl Journal {
     pub async fn pending(&self) -> Result<Option<Intent>> {
         self.io(|j| Ok(j.read()?.filter(|i| !i.complete))).await
     }
+    #[cfg(test)]
     pub async fn begin(
         &self,
         config: CreateRoomConfig,
         agent_space: bool,
         project: Option<String>,
+    ) -> Result<Intent> {
+        self.begin_with_folder(config, agent_space, project, None).await
+    }
+    pub async fn begin_with_folder(
+        &self,
+        config: CreateRoomConfig,
+        agent_space: bool,
+        project: Option<String>,
+        project_folder: Option<String>,
     ) -> Result<Intent> {
         config.request()?;
         self.io(move |j| {
@@ -225,6 +239,7 @@ impl Journal {
                 config,
                 agent_space,
                 project,
+                project_folder,
                 room: None,
                 complete: false,
             };
@@ -441,20 +456,22 @@ pub(super) async fn create(
     config: CreateRoomConfig,
     agent_space: bool,
     project: Option<String>,
+    project_folder: Option<String>,
 ) -> Result<Intent> {
     crate::matrix_context::ensure_current(client)?;
     let journal = Journal::for_client(client)?;
-    create_in(client, config, agent_space, project, &journal).await
+    create_in(client, config, agent_space, project, project_folder, &journal).await
 }
 async fn create_in(
     client: &Client,
     config: CreateRoomConfig,
     agent_space: bool,
     project: Option<String>,
+    project_folder: Option<String>,
     journal: &Journal,
 ) -> Result<Intent> {
     crate::matrix_context::ensure_current(client)?;
-    let intent = journal.begin(config, agent_space, project).await?;
+    let intent = journal.begin_with_folder(config, agent_space, project, project_folder).await?;
     let mut request = intent.config.request()?;
     request
         .initial_state
@@ -736,13 +753,13 @@ mod tests {
                 }).mount(&server).await;
                 let config=CreateRoomConfig{space,encrypted:!space,parent:(!space).then(||"!parent:example.org".try_into().unwrap()),..config()};
                 let mut unavailable=j.clone();unavailable.root=root.path().join("not-a-directory/owner");std::fs::write(root.path().join("not-a-directory"),b"keep").unwrap();
-                assert!(create_in(&client,config.clone(),agent,project.clone(),&unavailable).await.is_err());
+                assert!(create_in(&client,config.clone(),agent,project.clone(),None,&unavailable).await.is_err());
                 assert!(!server.received_requests().await.unwrap().iter().any(|r|r.url.path().ends_with("/createRoom")),"no createRoom before durable intent");
-                let lost=create_in(&client,config.clone(),agent,project.clone(),&j).await;
+                let lost=create_in(&client,config.clone(),agent,project.clone(),None,&j).await;
                 assert!(lost.is_err());
                 assert_eq!(server.received_requests().await.unwrap().iter().filter(|r|r.url.path().ends_with("/createRoom")).count(),1,"SDK must not replay createRoom: {lost:?}");
                 let saved=j.pending().await.unwrap().unwrap();assert!(saved.room.is_none());assert_eq!(saved.project,project);
-                assert!(create_in(&client,config.clone(),agent,None,&j).await.is_err());
+                assert!(create_in(&client,config.clone(),agent,None,None,&j).await.is_err());
                 Mock::given(method("GET")).and(path_regex(".*/joined_rooms$")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"joined_rooms":["!original:example.org"]}))).mount(&server).await;
                 let m=marker.lock().unwrap().clone();
                 Mock::given(method("GET")).and(path_regex(".*/state/org.hagency.creation.v1/?$")).respond_with(ResponseTemplate::new(200).set_body_json(m.clone())).mount(&server).await;
