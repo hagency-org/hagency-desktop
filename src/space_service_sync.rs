@@ -182,6 +182,7 @@ pub async fn space_service_loop(client: Client) -> anyhow::Result<()> {
         let space_room_list = space_service.space_room_list(space_id.clone()).await;
         let join_handle = crate::account_session::spawn(
             space_room_list_loop(
+                client.clone(),
                 space_id.clone(),
                 parent_chain.clone(),
                 receiver,
@@ -768,6 +769,7 @@ impl SpaceRoomExt for SpaceRoom {
 
 /// A loop that listens for changes to the set of rooms in a given space.
 async fn space_room_list_loop(
+    client: Client,
     space_id: OwnedRoomId,
     parent_chain: ParentChain,
     mut receiver: UnboundedReceiver<SpaceRoomListRequest>,
@@ -794,7 +796,14 @@ async fn space_room_list_loop(
         Cx::post_action(SpaceRoomListAction::SpaceDetails(space));
     }
 
-    // Next, paginate the space once to get at least *some* child rooms.    
+    // A SpaceRoomList updates metadata for rooms it already contains. Its hierarchy
+    // cursor, even an empty completed one, stays frozen until reset. Subscribe
+    // before the first page so a concurrent link cannot fall between the two.
+    // Raw events also cover unlinking, where the state content is empty.
+    use ruma::{events::space::child::SyncSpaceChildEvent, serde::Raw};
+    let child_events = client.observe_room_events::<Raw<SyncSpaceChildEvent>, ()>(&space_id);
+    let mut child_changes = child_events.subscribe();
+
     paginate_once().await;
 
     // The set of subspaces within this `space_id` that are already known to us.
@@ -868,6 +877,12 @@ async fn space_room_list_loop(
                 }
                 SpaceRoomListRequest::Shutdown => return,
             }
+        }
+
+        change = child_changes.next() => {
+            if change.is_none() { break }
+            space_room_list.reset().await;
+            paginate_once().await;
         }
 
         // Handle updates to this space's own details
@@ -1105,3 +1120,6 @@ impl std::fmt::Debug for SpaceRoomListAction {
         }
     }
 }
+
+#[cfg(test)]
+mod tests;
