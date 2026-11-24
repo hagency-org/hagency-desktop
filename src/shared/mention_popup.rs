@@ -573,7 +573,7 @@ fn build_row(cx: &mut Cx, list: &mut PortalList, index: usize, item: &MentionIte
         MentionItem::NotifyRoom { room_name } => {
             let new_widget = list.item(cx, index, id!(row));
             new_widget.label(cx, ids!(info.subtitle)).set_visible(cx, true);
-            new_widget.label(cx, ids!(info.title)).set_text(cx, "Notify the entire room");
+            new_widget.label(cx, ids!(info.title)).set_text(cx, crate::i18n::tr("Notify the entire room"));
             new_widget.label(cx, ids!(info.subtitle)).set_text(cx, "@room");
             let first = room_name.chars().next().map(|c| c.to_string()).unwrap_or_else(|| "@".into());
             new_widget.avatar(cx, ids!(avatar)).show_text(cx, Some(COLOR_ROBRIX_PURPLE), None, &first);

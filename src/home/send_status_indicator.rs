@@ -496,9 +496,9 @@ impl SendStatusIndicator {
             };
             match kind {
                 SendStatusLabel::Progress => match info.upload_percent {
-                    None => label.set_text(cx, "Encrypting"),
+                    None => label.set_text(cx, crate::i18n::tr("Encrypting")),
                     Some(percent) if percent < 100 => label.set_text(cx, &format!("{percent}%")),
-                    Some(_) => label.set_text(cx, "Sending"),
+                    Some(_) => label.set_text(cx, crate::i18n::tr("Sending")),
                 },
                 SendStatusLabel::Failed => label.set_text(cx, match info.icon {
                     SendStatusIcon::Retry => "Send failed, retrying...",
