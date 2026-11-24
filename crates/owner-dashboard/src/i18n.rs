@@ -236,7 +236,7 @@ messages! {
     KeepRunningOn => "Rented Agents keep working while Hagency is closed.", "关闭 Hagency 后，出租的 Agent 仍会继续工作。";
     KeepRunningOff => "Hagency pauses hosting when it quits and resumes it the next time it starts.", "Hagency 退出时会暂停托管，下次启动时恢复。";
     ContainersTitle => "Run this resource's Agents in containers", "在容器中运行此资源的 Agent";
-    ContainersOff => "This resource's Agents run on this Mac in its sandbox. Turn this on to run each one in its own container (Docker Desktop, OrbStack or Colima) that sees only its own folders.", "此资源的 Agent 在这台 Mac 的沙盒中运行。开启后，每个 Agent 会在自己的容器（Docker Desktop、OrbStack 或 Colima）中运行，只能看到自己的文件夹。";
+    ContainersOff => "This resource's Agents run in this computer's sandbox (macOS only; on Linux they cannot start until containers are on). Turn this on to run each one in its own container (Docker, Docker Desktop, OrbStack or Colima) that sees only its own folders.", "此资源的 Agent 在这台电脑的沙盒中运行（仅 macOS 提供；在 Linux 上需开启容器后才能启动）。开启后，每个 Agent 会在自己的容器（Docker、Docker Desktop、OrbStack 或 Colima）中运行，只能看到自己的文件夹。";
     ContainersTurningOn => "Preparing the container image. The first time takes a few minutes…", "正在准备容器镜像，首次需要几分钟…";
     ContainersOn => "From their next run, this resource's Agents run in their own container and see only their own folders. Each resource keeps its own setting.", "从下一次运行起，此资源的 Agent 会在自己的容器中运行，只能看到自己的文件夹。每个资源各自设置。";
     ContainersUnavailable => "Containers are not available for this resource, so its Agents cannot start. Turn this off to use the sandbox, or off and on again to use the container app you have now.", "此资源的容器不可用，其 Agent 无法启动。关闭此项可改用沙盒；或关闭后重新开启，以使用当前的容器应用。";

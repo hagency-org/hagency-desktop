@@ -35,7 +35,7 @@ impl ScriptHook for MiniAppNumberInput {
             self.view.text_input(cx,ids!(input)).set_is_read_only(cx,self.is_read_only);
             self.view.text_input(cx,ids!(input)).set_empty_text(cx,self.empty_text.clone());
             self.view.label(cx,ids!(unit)).set_visible(cx,self.millions || self.wan);
-            if self.wan {self.view.label(cx,ids!(unit)).set_text(cx,"万 token");}
+            if self.wan {self.view.label(cx,ids!(unit)).set_text(cx,if crate::i18n::language()==crate::i18n::Language::Chinese {"万 token"} else {"10K tokens"});}
             self.sync_steps(cx);
         });
     }

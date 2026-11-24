@@ -2309,6 +2309,14 @@ impl MiniAppsPanel {
             if let Err(code) = &result {
                 let diagnostic = grant_failure_code(code);
                 makepad_widgets::warning!("Native owner grant operation failed: {diagnostic}");
+                if diagnostic == "owner_grant_unclassified_failure"
+                    && !code.is_empty()
+                    && code.len() <= 64
+                    && code.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    // A bare identifier carries no account data, so it may be logged for diagnosis; it is never shown.
+                    makepad_widgets::warning!("Native owner grant operation failed with unrecognised code: {code}");
+                }
             }
             let _ = tx.try_send(result);
             SignalToUI::set_ui_signal();

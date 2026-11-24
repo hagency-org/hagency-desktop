@@ -689,7 +689,14 @@ impl ClaudeLaunch {
                 tracing::warn!(code = "shared_claude_container_start_failed", ?error,
                     "A pool Agent's container did not start");
                 failure(409, "shared_claude_container_unavailable")
+            } else if matches!(error, hagency_runtime::owned::StartError::Unsupported) {
+                // The Seatbelt sandbox exists only on macOS; elsewhere the run needs containers.
+                tracing::warn!(code = "shared_claude_sandbox_unsupported",
+                    "Pooled Claude Agents need containers on this operating system; the sandbox exists only on macOS");
+                failure(409, "shared_claude_sandbox_unsupported")
             } else {
+                tracing::warn!(code = "shared_claude_sandbox_start_failed", ?error,
+                    "A pool Agent's sandbox did not start");
                 failure(409, "shared_execution_launch_unavailable")
             }
         })

@@ -29,7 +29,10 @@ pub(crate) fn known_code(code: &str) -> Option<&'static str> {
         "daemon_bridge_journal_unavailable",
         "daemon_command_recovery_required",
         "daemon_command_receipt_expired",
-
+        "shared_claude_sandbox_unsupported",
+        "shared_claude_container_unavailable",
+        "shared_execution_launch_unavailable",
+        "owner_grant_unclassified_failure",
     ];
     CODES.iter().copied().find(|known| *known == code)
 }
@@ -93,6 +96,22 @@ pub(crate) fn message(code: &str) -> Option<&'static str> {
             "The service cannot confirm the original operation from its saved receipt. Keep this request and its identity; check the current resource state before attempting recovery.",
             "服务无法根据已保存的回执确认原操作。请保留此请求及其标识，先检查当前资源状态，再尝试恢复。",
         ),
+        "shared_claude_sandbox_unsupported" => (
+            "This computer cannot run pool Agents in the built-in sandbox, which exists only on macOS. In Agent → Hosting, turn on \"Run this resource's Agents in containers\" and make sure Docker is running.",
+            "这台电脑不支持内置沙盒（仅 macOS 提供）。请在 Agent → 资源托管 中开启“在容器中运行此资源的 Agent”，并确认 Docker 正在运行。",
+        ),
+        "shared_claude_container_unavailable" => (
+            "The container for this Agent did not start. Check that Docker is running and that the model endpoint is not a loopback address such as 127.0.0.1, then send the message again.",
+            "此 Agent 的容器未能启动。请确认 Docker 正在运行，且模型端点不是 127.0.0.1 这类回环地址，然后重新发送消息。",
+        ),
+        "shared_execution_launch_unavailable" => (
+            "The Agent process could not be started on the resource owner's computer. Ask the resource owner to check Agent → Hosting and the hosting service log.",
+            "无法在资源 owner 的电脑上启动 Agent 进程。请让资源 owner 查看 Agent → 资源托管 和托管服务日志。",
+        ),
+        "owner_grant_unclassified_failure" => (
+            "The publish was not confirmed and the app cannot name the cause. Keep this request, check Agent → Hosting and the hosting service log for the failure code, then check again.",
+            "发布结果尚未确认，应用无法给出具体原因。请保留此请求，在 Agent → 资源托管 和托管服务日志中查看失败代码，然后重新检查。",
+        ),
         _ => return None,
     };
     Some(
@@ -124,5 +143,13 @@ mod tests {
         let text = message("daemon_command_pending").unwrap();
         assert!(text.contains("original request") && text.contains("do not create a replacement"));
         assert!(message("/private/provider/home access_token=secret").is_none());
+    }
+
+    #[test]
+    fn launch_failures_have_both_languages() {
+        for code in ["shared_claude_sandbox_unsupported", "shared_claude_container_unavailable", "shared_execution_launch_unavailable", "owner_grant_unclassified_failure"] {
+            assert_eq!(known_code(code), Some(code));
+            assert!(message(code).is_some_and(|text| !text.is_empty()), "{code}");
+        }
     }
 }

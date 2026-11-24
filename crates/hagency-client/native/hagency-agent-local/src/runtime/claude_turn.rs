@@ -280,9 +280,9 @@ fn command_notice(input: &str, reset: bool) -> String {
         .take(64)
         .collect();
     if reset {
-        format!("✅ 已执行 {name}：对话已清空，下一条消息开始新的对话。")
+        format!("✅ Ran {name}: the conversation was cleared; the next message starts a new one. / 已执行 {name}：对话已清空，下一条消息开始新的对话。")
     } else {
-        format!("✅ 已执行 {name}。")
+        format!("✅ Ran {name}. / 已执行 {name}。")
     }
 }
 

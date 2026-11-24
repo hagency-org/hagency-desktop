@@ -107,14 +107,14 @@ fn apply_receipts(entry: &mut Entry, card: &Card) {
         {
             last_acknowledged = true;
             entry.hint = match receipt.outcome.as_str() {
-            "accepted" => "Agent 已接收此操作。",
-            "queued" => "Agent 已将指令加入下一轮。",
-            "rejected" => "运行时拒绝了此操作。",
-            "unsupported" => "当前运行时不支持此操作。",
-            "in_progress" => "停止请求已在处理中。",
-            "busy" => "操作队列繁忙，请稍后重新提交。",
-            "unavailable" => "本次运行已结束，操作未执行。",
-            _ => "未能确认操作结果；为避免重复执行，不会自动重发。",
+            "accepted" => crate::i18n::tr("The Agent accepted this action."),
+            "queued" => crate::i18n::tr("The Agent queued the instruction for the next turn."),
+            "rejected" => crate::i18n::tr("The runtime rejected this action."),
+            "unsupported" => crate::i18n::tr("The current runtime does not support this action."),
+            "in_progress" => crate::i18n::tr("A stop request is already in progress."),
+            "busy" => crate::i18n::tr("The action queue is busy. Please submit again shortly."),
+            "unavailable" => crate::i18n::tr("This run has ended; the action was not carried out."),
+            _ => crate::i18n::tr("The result could not be confirmed. To avoid running it twice, it will not be resent automatically."),
         }
             .into();
         }
@@ -133,9 +133,9 @@ fn apply_receipts(entry: &mut Entry, card: &Card) {
     }
     if recovered {
         restore_next_draft(entry);
-        entry.hint = "有指令未执行，原文已保留。可复制后发送，或在运行中重新提交。".into();
+        entry.hint = crate::i18n::tr("Some instructions were not carried out; the original text is kept. Copy it to send, or resubmit while the run is active.").into();
     } else if !card.state.active() && entry.sent_event.is_some() && !last_acknowledged {
-        entry.hint = "运行已结束，操作结果未确认。请先核对；不会自动重发。".into();
+        entry.hint = crate::i18n::tr("The run has ended and the action's result is unconfirmed. Check first; it will not be resent automatically.").into();
     }
 }
 fn restore_next_draft(entry: &mut Entry) -> bool {
@@ -289,7 +289,7 @@ pub fn request(key: &str, stop: bool) -> Option<Requested> {
         return None;
     }
     if !stop && entry.pending_drafts.len() + entry.recovered_drafts.len() >= protocol::MAX_ACTION_RECEIPTS {
-        entry.hint = "请先处理尚未确认或未执行的指令。".into();
+        entry.hint = crate::i18n::tr("Resolve instructions that are unconfirmed or not carried out first.").into();
         return None;
     }
     // Codex and Claude alike take the text into the running turn.
@@ -319,7 +319,7 @@ pub fn request(key: &str, stop: bool) -> Option<Requested> {
             text: (!stop).then(|| entry.draft.clone()),
         });
     entry.sending = true;
-    entry.hint = "正在发送…".into();
+    entry.hint = crate::i18n::tr("Sending…").into();
     Some(request)
 }
 pub fn sent(value: &Sent) -> bool {
@@ -344,7 +344,7 @@ fn apply_send_result(entry: &mut Entry, value: &Sent) {
             entry.sent_event = Some(event.clone());
             entry.sent_owner = Some(value.request.owner.clone());
             entry.retry = None;
-            entry.hint = "已发送，等待 Agent 确认。".into();
+            entry.hint = crate::i18n::tr("Sent; waiting for the Agent to confirm.").into();
             if let Some(text) = &value.request.text {
                 if entry.draft == *text { entry.draft.clear(); }
                 if !entry.pending_drafts.iter().any(|draft| draft.event == *event) {
@@ -359,7 +359,7 @@ fn apply_send_result(entry: &mut Entry, value: &Sent) {
         }
         Err(_) => {
             entry.retry = Some(value.request.clone());
-            entry.hint = "发送未获确认，可重试同一操作。".into();
+            entry.hint = crate::i18n::tr("Sending was not confirmed; you can retry the same action.").into();
         }
     }
 }
@@ -509,7 +509,7 @@ mod tests {
         update.revision = 2;
         update.last_action.as_mut().unwrap().event_id = "$action".into();
         assert!(apply(&mut e, update));
-        assert_eq!(e.hint, "Agent 已接收此操作。");
+        assert_eq!(e.hint, crate::i18n::tr("The Agent accepted this action."));
         assert_eq!(e.card.state, RunState::Running);
     }
     #[test]
@@ -600,8 +600,8 @@ mod tests {
             };
             apply_send_result(&mut e, &sent);
             if !completion_first { assert!(apply(&mut e, terminal.clone())); }
-            assert!(e.hint.contains("结果未确认"));
-            assert!(!e.hint.contains("等待"));
+            assert!(e.hint.contains("unconfirmed"));
+            assert!(!e.hint.contains("waiting"));
             assert_eq!(e.unconfirmed_text().as_deref(), Some("exact sent text"));
             assert_eq!(e.draft, "an unsent newer edit");
             assert!(e.recovered_drafts.is_empty() && e.retry.is_none());
@@ -666,7 +666,7 @@ mod tests {
             (e.key, e.card.event_id, e.card.state) = (key.into(), event.into(), state);
             e.draft.clear();
             match event {
-                "$done-noted" => e.hint = "Agent 已接收此操作。".into(),
+                "$done-noted" => e.hint = crate::i18n::tr("The Agent accepted this action.").into(),
                 "$done-draft" => e.draft = "not sent yet".into(),
                 "$done-recovered" => e.recovered_drafts.push("left unexecuted".into()),
                 "$done-unconfirmed" => e.pending_drafts.push(PendingDraft {
@@ -710,7 +710,7 @@ mod tests {
             ), "{runtime}");
             // Its receipt is awaited, and text the run did not take comes back.
             apply_send_result(&mut e, &Sent { request, result: Ok("$steer".into()) });
-            assert_eq!(e.hint, "已发送，等待 Agent 确认。");
+            assert_eq!(e.hint, crate::i18n::tr("Sent; waiting for the Agent to confirm."));
             assert!(e.draft.is_empty());
             assert_eq!(e.pending_drafts.len(), 1);
             let mut accepted = e.clone();
@@ -720,7 +720,7 @@ mod tests {
                 event_id: "$steer".into(), sender: "@requester:test".into(), outcome: "accepted".into(),
             });
             assert!(apply(&mut accepted, card.clone()));
-            assert_eq!(accepted.hint, "Agent 已接收此操作。");
+            assert_eq!(accepted.hint, crate::i18n::tr("The Agent accepted this action."));
             assert!(accepted.pending_drafts.is_empty() && accepted.draft.is_empty());
             card.action_receipts[0].outcome = "unavailable".into();
             assert!(apply(&mut e, card));
