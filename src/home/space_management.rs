@@ -516,7 +516,7 @@ async fn finish_recorded_creation(client:&Client,intent:super::creation_journal:
     // to catch up; a slow sync keeps the original ID pending, never recreates it.
     for _ in 0..15 {if client.get_room(&room).is_some(){break;}tokio::time::sleep(std::time::Duration::from_millis(200)).await;matrix_context::ensure_current(client)?;}
     let name=RoomNameId::new(matrix_sdk::RoomDisplayName::Named(intent.config.name.trim().into()),room);
-    let result=finish_creation(client,name,intent.config.clone(),intent.agent_space,intent.project.clone(),None).await;
+    let result=finish_creation(client,name,intent.config.clone(),intent.agent_space,intent.project.clone(),intent.project_folder.clone()).await;
     if !result.2 {super::creation_journal::Journal::for_client(client)?.completed(intent.operation).await?;}
     Ok(result)
 }
@@ -1224,6 +1224,7 @@ impl SpaceManagementPanel {
     fn restore_creation(&mut self,cx:&mut Cx,intent:&super::creation_journal::Intent) {
         self.saved_creation=Some(intent.clone());self.setup_config=Some(intent.config.clone());
         self.setup_agent_space=intent.agent_space;self.setup_project=intent.project.clone();
+        self.setup_project_folder=intent.project_folder.clone();
         self.created_space=intent.config.space;self.setup_pending=true;self.wizard_step=2;self.manage=false;
         self.parent=intent.config.parent.clone();
         self.view.drop_down(cx,ids!(kind)).set_selected_item(cx,if !intent.config.space{2}else if intent.agent_space{1}else{0});
@@ -1681,7 +1682,7 @@ impl Widget for SpaceManagementPanel {
                     editable_space(&client, parent, StateEventType::SpaceChild).await?;
                 }
                 matrix_context::ensure_current(&client)?;
-                let intent=super::creation_journal::create(&client,config,agent_space,project).await?;
+                let intent=super::creation_journal::create(&client,config,agent_space,project,project_folder).await?;
                 finish_recorded_creation(&client,intent).await
             });
             return;
@@ -2229,9 +2230,10 @@ mod tests {
     #[test]
     fn saved_creation_without_returned_id_blocks_new_creation_and_restores_original_intent() {
         let (mut cx,mut panel)=panel();
-        let saved=super::super::creation_journal::Intent {operation:uuid::Uuid::new_v4(),origin:"https://matrix.invalid/".into(),owner:"@alice:example.org".into(),config:CreateRoomConfig{name:"Original private project".into(),space:true,..Default::default()},agent_space:true,project:None,room:None,complete:false};
+        let saved=super::super::creation_journal::Intent {operation:uuid::Uuid::new_v4(),origin:"https://matrix.invalid/".into(),owner:"@alice:example.org".into(),config:CreateRoomConfig{name:"Original private project".into(),space:true,..Default::default()},agent_space:true,project:None,project_folder:Some("original-folder".into()),room:None,complete:false};
         panel.restore_creation(&mut cx,&saved);panel.sync(&mut cx);
-        assert_eq!(panel.wizard_step,2);assert!(panel.setup_pending);assert!(panel.created.is_none());assert!(panel.setup_agent_space);assert_eq!(panel.view.drop_down(&mut cx,ids!(kind)).selected_item(),1);
+        assert_eq!(panel.wizard_step,2);assert!(panel.setup_pending);assert!(panel.created.is_none());assert!(panel.setup_agent_space);
+        assert_eq!(panel.setup_project_folder.as_deref(),Some("original-folder"));assert_eq!(panel.view.drop_down(&mut cx,ids!(kind)).selected_item(),1);
         assert!(!panel.view.button(&mut cx,ids!(create)).borrow().unwrap().enabled());
         assert!(panel.view.button(&mut cx,ids!(finish_setup)).visible());assert!(panel.view.widget(&mut cx,ids!(original_room)).visible());
         assert!(panel.view.button(&mut cx,ids!(archive_creation)).visible());assert!(!panel.view.button(&mut cx,ids!(created)).visible());
