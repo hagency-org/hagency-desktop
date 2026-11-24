@@ -1801,6 +1801,15 @@ async fn matrix_worker_task(
                         });
                         return;
                     }
+                    if !crate::matrix_context::is_current(&client) { return; }
+                    if crate::hagency::backend::is_agent_invitation(&user_profile.user_id) {
+                        enqueue_popup_notification(
+                            crate::i18n::tr(crate::agent_access::AGENT_CHAT_GUIDANCE),
+                            PopupKind::Info,
+                            None,
+                        );
+                        return;
+                    }
                     if !allow_create {
                         Cx::post_action(DirectMessageRoomAction::DidNotExist { user_profile });
                         return;

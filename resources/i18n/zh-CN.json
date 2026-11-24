@@ -1,4 +1,5 @@
 {
+  "Open your own Agent’s chat from My Agents. To work with someone else’s Agent, mention it in a project room where it is connected.": "要与自己的 Agent 私聊，请从「我的 Agent」打开对话。要使用协作者的 Agent，请在已连接该 Agent 的项目房间中 @ 它。",
   "Waiting for this room to sync…": "正在等待此房间同步…",
   "This room hasn’t loaded yet. You can retry or leave this tab open.": "此房间暂未加载。你可以重试，也可以保持此页面打开，等待同步。",
   "Offline. Waiting for the connection to return.": "当前离线，正在等待连接恢复。",

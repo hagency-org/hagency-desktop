@@ -78,6 +78,9 @@ impl AgentFramework {
     }
 }
 
+pub(crate) const AGENT_CHAT_GUIDANCE: &str =
+    "Open your own Agent’s chat from My Agents. To work with someone else’s Agent, mention it in a project room where it is connected.";
+
 /// The DM room to open with `user`. The SDK's lookup goes by `m.direct` only,
 /// so it can return a room the other person declined or left; messages sent
 /// there reach no one. Prefer a room where they are joined, then one they are
@@ -97,6 +100,11 @@ pub async fn find_dm(client: &Client, user: &UserId) -> Option<Room> {
             Ok(None) => {}
             Err(_) => { unknown.get_or_insert(room); }
         }
+    }
+    // A plain Matrix invitation never activates a Hagency Agent. Preserve
+    // joined conversations, but do not send a collaborator into a pending DM.
+    if crate::hagency::backend::is_agent_invitation(user) {
+        return None;
     }
     invited.or(unknown)
 }

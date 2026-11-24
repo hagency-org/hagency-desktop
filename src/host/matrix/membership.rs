@@ -115,6 +115,9 @@ pub(super) async fn dm_open(user_id: OwnedUserId) -> Result<String, String> {
             if !super::policy::global_room_access_allowed("", RoomAccess::Write) {
                 return Err(super::policy::ROOM_ACCESS_DENIED.to_string());
             }
+            if crate::hagency::backend::is_agent_invitation(&user_id) {
+                return Err(crate::agent_access::AGENT_CHAT_GUIDANCE.into());
+            }
             super::policy::ensure_server_output(client.homeserver().as_str())?;
             super::policy::commit_sensitive_target(
                 "host",

@@ -19,46 +19,49 @@ fn recipients(members: Vec<OwnedUserId>, mentions: &BTreeSet<OwnedUserId>) -> Ve
         .collect()
 }
 
+fn unjoined_agent_dm(target: Option<&matrix_sdk::ruma::UserId>, joined: &[OwnedUserId]) -> bool {
+    matches!((target, joined), (Some(target), [member])
+        if target.as_str() != member.as_str() && crate::hagency::backend::is_agent_invitation(target))
+}
+
 /// Uses the SDK's signature-checked device store and normal send policy. This
 /// never marks a device trusted, shares old room keys, or falls back to plaintext.
 pub(crate) async fn ensure_ready(
     room: &Room,
     message: &RoomMessageEventContent,
 ) -> Result<(), &'static str> {
-    let result = tokio::time::timeout(Duration::from_secs(30), async {
+    const KEYS_UNAVAILABLE: &str = "This Agent's device keys are not available; it may not have started on its computer yet. Your message was not sent. Check that its service is running, then try again.";
+    tokio::time::timeout(Duration::from_secs(30), async {
         if !crate::room_encryption::confirmed_state(room)
             .await
-            .map_err(|_| ())?
+            .map_err(|_| KEYS_UNAVAILABLE)?
             .is_encrypted()
         {
             return Ok(());
         }
-        let members = room.members(RoomMemberships::JOIN).await.map_err(|_| ())?;
+        let members = room.members(RoomMemberships::JOIN).await.map_err(|_| KEYS_UNAVAILABLE)?;
+        let joined: Vec<_> = members.into_iter().map(|m| m.user_id().to_owned()).collect();
+        let targets = room.direct_targets();
+        if targets.len() == 1 {
+            let target = targets.iter().next().and_then(|id| matrix_sdk::ruma::UserId::parse(id.as_str()).ok());
+            if unjoined_agent_dm(target.as_deref(), &joined) {
+                return Err(crate::agent_access::AGENT_CHAT_GUIDANCE);
+            }
+        }
         let mentions = message
             .mentions
             .as_ref()
             .map(|m| m.user_ids.clone())
             .unwrap_or_default();
-        let users = recipients(
-            members
-                .into_iter()
-                .map(|m| m.user_id().to_owned())
-                .collect(),
-            &mentions,
-        );
+        let users = recipients(joined, &mentions);
         let client = room.client();
         for user in users {
-            wait_for_sendable_device(&client, &user).await.map_err(|_| ())?;
+            wait_for_sendable_device(&client, &user).await.map_err(|_| KEYS_UNAVAILABLE)?;
         }
-        Ok::<_, ()>(())
+        Ok(())
     })
-    .await;
-    match result {
-        Ok(Ok(())) => Ok(()),
-        _ => Err(
-            "This Agent's device keys are not available; it may not have started on its computer yet. Your message was not sent. Check that its service is running, then try again.",
-        ),
-    }
+    .await
+    .unwrap_or(Err(KEYS_UNAVAILABLE))
 }
 
 #[cfg(test)]
@@ -67,6 +70,17 @@ mod tests {
     fn user(s: &str) -> OwnedUserId {
         s.try_into().unwrap()
     }
+    #[test]
+    fn only_a_lone_sender_with_a_managed_agent_dm_target_needs_binding_guidance() {
+        use matrix_sdk::ruma::user_id;
+        let agent = user_id!("@_hagency_agt_test:one.test");
+        let user = user_id!("@member:two.test").to_owned();
+        assert!(unjoined_agent_dm(Some(agent), std::slice::from_ref(&user)));
+        assert!(!unjoined_agent_dm(Some(user_id!("@human:one.test")), std::slice::from_ref(&user)));
+        assert!(!unjoined_agent_dm(None, std::slice::from_ref(&user)));
+        assert!(!unjoined_agent_dm(Some(agent), &[user, agent.to_owned()]));
+    }
+
     #[test]
     fn encrypted_agent_first_send_waits_only_for_the_addressed_agent() {
         let owner = user("@owner:test");
