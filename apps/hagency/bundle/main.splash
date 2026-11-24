@@ -221,6 +221,7 @@ A.project_state_text = fn(state){
     return state
 }
 A.error_text = fn(code){
+    if code=="device_setup_required" {return A.t("Open This Computer and finish device setup for this account.", "请打开「这台电脑」，为当前账号完成设备设置。")}
     if code=="pool_containers_unavailable" {return A.t("This computer could not keep the container choice, so the pool was not created. Check the Hosting dashboard, or turn containers off and create it again.","这台电脑无法保存容器选项，因此没有创建资源池。请查看托管控制台，或关闭容器后重新创建。")}
     if code == "authorization_time_window_unavailable" {return A.t("The server authorization is outside its time window. Check the device and server clocks, then retry.","服务器授权不在有效时间内。请核对本机和服务器的时钟后重试。")}
     if code=="pool_agent_resource_mismatch" && H.entry_role=="owner" {return A.t("This request is above the pool’s current per-request limit, so it can’t be approved. Decline it, or raise the per-request limit first.","这个申请超过了资源池现在的每次申请上限，不能批准。可以拒绝，或先调高每次申请上限。")}
@@ -10318,7 +10319,7 @@ A.render_page = fn(){
                     mod.widgets.HagencyRowIcon{draw_bg.color:mod.widgets.RINX_DANGER_BG mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.alert draw_icon.color:mod.widgets.RINX_DANGER_FG}}
                     mod.widgets.HagencyListText{
                         mod.widgets.HagencyListTitle{text:A.t("Resource pools could not be loaded","资源池暂时无法加载")}
-                        mod.widgets.HagencyListSubtitle{text:A.t("Check the connection, then try again.","请检查网络连接后重试。")}
+                        mod.widgets.HagencyListSubtitle{text:if H.ux.errorCode=="device_setup_required" {A.error_text(H.ux.errorCode)} else {A.t("Check the connection, then try again.","请检查网络连接后重试。")}}
                     }
                 }
                 mod.widgets.HagencyListDivider{margin:Inset{left:14}}
