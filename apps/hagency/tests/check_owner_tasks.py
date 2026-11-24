@@ -12,6 +12,17 @@ let reply=fn(index,data){H.callbacks[index]({is_ok:true data:data})}
 let connection={id:"pool_original" label:"Pool A" ownerMxid:"@owner:test" executorDeviceId:"device" state:"admitted"}
 '''
 CASES={
+'resource_inventory_explains_device_setup': """
+let expected=A.t("Open This Computer and finish device setup for this account.", "请打开「这台电脑」，为当前账号完成设备设置。")
+H.page="resources" A.owner_load_pools()
+assert(H.calls[0].service=="hagency.resources.list")
+H.callbacks[0]({is_ok:false error:"device_setup_required"})
+assert(H.notice==expected && H.ux.errorCode=="device_setup_required" && !H.owner.poolsReady)
+A.pool_call=fn(service,args,done){done({is_ok:false error:"device_setup_required"})}
+H.page="pool_create" H.pool_create={epoch:1 accounts:nil error:""}
+A.pool_create_accounts()
+assert(H.pool_create.error==expected && H.pool_create.accounts==nil)
+""",
 'current_device_setup_requires_uninitialized_state': '''
 let fresh=A.pool_device_state({state:"uninitialized" canReview:true grantReviewAvailable:false grantIntents:[]},"ready")
 assert(fresh.fix && fresh.detail==A.t("Set up resource management for this account before connecting a coding tool and creating a pool.","先为当前账号完成资源管理初始化，再接入编码工具、创建资源池。"))
