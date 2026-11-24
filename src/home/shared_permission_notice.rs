@@ -155,6 +155,8 @@ pub struct SharedPermissionNotice {
     #[rust] timer:Timer,
     #[rust] active:bool,
     #[rust] execution_thread_filter:bool,
+    /// This room or thread has reported Agent work during this visit.
+    #[rust] tracked:bool,
     #[rust] rows:Vec<Value>,
     #[rust] selected:usize,
     #[rust] room_allowances:RoomAllowances,
@@ -282,8 +284,18 @@ impl SharedPermissionNotice {
         if !self.execution_busy {self.last_decision=None;}
         self.execution_text=execution_notice(value,&self.room,&self.thread,stopped).unwrap_or_default().into();
         self.rows=value["approvals"].as_array().cloned().unwrap_or_default().into_iter().filter(|r|r["approval"]["roomId"]==self.room && (self.thread.is_empty() || r["approval"]["threadRoot"]==self.thread)).take(16).collect();
+        self.tracked |= execution_row(value,&self.room,&self.thread).is_some()
+            || !self.rows.is_empty() || !self.room_allowances.text.is_empty();
         if self.selected>=self.rows.len(){self.selected=0;}
     }
+    fn read_failed(&mut self) {
+        self.room_allowances=RoomAllowances::default();
+        self.execution_thread_filter=false;
+        if self.tracked {
+            self.error="Could not confirm permission status; retrying.".into();
+        }
+    }
+
     /// Read the room's requests and the run's state again.
     fn poll(&mut self,_cx:&mut Cx) {
         if self.loading || !self.active || self.room.is_empty(){return;}
@@ -328,7 +340,7 @@ impl Widget for SharedPermissionNotice {
                             if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){cx.action(PendingApprovalsChanged);}
                             self.render(cx);
                         },
-                        Err(_)=>{self.room_allowances=RoomAllowances::default();self.execution_thread_filter=false;self.error="Could not confirm permission status; retrying.".into();self.render(cx);},
+                        Err(_)=>{self.read_failed();self.render(cx);},
                     }
                     if self.active{self.timer=cx.start_timeout(2.0);}
                 }
@@ -366,13 +378,29 @@ impl SharedPermissionNoticeRef {
         let Some(mut this)=self.borrow_mut()else{return};
         let identity=Service::for_current().map(|s|s.identity()).unwrap_or_default();
         if this.identity!=identity || this.room!=room || this.thread!=thread {
-            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_thread_filter=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
+            cx.stop_timer(this.timer);this.timer=Timer::default();this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_thread_filter=false;this.tracked=false;this.identity=identity;this.room=room.into();this.thread=thread.into();this.error.clear();this.execution_text.clear();this.nonce=this.nonce.wrapping_add(1);this.loading=false;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx);
         }else if this.active && !this.loading && this.timer.is_empty(){this.poll(cx);}
     }
 }
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn permission_read_failures_follow_work_in_the_selected_room() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        let mut n=widget.borrow_mut().unwrap();
+        n.room="!room".into();
+        n.read_status(&json!({"executions":[{"roomId":"!other","state":"started"}]}), |_|false);
+        n.read_failed();
+        assert!(!n.display().visible);
+        n.read_status(&json!({"executions":[{"roomId":"!room","state":"started"}]}), |_|false);
+        n.read_failed();
+        assert!(!n.error.is_empty() && n.display().visible);
+        n.read_status(&json!({"approvals":[]}), |_|false);
+        assert!(n.error.is_empty());
+    }
+
     #[test]
     fn room_allowance_updates_are_optional_scoped_and_replaced_on_refresh() {
         let mut state=super::RoomAllowances::default();
