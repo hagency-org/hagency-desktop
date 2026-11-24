@@ -5,7 +5,7 @@ use crate::console::{
     owner_provider::managed::{NamespaceLogin, LoginState},
 };
 use hagency_store::management::{
-    AccountLoginHandle, AccountLoginRequest, AccountLoginStatus, HostContext, Permission, Intent,
+    AccountLoginHandle, AccountLoginRequest, AccountLoginStatus, HostContext, Session, Permission, Intent,
     IntentOperation,
 };
 use hagency_store::{LoginVerdict, LoginOutcome, AccountReadinessMode};
@@ -121,12 +121,29 @@ impl Manager {
     }
 }
 impl NativeManagement {
+    /// Retry only a fresh identity check. Never replay a provider or store operation.
+    pub(super) async fn login_authorized(&self) -> Result<(HostContext, Session), NativeError> {
+        let mut delays = [250, 500, 1000].into_iter();
+        loop {
+            let result = self.authorized().await;
+            if result.as_ref().is_err_and(|error| {
+                error.status == 503 && error.code == "matrix_authorization_unavailable"
+            })
+                && let Some(ms) = delays.next()
+            {
+                tokio::time::sleep(Duration::from_millis(ms)).await;
+                continue;
+            }
+            return result;
+        }
+    }
+
     pub async fn login_account(
         self: &Arc<Self>,
         input: AccountLoginRequest,
     ) -> Result<AccountLoginStatus, NativeError> {
         input.validate().map_err(store_error)?;
-        let (context, session) = self.authorized().await?;
+        let (context, session) = self.login_authorized().await?;
         session
             .authorize(&context, Permission::LoginAccounts)
             .map_err(store_error)?;
@@ -137,7 +154,10 @@ impl NativeManagement {
         )
         .map_err(store_error)?;
         self.with_intent(intent, async {
-            let (context, session) = self.authorized().await?;
+            let (current, session) = self.login_authorized().await?;
+            if current != context {
+                return Err(failure(401, "management_scope_changed"));
+            }
             let reservation = session
                 .begin_account_login(&context, input.clone())
                 .await
@@ -152,25 +172,36 @@ impl NativeManagement {
         })
         .await
     }
+    async fn login_status_for(
+        &self,
+        context: &HostContext,
+        session: &Session,
+        input: &AccountLoginRequest,
+    ) -> Result<AccountLoginStatus, NativeError> {
+        let result = session.account_login_status(context, input.clone()).await;
+        let (current, _) = self.login_authorized().await?;
+        if &current != context {
+            return Err(failure(401, "management_scope_changed"));
+        }
+        result.map_err(store_error)
+    }
     async fn login_guard(
         &self,
         original: &HostContext,
         input: &AccountLoginRequest,
     ) -> Result<AccountLoginStatus, NativeError> {
-        let (context, session) = self.authorized().await?;
+        let (context, session) = self.login_authorized().await?;
         if &context != original {
             return Err(failure(401, "management_scope_changed"));
         }
-        let result = session.account_login_status(&context, input.clone()).await;
-        self.finish(&context, result, false).await
+        self.login_status_for(&context, &session, input).await
     }
     pub async fn account_login_status(
         &self,
         input: AccountLoginRequest,
     ) -> Result<AccountLoginStatus, NativeError> {
-        let (context, session) = self.authorized().await?;
-        let result = session.account_login_status(&context, input.clone()).await;
-        let mut status = self.finish(&context, result, false).await?;
+        let (context, session) = self.login_authorized().await?;
+        let mut status = self.login_status_for(&context, &session, &input).await?;
         if let Some(entry) = self.owner.0.account_logins.get(&context, &input)? {
             let snapshot = entry
                 .snapshot
@@ -187,7 +218,7 @@ impl NativeManagement {
         input: AccountLoginRequest,
     ) -> Result<AccountLoginStatus, NativeError> {
         let mut status = self.account_login_status(input.clone()).await?;
-        let (context, _) = self.authorized().await?;
+        let (context, _) = self.login_authorized().await?;
         if let Some(entry) = self.owner.0.account_logins.get(&context, &input)? {
             entry.cancel.store(true, Ordering::Release);
             let mut snapshot = entry
@@ -207,7 +238,7 @@ impl NativeManagement {
         input: AccountLoginRequest,
     ) -> Result<AccountLoginAuthorization, NativeError> {
         self.account_login_status(input.clone()).await?;
-        let (context, _) = self.authorized().await?;
+        let (context, _) = self.login_authorized().await?;
         let entry = self
             .owner
             .0
@@ -262,11 +293,28 @@ async fn run(
     tasks: TaskCustody,
 ) -> Result<(), DrainFailure> {
     let deadline = Instant::now() + Duration::from_secs(600);
-    let authorized = manager.login_guard(&context, &input).await.is_ok()
-        && handle.launch().check().is_ok()
-        && tasks.check_open().is_ok();
+    let local_guard = || {
+        if entry.cancel.load(Ordering::Acquire) {
+            Err("cancelled")
+        } else if Instant::now() >= deadline {
+            Err("expired")
+        } else if tasks.check_open().is_err() || handle.launch().check().is_err() {
+            Err("uncertain")
+        } else {
+            Ok(())
+        }
+    };
+    let guard = || async {
+        local_guard()?;
+        let checked = tokio::time::timeout_at(deadline.into(), manager.login_guard(&context, &input))
+            .await
+            .map_err(|_| "expired")?;
+        local_guard()?;
+        checked.map(|_| ()).map_err(|_| "uncertain")
+    };
     let mut login = None;
-    let mut terminal = if authorized {
+    let mut terminal = guard().await.err();
+    if terminal.is_none() {
         #[cfg(test)]
         let selected = manager
             .owner
@@ -284,7 +332,7 @@ async fn run(
         };
         #[cfg(not(test))]
         let start = NamespaceLogin::start(handle.launch(), &tasks).await;
-        match start {
+        terminal = match start {
             Ok((process, status)) => {
                 login = Some(process);
                 observed(&entry, status)
@@ -294,24 +342,11 @@ async fn run(
                 eprintln!("namespace login start: {}", _error.code);
                 Some("uncertain")
             }
-        }
-    } else {
-        Some("uncertain")
-    };
+        };
+    }
     while terminal.is_none() {
-        if entry.cancel.load(Ordering::Acquire) {
-            terminal = Some("cancelled");
-            break;
-        }
-        if Instant::now() >= deadline {
-            terminal = Some("expired");
-            break;
-        }
-        if tasks.check_open().is_err()
-            || manager.login_guard(&context, &input).await.is_err()
-            || handle.launch().check().is_err()
-        {
-            terminal = Some("uncertain");
+        if let Err(state) = guard().await {
+            terminal = Some(state);
             break;
         }
         match login.as_mut().unwrap().observe().await {
@@ -329,13 +364,7 @@ async fn run(
     };
     // Original namespace and current SDK must still agree before a fresh login claim.
     let mut state = terminal.unwrap_or("uncertain");
-    if !stopped
-        || (state == "authenticated"
-            && (manager.login_guard(&context, &input).await.is_err()
-                || handle.launch().check().is_err()
-                || entry.cancel.load(Ordering::Acquire)
-                || tasks.check_open().is_err()))
-    {
+    if !stopped || (state == "authenticated" && guard().await.is_err()) {
         state = "uncertain";
     }
     let verdict = LoginVerdict {

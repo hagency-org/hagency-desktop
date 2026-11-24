@@ -175,6 +175,68 @@ async fn native_managed_login_selected_namespace_completion_and_original_replay(
     f.stop().await;
 }
 #[tokio::test]
+async fn native_managed_login_transient_matrix_failure_keeps_original_attempt() {
+    let f = Fixture::new().await;
+    let (failed, observed) = super::owner_shutdown::command_source(&f, "matrix_authorization_unavailable").await;
+    let (m, input) = input(&f).await;
+    let recover = || async {
+        tokio::time::timeout(Duration::from_secs(10), observed.notified()).await.unwrap();
+        failed.store(false, Ordering::Release);
+    };
+
+    // A failure before dispatch must still yield exactly one provider process.
+    failed.store(true, Ordering::Release);
+    let (start, ()) = tokio::join!(m.login_account(input.clone()), recover());
+    start.unwrap();
+    wait(&m, &input, "awaiting_authorization").await;
+
+    // No foreground polling here: the original worker encounters the outage
+    // while the user is on the provider page.
+    failed.store(true, Ordering::Release);
+    recover().await;
+    let namespace = find(f._root.path(), &input.account_id).unwrap();
+    std::fs::write(namespace.join("fixture-complete"), "").unwrap();
+    wait(&m, &input, "authenticated").await;
+    for marker in ["fixture-spawns", "fixture-starts"] {
+        assert_eq!(std::fs::read_to_string(namespace.join(marker)).unwrap().lines().count(), 1);
+    }
+    f.owner.suspend().await.unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn native_managed_login_persistent_matrix_outage_returns_error_without_starting() {
+    let f = Fixture::new().await;
+    let (failed, _) = super::owner_shutdown::command_source(&f, "matrix_authorization_unavailable").await;
+    let (m, input) = input(&f).await;
+    failed.store(true, Ordering::Release);
+    let error = tokio::time::timeout(Duration::from_secs(10), m.login_account(input.clone()))
+        .await.unwrap().unwrap_err();
+    assert_eq!(error.code, "matrix_authorization_unavailable");
+    assert!(find(f._root.path(), "fixture-spawns").is_none());
+    failed.store(false, Ordering::Release);
+    f.owner.suspend().await.unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
+async fn native_managed_login_retired_during_matrix_retry_cannot_start_provider() {
+    let f = Fixture::new().await;
+    let (failed, observed) = super::owner_shutdown::command_source(&f, "matrix_authorization_unavailable").await;
+    let (m, input) = input(&f).await;
+    failed.store(true, Ordering::Release);
+    let (result, ()) = tokio::join!(m.login_account(input), async {
+        tokio::time::timeout(Duration::from_secs(10), observed.notified()).await.unwrap();
+        m.retire();
+        failed.store(false, Ordering::Release);
+    });
+    assert_eq!(result.unwrap_err().code, "management_access_required");
+    assert!(find(f._root.path(), "fixture-spawns").is_none());
+    f.owner.suspend().await.unwrap();
+    f.stop().await;
+}
+
+#[tokio::test]
 async fn native_managed_login_cancel_stops_original_process_without_new_attempt() {
     let f = Fixture::new().await;
     let (m, input) = input(&f).await;

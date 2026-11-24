@@ -118,12 +118,20 @@ impl NativeManagement {
         // One account-wide lane spans custody, effect and reply recording. A
         // second package instance cannot race a failed reply with a later effect.
         let _mutation = self.owner.0.management.mutations.lock().await;
-        let (context, session) = self.authorized().await?;
+        let login = intent.operation() == IntentOperation::LoginAccount;
+        let authorize = || async {
+            if login {
+                self.login_authorized().await
+            } else {
+                self.authorized().await
+            }
+        };
+        let (context, session) = authorize().await?;
         let saved = session
             .prepare_intent(&context, intent.clone())
             .await
             .map_err(store_error)?;
-        let (current, _) = self.authorized().await?;
+        let (current, _) = authorize().await?;
         if current != context {
             return Err(failure(401, "management_scope_changed"));
         }
@@ -292,8 +300,7 @@ impl NativeManagement {
             Err(_) => None,
         };
         if let Some(reply) = reply {
-            let (current, live) = self
-                .authorized()
+            let (current, live) = authorize()
                 .await
                 .map_err(|_| failure(409, "management_outcome_unknown"))?;
             if current != context {
@@ -303,7 +310,7 @@ impl NativeManagement {
                 .await
                 .map_err(|_| failure(409, "management_outcome_unknown"))?;
         }
-        let (current, _) = self.authorized().await.map_err(|error| {
+        let (current, _) = authorize().await.map_err(|error| {
             if result.is_ok() {
                 failure(409, "management_outcome_unknown")
             } else {
