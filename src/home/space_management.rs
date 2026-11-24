@@ -78,6 +78,7 @@ impl CreateRoomConfig {
 }
 
 struct FreshState {
+    creator_server: OwnedServerName,
     space: bool,
     name: RoomNameId,
     topic: String,
@@ -124,6 +125,7 @@ async fn fresh_state(client: &Client, room: &Room) -> Result<FreshState> {
     } else {
         creation.creator.clone()
     };
+    let creator_server = creator.as_ref().ok_or_else(|| anyhow!("Missing room creator."))?.server_name().to_owned();
     let mut creators: Vec<_> = creator.into_iter().collect();
     if rules.authorization.additional_room_creators {
         creators.extend(creation.additional_creators);
@@ -158,6 +160,7 @@ async fn fresh_state(client: &Client, room: &Room) -> Result<FreshState> {
         })
         .collect();
     Ok(FreshState {
+        creator_server,
         space: creation.room_type == Some(RoomType::Space),
         name: RoomNameId::new(
             matrix_sdk::RoomDisplayName::Named(name.into()),
@@ -451,6 +454,47 @@ fn suggested_folder(name: &str) -> String {
     cut.trim_end().to_owned()
 }
 
+/// A remote registration is display metadata. Its project ID and management
+/// operations belong to the registering homeserver.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RemoteKind {
+    Agent,
+    Ordinary,
+    Unknown,
+}
+
+async fn remote_kind(client: &Client, room: &RoomId) -> RemoteKind {
+    #[derive(serde::Deserialize)]
+    struct Kind { agent: bool }
+
+    let read = async {
+        let mut url = client.homeserver().join("/hagency/api/v1/space-kind").ok()?;
+        url.query_pairs_mut().append_pair("room", room.as_str());
+        let mut response = client.http_client().get(url)
+            .bearer_auth(client.access_token()?)
+            .timeout(std::time::Duration::from_secs(6)).send().await.ok()?.error_for_status().ok()?;
+        let mut body = Vec::new();
+        while let Some(chunk) = response.chunk().await.ok()? {
+            if chunk.len() > 128 - body.len() { return None }
+            body.extend_from_slice(&chunk);
+        }
+        serde_json::from_slice::<Kind>(&body).ok()
+    };
+    match read.await {
+        Some(Kind { agent: true }) => RemoteKind::Agent,
+        Some(Kind { agent: false }) => RemoteKind::Ordinary,
+        None => RemoteKind::Unknown,
+    }
+}
+
+async fn ensure_remote_ordinary(client: &Client, id: &RoomId) -> Result<()> {
+    ensure!(
+        remote_kind(client, id).await == RemoteKind::Ordinary,
+        "Space types could not be checked. Refresh before adding a room."
+    );
+    matrix_context::ensure_current(client)
+}
+
 #[derive(Clone, Debug)]
 struct SpaceChoice {
     name: RoomNameId,
@@ -458,6 +502,23 @@ struct SpaceChoice {
     can_edit: bool,
     topic: String,
     project_id: Option<String>,
+    remote_kind: Option<RemoteKind>,
+}
+
+impl SpaceChoice {
+    fn type_label(&self, projects_known: bool) -> &'static str {
+        if self.project_id.is_some() || self.remote_kind == Some(RemoteKind::Agent) {
+            "Agent space"
+        } else if projects_known && self.can_register_rooms() {
+            "Ordinary space"
+        } else {
+            "Space type unavailable"
+        }
+    }
+
+    fn can_register_rooms(&self) -> bool {
+        matches!(self.remote_kind, None | Some(RemoteKind::Ordinary))
+    }
 }
 #[derive(Clone, Debug, Default)]
 struct Snapshot {
@@ -501,7 +562,10 @@ async fn snapshot(client: &Client, parent: Option<&OwnedRoomId>) -> Result<Snaps
                     })
                     .and_then(|p| p["id"].as_str())
                     .map(str::to_owned);
+                let remote_kind = (project_id.is_none() && state.creator_server != user.server_name())
+                    .then_some(RemoteKind::Unknown);
                 data.spaces.push(SpaceChoice {
+                    remote_kind,
                     project_id,
                     name: state.name,
                     can_link: state
@@ -522,6 +586,13 @@ async fn snapshot(client: &Client, parent: Option<&OwnedRoomId>) -> Result<Snaps
         }
         data.rooms.push(name);
     }
+    // A slow or older federation peer must not serialize lookups for other Spaces.
+    use futures_util::{stream, StreamExt};
+    stream::iter(data.spaces.iter_mut().filter(|s| s.remote_kind.is_some()))
+        .for_each_concurrent(4, |space| async {
+            space.remote_kind = Some(remote_kind(client, space.name.room_id()).await);
+        }).await;
+    matrix_context::ensure_current(client)?;
     for id in &data.children {
         if !data.rooms.iter().any(|room| room.room_id() == id) {
             data.rooms.push(RoomNameId::new(
@@ -535,7 +606,7 @@ async fn snapshot(client: &Client, parent: Option<&OwnedRoomId>) -> Result<Snaps
     {
         let id = space.name.room_id();
         let registration = rows.iter().find(|row| row["spaceId"] == id.as_str());
-        data.can_register_project = space.can_edit && registration.is_none();
+        data.can_register_project = space.can_edit && space.can_register_rooms() && registration.is_none();
         if data.can_register_project {
             if let Some(raw) = client.state_store().get_custom_value(setup_key(id).as_bytes()).await? {
                 data.pending_folder = serde_json::from_slice(&raw)?;
@@ -923,9 +994,15 @@ impl SpaceManagementPanel {
             .iter()
             .find(|space| Some(space.name.room_id()) == self.parent.as_ref())
     }
+    fn can_register_rooms(&self) -> bool {
+        self.data.projects_known && self.choice().is_some_and(SpaceChoice::can_register_rooms)
+    }
     fn room_registration(&self, room: &RoomId) -> Option<&'static str> {
         if self.parent.is_none() { return None }
-        if !self.data.projects_known { return Some("Space types could not be checked. Refresh before adding a room.") }
+        if self.choice().is_some_and(|s| s.remote_kind == Some(RemoteKind::Agent)) {
+            return None;
+        }
+        if !self.can_register_rooms() { return Some("Space types could not be checked. Refresh before adding a room.") }
         if !self.data.children.contains(room) { return None }
         if self.choice().and_then(|space| space.project_id.as_ref()).is_none() { return None }
         match self.data.registered_rooms.as_ref().map(|rooms| rooms.get(room)) {
@@ -1009,7 +1086,9 @@ impl SpaceManagementPanel {
         self.view.label(cx, ids!(folder_error)).set_visible(cx, folder_error);
         self.view.label(cx, ids!(folder_hint)).set_visible(cx, !folder_error);
         if self.wizard_step == 1 && room {
-            let guidance = if !self.data.projects_known {
+            let guidance = if self.choice().is_some_and(|s| s.remote_kind == Some(RemoteKind::Agent)) {
+                "Ask a project manager on the home server to add rooms to this Agent space."
+            } else if !self.data.projects_known || self.choice().is_some_and(|s| !s.can_register_rooms()) {
                 "Space types could not be checked. Refresh before creating a room."
             } else if self.choice().is_none() {
                 "Choose a space to continue."
@@ -1029,7 +1108,7 @@ impl SpaceManagementPanel {
         self.view.label(cx, ids!(name_error)).set_text(cx, crate::i18n::tr(if !topic_valid {"The description is too long."} else {"Use a name of 255 characters or fewer."}));
         self.view.button(cx, ids!(create)).set_enabled(cx, !self.busy && name_valid && topic_valid
             && folder_valid
-            && (!room || self.choice().is_some_and(|c| c.can_link) && self.data.projects_known)
+            && (!room || self.choice().is_some_and(|c| c.can_link) && self.can_register_rooms())
             && self.created.is_none());
         self.view.button(cx, ids!(create)).set_text(cx, crate::i18n::tr(if self.busy {"Creating…"} else if room {"Create room"} else {"Create space"}));
         for id in [id!(wizard_next),id!(wizard_back),id!(finish_setup),id!(create_child)] {
@@ -1187,13 +1266,7 @@ impl Widget for SpaceManagementPanel {
                                 format!(
                                     "{} · {}",
                                     space.name.display(),
-                                    crate::i18n::tr(if space.project_id.is_some() {
-                                        "Agent space"
-                                    } else if data.projects_known {
-                                        "Ordinary space"
-                                    } else {
-                                        "Space type unavailable"
-                                    })
+                                    crate::i18n::tr(space.type_label(data.projects_known))
                                 )
                             }))
                             .collect::<Vec<_>>();
@@ -1387,7 +1460,7 @@ impl Widget for SpaceManagementPanel {
                 if let Some(room) = self.filtered.get(index) {
                     let finish = item.button(cx, ids!(finish_registration)).clicked(actions) && self.needs_room_registration(room.room_id());
                     let add = item.button(cx, ids!(toggle)).clicked(actions) && !self.data.children.contains(room.room_id());
-                    if (finish || add) && self.data.projects_known && self.choice().is_some_and(|space| space.can_link) {
+                    if (finish || add) && self.can_register_rooms() && self.choice().is_some_and(|space| space.can_link) {
                         log!("space-registration-review {}", serde_json::json!({"parent":self.parent,"room":room.room_id(),"project":self.choice().and_then(|space|space.project_id.as_deref()),"retry":finish}));
                         self.busy = true;
                         self.status(cx, StatusTone::Info, "Saving…");
@@ -1405,7 +1478,9 @@ impl Widget for SpaceManagementPanel {
         {
             let input = self.view.text_input(cx, ids!(existing_folder)).text();
             let folder = (!input.trim().is_empty()).then(|| input.trim().to_owned());
+            let remote_parent = self.choice().is_some_and(|space| space.remote_kind == Some(RemoteKind::Ordinary));
             self.run(cx, async move {
+                if remote_parent { ensure_remote_ordinary(&client, &space).await?; }
                 let message = adopt_existing_space(&client, &space, folder).await?;
                 Ok((message, None, false))
             });
@@ -1424,7 +1499,7 @@ impl Widget for SpaceManagementPanel {
                     None
                 },
             };
-            if !config.space && (config.parent.is_none() || !self.data.projects_known) {
+            if !config.space && (config.parent.is_none() || !self.can_register_rooms()) {
                 self.status(
                     cx, StatusTone::Warning,
                     "Choose a space and refresh its type before creating the room.",
@@ -1457,9 +1532,11 @@ impl Widget for SpaceManagementPanel {
             let agent_space = self.setup_agent_space;
             let project = self.setup_project.clone();
             let project_folder = self.setup_project_folder.clone();
+            let remote_parent = self.choice().is_some_and(|space| space.remote_kind == Some(RemoteKind::Ordinary));
             self.run(cx, async move {
                 let request = config.request()?;
                 if let Some(parent) = &config.parent {
+                    if remote_parent { ensure_remote_ordinary(&client, parent).await?; }
                     editable_space(&client, parent, StateEventType::SpaceChild).await?;
                 }
                 matrix_context::ensure_current(&client)?;
@@ -1517,12 +1594,14 @@ impl Widget for SpaceManagementPanel {
                     let add = !self.data.children.contains(room.room_id());
                     let child = room.room_id().clone();
                     if add || finish {
-                        if !self.data.projects_known || !self.choice().is_some_and(|space| space.can_link)
+                        if !self.can_register_rooms() || !self.choice().is_some_and(|space| space.can_link)
                             || (finish && !self.needs_room_registration(&child)) {
                             self.status(cx, StatusTone::Warning, "Space types could not be checked. Refresh before adding a room.");
                             return;
                         }
+                        let remote_parent = self.choice().is_some_and(|space| space.remote_kind == Some(RemoteKind::Ordinary));
                         self.run(cx, async move {
+                            if remote_parent { ensure_remote_ordinary(&client, &parent).await?; }
                             Ok((add_existing_room(&client, &parent, &child).await?, None, false))
                         });
                     } else {
@@ -1621,7 +1700,7 @@ impl Widget for SpaceManagementPanel {
                     let writable = !self.busy && self.choice().is_some_and(|c| c.can_link);
                     item.button(cx, ids!(finish_registration)).set_visible(cx, self.needs_room_registration(room.room_id()));
                     item.button(cx, ids!(finish_registration)).set_enabled(cx, writable);
-                    item.button(cx, ids!(toggle)).set_enabled(cx, writable && (self.data.children.contains(room.room_id()) || self.data.projects_known));
+                    item.button(cx, ids!(toggle)).set_enabled(cx, writable && (self.data.children.contains(room.room_id()) || self.can_register_rooms()));
                     item.draw_all(cx, scope);
                 }
             }
@@ -1662,6 +1741,7 @@ impl SpaceManagementPanelRef {
                 can_link: true,
                 can_edit: true,
                 topic: String::new(),
+                remote_kind: None,
                 project_id: Some("review-project".into()),
             }],
             ..Default::default()
@@ -1808,7 +1888,21 @@ mod tests {
             can_link,
             can_edit: can_link,
             topic: String::new(),
+            remote_kind: None,
             project_id: project.map(str::to_owned),
+        }
+    }
+    #[test]
+    fn federated_labels_do_not_grant_local_project_management() {
+        let mut choice = space("!space:example.org", None, true);
+        for (remote, label, manageable) in [
+            (RemoteKind::Agent, "Agent space", false),
+            (RemoteKind::Ordinary, "Ordinary space", true),
+            (RemoteKind::Unknown, "Space type unavailable", false),
+        ] {
+            choice.remote_kind = Some(remote);
+            assert_eq!(choice.type_label(true), label);
+            assert_eq!(choice.can_register_rooms(), manageable);
         }
     }
     #[tokio::test]

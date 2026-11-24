@@ -2696,6 +2696,7 @@
   "Created. Continue with the next step below.": "Created. Continue with the next step below.",
   "Created, but setup is incomplete. Use Finish setup to retry.": "Created, but setup is incomplete. Use Finish setup to retry.",
   "Choose a space and refresh its type before creating the room.": "Choose a space and refresh its type before creating the room.",
+  "Ask a project manager on the home server to add rooms to this Agent space.": "Ask a project manager on the home server to add rooms to this Agent space.",
   "Space type unavailable": "Space type unavailable",
   "Agent space": "Agent space",
   "Ordinary space": "Ordinary space",
