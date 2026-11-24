@@ -161,13 +161,14 @@ script_mod! {
         // Nothing here listens for scroll position changes.
         emit_scroll_actions: false,
         scroll_bar: ScrollBar {
-            // Keep overflow discoverable on the navy rail, including at rest.
+            // Keep overflow discoverable on the rail, including at rest. The
+            // handle takes the rail's own text roles so it follows the theme.
             bar_size: 6.0,
             min_handle_size: 28.0
             draw_bg +: {
-                color: #ffffff70
-                color_hover: #ffffffb0
-                color_drag: (mod.widgets.RBX_NAV_FG)
+                color: (mod.widgets.RBX_NAV_FG)
+                color_hover: (mod.widgets.RBX_NAV_FG_ACTIVE)
+                color_drag: (mod.widgets.RBX_NAV_FG_ACTIVE)
             }
         }
 
