@@ -735,13 +735,13 @@ impl Widget for InviteScreen {
                 accept_button.set_enabled(cx, false);
                 reject_and_block_button.set_enabled(cx, false);
                 cancel_button.set_text(cx, crate::i18n::tr("Reject Invite"));
-                accept_button.set_text(cx, "Joining...");
+                accept_button.set_text(cx, crate::i18n::tr("Joining..."));
             }
             InviteState::WaitingForLeaveResult => {
                 cancel_button.set_enabled(cx, false);
                 accept_button.set_enabled(cx, false);
                 reject_and_block_button.set_enabled(cx, false);
-                cancel_button.set_text(cx, "Rejecting...");
+                cancel_button.set_text(cx, crate::i18n::tr("Rejecting..."));
                 accept_button.set_text(cx, join_text);
             }
             InviteState::WaitingForJoinedRoom => {
@@ -749,7 +749,7 @@ impl Widget for InviteScreen {
                 accept_button.set_enabled(cx, false);
                 reject_and_block_button.set_enabled(cx, false);
                 cancel_button.set_text(cx, crate::i18n::tr("Reject Invite"));
-                accept_button.set_text(cx, "Joined!");
+                accept_button.set_text(cx, crate::i18n::tr("Joined!"));
             }
             InviteState::RoomLeft => {
                 cancel_button.set_visible(cx, false);

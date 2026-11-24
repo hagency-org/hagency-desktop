@@ -169,7 +169,7 @@ script_mod! {
             discover := ScrollYView {
                 width: Fill height: Fill flow: Down spacing: 8
                 mod.widgets.MobileSection {
-                    discover_mini_apps := mod.widgets.MobileRow {title.text: "Mini apps" icon.draw_icon.svg: ICON_SQUARES}
+                    discover_mini_apps := mod.widgets.MobileRow {title.text: #(crate::i18n::tr("Mini apps")) title.i18n_text: "Mini apps" icon.draw_icon.svg: ICON_SQUARES}
                     mod.widgets.MobileDivider {}
                     discover_article := mod.widgets.MobileRow {title.text: #(crate::i18n::tr("Article editor")) title.i18n_text: "Article editor" icon.draw_icon.svg: ICON_FILE}
                     mod.widgets.MobileDivider {}

@@ -838,7 +838,7 @@ impl ReplyText {
         let answer = std::mem::take(&mut self.answer);
         if !answer.is_empty() { answer }
         else if self.notes_delivered && !notes.is_empty() {
-            "本次运行已结束，未提供最终答复。".into()
+            "The run ended without a final answer. / 本次运行已结束，未提供最终答复。".into()
         } else { notes }
     }
 }
@@ -3872,7 +3872,7 @@ mod tests {
         let mut reply = ReplyText::default();
         reply.push("Already sent.", true);
         reply.notes_delivered = true;
-        assert_eq!(reply.finish(), "本次运行已结束，未提供最终答复。");
+        assert_eq!(reply.finish(), "The run ended without a final answer. / 本次运行已结束，未提供最终答复。");
 
         // A message without a phase (older app-servers) is part of the answer.
         let mut reply = ReplyText::default();

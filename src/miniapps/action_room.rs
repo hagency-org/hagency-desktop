@@ -24,8 +24,8 @@ script_mod! {
     mod.widgets.ActionRoomBoard = #(ActionRoomBoard::register_widget(vm)) {
         visible: false width: Fill height: Fill flow: Down
         bar := View {width: Fill height: Fit padding: 12 spacing: 8 flow: Right align: Align{y: 0.5}
-            RinxLabel {width: Fill text: "My Actions"}
-            toggle := RinxButton {text: "Chat history"}
+            RinxLabel {width: Fill text: #(crate::i18n::tr("My Actions")) i18n_text: "My Actions"}
+            toggle := RinxButton {text: #(crate::i18n::tr("Chat history")) i18n_text: "Chat history"}
         }
         panel := MiniAppsPanel {}
     }

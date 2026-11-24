@@ -129,7 +129,7 @@ async fn claude_owner_clear_starts_a_new_conversation_that_the_agent_follows() {
         .unwrap();
     let reply = turn(&mut f, &mut process, "second", "/clear").await;
     assert_eq!(reply.status, codex::TurnStatus::Completed);
-    assert_eq!(reply.text, "✅ 已执行 /clear：对话已清空，下一条消息开始新的对话。");
+    assert_eq!(reply.text, "✅ Ran /clear: the conversation was cleared; the next message starts a new one. / 已执行 /clear：对话已清空，下一条消息开始新的对话。");
     assert_eq!(reply.usage.input + reply.usage.output, 0);
     assert_eq!(saved_session(&f), "cleared-session");
 

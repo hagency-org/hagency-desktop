@@ -29,18 +29,18 @@ script_mod! {
         header := View {width: Fill height: 44 flow: Right spacing: 8 align: Align{y: 0.5}
             back := RinxButton {width: 44 height: 44 text: "" icon_walk: Walk{width: 20 height: 20}
                 draw_icon +: {svg: crate_resource("self://resources/icons/arrow_back.svg") color: mod.widgets.RINX_INK}}
-            title := Label {width: Fill max_lines: 1 text_overflow: Ellipsis text: "Mini apps" draw_text +: {color: mod.widgets.RINX_INK text_style.font_size: (18 * mod.widgets.RINX_TEXT_SCALE)}}
-            refresh := RinxButton {text: "Refresh"}
-            developer := RinxButton {text: "Developer"}
+            title := Label {width: Fill max_lines: 1 text_overflow: Ellipsis text: #(crate::i18n::tr("Mini apps")) i18n_text: "Mini apps" draw_text +: {color: mod.widgets.RINX_INK text_style.font_size: (18 * mod.widgets.RINX_TEXT_SCALE)}}
+            refresh := RinxButton {text: #(crate::i18n::tr("Refresh")) i18n_text: "Refresh"}
+            developer := RinxButton {text: #(crate::i18n::tr("Developer")) i18n_text: "Developer"}
         }
-        status := Label {width: Fill height: Fit draw_text.color: mod.widgets.RINX_MUTED text: "Loading App Hub…"}
+        status := Label {width: Fill height: Fit draw_text.color: mod.widgets.RINX_MUTED text: #(crate::i18n::tr("Loading App Hub…")) i18n_text: "Loading App Hub…"}
         collection := View {width: Fill height: Fill flow: Down spacing: 12
             tabs := View {width: Fill height: 44 flow: Right spacing: 6
-                recent := RinxButton {width: Fill text: "Recent"}
-                mine := RinxButton {width: Fill text: "My apps"}
-                browse := RinxButton {width: Fill text: "Browse"}
+                recent := RinxButton {width: Fill text: #(crate::i18n::tr("Recent")) i18n_text: "Recent"}
+                mine := RinxButton {width: Fill text: #(crate::i18n::tr("My apps")) i18n_text: "My apps"}
+                browse := RinxButton {width: Fill text: #(crate::i18n::tr("Browse")) i18n_text: "Browse"}
             }
-            search := RinxInput {width: Fill height: 40 empty_text: "Find mini apps"}
+            search := RinxInput {width: Fill height: 40 empty_text: #(crate::i18n::tr("Find mini apps")) i18n_empty_text: "Find mini apps"}
             empty := Label {visible: false width: Fill height: Fit draw_text.color: mod.widgets.RINX_MUTED}
             list := PortalList {width: Fill height: Fill
                 Filler := View {width: Fill height: 84}
@@ -63,18 +63,18 @@ script_mod! {
             permissions := Label {width: Fill draw_text.color: mod.widgets.RINX_INK}
             account := Label {width: Fill draw_text.color: mod.widgets.RINX_MUTED}
             room_group := View {width: Fill height: Fit flow: Down spacing: 8
-                Label {text: "Allow access to a conversation" draw_text.color: mod.widgets.RINX_MUTED}
+                Label {text: #(crate::i18n::tr("Allow access to a conversation")) i18n_text: "Allow access to a conversation" draw_text.color: mod.widgets.RINX_MUTED}
                 room := DropDown {width: Fill labels: ["No conversation access"]}
             }
             availability := Label {width: Fill draw_text.color: mod.widgets.RINX_MUTED}
             actions := View {width: Fill height: Fit flow: Right spacing: 12
-                primary := RinxPrimaryButton {height: 44 text: "Add"}
-                remove := RinxButton {height: 44 text: "Remove"}
+                primary := RinxPrimaryButton {height: 44 text: #(crate::i18n::tr("Add")) i18n_text: "Add"}
+                remove := RinxButton {height: 44 text: #(crate::i18n::tr("Remove")) i18n_text: "Remove"}
             }
-            remove_note := Label {width: Fill text: "Removing an app keeps its saved documents." draw_text.color: mod.widgets.RINX_MUTED}
+            remove_note := Label {width: Fill text: #(crate::i18n::tr("Removing an app keeps its saved documents.")) i18n_text: "Removing an app keeps its saved documents." draw_text.color: mod.widgets.RINX_MUTED}
             remove_confirm := View {visible: false width: Fill height: Fit flow: Right spacing: 12
-                cancel := RinxButton {height: 44 text: "Cancel"}
-                confirm := RinxButton {height: 44 text: "Remove app"}
+                cancel := RinxButton {height: 44 text: #(crate::i18n::tr("Cancel")) i18n_text: "Cancel"}
+                confirm := RinxButton {height: 44 text: #(crate::i18n::tr("Remove app")) i18n_text: "Remove app"}
             }
         }
     }

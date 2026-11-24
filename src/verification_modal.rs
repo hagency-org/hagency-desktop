@@ -355,7 +355,7 @@ impl VerificationModal {
         self.is_final = false;
         self.is_comparing_keys = false;
         accept_button.set_enabled(cx, false);
-        accept_button.set_text(cx, "Waiting…");
+        accept_button.set_text(cx, crate::i18n::tr("Waiting…"));
         cancel_button.set_text(cx, crate::i18n::tr("Cancel"));
         cancel_button.set_enabled(cx, true);
         cancel_button.set_visible(cx, true);

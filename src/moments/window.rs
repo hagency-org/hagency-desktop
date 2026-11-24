@@ -21,7 +21,7 @@ script_mod! {
             caption_label +: {
                 label +: {
                     draw_text +: { color: mod.widgets.RINX_INK }
-                    text: "Moments"
+                    text: #(crate::i18n::tr("Moments")) i18n_text: "Moments"
                 }
             }
         }

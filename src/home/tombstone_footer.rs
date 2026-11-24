@@ -165,7 +165,7 @@ impl TombstoneFooter {
                 replacement_reason.set_text(cx, DEFAULT_TOMBSTONE_REASON);
                 join_successor_button.set_text(cx, DEFAULT_JOIN_BUTTON_TEXT);
                 successor_room_avatar.show_text(cx, None, None, "?");
-                successor_room_name.set_text(cx, "(Unknown successor room");
+                successor_room_name.set_text(cx, crate::i18n::tr("(Unknown successor room)"));
                 self.successor_info = None;
             }
             SuccessorRoomDetails::Basic(sr) => {

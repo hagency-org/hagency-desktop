@@ -28,13 +28,13 @@ script_mod! {
         preview := HtmlOrPlaintext { width: Fill height: Fit selectable: true }
         input := TextInput {
             width: Fill height: Fit
-            empty_text: "追加指令…"
+            empty_text: #(crate::i18n::tr("Add instruction…")) i18n_empty_text: "Add instruction…"
         }
         buttons := View {
             width: Fill height: Fit flow: Right spacing: 8
-            append := Button {text: "追加到当前运行"}
-            stop := Button {text: "停止本次运行"}
-            restore := Button {text: "恢复未执行指令"}
+            append := Button {text: #(crate::i18n::tr("Add to current run")) i18n_text: "Add to current run"}
+            stop := Button {text: #(crate::i18n::tr("Stop this run")) i18n_text: "Stop this run"}
+            restore := Button {text: #(crate::i18n::tr("Restore unsent instructions")) i18n_text: "Restore unsent instructions"}
         }
         hint := Label {
             width: Fill height: Fit
@@ -42,7 +42,7 @@ script_mod! {
         }
         unconfirmed_notice := Label {
             visible: false width: Fill height: Fit
-            text: "以下指令结果未确认，原文可复制。请先核对，避免重复执行。"
+            text: #(crate::i18n::tr("The result of the following instructions is unconfirmed. The original text can be copied. Check it first to avoid running it twice.")) i18n_text: "The result of the following instructions is unconfirmed. The original text can be copied. Check it first to avoid running it twice."
             draw_text +: {color: mod.widgets.RINX_MUTED text_style: theme.font_regular {font_size: 11}}
         }
         unconfirmed := ScrollYView {
@@ -160,12 +160,12 @@ impl AgentRunCardRef {
             .set_text(cx, &format!("{} · {}", entry.name, entry.card.runtime));
         use ::hagency::agent_run_controls::State;
         let status = match entry.card.state {
-            State::Running => "运行中。追加指令会加入当前运行。",
-            State::Stopping => "正在停止，等待运行时结束并结算。",
-            State::Completed => "已完成",
-            State::Interrupted => "已停止",
-            State::Failed => "执行失败",
-            State::Unknown => "运行已离线，结果需要核对。",
+            State::Running => crate::i18n::tr("Running. Added instructions join the current run."),
+            State::Stopping => crate::i18n::tr("Stopping; waiting for the run to end and settle."),
+            State::Completed => crate::i18n::tr("Completed"),
+            State::Interrupted => crate::i18n::tr("Stopped"),
+            State::Failed => crate::i18n::tr("Run failed"),
+            State::Unknown => crate::i18n::tr("The run went offline; check its result."),
         };
         inner.view.label(cx, ids!(status)).set_text(cx, status);
         let preview = inner.view.html_or_plaintext(cx, ids!(preview));
@@ -190,7 +190,7 @@ impl AgentRunCardRef {
         }
         let append = inner.view.button(cx, ids!(buttons.append));
         append.set_visible(cx, open && entry.may_append);
-        append.set_text(cx, "追加到当前运行");
+        append.set_text(cx, crate::i18n::tr("Add to current run"));
         append.set_enabled(cx, !entry.sending);
         let stop = inner.view.button(cx, ids!(buttons.stop));
         stop.set_visible(cx, open && entry.may_stop);
