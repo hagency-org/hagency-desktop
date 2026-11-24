@@ -469,6 +469,7 @@ impl std::fmt::Debug for PreparedAttachmentShare {
 
 /// Remove under the lock, then return ownership so callback code may re-enter
 /// download/cancel/share without retaining the global transfer-map mutex.
+#[cfg(test)]
 pub(crate) fn take_download<T>(
     tasks: &Mutex<hashbrown::HashMap<OwnedMxcUri, T>>,
     mxc: &OwnedMxcUri,
