@@ -63,6 +63,12 @@ struct RemoteSession {
     /// it is zero before the first one, which keeps the lease comparison the
     /// stricter one.
     clock_allowance: Duration,
+    /// The longest window a renewed proof has had since the SDK last refreshed
+    /// its token for this session: what the server grants when the token's
+    /// own expiry does not cut the proof short. Zero before the first renewal.
+    full_window: Duration,
+    /// When this session last had the SDK refresh its token.
+    sdk_refreshed: Option<Instant>,
     invalidated: bool,
     binding: Binding,
     checked: Instant,
@@ -786,46 +792,45 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     }
     let (renewed, clock) = proof_response(request_started, renewal_response).await.map_err(renewal_error)?;
     let (mut until, mut taken) = clock.bounds(&renewed).map_err(|_| Error::Unavailable)?;
-    if until <= Instant::now() + Duration::from_secs(20)
-        && let Some(source) = &session.matrix_source
-    {
-        // A short returned proof signals actual token expiry, rather than the
-        // normal thirty-second server freshness window. Refresh only once.
-        let refreshed = source.refresh_access_token().await.map_err(|error| {
-            let code = super::native::sdk_source_failure(error);
-            eprintln!("hagency owner renewal failure: stage=sdk_refresh code={code}");
-            if code == "matrix_authorization_unavailable" {
-                Error::Unavailable
-            } else {
-                Error::Unauthorized
-            }
-        })?;
-        if refreshed.client_id != session.binding.client_id || refreshed.access_token.is_empty() {
-            return Err(Error::Unauthorized);
-        }
-        let request_started = Instant::now();
-        let response = client
-            .post(
-                server
-                    .join("/hagency/api/v1/sessions/current/renew")
-                    .unwrap(),
+    let mut proof_window = window_left(until, taken);
+    if let Some(source) = session.matrix_source.clone() {
+        // The server never trusts a proof past the token's own expiry, so an
+        // ageing token returns a shorter proof than the window the server
+        // grants. Refresh it once: when the proof is about to end, and already
+        // when it has lost a good part of that window, so that a host that
+        // then stalls still has most of the window ahead of it.
+        let expiring = until <= Instant::now() + EXPIRING_PROOF;
+        if expiring
+            || proof_shortened(
+                proof_window,
+                session.full_window,
+                session.sdk_refreshed.map(|at| at.elapsed()),
             )
-            .bearer_auth(&session.token)
-            .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
-            .json(&json!({"accessToken":refreshed.access_token}))
-            .send()
+        {
+            session.sdk_refreshed = Some(Instant::now());
+            match renew_with_refreshed_token(
+                &client,
+                &server,
+                &session.token,
+                &session.binding.client_id,
+                source.as_ref(),
+            )
             .await
-            .map_err(|_| Error::Unavailable)?;
-        if !response.status().is_success() {
-            eprintln!(
-                "hagency owner renewal failure: stage=server_after_refresh status={}",
-                response.status().as_u16()
-            );
+            {
+                Ok(bounds) => {
+                    (until, taken) = bounds;
+                    proof_window = window_left(until, taken);
+                    // The window a fresh token gets, also when the server now
+                    // grants a shorter one than before.
+                    session.full_window = Duration::ZERO;
+                }
+                // The proof in hand still holds. A refresh made ahead of the
+                // token's expiry is asked again later; one that got no answer
+                // must not take that proof away.
+                Err(Error::Unavailable) if !expiring => {}
+                Err(error) => return Err(error),
+            }
         }
-        let (refreshed, clock) = proof_response(request_started, response).await.map_err(renewal_error)?;
-        let bounds = clock.bounds(&refreshed).map_err(|_| Error::Unavailable)?;
-        until = bounds.0;
-        taken = bounds.1;
     }
     let (identity, clock) = get_identity(
         &client,
@@ -864,8 +869,73 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     }
     session.authorized_until = until.min(identity_until).min(session.oauth_expires);
     session.clock_allowance = window.saturating_duration_since(session.authorized_until);
+    session.full_window = session.full_window.max(proof_window);
     session.checked = Instant::now();
     Ok(())
+}
+/// A proof that ends this soon is taken as the token itself running out.
+const EXPIRING_PROOF: Duration = Duration::from_secs(20);
+/// How much of its full window a renewed proof has to have lost before the
+/// host has the SDK refresh its token for it. With the default window of
+/// thirty seconds this is the moment the proof counts as expiring anyway, so
+/// a server that grants no longer window sees the same refreshes as before.
+const SHORTENED_PROOF: Duration = Duration::from_secs(10);
+/// The least time between two refreshes made for a shortened proof. A token
+/// that lives shorter than the window cannot be refreshed into a full proof,
+/// and is refreshed when it runs out, as before.
+const SHORTENED_PROOF_REFRESH_SPACING: Duration = Duration::from_secs(60);
+/// What is left of a proof's window as the local clock reads it: the time to
+/// its deadline plus what the proof clock left out of the window.
+fn window_left(until: Instant, taken: Duration) -> Duration {
+    (until + taken).saturating_duration_since(Instant::now())
+}
+/// Whether a proof with `window` left has lost enough of `full`, the window a
+/// fresh token got, for a refresh, given how long ago the last one was asked.
+fn proof_shortened(window: Duration, full: Duration, refreshed: Option<Duration>) -> bool {
+    window + SHORTENED_PROOF <= full
+        && refreshed.is_none_or(|ago| ago >= SHORTENED_PROOF_REFRESH_SPACING)
+}
+/// Has the SDK refresh its token and renews the proof with the new one.
+async fn renew_with_refreshed_token(
+    client: &Client,
+    server: &Url,
+    session_token: &str,
+    client_id: &str,
+    source: &dyn super::native::MatrixTokenSource,
+) -> Result<(Instant, Duration), Error> {
+    let refreshed = source.refresh_access_token().await.map_err(|error| {
+        let code = super::native::sdk_source_failure(error);
+        eprintln!("hagency owner renewal failure: stage=sdk_refresh code={code}");
+        if code == "matrix_authorization_unavailable" {
+            Error::Unavailable
+        } else {
+            Error::Unauthorized
+        }
+    })?;
+    if refreshed.client_id != client_id || refreshed.access_token.is_empty() {
+        return Err(Error::Unauthorized);
+    }
+    let request_started = Instant::now();
+    let response = client
+        .post(
+            server
+                .join("/hagency/api/v1/sessions/current/renew")
+                .unwrap(),
+        )
+        .bearer_auth(session_token)
+        .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
+        .json(&json!({"accessToken":refreshed.access_token}))
+        .send()
+        .await
+        .map_err(|_| Error::Unavailable)?;
+    if !response.status().is_success() {
+        eprintln!(
+            "hagency owner renewal failure: stage=server_after_refresh status={}",
+            response.status().as_u16()
+        );
+    }
+    let (refreshed, clock) = proof_response(request_started, response).await.map_err(renewal_error)?;
+    clock.bounds(&refreshed).map_err(|_| Error::Unavailable)
 }
 fn random() -> Result<String, &'static str> {
     let mut bytes = [0; 32];
@@ -1421,6 +1491,8 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
                 oauth_expires: Instant::now() + oauth_lifetime,
                 authorized_until: authorized_until.min(Instant::now() + oauth_lifetime),
                 clock_allowance: std::time::Duration::ZERO,
+                full_window: std::time::Duration::ZERO,
+                sdk_refreshed: None,
                 invalidated: false,
                 binding: pending.binding.clone(),
                 checked: Instant::now(),
@@ -2211,6 +2283,27 @@ mod scope_policy_request_tests {
 mod shared_protocol_tests;
 
 #[cfg(test)]
+mod shortened_proof_tests {
+    use super::*;
+    #[test]
+    fn a_proof_counts_as_shortened_once_it_lost_ten_seconds_of_the_full_window() {
+        let secs = Duration::from_secs;
+        // A two-minute window, and a token closer than that to its expiry.
+        assert!(!proof_shortened(secs(120), secs(120), None));
+        assert!(!proof_shortened(secs(111), secs(120), None));
+        assert!(proof_shortened(secs(110), secs(120), None));
+        assert!(proof_shortened(secs(60), secs(120), Some(secs(60))));
+        // Not within a minute of the last refresh.
+        assert!(!proof_shortened(secs(60), secs(120), Some(secs(59))));
+        // Nothing is known before the first renewal.
+        assert!(!proof_shortened(secs(25), Duration::ZERO, None));
+        // The default window: only where the proof counts as expiring anyway.
+        assert!(!proof_shortened(secs(21), secs(30), None));
+        assert!(proof_shortened(EXPIRING_PROOF, secs(30), None));
+    }
+}
+
+#[cfg(test)]
 mod oauth_refresh_tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -2230,6 +2323,8 @@ mod oauth_refresh_tests {
             oauth_expires: now,
             authorized_until: now,
             clock_allowance: std::time::Duration::ZERO,
+            full_window: std::time::Duration::ZERO,
+            sdk_refreshed: None,
             invalidated: false,
             binding: Binding {
                 origin: origin.clone(),

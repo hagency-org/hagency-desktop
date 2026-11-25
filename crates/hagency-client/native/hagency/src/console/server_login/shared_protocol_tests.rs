@@ -21,6 +21,8 @@ async fn fixture(
             oauth_expires: now + Duration::from_secs(900),
             authorized_until: now + Duration::from_secs(900),
             clock_allowance: std::time::Duration::ZERO,
+            full_window: std::time::Duration::ZERO,
+            sdk_refreshed: None,
             invalidated: false,
             binding: Binding {
                 origin,

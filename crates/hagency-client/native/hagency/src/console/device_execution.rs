@@ -1156,7 +1156,17 @@ impl Console {
                 .unwrap_or("execution_request_failed");
             return Err(error(status, code));
         }
-        parse_response(&operation, value, &device)
+        // The server cuts a lease to the authorization window it knows when
+        // it handles the request, and another caller's renewal can move that
+        // window on after `device` was read. `current` is the same device with
+        // the proof this host holds now, so the answer is held to the later of
+        // the two windows.
+        let held = if current.window_until() > device.window_until() {
+            &current
+        } else {
+            &device
+        };
+        parse_response(&operation, value, held)
     }
     /// The shared project folder of `room`'s space, asked with the execution
     /// device the local runtime is pinned to. `Ok(None)` is the server's
