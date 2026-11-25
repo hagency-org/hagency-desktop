@@ -71,7 +71,7 @@ script_mod! {
                 icon_walk: Walk{width: 18, height: Fit, margin: Inset{bottom: 2}}
             }
 
-            directory_click_area := Button {
+            directory_click_area := RinxFocusButton {
                 width: (RBX_CONTROL_H_SM),
                 height: (RBX_CONTROL_H_SM)
                 padding: Inset{top: 6, bottom: 6, left: 6, right: 6}

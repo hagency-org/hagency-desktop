@@ -656,6 +656,7 @@ script_mod! {
         // full-width, top-left after the first render.
         mod.widgets.RinxKeyButton = set_type_default() do #(MiniAppButton::register_widget(vm)) {
             ..mod.widgets.RinxButton,
+            ..mod.widgets.RinxFocusButton,
             ..mod.widgets.Button,
             ..mod.widgets.ButtonFlat,
         }
@@ -671,11 +672,11 @@ mod.widgets.RinxToggle = mod.widgets.RinxKeyButton{height:max(44,mod.widgets.RIN
             let sdf=Sdf2d.viewport(self.pos * self.rect_size)
             let y=self.rect_size.y * 0.5
             sdf.box(1.0,1.0,self.rect_size.x-2.0,self.rect_size.y-2.0,6.0)
-            sdf.fill_keep(self.color.mix(self.color_hover,self.hover))
-            sdf.stroke(self.accent, self.focus)
+            let fill = self.color.mix(self.color_hover, self.hover)
+            sdf.fill(fill)
             sdf.box(12.0,y-10.0,34.0,20.0,10.0) sdf.fill(self.muted.mix(self.accent,self.selected).mix(self.muted,self.disabled))
             sdf.circle(22.0+14.0*self.selected,y,7.0) sdf.fill(self.knob)
-            return sdf.result
+            return self.draw_focus_ring(sdf.result, fill)
         }
     }
 }
@@ -692,7 +693,7 @@ mod.widgets.RinxSwitch = mod.widgets.RinxKeyButton{width:51 height:44 text:"" pa
             sdf.circle(2.5+r+(self.rect_size.x-5.0-2.0*r)*self.selected,y0+h*0.5,r)
             sdf.fill(self.knob)
             // Disabled switches fade as a whole, in either position.
-            return sdf.result*(1.0-0.5*self.disabled)
+            return self.draw_focus_ring(sdf.result*(1.0-0.5*self.disabled), #0000)
         }
     }
 }

@@ -1,32 +1,27 @@
 use makepad_widgets::*;
 
+/// Keep Makepad's input gate and disabled animation in sync.
+pub fn set_button_enabled(cx: &mut Cx, button: &ButtonRef, enabled: bool) {
+    button.set_enabled(cx, enabled);
+    if let Some(mut button) = button.borrow_mut() {
+        if button.disabled(cx) == enabled {
+            button.set_disabled(cx, !enabled);
+        }
+    }
+}
+
 script_mod! {
     use mod.prelude.widgets.*
     use mod.widgets.*
 
-    // The base Rinx button widget.
-    // Uses COLOR_ACTIVE_PRIMARY (blue) background with white text by default.
-    // See also the preset variants below:
-    //   RobrixPositiveIconButton, RobrixNegativeIconButton, RobrixNeutralIconButton.
-    mod.widgets.RobrixIconButton = Button {
+    mod.widgets.RobrixIconButton = RinxFocusButton {
         width: Fit,
         height: Fit,
         spacing: 10,
         padding: 10,
         margin: 0,
         align: Align{x: 0.5, y: 0.5}
-        // A click takes no key focus (as RinxButton). The focus colors below are one
-        // pale face and dark text for every variant, and the icon has no focus color,
-        // so a clicked button used to stay a white icon on a pale face.
         grab_key_focus: false
-
-        animator +: {
-            focus: {
-                default: @off
-                off: AnimatorState {from: {all: Snap} apply: {draw_bg: {focus: 0.0} draw_text: {focus: 0.0}}}
-                on: AnimatorState {from: {all: Snap} apply: {draw_bg: {focus: 1.0} draw_text: {focus: 1.0}}}
-            }
-        }
 
         draw_bg +: {
             border_size: 0.0
@@ -35,13 +30,11 @@ script_mod! {
             color: (COLOR_ACTIVE_PRIMARY)
             color_hover: (COLOR_ACTIVE_PRIMARY_DARKER)
             color_down: mod.widgets.RINX_ACCENT_DOWN
-            color_focus: mod.widgets.RINX_SELECTED
             color_disabled: (COLOR_BG_DISABLED)
 
             border_color: #0000
             border_color_hover: #0000
             border_color_down: #0000
-            border_color_focus: #0000
             border_color_disabled: #0000
 
             // Disable gradient (color_2) by default
@@ -52,14 +45,13 @@ script_mod! {
             border_color_2: vec4(-1.0, -1.0, -1.0, -1.0)
         }
 
-        draw_icon.color: (COLOR_PRIMARY)
+        draw_icon.color: mod.widgets.RINX_ON_ACCENT
         icon_walk: Walk{width: 16, height: 16}
 
         draw_text +: {
-            color: (COLOR_PRIMARY)
-            color_hover: (COLOR_PRIMARY)
-            color_down: (COLOR_PRIMARY)
-            color_focus: mod.widgets.RINX_INK
+            color: mod.widgets.RINX_ON_ACCENT
+            color_hover: mod.widgets.RINX_ON_ACCENT
+            color_down: mod.widgets.RINX_ON_ACCENT
             color_disabled: (COLOR_FG_DISABLED)
             text_style: mod.widgets.REGULAR_TEXT {font_size: (10 * mod.widgets.RINX_TEXT_SCALE)},
         }

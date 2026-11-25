@@ -60,10 +60,10 @@ script_mod! {
                     }
                     unread := UnreadBadge {}
                 }
-                more := ButtonFlat {
+                more := RinxFocusButton {
                     width: 28 height: 36 text: "⋯"
                     margin: 0 padding: 0
-                    draw_bg +: {color: #0000 color_hover: mod.widgets.RINX_HOVER color_down: mod.widgets.RINX_PRESSED color_focus: mod.widgets.RINX_SELECTED border_size: 0 border_radius: 5
+                    draw_bg +: {color: #0000 color_hover: mod.widgets.RINX_HOVER color_down: mod.widgets.RINX_PRESSED border_size: 0 border_radius: 5
                         color_2_hover: vec4(-1.0, -1.0, -1.0, -1.0) color_2_down: vec4(-1.0, -1.0, -1.0, -1.0) color_2_focus: vec4(-1.0, -1.0, -1.0, -1.0)}
                     draw_text +: {color: mod.widgets.RINX_MUTED color_hover: mod.widgets.RINX_INK color_down: mod.widgets.RINX_INK}
                 }

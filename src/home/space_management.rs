@@ -734,9 +734,10 @@ script_mod! {
         pixel: fn() {
             let sdf = Sdf2d.viewport(self.pos * self.rect_size)
             sdf.box(1.0, 1.0, self.rect_size.x - 2.0, self.rect_size.y - 2.0, self.border_radius)
-            sdf.fill_keep(self.color.mix(self.color_focus, self.focus).mix(self.color_hover, self.hover).mix(self.color_down, self.down).mix(self.color_disabled, self.disabled))
-            sdf.stroke(self.border_color.mix(self.border_color_focus, self.focus), max(self.border_size, self.focus))
-            return sdf.result
+            let fill = self.color.mix(self.color_hover, self.hover).mix(self.color_down, self.down).mix(self.color_disabled, self.disabled)
+            sdf.fill_keep(fill)
+            sdf.stroke(self.border_color, self.border_size)
+            return self.draw_focus_ring(sdf.result, fill)
         }
     }}
     let Primary = Action {width: Fill height: (48 * mod.widgets.RINX_TEXT_SCALE) icon_walk: Walk{width: 0 height: 0} spacing: 0 draw_bg +: {border_radius: 6 color: mod.widgets.RINX_ACCENT color_focus: mod.widgets.RINX_ACCENT color_hover: mod.widgets.RINX_ACCENT_HOVER color_down: mod.widgets.RINX_ACCENT_DOWN border_size: 0 border_color_focus: mod.widgets.RINX_ON_ACCENT color_disabled: mod.widgets.RINX_BORDER} draw_text +: {color: mod.widgets.RINX_ON_ACCENT color_hover: mod.widgets.RINX_ON_ACCENT color_focus: mod.widgets.RINX_ON_ACCENT color_down: mod.widgets.RINX_ON_ACCENT text_style: theme.font_bold{font_size: (12 * mod.widgets.RINX_TEXT_SCALE)} color_disabled: mod.widgets.RINX_MUTED}}
