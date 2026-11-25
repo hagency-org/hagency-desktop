@@ -7204,6 +7204,8 @@ A.who_pick_hit=fn(i){
     if !A.who_has(w.picks,hits[i].id) && w.picks.len()<64 {w.picks.push(hits[i].id)}
     w.name=""
     A.who_search("")
+    // Typing set visibility on the live views. Restore it before the page reuses them.
+    A.who_typing_show()
     A.redraw()
 }
 // The line under the field: {text, error}. An account counts only once it is known to exist.
@@ -14819,13 +14821,14 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         for index mxid in people {View{width:Fill height:Fit flow:Down
                             let picked=A.who_has(who.picks,mxid)
                             let shown=A.who_display(mxid)
+                            let account=if picked {mxid} else {A.pool_person(mxid)}
                             mod.widgets.HagencyListDivider{margin:Inset{left:(if index>0 {57} else {16})}}
                             mod.widgets.HagencyListFit{
                                 mod.widgets.HagencyListFitBody{
                                     mod.widgets.HagencyRowIcon{draw_bg.color:if picked {mod.widgets.RINX_INFO_BG} else {mod.widgets.RINX_SELECTED} mod.widgets.HagencyRowGlyph{draw_icon.svg:mod.rinx_icons.person draw_icon.color:if picked {mod.widgets.RINX_INFO_FG} else {mod.widgets.RINX_MUTED}}}
                                     mod.widgets.HagencyListText{
-                                        mod.widgets.HagencyWrapTitle{text:if shown!="" {shown} else {A.pool_person(mxid)}}
-                                        mod.widgets.HagencyListSubtitle{text:(if shown!="" {A.pool_person(mxid)+" · "} else {""})+A.who_source(v,mxid)}
+                                        mod.widgets.HagencyWrapTitle{text:if shown!="" {shown} else {account}}
+                                        mod.widgets.HagencyWrapSubtitle{text:(if shown!="" {account+" · "} else {""})+A.who_source(v,mxid)}
                                     }
                                     if picked {mod.widgets.HagencyPickOn{}}
                                     if !picked {mod.widgets.HagencyPickOff{}}
