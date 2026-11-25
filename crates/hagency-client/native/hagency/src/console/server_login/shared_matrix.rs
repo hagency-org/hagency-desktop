@@ -106,7 +106,7 @@ impl ServerLogin {
             if self.stopped.load(Ordering::Acquire) { return Err("matrix_account_changed"); }
             for previous in sessions.values_mut() { self.queue_revocation(previous).await; }
             sessions.clear();
-            sessions.insert(session_key(&cookie), RemoteSession { matrix_source: Some(source), token: token.clone(), oauth_token: String::new(), user_id: user.into(), device: Some(device), refresh_token: None, oauth_expires: until, authorized_until: until, clock_allowance: Duration::ZERO, invalidated: false, binding, checked: Instant::now(), expires: Instant::now() + Duration::from_secs(900) });
+            sessions.insert(session_key(&cookie), RemoteSession { matrix_source: Some(source), token: token.clone(), oauth_token: String::new(), user_id: user.into(), device: Some(device), refresh_token: None, oauth_expires: until, authorized_until: until, clock_allowance: Duration::ZERO, full_window: Duration::ZERO, sdk_refreshed: None, invalidated: false, binding, checked: Instant::now(), expires: Instant::now() + Duration::from_secs(900) });
             *self.status.lock().await = json!({"state":"device_authorized","deviceAuthorized":true,"transportOnline":false});
             Self::start_worker(console);
             tracing::info!(stage="owner_adoption",elapsed_ms=started.elapsed().as_millis() as u64,"SDK owner authorization ready");
@@ -221,6 +221,9 @@ mod tests {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
     include!("sdk_resume_tests.rs");
     const SERVER_CLOCK_32_SECONDS_AHEAD: u16 = 13;
+    /// The server grants the two-minute window this host asks for, and dates
+    /// its proofs, as a server has to for a window longer than the default.
+    const TWO_MINUTE_WINDOW: u16 = 14;
     struct Source {
         token: std::sync::Mutex<String>,
         current: Arc<AtomicBool>,
@@ -264,7 +267,16 @@ mod tests {
             self.refreshes.fetch_add(1, Ordering::Relaxed);
             {
                 let mut token = self.token.lock().unwrap();
-                if token.as_str() == "sdk-short" {
+                // The identity service gives no answer for these tokens.
+                if token.ends_with("-offline") {
+                    return Box::pin(async {
+                        Err(NativeError {
+                            status: 503,
+                            code: "matrix_authorization_unavailable".into(),
+                        })
+                    });
+                }
+                if matches!(token.as_str(), "sdk-short" | "sdk-aging") {
                     *token = "sdk-refreshed".into();
                 }
             }
@@ -321,12 +333,15 @@ mod tests {
         let records = requests.clone();
         let issuer = format!("{origin}auth/");
         let mxid = mxid.to_owned();
+        // The end of the window the last renewal was given: a lease is cut to it.
+        let session_until = Arc::new(std::sync::atomic::AtomicU64::new(0));
         let task = tokio::spawn(async move {
             loop {
                 let Ok((mut stream, _)) = listener.accept().await else {
                     break;
                 };
                 let records = records.clone();
+                let session_until = session_until.clone();
                 let issuer = issuer.clone();
                 let mxid = mxid.clone();
                 let late_epoch = late_epoch.clone();
@@ -391,7 +406,11 @@ mod tests {
                         });
                         body["fixtureDeviceGrant"] = json!(device_grant);
                     }
-                    let short_proof = body["accessToken"] == "sdk-short";
+                    // A token five seconds from its expiry, and one eighty
+                    // seconds from it: the server never trusts a proof longer.
+                    let token = body["accessToken"].as_str().unwrap_or_default().to_owned();
+                    let short_proof = token.starts_with("sdk-short");
+                    let aging_proof = token.starts_with("sdk-aging");
                     records.lock().unwrap().push((path.clone(), body));
                     if path == "/hagency/api/v1/devices" && behavior.load(Ordering::Acquire) == 8 {
                         return; // The device registration committed, but its reply was lost.
@@ -406,11 +425,16 @@ mod tests {
                     } else {
                         SystemTime::now()
                     };
+                    let window_ms: u64 = if behavior.load(Ordering::Acquire) == TWO_MINUTE_WINDOW {
+                        120_000
+                    } else {
+                        30_000
+                    };
                     let until = server_now
                         .duration_since(UNIX_EPOCH)
                         .unwrap()
                         .as_millis() as u64
-                        + 30_000;
+                        + window_ms;
                     let value = match path.as_str() {
                         "/hagency/api/v1/discovery" => {
                             json!({"product":"hagency-server","version":"0.1.0","protocolVersion":3,"capabilities":["pasion-oauth","owner-agent-appservice-v1","global-agent-identity-v2","execution-device-v1","owner-direct-v1"],"homeserver":issuer.strip_suffix("auth/").unwrap(),"issuer":issuer})
@@ -428,7 +452,9 @@ mod tests {
                             json!({"userId":"uid","mxid":mxid,"issuer":issuer,"subject":"sub","clientId":"sdk-client","deviceId":"device","generation":if behavior.load(Ordering::Acquire)==5 {2}else{1},"validUntilMs":if behavior.load(Ordering::Acquire)==12 {until+90_000}else{until}})
                         }
                         "/hagency/api/v1/sessions/current/renew" => {
-                            json!({"validUntilMs":if short_proof{until-25_000}else{until}})
+                            let renewed = if short_proof{until-window_ms+5_000}else if aging_proof{until-window_ms+80_000u64.min(window_ms)}else{until};
+                            session_until.store(renewed, Ordering::Release);
+                            json!({"validUntilMs":renewed})
                         }
                         "/hagency/api/v1/sessions/current" => json!({}),
                         "/hagency/api/v1/management/session" => {
@@ -460,6 +486,7 @@ mod tests {
                     if path.ends_with("/projects") && mode == 1
                         || path.ends_with("/devices/current") && mode == 10
                         || path.ends_with("/devices") && mode == 11
+                        || path.ends_with("/execution/leases/renew")
                     {
                         if let Some(gate) = project_gate {
                             gate.entered.notify_one();
@@ -468,6 +495,13 @@ mod tests {
                             tokio::time::sleep(Duration::from_secs(1)).await;
                         }
                     }
+                    // Read only now: a renewal that landed while this request
+                    // waited has moved the window on.
+                    let value = if path.ends_with("/execution/leases/renew") {
+                        json!({"lease":{"agentId":"agent-a","ownerUserId":"uid","deviceId":"device","deviceGeneration":1,"epoch":3,"expiresAtMs":session_until.load(Ordering::Acquire)}})
+                    } else {
+                        value
+                    };
                     let status = if path.ends_with("/devices/current") && mode == 6 {
                         503
                     } else if path.ends_with("/devices/current") && mode == 7 {
@@ -493,7 +527,7 @@ mod tests {
                         json!({"code":if status==401 {"sign_in_required"} else {"server_unavailable"}})
                     };
                     let body = value.to_string();
-                    let proof_headers = if mode == SERVER_CLOCK_32_SECONDS_AHEAD {
+                    let proof_headers = if mode == SERVER_CLOCK_32_SECONDS_AHEAD || mode == TWO_MINUTE_WINDOW {
                         format!("Date: {}\r\nCache-Control: no-store\r\n", httpdate::fmt_http_date(server_now))
                     } else {
                         String::new()
@@ -874,6 +908,174 @@ mod tests {
                 .any(|(p, b)| p.ends_with("/renew") && b["accessToken"] == "sdk-refreshed")
         );
         assert!(device.valid_until > Instant::now() + Duration::from_secs(20));
+        native.shutdown().await;
+        task.abort();
+    }
+    /// An owner on a server that grants the two-minute window, its first proof
+    /// renewed: the session knows what a fresh token gets.
+    async fn two_minute_owner(
+        token: &str,
+    ) -> (
+        NativeOwner,
+        Arc<Source>,
+        Arc<std::sync::Mutex<Vec<(String, Value)>>>,
+        tokio::task::JoinHandle<()>,
+        tempfile::TempDir,
+    ) {
+        let mode = Arc::new(std::sync::atomic::AtomicU16::new(TWO_MINUTE_WINDOW));
+        let (origin, requests, task) = fixture_controlled("@owner:test", None, mode).await;
+        let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+        let source = Arc::new(Source {
+            token: std::sync::Mutex::new(token.into()),
+            current: Arc::new(AtomicBool::new(true)),
+            error_code: "matrix_account_changed",
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            refreshes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let native = NativeOwner::open_with_matrix(
+            &root.path().join("state"),
+            &origin,
+            "@owner:test",
+            source.clone(),
+        )
+        .await
+        .unwrap();
+        let login = &native.test_console().0.server_login;
+        login.forget_recent_check().await;
+        let device = login.authorized_device().await.unwrap();
+        assert!(device.valid_until > Instant::now() + Duration::from_secs(100));
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 0);
+        (native, source, requests, task, root)
+    }
+    #[tokio::test]
+    async fn a_lease_cut_to_a_window_renewed_while_it_was_asked_for_is_accepted() {
+        use super::super::super::device_execution::{DeviceOperation, DeviceResponse, LeaseRef};
+        let mode = Arc::new(std::sync::atomic::AtomicU16::new(TWO_MINUTE_WINDOW));
+        let gate = Arc::new(ProjectResponseGate::default());
+        let (origin, _requests, task) =
+            fixture_with_project_gate("@owner:test", None, mode, Some(gate.clone())).await;
+        let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+        let source = Arc::new(Source {
+            token: std::sync::Mutex::new("sdk-first".into()),
+            current: Arc::new(AtomicBool::new(true)),
+            error_code: "matrix_account_changed",
+            calls: std::sync::atomic::AtomicUsize::new(0),
+            refreshes: std::sync::atomic::AtomicUsize::new(0),
+        });
+        let native = NativeOwner::open_with_matrix(
+            &root.path().join("state"),
+            &origin,
+            "@owner:test",
+            source.clone(),
+        )
+        .await
+        .unwrap();
+        let console = native.test_console();
+        let login = &console.0.server_login;
+        login.forget_recent_check().await;
+        login.authorized_device().await.unwrap();
+        // The proof the lease request is sent with is five seconds old.
+        for session in login.sessions.lock().await.values_mut() {
+            session.authorized_until -= Duration::from_secs(5);
+        }
+        let asked = console.execution_api(DeviceOperation::Renew {
+            lease: LeaseRef { agent_id: "agent-a".into(), epoch: 3 },
+            ttl_ms: 120_000,
+        });
+        // While the request is on its way, another caller renews the proof,
+        // and the server cuts the lease to that newer window.
+        let renewed_meanwhile = async {
+            gate.entered.notified().await;
+            login.forget_recent_check().await;
+            login.authorized_device().await.unwrap();
+            gate.release.notify_one();
+        };
+        let (answer, ()) = tokio::join!(asked, renewed_meanwhile);
+        match answer {
+            Ok(DeviceResponse::Lease(_)) => {}
+            Ok(_) => panic!("not a lease"),
+            Err(error) => panic!("refused: {} {}", error.status, error.code),
+        }
+        native.shutdown().await;
+        task.abort();
+    }
+    #[tokio::test]
+    async fn a_proof_an_ageing_token_shortens_refreshes_the_sdk_ahead_of_its_expiry() {
+        let (native, source, requests, task, _root) = two_minute_owner("sdk-first").await;
+        let login = &native.test_console().0.server_login;
+        // Eighty seconds before the token ends, the proof is shorter than the
+        // window and still far from expiring.
+        *source.token.lock().unwrap() = "sdk-aging".into();
+        login.forget_recent_check().await;
+        let device = login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
+        assert!(
+            device.valid_until > Instant::now() + Duration::from_secs(100),
+            "the refreshed token holds the whole window again"
+        );
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(p, b)| p.ends_with("/renew") && b["accessToken"] == "sdk-refreshed")
+        );
+        // The full proof of the new token asks for nothing more.
+        login.forget_recent_check().await;
+        login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
+        native.shutdown().await;
+        task.abort();
+    }
+    #[tokio::test]
+    async fn refreshes_for_a_shortened_proof_keep_a_minute_apart() {
+        let (native, source, _requests, task, _root) = two_minute_owner("sdk-first").await;
+        let login = &native.test_console().0.server_login;
+        *source.token.lock().unwrap() = "sdk-aging".into();
+        login.forget_recent_check().await;
+        login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
+        // A token that is short again at once is used as it is.
+        *source.token.lock().unwrap() = "sdk-aging".into();
+        login.forget_recent_check().await;
+        let device = login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
+        assert!(device.valid_until > Instant::now() + Duration::from_secs(60));
+        assert!(device.valid_until < Instant::now() + Duration::from_secs(100));
+        for session in login.sessions.lock().await.values_mut() {
+            session.sdk_refreshed = Some(
+                Instant::now()
+                    .checked_sub(Duration::from_secs(61))
+                    .expect("monotonic clock older than a minute"),
+            );
+        }
+        login.forget_recent_check().await;
+        let device = login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 2);
+        assert!(device.valid_until > Instant::now() + Duration::from_secs(100));
+        native.shutdown().await;
+        task.abort();
+    }
+    #[tokio::test]
+    async fn an_early_refresh_without_an_answer_keeps_the_proof_in_hand() {
+        let (native, source, _requests, task, _root) = two_minute_owner("sdk-first").await;
+        let login = &native.test_console().0.server_login;
+        *source.token.lock().unwrap() = "sdk-aging-offline".into();
+        login.forget_recent_check().await;
+        let device = login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
+        assert!(device.bearer().is_ok());
+        assert!(device.valid_until > Instant::now() + Duration::from_secs(60));
+        // It is not asked again with every renewal.
+        login.forget_recent_check().await;
+        login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
+        // A token that is running out has nothing to fall back on, as before.
+        // Every caller that finds the proof unrenewed asks again.
+        *source.token.lock().unwrap() = "sdk-short-offline".into();
+        login.forget_recent_check().await;
+        assert!(login.authorized_device().await.is_err());
+        assert!(source.refreshes.load(Ordering::Relaxed) >= 2);
         native.shutdown().await;
         task.abort();
     }

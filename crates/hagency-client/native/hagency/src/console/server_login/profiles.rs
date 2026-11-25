@@ -443,6 +443,8 @@ mod tests {
             oauth_expires: Instant::now(),
             authorized_until: Instant::now(),
             clock_allowance: std::time::Duration::ZERO,
+            full_window: std::time::Duration::ZERO,
+            sdk_refreshed: None,
             invalidated: false,
             binding: alice.clone(),
             checked: Instant::now(),
