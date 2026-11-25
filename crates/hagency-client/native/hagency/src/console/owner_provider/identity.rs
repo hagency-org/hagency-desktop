@@ -291,6 +291,7 @@ pub(super) async fn inspect_resource(
     process: &mut Process,
     paths: &ProviderPaths,
     deadline: Instant,
+    fresh_proof: bool,
 ) -> Result<(VerifiedProviderAccount, super::ProviderStatus), ProviderError> {
     selected_reference(&paths.codex_home, paths.shared)?;
     let value = process.rpc("account/read", json!({"refreshToken":false})).await?;
@@ -304,5 +305,23 @@ pub(super) async fn inspect_resource(
     if before != after || quota.0 != repeated.0 {
         return Err(failure(409, "provider_account_changed"));
     }
-    Ok((quota.proof(deadline)?, catalog))
+    let proof_until = resource_proof_deadline(Instant::now(), deadline, fresh_proof)?;
+    Ok((quota.proof(proof_until)?, catalog))
+}
+
+fn resource_proof_deadline(
+    observed_at: Instant,
+    deadline: Instant,
+    fresh_proof: bool,
+) -> Result<Instant, ProviderError> {
+    if observed_at >= deadline {
+        return Err(unavailable());
+    }
+    // Enrollment rechecks current owner authority after the probe. Starting
+    // observation freshness now does not renew the authority used to read it.
+    Ok(if fresh_proof {
+        observed_at + Duration::from_secs(30)
+    } else {
+        deadline
+    })
 }

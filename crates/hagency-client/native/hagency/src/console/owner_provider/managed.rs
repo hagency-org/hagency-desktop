@@ -7,6 +7,11 @@ use hagency_store::ManagedLaunch;
 /// keeps its reap custody, which the provider drain still observes.
 const PROBE_STOP_TIMEOUT: Duration = Duration::from_secs(10);
 
+// A fresh account read and two quota reads can each wait on the provider.
+// Give their combined verification enough time while honoring the caller's
+// credential deadline and the inner per-RPC timeout.
+pub(in crate::console) const RESOURCE_IDENTITY_TIMEOUT: Duration = Duration::from_secs(45);
+
 async fn stop_probe(process: &mut Process) -> Result<(), ProviderError> {
     match tokio::time::timeout(PROBE_STOP_TIMEOUT, process.child.kill()).await {
         Ok(Ok(())) => Ok(()),
@@ -125,6 +130,7 @@ pub(in crate::console) async fn inspect_resource(
     provider: &OwnerProvider,
     executable: &Path,
     deadline: std::time::Instant,
+    fresh_proof: bool,
 ) -> Result<(hagency_store::owner_resources::VerifiedProviderAccount, ProviderStatus), ProviderError> {
     let tasks = &provider.tasks;
     let _activity = tasks.enter().map_err(|_| failure(409, "provider_closing"))?;
@@ -132,10 +138,17 @@ pub(in crate::console) async fn inspect_resource(
     let paths = namespace_paths(launch)?;
     launch.check().map_err(|_| failure(409,"provider_namespace_unavailable"))?;
     let mut process = Process::spawn_inner(&paths, executable, true, tasks).await?;
-    let remaining = deadline.saturating_duration_since(std::time::Instant::now()).min(Duration::from_secs(25));
+    let budget = if fresh_proof {
+        RESOURCE_IDENTITY_TIMEOUT
+    } else {
+        Duration::from_secs(25)
+    };
+    let remaining = deadline
+        .saturating_duration_since(std::time::Instant::now())
+        .min(budget);
     let result = tokio::time::timeout(remaining, async {
         launch.check().map_err(|_| failure(409,"provider_namespace_unavailable"))?;
-        let result = identity::inspect_resource(&mut process, &paths, deadline).await?;
+        let result = identity::inspect_resource(&mut process, &paths, deadline, fresh_proof).await?;
         launch.check().map_err(|_| failure(409,"provider_namespace_unavailable"))?;
         Ok(result)
     }).await.map_err(|_| failure(504,"provider_identity_timeout")).and_then(|v|v);
