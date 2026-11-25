@@ -3,6 +3,11 @@ use serde_json::Value;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const MAX_WINDOW_MS: u64 = 31_000;
+/// The authorization window this host asks the server for when it renews its
+/// proof. A server that grants no more than the default one ignores the ask.
+pub(super) const REQUESTED_WINDOW_MS: u64 = 120_000;
+/// The longest window of a proof from a server that granted what was asked.
+const MAX_REQUESTED_WINDOW_MS: u64 = REQUESTED_WINDOW_MS + 1_000;
 
 pub(super) struct ProofClock {
     started: Instant,
@@ -73,19 +78,31 @@ impl ProofClock {
             now.duration_since(self.started),
         )
         .ok_or("authorization_time_window_unavailable")?;
+        let bound = window_bound(until, self.server_second_ms);
         Ok((
             now + Duration::from_millis(remaining),
-            Duration::from_millis(allowance_ms(until, local_ms, remaining)),
+            Duration::from_millis(allowance_ms(until, local_ms, remaining, bound)),
         ))
     }
 }
 
+/// The longest window the proof that ends at `until` may have. Only the
+/// server's own date can show a window longer than the default one: an undated
+/// proof is read with the local clock alone and keeps the default bound.
+fn window_bound(until: u64, server_second_ms: Option<u64>) -> u64 {
+    match server_second_ms.and_then(|second| until.checked_sub(second)) {
+        Some(window) if window > MAX_WINDOW_MS => MAX_REQUESTED_WINDOW_MS,
+        _ => MAX_WINDOW_MS,
+    }
+}
+
 /// What `remaining` leaves out of the window that ends at `until`, as the
-/// local clock reads it. Never more than the longest window a proof may have.
-fn allowance_ms(until: u64, local_ms: u64, remaining: u64) -> u64 {
+/// local clock reads it. Never more than `bound`, the longest window the
+/// proof may have.
+fn allowance_ms(until: u64, local_ms: u64, remaining: u64, bound: u64) -> u64 {
     until
         .saturating_sub(local_ms)
-        .min(MAX_WINDOW_MS)
+        .min(bound)
         .saturating_sub(remaining)
 }
 
@@ -95,10 +112,11 @@ fn remaining_ms(
     server_second_ms: Option<u64>,
     elapsed: Duration,
 ) -> Option<u64> {
+    let bound = window_bound(until, server_second_ms);
     let local_remaining = until.checked_sub(local_ms)?;
     let remaining = if let Some(server_second_ms) = server_second_ms {
         let window = until.checked_sub(server_second_ms)?;
-        if window > MAX_WINDOW_MS {
+        if window > bound {
             return None;
         }
         // HTTP Date is rounded down to seconds. Charge the whole unknown second
@@ -108,9 +126,7 @@ fn remaining_ms(
     } else {
         local_remaining
     };
-    (1..=MAX_WINDOW_MS)
-        .contains(&remaining)
-        .then_some(remaining)
+    (1..=bound).contains(&remaining).then_some(remaining)
 }
 
 #[cfg(test)]
@@ -127,7 +143,18 @@ mod tests {
         );
         assert_eq!(remaining_ms(162_000, 161_900, date, half_second), Some(100));
         assert_eq!(remaining_ms(162_000, 162_000, date, half_second), None);
-        assert_eq!(remaining_ms(164_000, 100_000, date, half_second), None);
+        // A dated proof may have the window this host asks for, and no more.
+        assert_eq!(
+            remaining_ms(164_000, 100_000, date, half_second),
+            Some(30_500)
+        );
+        assert_eq!(
+            remaining_ms(252_000, 132_200, date, half_second),
+            Some(118_500)
+        );
+        assert_eq!(remaining_ms(254_000, 132_200, date, half_second), None);
+        // An undated proof cannot show a longer window than the default one.
+        assert_eq!(remaining_ms(252_000, 132_200, None, half_second), None);
         assert_eq!(
             remaining_ms(162_000, 100_000, date, Duration::from_secs(29)),
             None
@@ -148,19 +175,32 @@ mod tests {
         // 29.8 s.
         let remaining = remaining_ms(162_000, 132_200, date, half_second).unwrap();
         assert_eq!(remaining, 28_500);
-        assert_eq!(allowance_ms(162_000, 132_200, remaining), 1_300);
+        assert_eq!(allowance_ms(162_000, 132_200, remaining, MAX_WINDOW_MS), 1_300);
         // A local clock that is ahead bounds the proof by itself: nothing was
         // taken beyond what it reads.
         let remaining = remaining_ms(162_000, 140_000, date, half_second).unwrap();
         assert_eq!(remaining, 22_000);
-        assert_eq!(allowance_ms(162_000, 140_000, remaining), 0);
+        assert_eq!(allowance_ms(162_000, 140_000, remaining, MAX_WINDOW_MS), 0);
         // An undated proof is read with the local clock alone.
         let remaining = remaining_ms(131_000, 100_000, None, half_second).unwrap();
-        assert_eq!(allowance_ms(131_000, 100_000, remaining), 0);
+        assert_eq!(allowance_ms(131_000, 100_000, remaining, MAX_WINDOW_MS), 0);
         // A local clock far behind never widens the allowance past one window.
         let remaining = remaining_ms(162_000, 100_000, date, half_second).unwrap();
-        assert_eq!(allowance_ms(162_000, 100_000, remaining), 31_000 - 28_500);
-        assert_eq!(allowance_ms(162_000, 170_000, 1), 0);
+        assert_eq!(
+            allowance_ms(162_000, 100_000, remaining, MAX_WINDOW_MS),
+            31_000 - 28_500
+        );
+        assert_eq!(allowance_ms(162_000, 170_000, 1, MAX_WINDOW_MS), 0);
+        // A proof with the longer window this host asked for keeps the same
+        // allowance: the server's second and the round trip.
+        assert_eq!(window_bound(162_000, date), MAX_WINDOW_MS);
+        assert_eq!(window_bound(252_000, date), MAX_REQUESTED_WINDOW_MS);
+        assert_eq!(window_bound(252_000, None), MAX_WINDOW_MS);
+        let remaining = remaining_ms(252_000, 132_200, date, half_second).unwrap();
+        assert_eq!(
+            allowance_ms(252_000, 132_200, remaining, MAX_REQUESTED_WINDOW_MS),
+            1_300
+        );
     }
 
     #[test]

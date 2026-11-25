@@ -17,7 +17,7 @@ use super::{
     AuthorizedDevice, Console,
     device_execution::{
         DeviceOperation as Op, DeviceResponse as Response, HistorySnapshot, Lease, LeaseRef,
-        Outcome, Takeover,
+        MAX_LEASE_TTL_MS, Outcome, Takeover,
     },
     owned_agents::{ledger_path, profile_identity},
     server_login::OwnerOperation,
@@ -1323,7 +1323,8 @@ async fn operation<T: Transport>(
 }
 fn deadline(lease: &Lease) -> Result<Instant, RuntimeError> {
     let remaining = i128::from(lease.expires_at_ms) - i128::from(wall_ms());
-    if remaining <= 0 || remaining > 31_000 {
+    // The device layer has already held the lease to what was asked for it.
+    if remaining <= 0 || remaining > i128::from(MAX_LEASE_TTL_MS) + 1_000 {
         return Err(RuntimeError::Authorization);
     }
     Ok(Instant::now() + Duration::from_millis(remaining as u64))
@@ -1352,7 +1353,7 @@ async fn heartbeat(
         // expiry of an earlier snapshot must not prevent same-device recovery.
         if Instant::now() >= next {
             let pin = DevicePin::from(&device);
-            let renewed = tokio::select! { biased; _=canceled(&mut receiver)=>return, _=tokio::time::sleep_until(expiry.into())=>break "lease_renewal_deadline", result=console.execution_api_pinned(Op::Renew{lease:lease.reference(),ttl_ms:30_000},&pin)=>result };
+            let renewed = tokio::select! { biased; _=canceled(&mut receiver)=>return, _=tokio::time::sleep_until(expiry.into())=>break "lease_renewal_deadline", result=console.execution_api_pinned(Op::Renew{lease:lease.reference(),ttl_ms:MAX_LEASE_TTL_MS},&pin)=>result };
             let value = match renewed {
                 Ok(Response::Lease(value)) => value,
                 Err(error) if !matches!(error.status, 401 | 403 | 409) => {
@@ -1618,7 +1619,7 @@ async fn acquire_checked<T: Transport>(
         cancel,
         Op::Acquire {
             agent_id: config.agent_id.clone(),
-            ttl_ms: 30_000,
+            ttl_ms: MAX_LEASE_TTL_MS,
             takeover: config.takeover,
             history_snapshot: snapshot.clone(),
         },

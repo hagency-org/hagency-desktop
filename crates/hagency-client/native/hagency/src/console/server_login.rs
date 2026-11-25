@@ -691,6 +691,11 @@ fn renewal_error(code: &str) -> Error {
         Error::Unavailable
     }
 }
+/// Asks the server to trust a renewed proof for longer than its default
+/// thirty seconds, so that a host that stalls for a while keeps its
+/// authorization and the leases that end with it. A server that grants no more
+/// ignores the header; one that does cuts every lease to the window it gave.
+const AUTHORIZATION_WINDOW_HEADER: &str = "x-hagency-authorization-window-ms";
 async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     if session.invalidated {
         return Err(Error::Unauthorized);
@@ -765,6 +770,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 .unwrap(),
         )
         .bearer_auth(&session.token)
+        .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
         .json(&json!({"accessToken":shared_token.as_ref().unwrap_or(&session.oauth_token)}))
         .send()
         .await
@@ -805,6 +811,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                     .unwrap(),
             )
             .bearer_auth(&session.token)
+            .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
             .json(&json!({"accessToken":refreshed.access_token}))
             .send()
             .await

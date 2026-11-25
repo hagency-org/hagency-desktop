@@ -11,6 +11,25 @@ const MAX_WIRE_BYTES: usize = 131_072;
 const MAX_TEXT_BYTES: usize = 65_536;
 // Up to 100 events with 64KiB text each, worst-case six-byte JSON escaping.
 const MAX_RESPONSE_BYTES: usize = 40 * 1024 * 1024;
+/// The lease length every server accepts, and the longest one a default
+/// authorization window can hold.
+const DEFAULT_LEASE_TTL_MS: i64 = 30_000;
+/// The longest lease this host asks for.
+pub(super) const MAX_LEASE_TTL_MS: i64 = 120_000;
+
+/// The longest lease worth asking for with `device`'s proof. The server cuts a
+/// lease to the device's authorization window, and only a server that granted
+/// a window longer than the default one accepts a lease longer than a minute.
+fn lease_limit_ms(device: &AuthorizedDevice) -> i64 {
+    let window = device
+        .valid_until()
+        .saturating_duration_since(std::time::Instant::now());
+    if window > Duration::from_millis(DEFAULT_LEASE_TTL_MS as u64 + 1_000) {
+        MAX_LEASE_TTL_MS
+    } else {
+        DEFAULT_LEASE_TTL_MS
+    }
+}
 
 /// Immutable host-only profile/device pin. No bearer or browser token is stored.
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -408,6 +427,27 @@ pub enum DeviceResponse {
     E2eeConfirmed,
 }
 impl DeviceOperation {
+    /// The same operation, asking for a lease no longer than `limit_ms`.
+    fn lease_within(self, limit_ms: i64) -> Self {
+        match self {
+            Self::Acquire {
+                agent_id,
+                ttl_ms,
+                takeover,
+                history_snapshot,
+            } => Self::Acquire {
+                agent_id,
+                ttl_ms: ttl_ms.min(limit_ms),
+                takeover,
+                history_snapshot,
+            },
+            Self::Renew { lease, ttl_ms } => Self::Renew {
+                lease,
+                ttl_ms: ttl_ms.min(limit_ms),
+            },
+            other => other,
+        }
+    }
     fn lease(&self) -> Option<&LeaseRef> {
         match self {
             Self::Acquire { .. } | Self::History { .. } => None,
@@ -627,7 +667,7 @@ impl DeviceOperation {
     }
 }
 fn ttl(ttl: i64) -> Result<(), DeviceError> {
-    if (1000..=60_000).contains(&ttl) {
+    if (1000..=MAX_LEASE_TTL_MS).contains(&ttl) {
         Ok(())
     } else {
         Err(error(400, "invalid_lease_ttl"))
@@ -825,16 +865,20 @@ fn parse_response(
             }
             Ok(DeviceResponse::History(history))
         }
-        DeviceOperation::Acquire { agent_id, .. }
+        DeviceOperation::Acquire {
+            agent_id, ttl_ms, ..
+        }
         | DeviceOperation::Renew {
             lease: LeaseRef { agent_id, .. },
-            ..
+            ttl_ms,
         } => {
             let lease: Lease = decode(&value, "lease")?;
+            // Never longer than was asked, give or take a second between the
+            // two clocks.
             let remaining = lease
                 .expires_at_ms
                 .checked_sub(now_ms()?)
-                .filter(|n| *n > 0 && *n <= 31_000)
+                .filter(|n| *n > 0 && *n <= ttl_ms.saturating_add(1_000))
                 .ok_or_else(invalid)?;
             if &lease.agent_id != agent_id
                 || lease.owner_user_id != device.user_id()
@@ -1036,6 +1080,20 @@ impl Console {
         if expected.is_some_and(|pin| pin != &DeviceIdentity::from(&device)) {
             return Err(error(401, "device_authorization_required"));
         }
+        // A lease is asked for no longer than this device's proof can hold.
+        let limit = lease_limit_ms(&device);
+        let refit = matches!(
+            &operation,
+            DeviceOperation::Acquire { ttl_ms, .. } | DeviceOperation::Renew { ttl_ms, .. }
+                if *ttl_ms > limit
+        );
+        let (operation, path, body) = if refit {
+            let fitted = operation.lease_within(limit);
+            let (path, body) = fitted.request()?;
+            (fitted, path, body)
+        } else {
+            (operation, path, body)
+        };
         let server =
             Url::parse(device.origin()).map_err(|_| error(503, "invalid_server_binding"))?;
         let client = super::server_login::http().map_err(|_| error(503, "server_unavailable"))?;
@@ -1190,6 +1248,47 @@ mod processing_tests {
         assert_eq!(
             refused(&device(28_000, 500)),
             (502, "execution_scope_mismatch".to_owned())
+        );
+    }
+    #[test]
+    fn a_lease_is_asked_for_as_long_as_the_device_window_can_hold() {
+        let device = |window_ms: u64| {
+            super::super::server_login::fixture_device(
+                "https://example.test/", "owner-subject", "@owner:example.test",
+            )
+            .0
+            .with_fixture_window(Duration::from_millis(window_ms), Duration::ZERO)
+        };
+        // A default window: the lease every server accepts.
+        assert_eq!(lease_limit_ms(&device(30_000)), 30_000);
+        assert_eq!(lease_limit_ms(&device(31_000)), 30_000);
+        // A window the server made longer: the longest lease this host asks for.
+        assert_eq!(lease_limit_ms(&device(45_000)), 120_000);
+        assert_eq!(lease_limit_ms(&device(120_000)), 120_000);
+        let renew = |ttl_ms: i64| DeviceOperation::Renew {
+            lease: LeaseRef { agent_id: "agent-a".into(), epoch: 3 },
+            ttl_ms,
+        };
+        let asked = |operation: DeviceOperation| {
+            serde_json::from_slice::<Value>(&operation.request().unwrap().1).unwrap()["ttlMs"]
+                .clone()
+        };
+        assert_eq!(asked(renew(120_000).lease_within(30_000)), json!(30_000));
+        assert_eq!(asked(renew(120_000).lease_within(120_000)), json!(120_000));
+        assert_eq!(asked(renew(30_000).lease_within(120_000)), json!(30_000));
+        assert!(renew(120_001).request().is_err());
+        // The answer is held to what was asked.
+        let answer = |remaining_ms: i64| json!({"lease":{
+            "agentId":"agent-a","ownerUserId":"owner-subject","deviceId":"fixture_device",
+            "deviceGeneration":1,"epoch":3,"expiresAtMs":now_ms().unwrap() + remaining_ms
+        }});
+        assert!(parse_response(&renew(120_000), answer(119_000), &device(120_000)).is_ok());
+        let refused = parse_response(&renew(30_000), answer(119_000), &device(120_000))
+            .err()
+            .unwrap();
+        assert_eq!(
+            (refused.status, refused.code),
+            (502, "invalid_execution_response".to_owned())
         );
     }
     #[test]
