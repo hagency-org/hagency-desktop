@@ -104,22 +104,89 @@ fn targets(card: &SplashRef, id: LiveId) -> Vec<WidgetRef> {
     result
 }
 fn draw_card(cx: &mut Cx, card: &SplashRef) {
+    draw_card_in_viewport(cx, card, dvec2(1000., 800.));
+}
+
+fn draw_card_in_viewport(cx: &mut Cx, card: &SplashRef, viewport: DVec2) {
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
     let pass = DrawPass::new(cx);
-    pass.set_size(cx, dvec2(1000., 800.));
+    pass.set_size(cx, viewport);
     let mut list = DrawList2d::new(cx);
     let event = DrawEvent::default();
     let mut draw = CxDraw::new(cx, &event);
     let mut cx2d = Cx2d::new(&mut draw);
     cx2d.begin_pass(&pass, None);
     list.begin_always(&mut cx2d);
-    cx2d.begin_root_turtle(dvec2(1000., 800.), Layout::flow_overlay());
+    cx2d.begin_root_turtle(viewport, Layout::flow_overlay());
     card.borrow_mut()
         .unwrap()
         .draw_all(&mut cx2d, &mut Scope::empty());
     cx2d.end_pass_sized_turtle();
     list.end(&mut cx2d);
     cx2d.end_pass(&pass);
+}
+
+#[test]
+fn pool_request_picker_draws_the_account_after_selecting_a_search_result() {
+    let source = include_str!("../../apps/hagency/bundle/main.splash");
+    let open = r#"
+let task_fixture_open=fn(){
+    H.ready=true H.busy=false H.command=nil H.entry_role="owner"
+    H.session={account:"@owner:test" features:["resource-pool-agents-v1","pool-grant-succession-v1"]}
+    H.page="pool_who" H.pool_sub_rid="pool"
+    let now=1793334588000
+    let pool={id:"pool" model:"gpt-6.1-sol" framework:"codex" reasoning:"medium" published:false capabilities:["coding"] localName:{name:"Research" revision:1} budget:{remainingTokens:9000000 reserved:0 pool:{ceiling:9000000 committed:0 period:"monthly"} seat:{quota:9000000}} usage:{spent:0 spend_period_key:"2026-10"}}
+    let conn={id:"connection" label:"Research" resourceId:"pool" ownerMxid:"@owner:test" coordinatorMxid:"@owner:test" executorDeviceId:"device" state:"admitted"}
+    let grant={id:"connection" ownerMxid:"@owner:test" publishedTokens:9000000 grantRevision:1 currentPeriodEndMs:1793491200000}
+    H.resources=[pool]
+    H.resource_detail={protocol:"hagency-management-v1" resource:pool editing:{allowed:false reason:"previously_offered"} choices:[] ceiling:{tokens:9000000 period:"monthly"} observedAtMs:now}
+    H.pool_info={rid:pool.id conn:conn connState:"ready" grant:grant grantState:"ready" board:{grantReviewAvailable:true} boardState:"ready" requests:0 alerts:0 tools:0 stopped:0 workspaces:0 agents:0 inuse:0 now:now using:[] floor:nil}
+    H.who_list={rid:pool.id cid:conn.id state:"ready" data:{contributionId:conn.id state:"published" applicants:["@owner:test"] changePending:false} code:""}
+    H.who.rid=pool.id H.who.name=""
+    H.who_people.rid=pool.id H.who_people.knownState="ready" H.who_people.known=[]
+    A.redraw()
+}
+let show_search_result=fn(){
+    H.who.name="lisi"
+    H.who_people.query="lisi" H.who_people.state="ready"
+    H.who_people.found=[{id:"@lisi:test" name:"Li Si"}]
+    H.who_people.exact={userId:"@lisi:test" exists:true}
+    A.who_typing_show()
+}
+let pick_search_result=fn(){A.who_pick_hit(0)}
+"#;
+    fn find_text(widget: &WidgetRef, text: &str, matches: &mut Vec<WidgetRef>) {
+        if widget.text() == text {
+            matches.push(widget.clone());
+        }
+        widget.children(&mut |_, child| find_text(&child, text, matches));
+    }
+    let (mut cx, card) = fixture_with_open(source, open);
+    let viewport = dvec2(458., 520.);
+    draw_card_in_viewport(&mut cx, &card, viewport);
+    assert!(card.call_script_fn(&mut cx, id!(show_search_result), &[]));
+    cx.handle_script_tasks();
+    draw_card_in_viewport(&mut cx, &card, viewport);
+    assert!(targets(&card, id!(pool_who_hit0))[0].visible());
+    assert!(!targets(&card, id!(pool_who_people))[0].visible());
+
+    assert!(card.call_script_fn(&mut cx, id!(pick_search_result), &[]));
+    cx.handle_script_tasks();
+    draw_card_in_viewport(&mut cx, &card, viewport);
+    assert!(!targets(&card, id!(pool_who_hit0))[0].visible());
+
+    let row = targets(&card, id!(pool_who_people));
+    assert_eq!(row.len(), 1);
+    assert!(row[0].visible());
+    for text in ["@lisi:test", "Added by you"] {
+        let mut labels = Vec::new();
+        find_text(&row[0], text, &mut labels);
+        assert_eq!(labels.len(), 1, "selected row should contain {text}");
+        let rect = labels[0].area().clipped_rect(&cx);
+        assert!(labels[0].visible() && rect.size.x >= 30. && rect.size.y >= 10., "{text}: {rect:?}");
+        assert!(rect.pos.x >= 0. && rect.pos.x + rect.size.x <= viewport.x + 0.5, "{text}: {rect:?}");
+    }
+    card.set_text(&mut cx, "");
 }
 const BOARD: &str = r#"
 let task_fixture_open=fn(){
