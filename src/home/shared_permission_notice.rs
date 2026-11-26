@@ -608,6 +608,14 @@ impl SharedPermissionNotice {
         }
         if !active {self.room_allowances=RoomAllowances::default();self.render(cx);}
     }
+    /// What some message offers changed. When the card on the message sent
+    /// this notice's message again, this offer is gone too.
+    fn offers_changed(&mut self,cx:&mut Cx) {
+        if self.resend.as_ref().is_some_and(|r|sent_again(&self.room,&r.event)) {
+            self.resend=None;
+            self.render(cx);
+        }
+    }
     /// Send the decision for the request on screen, through the same store as
     /// the card on the message, so both show it.
     fn decide(&mut self,cx:&mut Cx,decision:&str) {
@@ -643,12 +651,7 @@ impl Widget for SharedPermissionNotice {
                     if self.active && !self.loading {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
                 }
                 if action.downcast_ref::<PendingApprovalsChanged>().is_some(){self.render(cx);}
-                // The card on the message sent it again: this offer is gone too.
-                if action.downcast_ref::<resend_offers::ResendOffersChanged>().is_some()
-                    && self.resend.as_ref().is_some_and(|r|sent_again(&self.room,&r.event)) {
-                    self.resend=None;
-                    self.render(cx);
-                }
+                if action.downcast_ref::<resend_offers::ResendOffersChanged>().is_some(){self.offers_changed(cx);}
                 // Nothing went out: read again whether the message can still be sent again.
                 if let Some(failed)=action.downcast_ref::<crate::sliding_sync::SendAgainFailed>()
                     && failed.room_id.as_str()==self.room && self.active && !self.loading {
@@ -989,11 +992,12 @@ mod tests {
             n.render(&mut cx);
             assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
         }
-        // The card on the message was pressed.
+        // The card on the message was pressed, and said so. The notice is
+        // told directly: its event handling first checks the account, which
+        // tests running at the same time change.
         crate::sliding_sync::note_sent_again(&OwnedRoomId::try_from("!card:x").unwrap(),&OwnedEventId::try_from("$by_card").unwrap());
-        let actions=cx.capture_actions(|cx|cx.action(resend_offers::ResendOffersChanged));
-        widget.handle_event(&mut cx,&Event::Actions(actions),&mut Scope::empty());
         let mut n=widget.borrow_mut().unwrap();
+        n.offers_changed(&mut cx);
         assert!(n.resend.is_none());
         assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
     }
