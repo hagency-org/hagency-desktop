@@ -16,7 +16,8 @@ pub(super) struct State {
     lose_stop: bool,
     invalid_binding: bool,
     binding_epoch: Option<u64>,
-    lose_binding: bool,
+    /// Binding answers the server gives and that are lost on the way.
+    lost_bindings: u32,
     stop_inputs: Vec<Value>,
     stop_results: BTreeMap<String, u64>,
     generic_starts: usize,
@@ -223,7 +224,8 @@ pub(super) fn management(
         }
         s.shared.demands.binding = Some(binding.clone());
         s.shared.demands.status = "bound".into();
-        if std::mem::take(&mut s.shared.demands.lose_binding) {
+        if s.shared.demands.lost_bindings > 0 {
+            s.shared.demands.lost_bindings -= 1;
             return Some(Some(json!({"fixtureStatus":409,"error":"fixture_binding_reply_lost"})));
         }
         return Some(Some(
@@ -354,14 +356,17 @@ async fn native_demand_recovered_promotion_unblocks_next_encrypted_message() {
     offer(&f, 1);
     {
         let mut s = f.state.lock().unwrap();
-        s.shared.demands.lose_binding = true;
+        // Every binding answer is lost while the process lives: it asks
+        // again until its lease ends, and the binding is recovered after.
+        s.shared.demands.lost_bindings = u32::MAX;
         let w = s.shared.work.as_mut().unwrap();
         w.encrypted = true;
         w.body = w.event_id.clone();
         w.body_digest = format!("{:x}", Sha256::digest(w.body.as_bytes()));
     }
     t.poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage"))).await.unwrap().outcome.unwrap();
-    wait_attempt(&f).await;
+    wait_attempt_for(&f, Duration::from_secs(40)).await;
+    f.state.lock().unwrap().shared.demands.lost_bindings = 0;
     assert_eq!(rows(&f, "owner_shared_demand_bindings"), 0);
     assert_eq!(rows(&f, "owner_managed_calls"), 0);
     assert_eq!(count_methods(&f, "turn/start"), 0);
@@ -394,6 +399,39 @@ async fn native_demand_recovered_promotion_unblocks_next_encrypted_message() {
     assert_eq!(rows(&f, "owner_managed_budget_deltas"), 0);
     assert_eq!(sent.lock().unwrap().len(), 1);
     assert_eq!(f.state.lock().unwrap().shared.demands.generic_starts, 0);
+    f.stop().await;
+}
+/// A binding answer that is lost is asked again: the process that was given
+/// the work records its binding and runs the turn once. Before, the process
+/// ended, and the message waited for its demand to be recovered.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_demand_asks_again_when_a_binding_answer_is_lost() {
+    let (f, t, _) = fixture_budget(1000).await;
+    offer(&f, 1);
+    f.state.lock().unwrap().shared.demands.lost_bindings = 1;
+    let progress = t
+        .poll_demand_fixture(&f.registry, None, Some(launch(&f, "text-usage")))
+        .await
+        .unwrap()
+        .outcome
+        .unwrap();
+    assert!(matches!(
+        progress,
+        SharedDemandProgress::Execution {
+            progress: SharedExecutionProgress::Running { .. },
+            ..
+        }
+    ));
+    wait_attempt(&f).await;
+    assert_eq!(
+        f.state.lock().unwrap().shared.demands.lost_bindings,
+        0,
+        "one binding answer was lost first"
+    );
+    assert_eq!(rows(&f, "owner_shared_demand_bindings"), 1);
+    assert_eq!(rows(&f, "owner_managed_calls"), 1);
+    assert_eq!(count_methods(&f, "turn/start"), 1);
     f.stop().await;
 }
 #[tokio::test]

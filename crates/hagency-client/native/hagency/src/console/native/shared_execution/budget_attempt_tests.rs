@@ -213,6 +213,27 @@ async fn native_shared_budget_v3_lost_start_reply_retains_intent_and_one_actual_
     assert_eq!(rows(&f,"owner_shared_budget_start_intents"),1);assert_eq!(rows(&f,"owner_shared_successor_attempts"),1);assert_eq!(rows(&f,"owner_managed_calls"),1);
     f.stop().await;
 }
+/// The budget driver asks a poll for work, its acknowledgement and the
+/// freezing of its context again when they get no answer, as the other
+/// drivers do. The turn runs once.
+#[tokio::test]
+#[ignore="requires explicitly built offline supervised probe"]
+async fn native_shared_budget_v3_asks_again_when_an_exchange_before_the_turn_gets_no_answer(){
+    let(f,t,_)=prepared().await;
+    {let mut s=f.state.lock().unwrap();s.shared.unanswered_polls=2;s.shared.unanswered_acks=1;s.shared.contexts.lost_freezes=1;}
+    assert!(matches!(t.poll_budget_successor_fixture(&f.registry,launch(&f,"text-usage")).await.unwrap(),SharedExecutionProgress::Running{..}));
+    wait_stopped(&f).await;
+    {
+        let s=f.state.lock().unwrap();
+        assert_eq!(s.shared.unanswered_polls,0,"two polls got no answer first");
+        assert_eq!(s.shared.unanswered_acks,0,"one acknowledgement got no answer first");
+        assert_eq!(s.shared.contexts.lost_freezes,0,"the answer to one freeze was lost first");
+        assert_eq!(s.shared.receipts.len(),1);
+    }
+    let methods=std::fs::read_to_string(f._root.path().join("shared-probe/methods")).unwrap();
+    assert_eq!(methods.lines().filter(|s|*s=="turn/start").count(),1);
+    f.stop().await;
+}
 #[tokio::test]
 #[ignore="requires explicitly built offline supervised probe"]
 async fn native_shared_budget_v3_uncertain_work_start_never_calls_provider(){

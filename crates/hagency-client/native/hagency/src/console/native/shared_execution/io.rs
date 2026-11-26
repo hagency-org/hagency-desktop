@@ -446,6 +446,52 @@ impl Io {
     {
         self.settled(Instant::now() + RUNNING_CHECK_SETTLE, step).await
     }
+    /// An exchange with the server between the poll for work and the start
+    /// of its turn: the poll itself, the binding, the acknowledgement and the
+    /// context. It runs under the proof in hand. When it gets no answer
+    /// (`NativeError::said`) it is asked again under a fresh proof while the
+    /// lease lasts, as a check and a renewal are. The server answers each of
+    /// these a second time with what it answered or did the first time: a
+    /// poll gives the same work until it has started, an acknowledged work is
+    /// acknowledged, and a context frozen before is given back as it is.
+    ///
+    /// Only the exchange goes in `step`. What this host records from its
+    /// answer is written once, after it: a refusal of its own records is a
+    /// decision, and the store's refusal reads like a replaced scope
+    /// (`management_access_required`), which is asked again.
+    ///
+    /// Before, one such exchange without an answer ended the process, and
+    /// with it a message the server had already bound to it. The start of
+    /// the turn is not asked again here: an unanswered start is unknown, and
+    /// stays so.
+    ///
+    /// `step` takes the proof and keeps it only while it runs, so nothing is
+    /// held during the wait.
+    pub(super) async fn asked_again<P, T, N, NF, S, SF>(
+        &self,
+        until: Instant,
+        first: P,
+        next: N,
+        step: S,
+    ) -> Result<T, NativeError>
+    where
+        N: Fn() -> NF,
+        NF: std::future::Future<Output = Result<P, NativeError>>,
+        S: Fn(P) -> SF,
+        SF: std::future::Future<Output = Result<T, NativeError>>,
+    {
+        let mut proof = first;
+        loop {
+            match step(proof).await {
+                Err(error) if self.transient(&error) && Instant::now() + RETRY_GAP < until => {
+                    tracing::info!(code = %error.code, said = ?error.said(), "Pooled work step before its turn got no answer; asking again");
+                    tokio::time::sleep(RETRY_GAP).await;
+                    proof = next().await?;
+                }
+                result => return result,
+            }
+        }
+    }
     /// Hosting stopping, or this management package retired or expired, is a
     /// real revocation: no retry, the run stops now.
     fn revoked(&self) -> bool {

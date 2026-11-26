@@ -58,6 +58,10 @@ pub(crate) struct State {
     activity_epoch: u64,
     refuse_renewal: bool,
     unanswered_renewals: u32,
+    /// Polls for work the server does not serve. Nothing changes on it.
+    unanswered_polls: u32,
+    /// Acknowledgements the server takes and whose answer is lost.
+    unanswered_acks: u32,
     /// Added to the end of every activity lease this server issues, and to
     /// nothing else: its start windows, delivery leases and tickets stay as
     /// they are. Ninety-five seconds is a server whose session follows a
@@ -279,6 +283,10 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
             json!({"activity":{"authority":{"runtimeCommandId":runtime_id,"epoch":s.shared.activity_epoch,"token":"c".repeat(64)},"commandDigest":h,"processDigest":process_digest,"expiresAtMs":at+25000+s.shared.lease_stretch_ms},"observedAtMs":at}),
         );
     }
+    if path.ends_with("/work/poll") && s.shared.unanswered_polls > 0 {
+        s.shared.unanswered_polls -= 1;
+        return Some(json!({"fixtureStatus":503,"error":"fixture_unavailable"}));
+    }
     if path.ends_with("/work/poll") && s.shared.idle_work {
         return Some(json!({"work":null,"observedAtMs":at}));
     }
@@ -295,6 +303,10 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         assert_eq!(body["authority"]["epoch"], s.shared.activity_epoch);
         s.shared.ack_epoch = Some(s.shared.activity_epoch);
         assert_eq!(body["workDigest"], wh);
+        if s.shared.unanswered_acks > 0 {
+            s.shared.unanswered_acks -= 1;
+            return Some(json!({"fixtureStatus":503,"error":"fixture_unavailable"}));
+        }
         return Some(json!({"acknowledged":true,"observedAtMs":at}));
     }
     if path.ends_with("/work/start") {
@@ -971,6 +983,41 @@ async fn native_shared_execution_sends_a_renewal_again_when_it_gets_no_answer() 
     {
         let s = f.state.lock().unwrap();
         assert_eq!(s.shared.unanswered_renewals, 0, "two renewals got no answer first");
+        assert!(!s.shared.processes.values().any(|r| r.state == "stopped"));
+    }
+    std::fs::write(f._root.path().join("shared-probe/release-text"), b"release").unwrap();
+    stopped(&f).await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.starts, 1);
+        assert_eq!(s.shared.receipts.len(), 1);
+    }
+    f.stop().await;
+}
+
+/// A poll for work, its acknowledgement and the freezing of its context that
+/// the server did not serve, or whose answer was lost, were not refused. Each
+/// is asked again, and the process that was given the work runs it once. Taken as refusals, one exchange without an answer
+/// ended the process, and the message the server had bound to it with it.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_shared_execution_asks_again_when_an_exchange_before_the_turn_gets_no_answer() {
+    let (f, t, _) = fixture().await;
+    {
+        let mut s = f.state.lock().unwrap();
+        s.shared.unanswered_polls = 2;
+        s.shared.unanswered_acks = 1;
+        s.shared.contexts.lost_freezes = 1;
+    }
+    t.poll_fixture(&f.registry, launch(&f, "text-renew"))
+        .await
+        .unwrap();
+    method_seen(&f, "turn/start").await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.unanswered_polls, 0, "two polls got no answer first");
+        assert_eq!(s.shared.unanswered_acks, 0, "one acknowledgement got no answer first");
+        assert_eq!(s.shared.contexts.lost_freezes, 0, "the answer to one freeze was lost first");
         assert!(!s.shared.processes.values().any(|r| r.state == "stopped"));
     }
     std::fs::write(f._root.path().join("shared-probe/release-text"), b"release").unwrap();

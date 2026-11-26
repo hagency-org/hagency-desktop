@@ -10,13 +10,15 @@ pub(super) struct State {
     deliveries: BTreeMap<String, SharedDeliveryRecord>,
     starts: usize,
     lose_start: bool,
+    /// Contexts the server freezes and whose answer is lost.
+    pub lost_freezes: u32,
     wrong_thread: bool,
     rich: bool,
 }
 impl Default for State {
     fn default() -> Self {
         Self { active: true, v3: true, plain_mode: false, works: BTreeMap::new(), contexts: BTreeMap::new(),
-            deliveries: BTreeMap::new(), starts: 0, lose_start: false, wrong_thread: false, rich: false }
+            deliveries: BTreeMap::new(), starts: 0, lose_start: false, lost_freezes: 0, wrong_thread: false, rich: false }
     }
 }
 fn hash_text(v: &str) -> String {
@@ -73,6 +75,10 @@ pub(super) fn management(
                 context: c,
             };
             s.shared.contexts.contexts.insert(w.id.clone(), record);
+            if s.shared.contexts.lost_freezes > 0 {
+                s.shared.contexts.lost_freezes -= 1;
+                return Some(Some(json!({"fixtureStatus":503,"error":"fixture_unavailable"})));
+            }
         }
         let mut c = s.shared.contexts.contexts[&w.id].clone();
         if s.shared.contexts.wrong_thread {

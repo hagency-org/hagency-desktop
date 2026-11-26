@@ -3,19 +3,15 @@ use super::*;
 use super::context_io::ContextAction;
 use super::budget_work_io::WorkAction;
 use super::context_io::paired;
-pub(super) async fn prepare(
-    io: &Io,
+/// The exchanges that bring the context of a plaintext work on the budget
+/// routes, asked again as `context_io::context` is. This host's record of the
+/// input is `context_io::prepare`, the same for both.
+pub(super) async fn context(
     b: &Bound,
-    r: &OwnerResourceRegistry,
-    a: VerifiedSharedActivity,
     w: &SharedWorkItem,
     authority: SharedActivityRef,
     until: Instant,
-) -> Result<SharedPreparedInput, NativeError> {
-    if w.encrypted {
-        let text=super::e2ee::input(io,b,w).await?;
-        return r.prepare_shared_decrypted_input(a,w.clone(),text).await.map_err(store);
-    }
+) -> Result<(SharedWorkInputMode, SharedContextRecord), NativeError> {
     paired(b).await?;
     let mode: Timed<SharedWorkInputMode> = b
         .upload(
@@ -30,38 +26,33 @@ pub(super) async fn prepare(
             until,
         )
         .await?;
-    mode.value.validate().map_err(store)?;
+    mode.value.validate().map_err(|_| invalid())?;
     let mode = mode.value;
     if mode.mode != "thread_context_v1" {
         return Err(failure(409, "native_context_protocol_required"));
     }
-    let context = {
-        let action = if let Some(hash) = &mode.context_digest {
-            ContextAction::Recover {
-                work: w.id.clone(),
-                input: SharedContextRecoverInput {
-                    work_digest: digest(w)?,
-                    runtime_command_digest: w.runtime_command_digest.clone(),
-                    context_digest: hash.clone(),
-                },
-            }
-        } else {
-            ContextAction::Freeze {
-                work: w.id.clone(),
-                input: SharedContextInput {
-                    authority,
-                    work_digest: digest(w)?,
-                    version: 3,
-                },
-            }
-        };
-        let c: Timed<SharedContextRecord> = b.upload(WorkAction::Context(Box::new(action)).into(), until).await?;
-        c.value.render_for(w).map_err(store)?;
-        c.value
+    let action = if let Some(hash) = &mode.context_digest {
+        ContextAction::Recover {
+            work: w.id.clone(),
+            input: SharedContextRecoverInput {
+                work_digest: digest(w)?,
+                runtime_command_digest: w.runtime_command_digest.clone(),
+                context_digest: hash.clone(),
+            },
+        }
+    } else {
+        ContextAction::Freeze {
+            work: w.id.clone(),
+            input: SharedContextInput {
+                authority,
+                work_digest: digest(w)?,
+                version: 3,
+            },
+        }
     };
-    r.prepare_shared_input(a, w.clone(), mode, Some(context))
-        .await
-        .map_err(store)
+    let context: Timed<SharedContextRecord> =
+        b.upload(WorkAction::Context(Box::new(action)).into(), until).await?;
+    Ok((mode, context.value))
 }
 pub(super) async fn start(
     b: &Bound,
