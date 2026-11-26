@@ -1360,6 +1360,7 @@ async fn heartbeat(
                     tracing::warn!(
                         stage = "lease_renewal",
                         status = error.status,
+                        code = %error.code,
                         remaining_ms =
                             expiry.saturating_duration_since(Instant::now()).as_millis() as u64,
                         "Lease renewal transport failure; retrying before deadline"

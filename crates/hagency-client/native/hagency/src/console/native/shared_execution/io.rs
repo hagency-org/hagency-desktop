@@ -513,7 +513,9 @@ pub(super) fn writer_busy(error: &NativeError) -> bool {
     error.status == 503 && error.code == "domain_writer_busy"
 }
 
-/// A renewable management scope or a temporarily occupied domain writer.
+/// A renewable management scope, a temporarily occupied domain writer, or a
+/// management session that was not free: a check that could not be made is
+/// made again, as nothing of the step has been sent or kept by then.
 fn transient_boundary(error: &NativeError) -> bool {
     writer_busy(error) || matches!(
         error.code.as_str(),
@@ -523,6 +525,7 @@ fn transient_boundary(error: &NativeError) -> bool {
             | "owner_authorization_required"
             | "matrix_authorization_unavailable"
             | "management_unavailable"
+            | "management_capacity"
     )
 }
 impl Bound {

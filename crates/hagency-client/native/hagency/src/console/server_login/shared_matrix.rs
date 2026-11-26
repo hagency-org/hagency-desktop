@@ -180,7 +180,9 @@ impl ServerLogin {
         }
         let _renewal = self.renewal.lock().await;
         let key = session_key(cookie);
-        self.renew_session_inner(&key).await?;
+        // The proof in hand serves a management call as it serves a run: a
+        // renewal without an answer does not end it before its own window.
+        self.renew_or_keep(&key).await?;
         let mut sessions = self.sessions.lock().await;
         let session = sessions.get_mut(&key).ok_or(Error::Unauthorized)?;
         if session.invalidated
@@ -647,10 +649,24 @@ mod tests {
         for s in login.sessions.lock().await.values_mut() {
             s.checked = Instant::now() - Duration::from_secs(6);
         }
-        assert!(matches!(
-            login.authorized_device().await,
-            Err(Error::Unavailable)
-        ));
+        // A renewal without an answer is no refusal: the proof in hand serves
+        // until its own end, and not a moment longer.
+        let renewals = || {
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .filter(|(p, _)| p.ends_with("/renew"))
+                .count()
+        };
+        let asked = renewals();
+        let kept = login.authorized_device().await.unwrap();
+        assert_eq!(kept.valid_until(), old.valid_until());
+        assert_eq!(renewals(), asked + 1);
+        // The next caller does not wait out the same unanswered request.
+        let again = login.authorized_device().await.unwrap();
+        assert_eq!(again.valid_until(), old.valid_until());
+        assert_eq!(renewals(), asked + 1);
         assert!(old.bearer().is_ok());
         assert!(login.revocations.lock().await.is_empty());
         for s in login.sessions.lock().await.values_mut() {
@@ -1070,12 +1086,24 @@ mod tests {
         login.forget_recent_check().await;
         login.authorized_device().await.unwrap();
         assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
-        // A token that is running out has nothing to fall back on, as before.
-        // Every caller that finds the proof unrenewed asks again.
+        // A token that is running out has no earlier proof to fall back on:
+        // the server has cut its session to the token's own end, and so is
+        // the proof in hand. Every caller that finds it unrenewed asks again,
+        // and it serves no longer than that end.
         *source.token.lock().unwrap() = "sdk-short-offline".into();
         login.forget_recent_check().await;
-        assert!(login.authorized_device().await.is_err());
-        assert!(source.refreshes.load(Ordering::Relaxed) >= 2);
+        let last = login.authorized_device().await.unwrap();
+        assert!(last.valid_until <= Instant::now() + Duration::from_secs(6));
+        let asked = source.refreshes.load(Ordering::Relaxed);
+        assert!(asked >= 2, "{asked}");
+        let again = login.authorized_device().await.unwrap();
+        assert!(again.valid_until <= last.valid_until);
+        assert!(source.refreshes.load(Ordering::Relaxed) > asked);
+        tokio::time::sleep_until((last.valid_until + Duration::from_millis(50)).into()).await;
+        assert!(matches!(
+            login.authorized_device().await,
+            Err(Error::Unavailable)
+        ));
         native.shutdown().await;
         task.abort();
     }

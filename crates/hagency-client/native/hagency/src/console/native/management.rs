@@ -595,7 +595,7 @@ impl NativeManagement {
             .console
             .authorized_device()
             .await
-            .map_err(|_| authorization_failed("device", failure(401, "owner_authorization_required")))?;
+            .map_err(|error| authorization_failed("device", device_failure(error)))?;
         device
             .bearer()
             .map_err(|_| authorization_failed("device_bearer", failure(401, "owner_authorization_required")))?;
@@ -658,19 +658,30 @@ impl NativeManagement {
         })?;
         Ok((context, session, device))
     }
+    /// The check of the authority a call ran under, made after the call.
+    ///
+    /// When the call's change is made (`committed`), what is left is to
+    /// confirm that this authority still stands. A check that cannot be made
+    /// now is not an answer, so it is made again for a while, and only then
+    /// is the outcome called unknown. A refusal is final at once.
+    pub(super) async fn authorized_after(
+        &self,
+        committed: bool,
+    ) -> Result<(service::HostContext, service::Session), NativeError> {
+        if !committed {
+            return self.authorized().await;
+        }
+        check_after_change(|| self.authorized())
+            .await
+            .map_err(|_| failure(409, "management_outcome_unknown"))
+    }
     pub(super) async fn finish<T>(
         &self,
         original: &service::HostContext,
         result: Result<T, hagency_store::Error>,
         mutation: bool,
     ) -> Result<T, NativeError> {
-        let (current, _) = self.authorized().await.map_err(|error| {
-            if mutation && result.is_ok() {
-                failure(409, "management_outcome_unknown")
-            } else {
-                error
-            }
-        })?;
+        let (current, _) = self.authorized_after(mutation && result.is_ok()).await?;
         if current != *original {
             return Err(if mutation && result.is_ok() {
                 failure(409, "management_outcome_unknown")
@@ -952,6 +963,46 @@ mod package_deadline_tests {
 
 /// Which authorization step failed, for diagnosis: several steps share one
 /// returned code. Stage names and codes only; never identifiers.
+/// A device proof that could not be had. One the server could not be asked
+/// for is temporary and says nothing about the sign-in; any other is a refusal.
+pub(super) fn device_failure(error: crate::console::Error) -> NativeError {
+    if matches!(error, crate::console::Error::Unavailable) {
+        failure(503, "matrix_authorization_unavailable")
+    } else {
+        failure(401, "owner_authorization_required")
+    }
+}
+/// Whether an authority check failed without an answer: there was no free
+/// session, or the local service or the server did not answer. Such a check
+/// says nothing about the authority; a refusal carries another status.
+pub(super) fn unanswered(error: &NativeError) -> bool {
+    error.status == 503
+}
+/// The pause before an unanswered authority check is made again.
+pub(super) const UNANSWERED_CHECK_GAP: Duration = Duration::from_millis(500);
+/// How long a change that is already made waits for an unanswered check of
+/// its authority: the time a running task gives the same check to settle.
+const UNANSWERED_CHECK_PATIENCE: Duration = Duration::from_secs(20);
+/// Makes an authority check for a caller whose change is already made, and
+/// makes it again while it goes unanswered. Any other result, a refusal
+/// included, is returned at once.
+pub(super) async fn check_after_change<T, F>(check: impl Fn() -> F) -> Result<T, NativeError>
+where
+    F: std::future::Future<Output = Result<T, NativeError>>,
+{
+    let patience = Instant::now() + UNANSWERED_CHECK_PATIENCE;
+    loop {
+        match check().await {
+            Err(error)
+                if unanswered(&error) && Instant::now() + UNANSWERED_CHECK_GAP < patience =>
+            {
+                tracing::info!(code = %error.code, "Management authority check after a change retrying");
+                tokio::time::sleep(UNANSWERED_CHECK_GAP).await;
+            }
+            checked => return checked,
+        }
+    }
+}
 fn authorization_failed(stage: &'static str, error: NativeError) -> NativeError {
     tracing::info!(stage, code = %error.code, "Management authorization failed");
     error

@@ -371,12 +371,28 @@ impl Bridge {
                     match self.journal.admit(request_id, &fingerprint)? {
                         Admission::Pending => return Err(error(503, "daemon_command_pending")),
                         Admission::RecoveryRequired => {
-                            let Some(result) = recover_native_receipt(&self.journal, request_id, &manager, operation, &arguments).await? else {
-                                return Err(error(409, "daemon_command_recovery_required"));
-                            };
-                            self.journal.finish(request_id, &result)?;
-                    receipt_recorded.store(super::terminal_receipt(&result),Ordering::Release);
-                            return result.map_err(Failure::native);
+                            match recover_native_receipt(&self.journal, request_id, &manager, operation, &arguments).await? {
+                                Some(result) => {
+                                    self.journal.finish(request_id, &result)?;
+                                    receipt_recorded.store(super::terminal_receipt(&result),Ordering::Release);
+                                    return result.map_err(Failure::native);
+                                }
+                                // No answer is recorded, and the native
+                                // journal can finish this command under its
+                                // own ID: it runs again below, as this same
+                                // request. Two retries never run side by side.
+                                None => {
+                                    // Boxed: the lookup's state stays out
+                                    // of this dispatch future.
+                                    let resumes = Box::pin(resumes_under_original_id(&manager, operation, &arguments)).await?;
+                                    if !resumes {
+                                        return Err(error(409, "daemon_command_recovery_required"));
+                                    }
+                                    if !self.journal.reenter(request_id)? {
+                                        return Err(error(503, "daemon_command_pending"));
+                                    }
+                                }
+                            }
                         },
                         Admission::Result(result) => { receipt_recorded.store(true,Ordering::Release); return result.map_err(Failure::native); },
                         Admission::New => {}
@@ -1184,6 +1200,47 @@ fn matching_intent_reply(operation: Operation, arguments: &Value, saved: &servic
     let (id, kind, input) = original_intent(operation, arguments)?;
     (saved.command_id == id && saved.operation == kind && saved.input == input).then(|| saved.reply.clone()).flatten()
 }
+/// What the native journal says about a command whose first run left the
+/// bridge without an answer.
+#[derive(Debug, PartialEq)]
+enum Custody {
+    /// The native journal shows no such command. Its record is written before
+    /// anything is applied and is never removed, so either nothing ran, or
+    /// the command was acknowledged since: the journal keeps that record and
+    /// refuses to prepare the command a second time.
+    Absent,
+    /// It holds exactly this command, and no answer for it yet.
+    Unanswered,
+    /// Answered, or the same ID with another operation or other arguments.
+    Other,
+}
+fn custody(operation: Operation, arguments: &Value, saved: Option<&service::PendingIntent>) -> Custody {
+    let Some((id, kind, input)) = original_intent(operation, arguments) else { return Custody::Other };
+    match saved {
+        None => Custody::Absent,
+        Some(saved) if saved.command_id == id && saved.operation == kind && saved.input == input && saved.reply.is_none() => Custody::Unanswered,
+        Some(_) => Custody::Other,
+    }
+}
+/// Whether a management command that needs recovery may enter native code
+/// again as the same request.
+///
+/// The native journal is built for that: a later run of a command it holds
+/// asks the server for the original under the command's own ID before it
+/// applies anything, and calls the outcome unknown rather than guess. A
+/// command it does not show either never ran or is refused again by the
+/// journal itself (see `Custody::Absent`). Refusing both left a request
+/// whose first run failed for a passing reason (no free management session,
+/// an authorization check that got no answer) refused for the whole day the
+/// Desktop reuses its ID, with no way to settle it.
+///
+/// Only commands the native journal keeps by their own ID qualify. A failed
+/// lookup is returned as it is, and the next retry asks again.
+async fn resumes_under_original_id(manager: &Arc<NativeManagement>, operation: Operation, arguments: &Value) -> Result<bool, NativeError> {
+    let Some((id, _, _)) = original_intent(operation, arguments) else { return Ok(false) };
+    let saved = manager.original_command_receipt(id).await?;
+    Ok(custody(operation, arguments, saved.as_ref()) != Custody::Other)
+}
 async fn matching_native_receipt(manager: &Arc<NativeManagement>, operation: Operation, arguments: &Value) -> Result<Option<Result<Value, Failure>>, NativeError> {
     if operation == Operation::observe_personal_settings {
         let Some(id) = arguments.get(0).and_then(|input| input.get("commandId")).and_then(Value::as_str) else { return Ok(None) };
@@ -1247,5 +1304,29 @@ mod receipt_matching_tests {
         assert!(observation_reply(&args,&saved).is_none());
         saved.operation=service::IntentOperation::PersonalAgentObservation;saved.reply=None;
         assert!(observation_reply(&args,&saved).is_none());
+    }
+    #[test]
+    fn only_a_command_the_native_journal_can_finish_runs_again_as_the_same_request() {
+        let args=serde_json::json!([{"commandId":"decide-1","operation":"pool_agent_decide","requestId":"request-1","decision":"approve","expectedRevision":1}]);
+        let saved=|reply:Value| -> service::PendingIntent {
+            serde_json::from_value(serde_json::json!({"commandId":"decide-1","operation":"pool_agent_decide","input":args[0],"reply":reply})).unwrap()
+        };
+        // Held without an answer: the first run stopped at a passing failure.
+        let unanswered=saved(Value::Null);
+        assert_eq!(custody(Operation::central,&args,Some(&unanswered)),Custody::Unanswered);
+        // Never taken, or acknowledged: the journal decides at its own gate.
+        assert_eq!(custody(Operation::central,&args,None),Custody::Absent);
+        // An answer is returned as recorded, never run for again.
+        let refused=saved(serde_json::json!({"kind":"failure","data":{"status":409,"code":"management_revision_conflict"}}));
+        assert_eq!(custody(Operation::central,&args,Some(&refused)),Custody::Other);
+        // The same ID with other arguments, or under another operation.
+        let mut other=args.clone();other[0]["decision"]=serde_json::json!("decline");
+        assert_eq!(custody(Operation::central,&other,Some(&unanswered)),Custody::Other);
+        let mut renamed=unanswered.clone();renamed.operation=service::IntentOperation::PoolAgentStop;
+        assert_eq!(custody(Operation::central,&args,Some(&renamed)),Custody::Other);
+        // A command the native journal does not keep by its own ID.
+        let bare=serde_json::json!([{"resourceId":"resource-1"}]);
+        assert_eq!(custody(Operation::central,&bare,None),Custody::Other);
+        assert_eq!(custody(Operation::saved_commands,&serde_json::json!([]),None),Custody::Other);
     }
 }

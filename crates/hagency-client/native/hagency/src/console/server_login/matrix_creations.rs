@@ -295,7 +295,7 @@ impl ServerLogin {
         }
         let renewal = self.renewal.lock().await;
         let key = session_key(cookie);
-        self.renew_session_inner(&key).await.map_err(|failure| {
+        self.renew_or_keep(&key).await.map_err(|failure| {
             let unavailable = matches!(failure, super::Error::Unavailable);
             error(
                 if unavailable { 503 } else { 401 },

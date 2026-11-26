@@ -186,6 +186,8 @@ pub(super) struct ServerLogin {
     profiles: Mutex<profiles::Profiles>,
     transition: Mutex<()>,
     renewal: Mutex<()>,
+    /// The session whose last renewal got no answer, and when.
+    unanswered: std::sync::Mutex<Option<(String, Instant)>>,
     worker_started: AtomicBool,
     stopped: std::sync::Arc<AtomicBool>,
     revocations_path: Option<PathBuf>,
@@ -287,6 +289,7 @@ impl ServerLogin {
             profiles: Mutex::new(profiles),
             transition: Mutex::new(()),
             renewal: Mutex::new(()),
+            unanswered: std::sync::Mutex::new(None),
             revocations_path,
             revocations: Mutex::new(revocations),
             worker_started: AtomicBool::new(false),
@@ -356,7 +359,8 @@ impl ServerLogin {
         if session.invalidated || session.expires <= Instant::now() {
             return Err(Error::Unauthorized);
         }
-        self.renew_session(&key).await
+        let _renewal = self.renewal.lock().await;
+        self.renew_or_keep(&key).await.map(|_| ())
     }
     /// Stop snapshots immediately without waiting for network or session locks.
     pub(super) fn retire(&self) {
@@ -393,6 +397,7 @@ impl ServerLogin {
         match result {
             Ok(()) => {
                 *session = snapshot;
+                self.note_renewal(key, true);
                 let mut status = self.status.lock().await;
                 if status["code"] == "matrix_authorization_unavailable" {
                     *status = json!({"state":"device_authorized","deviceAuthorized":true,"transportOnline":false});
@@ -414,6 +419,7 @@ impl ServerLogin {
                 // Preserve rotated OAuth credentials, but never extend a proof
                 // after a failed request. A later SDK check can recover it.
                 *session = snapshot;
+                self.note_renewal(key, false);
                 tracing::warn!(
                     stage = "owner_renewal",
                     elapsed_ms = started.elapsed().as_millis() as u64,
@@ -428,6 +434,7 @@ impl ServerLogin {
                 Err(Error::Unavailable)
             }
             Err(error) => {
+                self.note_renewal(key, true);
                 if session.matrix_source.is_some() {
                     // An SDK account switch can race local retirement. Renewal
                     // refusal does not prove that the saved original account
@@ -441,6 +448,58 @@ impl ServerLogin {
                 *self.status.lock().await = json!({"state":"failed","code":"sign_in_required","deviceAuthorized":false,"transportOnline":false});
                 Err(error)
             }
+        }
+    }
+    /// Renews the proof of a session for a caller that is about to use it, and
+    /// tells whether the proof in hand was kept because the renewal got no
+    /// answer. Caller holds the renewal guard.
+    ///
+    /// A renewal that got no answer says nothing about the proof in hand: the
+    /// server trusts it until `authorized_until`, and nothing has taken that
+    /// back. Only a refusal, or the end of that window, ends it. The proof is
+    /// never extended here, and one the server has answered with a shorter
+    /// proof is cut to that (see `renew`). After an unanswered renewal the
+    /// next callers use the proof without asking again for a moment, so that
+    /// they do not wait out the same unanswered request one after another;
+    /// the background worker keeps asking meanwhile. A proof that is about to
+    /// end is asked for by every caller, as before.
+    pub(super) async fn renew_or_keep(&self, key: &str) -> Result<bool, Error> {
+        let asked_just_now = self
+            .unanswered
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .is_some_and(|(session, at)| {
+                session == key && at.elapsed() < UNANSWERED_RENEWAL_SPACING
+            });
+        if asked_just_now && self.proof_in_hand(key, EXPIRING_PROOF).await {
+            return Ok(true);
+        }
+        match self.renew_session_inner(key).await {
+            Ok(()) => Ok(false),
+            Err(Error::Unavailable) if self.proof_in_hand(key, Duration::ZERO).await => Ok(true),
+            Err(error) => Err(error),
+        }
+    }
+    /// Whether the session holds a proof with more than `margin` of its
+    /// window left.
+    async fn proof_in_hand(&self, key: &str, margin: Duration) -> bool {
+        !self.stopped.load(Ordering::Acquire)
+            && self.sessions.lock().await.get(key).is_some_and(|s| {
+                !s.invalidated && s.authorized_until > Instant::now() + margin
+            })
+    }
+    /// Records whether the renewal of a session was answered, by a grant or a
+    /// refusal alike.
+    fn note_renewal(&self, key: &str, answered: bool) {
+        let mut unanswered = self.unanswered.lock().unwrap_or_else(|e| e.into_inner());
+        if !answered {
+            *unanswered = Some((key.to_owned(), Instant::now()));
+        } else if unanswered
+            .as_ref()
+            .is_some_and(|(session, _)| session == key)
+        {
+            *unanswered = None;
         }
     }
     /// Only the trusted Rust runtime can obtain a current device credential.
@@ -459,14 +518,23 @@ impl ServerLogin {
             .find(|(_, s)| !s.invalidated)
             .map(|(key, _)| key.clone())
             .ok_or(Error::Unauthorized)?;
-        self.renew_session_inner(&key).await?;
+        let kept = self.renew_or_keep(&key).await?;
         let sessions = self.sessions.lock().await;
         let session = sessions
             .get(&key)
             .filter(|s| !s.invalidated)
             .ok_or(Error::Unauthorized)?;
-        if self.stopped.load(Ordering::Acquire) || session.authorized_until <= Instant::now() {
+        if self.stopped.load(Ordering::Acquire) {
             return Err(Error::Unauthorized);
+        }
+        if session.authorized_until <= Instant::now() {
+            // A window that ran out while the server could not be asked comes
+            // back with the next answered renewal: it was not refused.
+            return Err(if kept {
+                Error::Unavailable
+            } else {
+                Error::Unauthorized
+            });
         }
         let mut device = session.device.clone().ok_or(Error::Unauthorized)?;
         device.valid_until = session.authorized_until;
@@ -792,6 +860,13 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     }
     let (renewed, clock) = proof_response(request_started, renewal_response).await.map_err(renewal_error)?;
     let (mut until, mut taken) = clock.bounds(&renewed).map_err(|_| Error::Unavailable)?;
+    // The server has answered, and its session now ends with this proof. If
+    // a later step gets no answer, the proof that stays in hand is the one
+    // the server holds: an earlier one that ran longer no longer stands.
+    if until < session.authorized_until {
+        session.authorized_until = until;
+        session.clock_allowance = taken;
+    }
     let mut proof_window = window_left(until, taken);
     if let Some(source) = session.matrix_source.clone() {
         // The server never trusts a proof past the token's own expiry, so an
@@ -873,6 +948,9 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     session.checked = Instant::now();
     Ok(())
 }
+/// How long callers use the proof in hand after a renewal went unanswered
+/// before one of them asks again: the spacing of two checks of a proof.
+const UNANSWERED_RENEWAL_SPACING: Duration = Duration::from_secs(5);
 /// A proof that ends this soon is taken as the token itself running out.
 const EXPIRING_PROOF: Duration = Duration::from_secs(20);
 /// How much of its full window a renewed proof has to have lost before the
@@ -2004,7 +2082,7 @@ impl ServerLogin {
                     .ok_or_else(|| OwnerError::new(401, "sign_in_required"))?
             }
         };
-        self.renew_session_inner(&key).await.map_err(|e| {
+        self.renew_or_keep(&key).await.map_err(|e| {
             OwnerError::new(
                 if matches!(e, Error::Unavailable) {
                     503

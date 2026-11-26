@@ -876,13 +876,9 @@ impl NativeManagement {
             .await;
         // A successful write followed by scope loss has an unknown UI outcome;
         // its stable command receipt is recovered after fresh authentication.
-        let (current, current_session) = self.authorized().await.map_err(|error| {
-            if command.mutation() && reply.is_ok() {
-                failure(409, "management_outcome_unknown")
-            } else {
-                error
-            }
-        })?;
+        let (current, current_session) = self
+            .authorized_after(command.mutation() && reply.is_ok())
+            .await?;
         if current != context {
             return Err(failure(
                 409,
