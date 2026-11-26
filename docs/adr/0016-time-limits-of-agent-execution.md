@@ -70,6 +70,12 @@ For the room:
    is unknown, which may have acted or cost something and has its review
    instead; nor for a message that is still waiting.
 
+   It is offered on the message itself, on every message the room's status
+   lists that can be sent again, and the notice at the end of the timeline
+   offers it for the newest message too. Both read the same status, so an
+   earlier message keeps its offer when a newer one arrives, and a click on
+   either sends once.
+
    It is never pressed by the program. Two devices of one person would each
    send it, and one message would become two runs.
 
@@ -110,6 +116,10 @@ has until it is decided.
   command's start window (30 seconds).
 - A reader who did not send a message that arrived while its Agent was
   stopped keeps reading that the Agent is paused after it runs again.
+- A message is offered while the room's status lists it. The status holds
+  the room's 16 newest rows, one for each Agent of a message, so a message
+  that ended without a turn is no longer offered once 16 newer rows stand
+  above it.
 - A computer whose clock is ahead loses that much of every lease, and a
   whole lease when it is ahead by a lease's length: that cannot be told from
   having slept.
@@ -127,7 +137,7 @@ point is in the release notes.
 | Point | State |
 |---|---|
 | 2. Token refresh ahead of the expiry; one local session shared between calls | implemented |
-| 5, 6. The notice names the Agent and offers "Send again" | implemented with this record; the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
+| 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented; the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review |
 | 1. Leases follow the server's lease | Agent execution leases do; activity leases and the rest are in review |
 | 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. In review: the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
