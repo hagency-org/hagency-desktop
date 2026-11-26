@@ -56,7 +56,16 @@ impl ProcessBinding {
         lease.authority.validate()?;
         let original = self.enrollment();
         let checked_at = Instant::now();
-        let remaining = lease.expires_at_ms.saturating_sub(graphs::now_ms()?);
+        // What the wall clock leaves of the lease. That clock is the second
+        // witness, for a computer that slept while the other clock stood
+        // still: it may end a lease early and decides nothing else. Read
+        // alone, a clock that is slow made a fresh lease look longer than
+        // any lease is, and the lease was refused.
+        let longest = hagency_runtime::owned::LONGEST_ACTIVITY_LEASE;
+        let remaining = lease
+            .expires_at_ms
+            .saturating_sub(graphs::now_ms()?)
+            .min(longest.as_millis() as u64);
         if enrollment.profile.digest != original.profile.digest
             || enrollment.executor_device_id != original.executor_device_id
             || enrollment.executor_generation != original.executor_generation
@@ -66,9 +75,10 @@ impl ProcessBinding {
             || lease.process_digest != self.process_digest()?
             || expires <= checked_at
             || remaining == 0
-            // As long as the process itself takes one, and no longer.
-            || u128::from(remaining) > hagency_runtime::owned::LONGEST_ACTIVITY_LEASE.as_millis()
-            || expires > checked_at + hagency_runtime::owned::LONGEST_ACTIVITY_LEASE
+            // As long as the process itself takes one, and no longer: held
+            // on the end that is counted from the moment the request was
+            // sent.
+            || expires > checked_at + longest
             || self
                 .source()
                 .activity_deadline(lease.authority.epoch)

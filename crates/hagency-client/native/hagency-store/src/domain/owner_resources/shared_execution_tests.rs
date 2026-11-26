@@ -396,6 +396,19 @@ async fn run_actual_capture_bound(mode: &str, mismatch: bool, shorter_wall: bool
             )
             .is_err()
         );
+        // A computer whose clock is slow reads a fresh lease as longer than
+        // any lease is. The end counted from the send instant holds it; the
+        // wall clock is not asked to refuse it.
+        let mut slow = lease.clone();
+        slow.expires_at_ms = graphs::now_ms().unwrap() + 130_000;
+        assert!(
+            sink.authorize_activity(
+                enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+                &slow,
+                expires,
+            )
+            .is_ok()
+        );
     }
     let active = || {
         sink.authorize_activity(
