@@ -32,9 +32,18 @@ come to this:
    after half of what is left when that is sooner. The access token is
    refreshed as soon as a proof has lost 10 seconds of the window (at most
    once a minute for that reason) and always when a proof has 20 seconds or
-   less left, so the lead stays near the window. The activity lease of a
-   working process is renewed once, when 20 seconds of it are left; that rule
-   has to change with the lease's length and is in review.
+   less left, so the lead stays near the window.
+
+   The activity lease of a working process, in review (Desktop #243 and the
+   follow-up on `fix/end-a-lease-by-the-wall-clock`): renewed ten seconds
+   after its grant, no later than twenty seconds before its end and no
+   sooner than five seconds after its grant; a lease with less than twenty
+   seconds left is renewed half-way through. Its end is the earlier of the
+   end counted from the request and the end on this computer's wall clock.
+   All four drivers of a process take that moment from one function,
+   `io::renewal_moment`. Main still renews it once, when 20 seconds of it
+   are left, and the Claude driver when 15 seconds of a 30-second lease are
+   left.
 3. **A check that cannot be made is not a refusal.** Every failed step is
    decided, not asked, or without an answer, and that is worked out in one
    place. Only a decided failure ends work. The other two wait and ask again,
@@ -150,9 +159,17 @@ document states the case, and its option A is drafted (Desktop #249, server
   too. A message that ended without a turn is no longer offered once 16
   newer such rows stand above it, which for the owner of a busy Agent can
   be soon.
-- A computer whose clock is ahead loses that much of every lease, and a
-  whole lease when it is ahead by a lease's length: that cannot be told from
-  having slept.
+- In review (Desktop #243 and the follow-up on
+  `fix/end-a-lease-by-the-wall-clock`): a computer whose clock is ahead
+  holds what its clock leaves of each lease and renews it before that runs
+  out, more often the further it is ahead: every five seconds while more
+  than twenty seconds are left, half-way through what is left below that.
+  Only a clock ahead by the whole lease loses it, and every process then
+  ends at its first lease. After a sleep through a lease's end, the turn
+  ends at its next renewal moment, at most ten seconds of awake time; the
+  store refuses its records, and the commit gate its messages, from the
+  wall-clock end on. On main, such a computer still loses that much of
+  every lease, and a whole lease when it is ahead by a lease's length.
 - The answer that grants an Agent's execution lease carries no server time,
   so for that lease the wall clock is the only witness, and a computer whose
   clock is behind by more than a second is refused a full-length lease.
@@ -174,10 +191,11 @@ point is in the release notes. Pull requests named "in review" are open.
 | Point | State |
 |---|---|
 | 2. Token refresh ahead of the expiry; one local session shared between calls | implemented |
+| 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and the follow-up on `fix/end-a-lease-by-the-wall-clock`) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review (Desktop #242, #247). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
-| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. In review: the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
+| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and the follow-up on `fix/end-a-lease-by-the-wall-clock`); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
 
 Also in review: Desktop #246 counts an Agent execution lease from its
 request with the server's date (point 4, and the known bound on that lease).
