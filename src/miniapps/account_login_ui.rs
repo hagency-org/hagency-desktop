@@ -25,7 +25,7 @@ fn pending(state: &str) -> bool {
 fn primary_label(state: &str) -> Option<&'static str> {
     match state {
         "review" => Some("Start sign-in"),
-        "awaiting_authorization" => Some("Reopen authorization page"),
+        "awaiting_authorization" => Some("Open authorization page"),
         _ => None,
     }
 }
@@ -33,7 +33,7 @@ fn words(state: &str) -> (&'static str, &'static str) {
     match state {
         "review" => (
             "Sign in to this account",
-            "Hagency will open the provider’s secure sign-in page. Credentials stay with Codex on this device. Signing in does not allocate resources.",
+            "You’ll open the provider’s secure sign-in page to continue. Credentials stay with Codex on this device. Signing in does not allocate resources.",
         ),
         "starting" => (
             "Starting sign-in…",
@@ -41,7 +41,7 @@ fn words(state: &str) -> (&'static str, &'static str) {
         ),
         "awaiting_authorization" => (
             "Complete authorization in your browser",
-            "If the page didn’t open, reopen it below. This window updates when Codex confirms.",
+            "Use the button below to open the page. This window updates when Codex confirms.",
         ),
         "stopping" => (
             "Finishing the original request…",
@@ -325,13 +325,12 @@ mod tests {
     use super::*;
     use makepad_widgets::makepad_draw::cx_draw::CxDraw;
     #[test]
-    fn browser_prompt_offers_reopen_until_codex_confirms() {
+    fn browser_prompt_offers_open_until_codex_confirms() {
         let zh = |key| crate::i18n::text_for(crate::i18n::Language::Chinese, key);
         assert_eq!(zh(words("awaiting_authorization").0), "请在浏览器中完成授权");
-        assert_eq!(
-            primary_label("awaiting_authorization").map(zh),
-            Some("重新打开授权页")
-        );
+        let label = primary_label("awaiting_authorization");
+        assert_eq!(label, Some("Open authorization page"));
+        assert_eq!(label.map(zh), Some("打开授权页"));
         assert_eq!(zh(words("authenticated").0), "Codex 已连接");
         assert_eq!(primary_label("authenticated"), None);
         for state in [
