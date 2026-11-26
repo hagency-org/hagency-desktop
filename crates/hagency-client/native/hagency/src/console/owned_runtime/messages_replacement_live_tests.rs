@@ -339,6 +339,7 @@ async fn real_palpo_signing_in_again_settles_unknown_reports_from_room_history()
         host_files: false,
         shared_workspace: false,
         shared_workspace_pin: None,
+        remote: None,
         owner_direct: true,
         recovery_device_id: None,
         recovery_consent_id: None,

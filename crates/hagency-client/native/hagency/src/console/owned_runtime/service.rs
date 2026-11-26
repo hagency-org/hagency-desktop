@@ -235,7 +235,7 @@ fn active_binding_ids(bindings: &[Binding], agent: &str) -> BTreeSet<String> {
 /// Agent uses: the same checks as a single Room start (`OwnedRuntime::start`).
 /// Comparing with the owner's Codex account alone refused every Claude Code
 /// and Octos Agent with "runtime_profile_unavailable".
-fn owner_connection(
+pub(super) fn owner_connection(
     root: &std::path::Path,
     origin: &str,
     issuer: &str,
@@ -331,14 +331,21 @@ impl OwnedRuntime {
             .server_login
             .state_directory()
             .ok_or(RuntimeError::Profile)?;
-        owner_connection(
-            &root,
-            device.origin(),
-            device.issuer(),
-            device.subject(),
-            device.owner_mxid(),
-            &config,
-        )?;
+        if let Some(remote) = &config.remote {
+            if config.shared_workspace {
+                return Err(RuntimeError::Execution("remote_runtime_incompatible"));
+            }
+            remote.verify(device.owner_mxid(), &config.agent_id).await?;
+        } else {
+            owner_connection(
+                &root,
+                device.origin(),
+                device.issuer(),
+                device.subject(),
+                device.owner_mxid(),
+                &config,
+            )?;
+        }
         config.shared_workspace_pin = if config.shared_workspace { Some(shared_workspace_pin(&config.profile.cwd)?) } else { None };
         let (path, profile_id) = intent_location(&console, &device)?;
 
@@ -366,6 +373,7 @@ impl OwnedRuntime {
             host_files: false,
             shared_workspace: config.shared_workspace,
             shared_workspace_pin: config.shared_workspace_pin.clone(),
+            remote_consent: config.remote.as_ref().map(remote::RemoteBinding::consent),
         };
         save_options(
             &path.with_file_name("agent-service-options.json"),
@@ -425,7 +433,13 @@ impl OwnedRuntime {
                         let reply = host.owner_api_pinned(&task_pin, OwnerOperation::Bindings { agent: intent.agent_id.clone() })
                             .await.map_err(assignment_error)?;
                         let bindings: Vec<Binding> = serde_json::from_value(reply.value["bindings"].clone()).map_err(|_| RuntimeError::Profile)?;
-                        let active = active_binding_ids(&bindings, &intent.agent_id);
+                        let active: BTreeSet<String> = if config.remote.is_some() {
+                            bindings.iter().filter(|binding| binding.agent_id == intent.agent_id
+                                && binding.state == "active" && binding.scope_kind == "owner_direct")
+                                .map(|binding| binding.id.clone()).collect()
+                        } else {
+                            active_binding_ids(&bindings, &intent.agent_id)
+                        };
                         // A paused/removed Room must terminate its worker. No local
                         // room intent is allowed to resurrect it on recovery.
                         let snapshot = manager.status(&host, &intent.agent_id).await?;
@@ -450,7 +464,7 @@ impl OwnedRuntime {
                             // Every start, retries included, runs the coding tool as it
                             // is found now: an update may have moved the file this
                             // service started with, and `start` refuses any other.
-                            if let Err(error) = current_program(&mut child.profile, &child.credential_ref) {
+                            if child.remote.is_none() && let Err(error) = current_program(&mut child.profile, &child.credential_ref) {
                                 let code = failure_code(&Err(error)).unwrap_or("runtime_start_failed");
                                 tracing::warn!(stage = "agent_room_start", code, "An Agent room did not start; it will be retried");
                                 schedule_retry(&mut retries,&binding,code,Instant::now());
@@ -600,11 +614,23 @@ impl OwnedRuntime {
                     matches!(child.phase, "online_chat_only" | "online") || child.phase.starts_with("executing_")
                 })
         });
+        // Only the authenticated owner receives the destination. The grant
+        // credential remains in the native host process.
+        let configured_remote = remote::load(&path, agent).ok().flatten();
+        let remote_endpoint = runtime.as_ref().and_then(|runtime| {
+            runtime.bindings.iter().find_map(|child| child.remote_endpoint.as_deref())
+        }).or_else(|| configured_remote.as_ref().map(remote::RemoteBinding::endpoint));
+        let remote_error = runtime.as_ref().and_then(|runtime| {
+            runtime.bindings.iter().filter_map(|child| child.last_error)
+                .find(|code| code.starts_with("remote_runtime_"))
+        });
         let native_tools = runtime.as_ref().is_some_and(|status| status.native_tools);
         Ok(serde_json::json!({"runtime":runtime,"service":{
             "enabled":intent.is_some(),"running":running,"watcherRunning":watcher_running,"warning":options_warning,"phase":health.phase,"lastError":health.last_error,"problems":health.problems,"deviceId":device.device_id(),
             "effort":options.as_ref().map(|value| &value.effort).or_else(||intent.as_ref().map(|value| &value.effort)),
-            "rooms":reply.value["bindings"]},"nativeTools":native_tools,"strictTokenCap":false}))
+            "rooms":reply.value["bindings"]},"nativeTools":native_tools,"strictTokenCap":false,
+            "remoteEndpoint":remote_endpoint,"remoteError":remote_error,
+            "pendingRemoteRun":remote::pending_receipt(&path, agent)}))
     }
     pub(in crate::console) async fn stop_agent_service(
         &self,
@@ -837,6 +863,7 @@ mod tests {
             host_files: false,
             shared_workspace: false,
             shared_workspace_pin: None,
+            remote: None,
             owner_direct: false,
             recovery_device_id: None,
             recovery_consent_id: None,
@@ -1061,6 +1088,7 @@ mod tests {
             host_files: false,
             shared_workspace: false,
             shared_workspace_pin: None,
+            remote_consent: None,
         };
         let global = intended("a", ALL_ROOMS);
         for intent in [
@@ -1105,6 +1133,7 @@ mod tests {
             host_files: false,
             shared_workspace: false,
             shared_workspace_pin: None,
+            remote_consent: None,
         };
         let values = RuntimeIntents {
             version: RUNTIME_STATE_VERSION,

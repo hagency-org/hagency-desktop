@@ -4,6 +4,7 @@ mod idle_turns;
 pub(in crate::console) mod messages;
 pub(in crate::console) mod e2ee;
 mod provider_custody;
+pub(super) mod remote;
 pub(in crate::console) mod questions;
 mod roles;
 mod room_tools;
@@ -45,6 +46,7 @@ pub(super) struct StartConfig {
     pub binding_id: String,
     pub profile: Profile,
     pub credential_ref: String,
+    pub remote: Option<remote::RemoteBinding>,
     pub takeover: Takeover,
     pub host_files: bool,
     pub shared_workspace: bool,
@@ -69,6 +71,8 @@ pub(super) struct RuntimeIntent {
     pub shared_workspace: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub shared_workspace_pin: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub remote_consent: Option<String>,
 }
 impl RuntimeIntent {
     pub(super) fn start_input(&self) -> serde_json::Value {
@@ -254,6 +258,7 @@ fn verify_recovery_intent(
                     && v.host_files == config.host_files
                     && v.shared_workspace == config.shared_workspace
                     && v.shared_workspace_pin == config.shared_workspace_pin
+                    && v.remote_consent == config.remote.as_ref().map(remote::RemoteBinding::consent)
             });
             if valid {
                 Ok(())
@@ -307,6 +312,7 @@ fn save_intent(
             host_files: config.host_files,
             shared_workspace: config.shared_workspace,
             shared_workspace_pin: config.shared_workspace_pin.clone(),
+            remote_consent: config.remote.as_ref().map(remote::RemoteBinding::consent),
         }),
         config.recovery_consent_id.as_deref(),
     )
@@ -346,6 +352,8 @@ pub(super) struct RuntimeStatus {
     pub bindings: Vec<RuntimeStatus>,
     pub phase: &'static str,
     pub last_error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_endpoint: Option<String>,
     pub native_tools: bool,
     pub strict_token_cap: bool,
     pub host_file_tools: bool,
@@ -355,7 +363,11 @@ pub(super) struct RuntimeStatus {
     pub capability_version: Option<&'static str>,
 }
 impl RuntimeStatus {
-    fn with_capabilities(self, config: &StartConfig) -> Self {
+    fn with_capabilities(mut self, config: &StartConfig) -> Self {
+        if let Some(remote) = &config.remote {
+            self.remote_endpoint = Some(remote.endpoint().to_owned());
+            return self;
+        }
         let mut status = self.with_host_files(config.host_files || config.shared_workspace);
         status.file_replace = config.shared_workspace;
         if config.shared_workspace { status.capability_version = Some("hagency-shared-files-v1"); }
@@ -385,6 +397,7 @@ impl RuntimeStatus {
             bindings: vec![],
             phase,
             last_error: error,
+            remote_endpoint: None,
             native_tools: false,
             strict_token_cap: false,
             host_file_tools: false,
@@ -648,28 +661,8 @@ impl OwnedRuntime {
         mut config: StartConfig,
     ) -> Result<RuntimeStatus, RuntimeError> {
         let _activity = self.tasks.enter().map_err(|_| RuntimeError::Stopped)?;
-        runtime::validate(&config.profile, &config.credential_ref)
-            .map_err(|_| RuntimeError::Profile)?;
-        if config.profile.executable
-            != super::owner_provider::external::executable(runtime::kind(&config.credential_ref))
-                .map_err(|_| RuntimeError::Profile)?
-        {
-            return Err(RuntimeError::Profile);
-        }
-        if runtime::managed_reference(&config.credential_ref).is_some() {
-            super::owner_provider::external::verify_reference(
-                &config.profile.codex_home,
-                &config.credential_ref,
-            )
-            .map_err(|_| RuntimeError::Profile)?;
-        } else if super::owner_provider::selected_reference(
-            &config.profile.codex_home,
-            config.profile.shared_auth,
-        )
-        .map_err(|_| RuntimeError::Profile)?
-            != config.credential_ref
-        {
-            return Err(RuntimeError::Profile);
+        if config.remote.is_some() && (config.host_files || config.shared_workspace) {
+            return Err(RuntimeError::Execution("remote_runtime_incompatible"));
         }
         let device = console.authorized_device().await.map_err(device_error)?;
         device.bearer().map_err(|_| RuntimeError::Authorization)?;
@@ -738,23 +731,15 @@ impl OwnedRuntime {
             device.owner_mxid(),
         )
         .map_err(|_| RuntimeError::Profile)?;
-        // Paths are owner-specific, and must be initialized by the owner. A
-        // caller cannot silently repurpose ~/.codex or another owner's login.
-        let expected = super::owner_provider::external::paths_for_reference(
-            &root,
-            device.origin(),
-            device.issuer(),
-            device.subject(),
-            device.owner_mxid(),
-            &config.credential_ref,
-        )
-        .map_err(|_| RuntimeError::Profile)?;
-        if config.profile.codex_home != expected.codex_home
-            || config.profile.home != expected.home
-            || config.profile.shared_auth != expected.shared
-            || config.credential_ref != expected.credential_ref
-        {
-            return Err(RuntimeError::Profile);
+        if let Some(remote) = &config.remote {
+            if !config.owner_direct {
+                return Err(RuntimeError::Execution("remote_runtime_scope_required"));
+            }
+            remote.verify(device.owner_mxid(), &config.agent_id).await?;
+        } else {
+            service::owner_connection(
+                &root, device.origin(), device.issuer(), device.subject(), device.owner_mxid(), &config,
+            )?;
         }
         let mut ledger = local(Ledger::open_scoped(
             &path,
@@ -775,15 +760,17 @@ impl OwnedRuntime {
             thread: "runtime-profile-validation".into(),
         };
         local(ledger.register_binding(device.owner_mxid(), &scope))?;
-        match local(ledger.model_profile(&scope))? {
-            Some(p)
-                if p.model == config.profile.model
-                    && p.workspace_root == config.profile.cwd.to_string_lossy()
-                    && p.credential_ref == config.credential_ref
-                    && (p.credential_ref.starts_with("keychain:")
-                        || p.credential_ref.starts_with("codex-managed:")
-                        || runtime::managed_reference(&p.credential_ref).is_some()) => {}
-            _ => return Err(RuntimeError::Profile),
+        if config.remote.is_none() {
+            match local(ledger.model_profile(&scope))? {
+                Some(p)
+                    if p.model == config.profile.model
+                        && p.workspace_root == config.profile.cwd.to_string_lossy()
+                        && p.credential_ref == config.credential_ref
+                        && (p.credential_ref.starts_with("keychain:")
+                            || p.credential_ref.starts_with("codex-managed:")
+                            || runtime::managed_reference(&p.credential_ref).is_some()) => {}
+                _ => return Err(RuntimeError::Profile),
+            }
         }
         let key = identity(&device, &config.agent_id);
         let mut entries = self.entries_for(&device).await?;
@@ -1734,10 +1721,7 @@ async fn run_host(
     let agent = initial.config.agent_id.clone();
     // Verify the owner's dedicated provider before any acquisition or explicit
     // takeover can disrupt an existing device. This is account/config only.
-    let mut provider = tokio::select! {biased;_=canceled(&mut cancel)=>return Err(RuntimeError::Stopped),p=provider_custody::Provider::capture(&provider_tasks,provider_custody::spawn(&initial.config.profile,&initial.config.credential_ref))=>p.map_err(|_|RuntimeError::Provider)?};
-    let checked = tokio::select! {biased;_=canceled(&mut cancel)=>Err(RuntimeError::Stopped),r=async {provider.session.initialize().await?;provider.session.verify_host_environment().await?;provider.session.require_local_account().await}=>r.map_err(|error|startup_check_failure(&error))};
-    provider.stop().await.map_err(|_| RuntimeError::Provider)?;
-    checked?;
+    check_backend(&initial.config, &provider_tasks, &mut cancel).await?;
     let mut ledger = local(Ledger::open_scoped(&path, &owner, &profile_id))?;
     let (lease, history_snapshot, pre_covered) = acquire_for_start(
         &transport,
@@ -1785,12 +1769,10 @@ async fn run_host(
                 let Ok(completion)=completion else {return;};
                 let mut work=work;
                 let result=async {
-                    let mut provider=tokio::select! {biased;_=canceled(&mut work.receiver)=>return Err(RuntimeError::Stopped),p=provider_custody::Provider::capture(&provider_tasks,provider_custody::spawn(&work.config.profile,&work.config.credential_ref))=>p.map_err(|_|RuntimeError::Profile)?};
-                    let checked=tokio::select! {biased;_=canceled(&mut work.receiver)=>Err(RuntimeError::Stopped),r=async {provider.session.initialize().await?;provider.session.verify_host_environment().await?;provider.session.require_local_account().await}=>r.map_err(|error|startup_check_failure(&error))};
-                    provider.stop().await.map_err(|_|RuntimeError::Provider)?;checked?;
+                    check_backend(&work.config, &provider_tasks, &mut work.receiver).await?;
                     let mut ledger=local(Ledger::open_scoped(&path,&owner,&profile_id))?;
                     let mut ready=RuntimeStatus::new(&work.config.agent_id,if models_allowed {if work.config.shared_workspace {"online"} else {"online_chat_only"}} else {"ledger_recovery_required"},if models_allowed{None}else{Some("ledger_recovery_required")}).with_capabilities(&work.config);ready.binding_id=Some(work.config.binding_id.clone());work.status.send_replace(ready);
-                    if models_allowed && (work.config.owner_direct || transport.supports_group_crypto()) {e2ee::prepare(&transport,&reference,&work.config,&mut work.receiver).await;}
+                    if models_allowed && work.config.remote.is_none() && (work.config.owner_direct || transport.supports_group_crypto()) {e2ee::prepare(&transport,&reference,&work.config,&mut work.receiver).await;}
                     execution_loop_with_gate(&transport,&owner,&mut ledger,&work.config,&reference,&mut work.receiver,&work.status,models_allowed).await
                 }.await;
                 let mut final_status=RuntimeStatus::new(&work.config.agent_id,"stopped",failure_code(&result)).with_capabilities(&work.config);
@@ -1808,6 +1790,34 @@ async fn run_host(
         _ => result,
     }
 }
+async fn check_backend(
+    config: &StartConfig,
+    tasks: &TaskCustody,
+    cancel: &mut watch::Receiver<bool>,
+) -> Result<(), RuntimeError> {
+    // A remote binding was verified against the live invitation before start.
+    if config.remote.is_some() {
+        return Ok(());
+    }
+    let mut provider = tokio::select! {
+        biased;
+        _ = canceled(cancel) => return Err(RuntimeError::Stopped),
+        result = provider_custody::Provider::capture(tasks, provider_custody::spawn(&config.profile, &config.credential_ref)) =>
+            result.map_err(|_| RuntimeError::Provider)?,
+    };
+    let checked = tokio::select! {
+        biased;
+        _ = canceled(cancel) => Err(RuntimeError::Stopped),
+        result = async {
+            provider.session.initialize().await?;
+            provider.session.verify_host_environment().await?;
+            provider.session.require_local_account().await
+        } => result.map_err(|error| startup_check_failure(&error)),
+    };
+    provider.stop().await.map_err(|_| RuntimeError::Provider)?;
+    checked
+}
+
 /// One supervisor owns the lease. Workers can never acquire, renew or release it.
 /// All cancellation paths join workers before the supervisor releases the lease.
 async fn supervise_bindings<F>(
@@ -1997,24 +2007,26 @@ async fn execution_loop_with_gate<T: Transport>(
             tokio::select! {biased;_=canceled(cancel)=>return Err(RuntimeError::Stopped),_=tokio::time::sleep(Duration::from_millis(250))=>{}}
             continue;
         }
-        if console.supports_group_crypto() {
-            e2ee::pump_candidates(console, lease, config, cancel).await?;
+        if config.remote.is_none() {
+            if console.supports_group_crypto() {
+                e2ee::pump_candidates(console, lease, config, cancel).await?;
+            }
+            // A parked session may have started a turn by itself (a timer, a peer
+            // message). It runs before the next request is taken, so a request
+            // never meets a session that is in the middle of such a turn.
+            idle_turns::pump(
+                console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
+            )
+            .await?;
+            // A timer the Agent set with the host is due: its turn runs here,
+            // between requests, like the turn above.
+            wakeups::pump(
+                console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
+                &mut timers,
+            )
+            .await?;
+            idle_turns::deliver(console, lease, config, cancel, &mut undelivered).await?;
         }
-        // A parked session may have started a turn by itself (a timer, a peer
-        // message). It runs before the next request is taken, so a request
-        // never meets a session that is in the middle of such a turn.
-        idle_turns::pump(
-            console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
-        )
-        .await?;
-        // A timer the Agent set with the host is due: its turn runs here,
-        // between requests, like the turn above.
-        wakeups::pump(
-            console, lease, ledger, owner, config, cancel, status, &mut sessions, &mut undelivered,
-            &mut timers,
-        )
-        .await?;
-        idle_turns::deliver(console, lease, config, cancel, &mut undelivered).await?;
         let events = match operation(
             console,
             cancel,
@@ -2144,13 +2156,15 @@ async fn execution_loop_with_gate<T: Transport>(
             }
             let scope = record.dispatch.scope();
             // Profile changes require another explicit owner start.
-            let profile = local(ledger.model_profile(&scope))?.ok_or(RuntimeError::Profile)?;
-            if profile.model != config.profile.model
-                || profile.credential_ref != config.credential_ref
-                || profile.workspace_root != config.profile.cwd.to_string_lossy()
-                || profile.web_search != config.profile.web_search
-            {
-                return Err(RuntimeError::Profile);
+            if config.remote.is_none() {
+                let profile = local(ledger.model_profile(&scope))?.ok_or(RuntimeError::Profile)?;
+                if profile.model != config.profile.model
+                    || profile.credential_ref != config.credential_ref
+                    || profile.workspace_root != config.profile.cwd.to_string_lossy()
+                    || profile.web_search != config.profile.web_search
+                {
+                    return Err(RuntimeError::Profile);
+                }
             }
             if local(ledger.inbox_available_bytes(owner))? < 65_536 {
                 return Err(RuntimeError::Profile);
@@ -2620,6 +2634,68 @@ async fn space_project<T: Transport>(
     super::space_folder::place(transport.space_root(), owner, folder).await
 }
 #[allow(clippy::too_many_arguments)]
+async fn run_remote_turn<T: Transport>(
+    transport: &T,
+    lease: &LeaseRef,
+    ledger: &mut Ledger,
+    owner: &str,
+    config: &StartConfig,
+    remote: &remote::RemoteBinding,
+    prepared: &inbox::Prepared,
+    mut admission: Option<super::hosting::TurnAdmission>,
+    cancel: &mut watch::Receiver<bool>,
+    status: &watch::Sender<RuntimeStatus>,
+) -> Result<Option<Finish>, RuntimeError> {
+    let dispatch = &prepared.dispatch;
+    if !config.owner_direct || dispatch.requester_mxid != owner || dispatch.body.trim().is_empty()
+        || local(ledger.request_disposition(&dispatch.scope(), &dispatch.id))? != hagency_agent_local::RequestPolicy::Allow
+    {
+        return Ok(Some(Finish::Rejected));
+    }
+    // Only an unencrypted owner-direct room may send a prompt to this demo.
+    let mut room_cancel = cancel.clone();
+    let plaintext = tokio::select! {
+        biased;
+        _ = canceled(cancel) => return Err(RuntimeError::Stopped),
+        result = tokio::time::timeout(Duration::from_secs(20), async {
+            let device = e2ee::device(transport, lease, config, &mut room_cancel).await?;
+            device.room_encrypted(&dispatch.room_id).await.map(|encrypted| !encrypted)
+        }) => result.map_err(|_| RuntimeError::Transport)??,
+    };
+    if !plaintext {
+        return Ok(Some(Finish::Rejected));
+    }
+    check_running(transport, lease, dispatch, &prepared.execution_id, cancel).await?;
+    remote.record(prepared)?;
+    let mut running = RuntimeStatus::new(&config.agent_id, "executing_chat_only", None).with_capabilities(config);
+    running.binding_id = Some(config.binding_id.clone());
+    status.send_replace(running);
+    if let Some(turn) = &mut admission { turn.started(); }
+    let permission = cancel.clone();
+    let outcome = tokio::select! {
+        biased;
+        _ = canceled(cancel) => Err(RuntimeError::Stopped),
+        error = monitor_running(transport, lease, prepared, permission) => Err(error),
+        result = remote.run(prepared) => {
+            let finish = match result? {
+                remote::RemoteOutcome::Succeeded(answer) => {
+                    local(ledger.persist_execution_reply(owner, &dispatch.id, &prepared.execution_id, &answer))?;
+                    None
+                }
+                remote::RemoteOutcome::Rejected => Some(Finish::Rejected),
+                remote::RemoteOutcome::Failed => Some(Finish::Failed),
+            };
+            remote.resolved(&prepared.execution_id);
+            return Ok(finish);
+        }
+    };
+    // Cancellation is best effort. The original receipt remains available for
+    // reconciliation if the remote runtime cannot be reached.
+    remote.cancel(&prepared.execution_id).await;
+    outcome
+}
+
+#[allow(clippy::too_many_arguments)]
 #[tracing::instrument(skip_all, fields(agent_id = %config.agent_id, binding_id = %config.binding_id, dispatch_id = %prepared.dispatch.id))]
 async fn run_turn<T: Transport>(
     transport: &T,
@@ -2633,6 +2709,9 @@ async fn run_turn<T: Transport>(
     status: &watch::Sender<RuntimeStatus>,
     sessions: &mut provider_custody::Sessions,
 ) -> Result<Option<Finish>, RuntimeError> {
+    if let Some(remote) = &config.remote {
+        return run_remote_turn(transport, lease, ledger, owner, config, remote, &prepared, admission, cancel, status).await;
+    }
     let scope = prepared.dispatch.scope();
     if config.shared_workspace && config.shared_workspace_pin.as_deref() != Some(shared_workspace_pin(&config.profile.cwd)?.as_str()) {
         return Err(RuntimeError::Profile);
@@ -3354,6 +3433,7 @@ mod tests {
             host_files: false,
             shared_workspace: false,
             shared_workspace_pin: None,
+            remote_consent: None,
         }
     }
     #[tokio::test]
@@ -3688,6 +3768,7 @@ mod tests {
             host_files: false,
             shared_workspace: false,
             shared_workspace_pin: None,
+            remote: None,
             owner_direct: false,
             recovery_device_id: None,
             recovery_consent_id: None,

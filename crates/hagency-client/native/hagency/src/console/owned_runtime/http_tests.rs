@@ -638,6 +638,7 @@ async fn fixture_modes(unknown: bool, budget: u64, processing_failure: u8, conti
         host_files: continuous,
         shared_workspace: false,
         shared_workspace_pin: None,
+        remote: None,
         owner_direct: false,
         recovery_device_id: None,
         recovery_consent_id: None,
@@ -835,6 +836,7 @@ async fn typed_http_runtime_intent_recovery_rechecks_scope_and_explicit_stop_sur
         host_files: false,
         shared_workspace: false,
         shared_workspace_pin: None,
+        remote_consent: None,
     };
     change_intent(
         &path,
@@ -886,6 +888,7 @@ async fn typed_http_runtime_intent_recovery_rechecks_scope_and_explicit_stop_sur
         host_files: saved.host_files,
         shared_workspace: saved.shared_workspace,
         shared_workspace_pin: saved.shared_workspace_pin.clone(),
+        remote: None,
         owner_direct: false,
         recovery_device_id: Some(saved.device_id.clone()),
         recovery_consent_id: Some(saved.consent_id.clone()),

@@ -8448,6 +8448,10 @@ A.local_reason=fn(code){
     if code=="local_no_response_start" {return A.t("The device didn’t respond. The service may not have started.","没有收到设备响应，服务可能尚未启动。")}
     if code=="local_no_response" {return A.t("No response yet. Refresh to see the current state.","暂未收到响应，请刷新查看当前状态。")}
     if code=="personal_agent_encryption_failed" {return A.t("Couldn’t turn on encryption. Check your connection and try again.","未能开启加密，请检查网络后重试。")}
+    if code=="remote_runtime_unavailable" {return A.t("The remote runtime or its model is unavailable.","远程运行时或其模型暂不可用。")}
+    if code=="remote_runtime_incompatible" {return A.t("The runtime invitation or model does not match this Agent.","运行时邀请或模型与此 Agent 不匹配。")}
+    if code=="remote_runtime_entitlement_denied" {return A.t("The runtime withdrew this Agent’s execution access.","远程运行时已撤回此 Agent 的执行授权。")}
+    if code=="remote_runtime_pending_reconciliation" {return A.t("The original runtime is still reconciling this run.","这次运行仍在原运行时等待核对。")}
     return A.error_text(code)
 }
 A.local_state=fn(){if H.local_status==nil {return ""} return H.local_status.service.state}
@@ -15389,6 +15393,17 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                             }
                         }
                     }
+                    if st!=nil && st.remoteEndpoint!=nil {View{width:Fill height:Fit flow:Down spacing:6
+                        mod.widgets.HagencyList{
+                            mod.widgets.HagencySwitchRow{
+                                mod.widgets.HagencyListTitle{text:A.t("Remote runtime","远程运行时")}
+                                mod.widgets.HagencyListValue{text:st.remoteEndpoint}
+                            }
+                        }
+                        mod.widgets.HagencyListNote{text:if encrypted {A.t("This runtime cannot work in an encrypted chat.", "此运行时无法处理加密私聊。")} else {A.t("When you start the service, your private chat requests will be sent to this runtime.", "启动服务后，你在私聊中发出的请求会发送到此运行时。")}}
+                        if st.remoteError!=nil && st.remoteError!="remote_runtime_pending_reconciliation" {mod.widgets.HagencyListNote{text:A.local_reason(st.remoteError)}}
+                    }}
+                    if st!=nil && st.pendingRemoteRun!=nil && state!="processing" {mod.widgets.HagencyListNote{text:A.local_reason("remote_runtime_pending_reconciliation")+" "+st.pendingRemoteRun.run_id+" · "+st.pendingRemoteRun.endpoint}}
                     if !s.online {mod.widgets.HagencyListNote{text:A.t("You can start it or change settings once the execution device is online.","执行设备上线后才能启动或修改设置。")}}
                     if s.online && st!=nil && !st.here {mod.widgets.HagencyListNote{text:A.t("It can only be started or stopped on its execution device.","只能在执行设备上启动或停止。")}}
 

@@ -204,6 +204,7 @@ async fn real_palpo_delivery_only_report_authorization_and_revocation() {
         host_files: false,
         shared_workspace: false,
         shared_workspace_pin: None,
+        remote: None,
         owner_direct: true,
         recovery_device_id: None,
         recovery_consent_id: None,

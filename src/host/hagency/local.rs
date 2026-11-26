@@ -175,6 +175,9 @@ fn direct_room(agent: &Agent) -> Result<matrix_sdk::ruma::OwnedRoomId, String> {
 async fn status(account: &str, id: &str) -> Result<Value, String> {
     let service = service_for(account)?;
     let agent = agent(&service, id).await?;
+    let mut remote_endpoint = Value::Null;
+    let mut remote_error = Value::Null;
+    let mut pending_remote_run = Value::Null;
     let state = if agent.here && service.local_agent_host().is_ok_and(|host| host != LocalAgentHost::Here) {
         // The Agent is assigned to this device, but nothing on this computer
         // runs this account's Agents (another account is hosted here, or
@@ -191,7 +194,12 @@ async fn status(account: &str, id: &str) -> Result<Value, String> {
             })
             .await;
         match status {
-            Ok(value) => service_state(&value, id),
+            Ok(value) => {
+                remote_endpoint = value["remoteEndpoint"].clone();
+                remote_error = value["remoteError"].clone();
+                pending_remote_run = value["pendingRemoteRun"].clone();
+                service_state(&value, id)
+            }
             Err(_) => "unknown",
         }
     } else {
@@ -223,7 +231,7 @@ async fn status(account: &str, id: &str) -> Result<Value, String> {
         .date_naive()
         .and_hms_opt(0, 0, 0)
         .map(|midnight| midnight.and_utc().with_timezone(&chrono::Local).format("%H:%M").to_string());
-    Ok(json!({"agentId": id, "here": agent.here, "deviceName": agent.device_name, "service": {"state": state}, "chat": chat, "rooms": rooms, "resetLocalTime": reset}))
+    Ok(json!({"agentId": id, "here": agent.here, "deviceName": agent.device_name, "service": {"state": state}, "chat": chat, "rooms": rooms, "resetLocalTime": reset, "remoteEndpoint": remote_endpoint, "remoteError": remote_error, "pendingRemoteRun": pending_remote_run}))
 }
 
 impl Call {
