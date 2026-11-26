@@ -3730,6 +3730,20 @@ pub fn note_sent_again(room_id: &RoomId, event_id: &EventId) {
     sent.push((room_id.to_owned(), event_id.to_owned()));
 }
 
+/// A message of the user's own that was sent again for an earlier one: the
+/// earlier one is not offered again. It reads the message as the server
+/// returned it, so a copy that never left this device names nothing, and it
+/// works the same on every device of the sender and after a restart. True
+/// when the earlier one was offered until now.
+fn note_sent_again_by(room_id: &RoomId, event: &matrix_sdk_ui::timeline::EventTimelineItem) -> bool {
+    if !event.is_own() { return false; }
+    let Some(content) = event.original_json().and_then(|raw| raw.get_field::<serde_json::Value>("content").ok()).flatten() else { return false };
+    let Some(original) = crate::hagency::resend_offers::original_of(&content).and_then(|id| <&EventId>::try_from(id).ok()) else { return false };
+    if sent_again(room_id, original) { return false; }
+    note_sent_again(room_id, original);
+    true
+}
+
 fn forget_sent_again(room_id: &RoomId, event_id: &EventId) {
     SENT_AGAIN.lock().unwrap().retain(|(room, event)| !(room == room_id && event == event_id));
 }
@@ -3758,7 +3772,10 @@ async fn send_again_to_agents(
     crate::room_encryption::confirmed_state(timeline.room()).await.map_err(|_| SendAgain::Later)?;
     #[cfg(feature = "agent_chat")]
     crate::agent_chat::encrypted_send::ensure_ready(timeline.room(), &message).await.map_err(|_| SendAgain::Later)?;
-    let routing = crate::agent_access::routing::room_only(&crate::agent_access::current(), current_user_id().as_deref(), room_id, &message);
+    let mut extra = crate::agent_access::routing::room_only(&crate::agent_access::current(), current_user_id().as_deref(), room_id, &message).unwrap_or_default();
+    // The new message names the one it is sent for, so that no device of the
+    // sender offers that one again once it has the new one.
+    extra.extend(crate::hagency::resend_offers::marker(event_id.as_str()));
     let content: AnyMessageLikeEventContent = match thread_root {
         Some(root) => {
             let reply = Reply {
@@ -3770,7 +3787,7 @@ async fn send_again_to_agents(
         }
         None => message.into(),
     };
-    timeline.send_with_extra_content(content, routing).await.map_err(|_| SendAgain::Later)?;
+    timeline.send_with_extra_content(content, Some(extra)).await.map_err(|_| SendAgain::Later)?;
     log!("Queued a message sent again for {timeline_kind}.");
     Ok(())
 }
@@ -6528,6 +6545,15 @@ async fn timeline_subscriber_handler(
             if num_updates > 0 {
                 #[cfg(feature = "agent_chat")]
                 if !is_progress_only {for event in timeline_items.iter().filter_map(|item| item.as_event()) {crate::agent_chat::approval_runtime::ingest(&timeline.room().client(), &room_id, event);}}
+                // The messages that arrived or changed, and every one when the
+                // whole timeline may have changed.
+                if !is_progress_only {
+                    let first = if clear_cache { 0 } else { index_of_first_change };
+                    let mut noted = false;
+                    for event in timeline_items.iter().skip(first).filter_map(|item| item.as_event()) {noted |= note_sent_again_by(&room_id, event);}
+                    // The card on that message and the notice drop the offer.
+                    if noted { Cx::post_action(crate::hagency::resend_offers::ResendOffersChanged); }
+                }
                 // Handle the case where back pagination inserts items at the beginning of the timeline
                 // (meaning the entire timeline needs to be re-drawn),
                 // but there is a virtual event at index 0 (e.g., a day divider).
