@@ -35,6 +35,35 @@ impl SharedDemandSubmission {
     pub fn input(&self) -> &SharedDemandStartInput {
         &self.input
     }
+    /// Retry v2: the server no longer lists it, so this start goes out without
+    /// `reoffers`. Saved first: from then on none of the event's work is
+    /// handed back here, since the server keeps whatever a start was stored
+    /// with. Restriction only.
+    pub async fn lapse_reoffers(&mut self) -> Result<(), Error> {
+        if !self.input.reoffers {
+            return Ok(());
+        }
+        self.check()?;
+        let registry = self.registry.clone();
+        let profile = self.proof.enrollment.profile.digest.clone();
+        let child = self.original.agent_reservation_id.clone();
+        let id = self.proof.offer.demand_id.clone();
+        self.registry
+            .store
+            .call(4096, move |db| {
+                if registry.closed.load(Ordering::Acquire) {
+                    return Err(Error::LocalAuthority);
+                }
+                let tx = db.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                journal::load(&tx, &profile, &child, &id)?.ok_or(Error::LocalAuthority)?;
+                release::lapse(&tx, &id)?;
+                tx.commit()?;
+                Ok(())
+            })
+            .await?;
+        self.input.reoffers = false;
+        self.check()
+    }
     /// Reuse this still-live observation only to read the original local
     /// reservation. It cannot authorize claiming the delivered attempt.
     pub async fn into_attempt_cleanup(
@@ -180,7 +209,9 @@ impl OwnerResourceRegistry {
                 if tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals WHERE demand_id=?1)", [&proof.offer.demand_id], |r| r.get::<_, bool>(0))? {
                     return Err(Error::LocalAuthority);
                 }
-                let input = saved.input.ok_or(Error::Capacity)?;
+                let reoffers = release::reoffering(&tx, &saved)?;
+                let mut input = saved.input.ok_or(Error::Capacity)?;
+                input.reoffers = reoffers;
                 let start = start_selection::saved_start(&tx, &p, &input.start.start_intent_id)?;
                 if canonical::digest(&serde_json::to_value(start.original())?)?
                     != canonical::digest(&serde_json::to_value(&original)?)?

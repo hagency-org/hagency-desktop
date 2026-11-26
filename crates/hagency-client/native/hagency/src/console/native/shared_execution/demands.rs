@@ -86,9 +86,9 @@ impl SharedExecutionTransport {
         after: Option<String>,
         launch: Option<super::super::managed_runtime::PreparedLaunch>,
     ) -> Result<SharedDemandPoll, NativeError> {
-        let reply = self.fetch_demand(after).await?;
+        let (reply, reoffers) = self.fetch_demand(after).await?;
         let outcome = match reply.value.demand {
-            Some(s) => self.consume_demand(r, s, reply.observed, launch).await,
+            Some(s) => self.consume_demand(r, s, reply.observed, launch, reoffers).await,
             None => Ok(SharedDemandProgress::Idle),
         };
         Ok(SharedDemandPoll {
@@ -96,15 +96,19 @@ impl SharedExecutionTransport {
             outcome,
         })
     }
-    async fn fetch_demand(&self, after: Option<String>) -> Result<Timed<demand_io::PollReply>, NativeError> {
+    /// The next demand, and whether the poll opted in to retry v2's given
+    /// back messages (`reoffers`).
+    async fn fetch_demand(&self, after: Option<String>) -> Result<(Timed<demand_io::PollReply>, bool), NativeError> {
         enabled()?;
         let b = self.io.bound().await?;
         demand_io::require_pair(&b).await?;
+        let (retries, reoffers) = demand_io::retry_protocol(&b).await?;
         let reply: Timed<demand_io::PollReply> = b
             .request(
                 DemandAction::Poll {
                     after,
-                    retries: demand_io::retries(&b).await?,
+                    retries,
+                    reoffers,
                 }
                 .into(),
                 false,
@@ -113,11 +117,11 @@ impl SharedExecutionTransport {
         if let Some(id) = &reply.value.next_after {
             super::super::key(id)?;
         }
-        Ok(reply)
+        Ok((reply, reoffers))
     }
 
     pub(in crate::console::native) async fn discover_demand(&self, after: Option<String>) -> Result<(Option<String>, Option<(String,String)>), NativeError> {
-        let reply = self.fetch_demand(after).await?.value;
+        let reply = self.fetch_demand(after).await?.0.value;
         Ok((reply.next_after, reply.demand.map(|s| (s.offer.demand_id,s.demand_digest))))
     }
 
@@ -166,13 +170,14 @@ impl SharedExecutionTransport {
     }
     pub(in crate::console::native) async fn consume_demand_ref(&self, r: &OwnerResourceRegistry, id: &str, expected: &str) -> Result<SharedDemandProgress, NativeError> {
         let b = self.io.bound().await?;
-
+        let (retries, reoffers) = demand_io::retry_protocol(&b).await?;
         let reply: Timed<demand_io::RecoverReply> = b
             .request(
                 DemandAction::Recover {
                     id: id.to_owned(),
                     digest: expected.to_owned(),
-                    retries: demand_io::retries(&b).await?,
+                    retries,
+                    reoffers,
                 }
                 .into(),
                 false,
@@ -182,15 +187,17 @@ impl SharedExecutionTransport {
         if s.offer.demand_id != id || s.demand_digest != expected {
             return Err(invalid());
         }
-        self.consume_demand(r, s, reply.observed, None).await
+        self.consume_demand(r, s, reply.observed, None, reoffers).await
     }
 
+    /// `reoffers`: the request that returned `s` opted in to retry v2.
     async fn consume_demand(
         &self,
         r: &OwnerResourceRegistry,
         s: Status,
         observed: u64,
         launch: Option<super::super::managed_runtime::PreparedLaunch>,
+        reoffers: bool,
     ) -> Result<SharedDemandProgress, NativeError> {
         s.validate()?;
         let id = s.offer.demand_id.clone();
@@ -247,7 +254,11 @@ impl SharedExecutionTransport {
                 status: s.state,
             });
         }
-        let proof = offer_proof(&b, r, target.original(), &s, observed).await?;
+        // An original start prepared now opts in to retry v2 when the server
+        // that showed this offer lists it; a saved start keeps its own bytes.
+        let proof = offer_proof(&b, r, target.original(), &s, observed)
+            .await?
+            .with_reoffers(reoffers);
         let saved = r
             .prepare_shared_demand(
                 proof,
@@ -269,6 +280,7 @@ impl SharedExecutionTransport {
                 } else {
                     "usage_unrepresentable"
                 };
+                let (retries, listed) = demand_io::retry_protocol(&b).await?;
                 let reply: Timed<demand_io::RecoverReply> = b
                     .request(
                         DemandAction::Block {
@@ -278,7 +290,8 @@ impl SharedExecutionTransport {
                                 expected_control_revision: s.offer.control_revision,
                                 reason: reason.into(),
                                 budget: budget.observation.clone(),
-                                retries: demand_io::retries(&b).await?,
+                                retries,
+                                reoffers: listed,
                             },
                         }
                         .into(),
@@ -356,6 +369,7 @@ impl SharedExecutionTransport {
                                 reason: reason.into(),
                                 budget: budget.observation.clone(),
                                 retries: true,
+                                reoffers: demand_io::retries_v2(b).await?,
                             },
                         }
                         .into(),
@@ -401,6 +415,7 @@ impl SharedExecutionTransport {
         let mut launch = launch.map(launch::Launch::from);
         let inspected = matches!(status.state.as_str(), "offered" | "retry_offered")
             && original.runtime().map_err(store)? == "codex";
+        let listed;
         if inspected {
             // Inspect the selected provider's policy and account availability.
             // The execution process still requires H1's matching command.
@@ -434,8 +449,19 @@ impl SharedExecutionTransport {
                 return Err(invalid());
             }
             demand_io::require_pair(&fresh).await?;
+            listed = demand_io::retries_v2(&fresh).await?;
         } else {
             demand_io::require_pair(bound).await?;
+            listed = demand_io::retries_v2(bound).await?;
+        }
+        // Retry v2: a start carries `reoffers` only as its event saved it, and
+        // only to a server that lists it. Before one goes out without it
+        // although its event opted in, that is saved: the server keeps what a
+        // start was stored with, so none of the event's work is handed back.
+        let mut input = input;
+        if input.reoffers && !listed {
+            submission.lapse_reoffers().await.map_err(store)?;
+            input.reoffers = false;
         }
         let plan = super::attempts::DemandPreparation { submission, inspected, original_digest: digest(original)? };
         self.process_attempt_scoped(r, attempt_io::AttemptAction::DemandStart {

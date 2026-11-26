@@ -2,7 +2,9 @@
 //! in place. The demand, its offer and its FIFO place stay. A retry is one new
 //! start intent, whose id derives from the demand and the retry number, that
 //! names the demand's never-started attempt. Proof is local and immutable:
-//! every earlier start of the event has an unclaimed fence and no claim.
+//! every earlier start of the event has an unclaimed fence and no claim, or
+//! (retry v2) a claimed process whose stop handed the event's unbegun work
+//! back (`release.rs`); such a retry names that stopped process.
 //! Nothing here starts a process, a call or a model turn.
 use super::*;
 
@@ -93,9 +95,11 @@ pub(in super::super) fn own_start(
     Ok(())
 }
 
-/// Every earlier start of the event is provably unstarted on this
-/// installation, and the latest one is the never-started head. Returns that
-/// head's command id.
+/// Every earlier start of the event provably never ran this event here: it
+/// was never claimed, or (retry v2) its claimed process stopped and its stop
+/// route handed this event's work back as exactly the next retry. The latest
+/// start is the head: the never-started head, or the newest process. Returns
+/// that head's command id.
 fn proven_unstarted(
     db: &Connection,
     profile: &str,
@@ -105,6 +109,7 @@ fn proven_unstarted(
 ) -> Result<String, Error> {
     let child = &original.agent_reservation_id;
     let mut previous = String::new();
+    let mut claimed_head = false;
     for k in 0..n {
         let start = saved_start(db, profile, child, saved, k)?;
         let claimed: bool = db.query_row(
@@ -112,9 +117,19 @@ fn proven_unstarted(
             [&start.start_intent_id],
             |r| r.get(0),
         )?;
+        claimed_head = claimed;
         if claimed {
-            // A claimed attempt may have run: never another turn for this event.
-            return Err(Error::LocalAuthority);
+            // A claimed attempt may have run: another turn for this event only
+            // when its stop route, decided beside its stop, handed the work back.
+            previous = db
+                .query_row(
+                    "SELECT a.id FROM owner_shared_successor_attempts a JOIN owner_shared_stop_routes s ON s.attempt_id=a.id WHERE a.start_intent_id=?1 AND a.child_id=?2 AND a.profile=?3 AND s.route='retry' AND s.demand_id=?4 AND s.retry=?5",
+                    params![start.start_intent_id, child, profile, saved.offer.demand_id, k + 1],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or(Error::LocalAuthority)?;
+            continue;
         }
         previous = db
             .query_row(
@@ -125,8 +140,23 @@ fn proven_unstarted(
             .optional()?
             .ok_or(Error::Conflict)?;
     }
-    let head = attempt_unstarted::head(db, profile, original)?.ok_or(Error::Conflict)?;
-    if head.command_id() != previous {
+    let unstarted = attempt_unstarted::head(db, profile, original)?;
+    if claimed_head {
+        // The stopped process is still the newest one, with no never-started
+        // attempt after it.
+        let latest: Option<String> = db
+            .query_row(
+                "SELECT id FROM owner_shared_successor_attempts WHERE child_id=?1 ORDER BY process_attempt DESC LIMIT 1",
+                [child],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if unstarted.is_some() || latest.as_deref() != Some(previous.as_str()) {
+            return Err(Error::Conflict);
+        }
+        return Ok(previous);
+    }
+    if unstarted.ok_or(Error::Conflict)?.command_id() != previous {
         return Err(Error::Conflict);
     }
     Ok(previous)
@@ -244,6 +274,7 @@ impl OwnerResourceRegistry {
                 expected_control_revision: proof.offer.control_revision,
                 start,
                 retry: Some(n),
+                reoffers: release::reoffering(&tx, &saved)?,
             };
             input.validate_for(&proof.offer)?;
             proof.check()?;

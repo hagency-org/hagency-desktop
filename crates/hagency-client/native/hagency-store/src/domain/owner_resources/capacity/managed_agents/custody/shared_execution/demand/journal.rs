@@ -270,7 +270,7 @@ impl OwnerResourceRegistry {
                         (SharedDemandDisposition::Pending,None,None,pending_revision()?)
                     }else{
                         let saved=start_intent::prepare_in_transaction(&tx,e,original.clone(),predecessor.clone(),id)?;
-                        let input=SharedDemandStartInput{demand_digest:proof.offer.digest()?,expected_control_revision:proof.offer.control_revision,start:saved.input,retry:None};
+                        let input=SharedDemandStartInput{demand_digest:proof.offer.digest()?,expected_control_revision:proof.offer.control_revision,start:saved.input,retry:None,reoffers:proof.reoffers};
                         input.validate_for(&proof.offer)?;let rev=input.start.budget_observation.observed_ledger_revision;
                         (SharedDemandDisposition::StartPrepared,Some(input),None,rev)
                     }
