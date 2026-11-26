@@ -3733,12 +3733,15 @@ pub fn note_sent_again(room_id: &RoomId, event_id: &EventId) {
 /// A message of the user's own that was sent again for an earlier one: the
 /// earlier one is not offered again. It reads the message as the server
 /// returned it, so a copy that never left this device names nothing, and it
-/// works the same on every device of the sender and after a restart.
-fn note_sent_again_by(room_id: &RoomId, event: &matrix_sdk_ui::timeline::EventTimelineItem) {
-    if !event.is_own() { return; }
-    let Some(content) = event.original_json().and_then(|raw| raw.get_field::<serde_json::Value>("content").ok()).flatten() else { return };
-    let Some(original) = crate::hagency::resend_offers::original_of(&content).and_then(|id| <&EventId>::try_from(id).ok()) else { return };
-    if !sent_again(room_id, original) { note_sent_again(room_id, original); }
+/// works the same on every device of the sender and after a restart. True
+/// when the earlier one was offered until now.
+fn note_sent_again_by(room_id: &RoomId, event: &matrix_sdk_ui::timeline::EventTimelineItem) -> bool {
+    if !event.is_own() { return false; }
+    let Some(content) = event.original_json().and_then(|raw| raw.get_field::<serde_json::Value>("content").ok()).flatten() else { return false };
+    let Some(original) = crate::hagency::resend_offers::original_of(&content).and_then(|id| <&EventId>::try_from(id).ok()) else { return false };
+    if sent_again(room_id, original) { return false; }
+    note_sent_again(room_id, original);
+    true
 }
 
 fn forget_sent_again(room_id: &RoomId, event_id: &EventId) {
@@ -6546,7 +6549,10 @@ async fn timeline_subscriber_handler(
                 // whole timeline may have changed.
                 if !is_progress_only {
                     let first = if clear_cache { 0 } else { index_of_first_change };
-                    for event in timeline_items.iter().skip(first).filter_map(|item| item.as_event()) {note_sent_again_by(&room_id, event);}
+                    let mut noted = false;
+                    for event in timeline_items.iter().skip(first).filter_map(|item| item.as_event()) {noted |= note_sent_again_by(&room_id, event);}
+                    // The card on that message and the notice drop the offer.
+                    if noted { Cx::post_action(crate::hagency::resend_offers::ResendOffersChanged); }
                 }
                 // Handle the case where back pagination inserts items at the beginning of the timeline
                 // (meaning the entire timeline needs to be re-drawn),
