@@ -16,7 +16,7 @@ H.resource_detail.resource.budget.seat={quota:700 remaining:700 committed:0 peri
 CASES={
 'default_source_inherited':'H.resource_detail.executionPolicy={yolo:true} A.create_resource_configuration() assert(H.resource_create_draft.yolo) A.submit_resource_creation() let {executionPolicy=nil}=sent[0].args assert(executionPolicy==nil && sent[0].service=="hagency.resources.create")',
 'default_overridden':'H.resource_detail.executionPolicy={yolo:true} A.create_resource_configuration() A.choose_resource_default("create",false) A.submit_resource_creation() assert(sent.len()==1 && sent[0].args.executionPolicy.yolo==false && H.resource_detail.executionPolicy.yolo)',
-'default_enabled':'A.create_resource_configuration() A.choose_resource_default("create",true) A.submit_resource_creation() assert(sent.len()==1 && sent[0].args.executionPolicy.yolo)',
+'default_enabled':'A.create_resource_configuration() A.choose_resource_default("create",true) assert(H.create_trust_ask=="create" && !H.resource_create_draft.yolo) A.confirm_resource_trust() A.submit_resource_creation() assert(sent.len()==1 && sent[0].args.executionPolicy.yolo)',
 'default_unsupported_refused':'H.resource_detail.resource.framework="octos" A.create_resource_configuration() A.choose_resource_default("create",true) assert(!H.resource_create_draft.yolo) H.resource_create_draft.yolo=true A.submit_resource_creation() assert(sent.len()==0)',
 
  'published_source':'''A.create_resource_configuration() assert(H.page=="resource_create" && H.resource_create_draft.sourceResourceId=="resource_original" && H.resource_create_draft.tokens=="700" && sent.len()==0 && H.resource_detail.resource.published)''',
@@ -41,12 +41,31 @@ CASES={
  'source_change_settles_only_original':'''H.command={service:"hagency.resources.create" args:{commandId:"original"}} A.retry_command() callback({is_ok:false error:"management_resource_source_changed"}) assert(H.command==nil && sent.len()==2 && sent[1].service=="hagency.intent.acknowledge" && sent[1].args.commandId=="original")''',
  'success_opens_new_resource':'''let opened="" A.open_resource=fn(id){opened=id} A.acknowledge=fn(id){} H.resource_create_draft={tokens:"450"} H.resource_edit_draft={tokens:"333"} H.command={service:"hagency.resources.create" args:{commandId:"original" sourceResourceId:"resource_original"}} A.retry_command() callback({is_ok:true data:{resourceId:"resource_new" revision:"new_revision"}}) assert(opened=="resource_new" && H.command==nil && H.resource_create_draft==nil && H.resource_edit_draft.tokens=="333")''',
  'recovery_opens_original_new_result':'''let opened="" A.open_resource=fn(id){opened=id} A.acknowledge=fn(id){} H.resource_create_draft={tokens:"450"} A.recover_native({commandId:"original" operation:"create_resource_configuration"}) assert(sent[0].service=="hagency.intent.retry") callback({is_ok:true data:{operation:"create_resource_configuration" data:{resourceId:"resource_new" revision:"original_revision"}}}) assert(opened=="resource_new" && H.resource_create_draft==nil)''',
- 'render_source_and_shared_limit':'''A.create_resource_configuration() H.resource_create_models_open=true let page=View{@@FORM@@} let texts=[] let collect=fn(v){if !v.is_object(){return} let {text=""}=v if text!=""{texts.push(text)} for i key child in v {collect(child)}} collect(page) let has=fn(text){for v in texts {if v==text{return true}}return false} assert(has(A.t("Create a new configuration","创建新配置")) && has(A.t("Shared account limit · unchanged","共享账号上限 · 保持不变")) && has("resource_original") && has("other-model"))''',
+ 'render_source_and_shared_limit':'''A.create_resource_configuration()
+let page=View{@@FORM@@}
+let presets=[] let editor=nil let collect=fn(v){
+    if !v.is_object(){return}
+    for i key child in v {
+        if key.to_string()=="resource_create_preset" {presets.push(child)}
+        if key.to_string()=="resource_create_tokens" {editor=child}
+        collect(child)
+    }
+}
+collect(page)
+assert(editor.maximum==700 && presets.len()==4)
+assert(presets[0].text==A.tokens(175) && presets[1].text==A.tokens(350))
+assert(presets[2].text==A.tokens(525) && presets[3].text==A.tokens(700))
+presets[0].on_click()
+assert(H.resource_create_draft.tokens=="175")
+''',
 }
 
 def main():
  p=argparse.ArgumentParser();p.add_argument('vm',type=Path);p.add_argument('--output',type=Path,required=True);a=p.parse_args();a.output.mkdir(parents=True,exist_ok=True)
- source=(APP/'bundle/main.splash').read_text();form=source[source.index('        if H.page=="resource_create" &&'):source.index('        if H.page == "personal_agents" {mod.widgets.HagencyDetailCard{')];rows=[]
+ source=(APP/'bundle/main.splash').read_text()
+ start=source.index('        if H.page=="resource_create" &&')
+ form=source[start:source.index('        if H.page=="personal_model"{',start)]
+ rows=[]
  for lang in ['en','zh-CN']:
   for name,code in CASES.items():
    path=a.output/f'{lang}-{name}.splash';path.write_text(fixture(source+'\nmod.resource_create_actions=A\nmod.resource_create_host=host\n',lang)+SETUP+code.replace('@@FORM@@',form)+'\ntrue\n')

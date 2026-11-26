@@ -126,6 +126,15 @@ assert(has(A.t("Models in one Octos profile share its monthly limit. Local model
 assert(has(A.t("Octos uses the reasoning settings in this profile.","Octos 使用该配置中的推理设置。")))
 assert(A.pool_create_ready() && A.pool_create_valid())
 assert(button("pool_create_model")!=nil && button("pool_create_effort")==nil && button("pool_create_setup")==nil)
+assert(button("pool_create_tokens").maximum==-1)
+let presets=A.pool_create_quick_amounts(A.pool_create_quota())
+assert(presets.len()==4 && presets[0]==250000000 && presets[1]==500000000 && presets[2]==750000000 && presets[3]==1000000000)
+for preset in presets {assert(has(A.tokens(preset)))}
+assert(button("pool_create_preset").text==A.tokens(1000000000))
+button("pool_create_preset").on_click()
+assert(H.enrollment_draft.tokens=="1000000000" && A.pool_create_valid())
+A.pool_create_preset(1200000000)
+assert(A.pool_create_valid())
 ''')
         run('octos_pool_existing-'+lang,base+'''
 octos.resourceCount=1 H.page="pool_create" H.pool_create={epoch:1 account:octos accounts:[octos] error:"" models:{enrollmentReady:true provider:{models:[{id:"coding" model:"local-model" label:"coding · local-model" enrolled:true sharedReasoning:[nil] sharedDefaultReasoning:nil}]}} modelsError:"" loadingModels:false}
@@ -146,6 +155,12 @@ H.host_callback({is_ok:true data:{protocol:"hagency-management-v1" accountId:oct
     {id:"deepseek" model:"deepseek" label:"local · deepseek" enrolled:false sharedReasoning:[nil] sharedDefaultReasoning:nil}]}}})
 assert(!A.pool_create_duplicate() && A.pool_create_ready() && H.enrollment_draft.model.model=="deepseek")
 assert(H.enrollment_draft.tokens=="1000" && A.pool_create_quota()==1000 && A.pool_create_valid())
+let form=View{'''+pool_page+'''} collect(form)
+assert(button("pool_create_tokens").maximum==1000)
+assert(has(A.tokens(250)) && has(A.tokens(500)) && has(A.tokens(750)))
+assert(button("pool_create_preset").text==A.tokens(1000) && button("pool_create_preset").enabled)
+let small=A.pool_create_quick_amounts(1)
+assert(small.len()==1 && small[0]==1)
 A.pool_create_model(H.pool_create.models.provider.models[0])
 assert(H.enrollment_draft.model.model=="deepseek")
 A.pool_create_preset(1001) assert(!A.pool_create_valid())
