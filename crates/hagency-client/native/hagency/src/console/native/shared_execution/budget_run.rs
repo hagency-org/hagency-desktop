@@ -459,44 +459,87 @@ async fn work_loop(
             .await?;
             continue;
         };
-        let (b, verified) = guarded(cancel, a.until, || proof(io, r, sink, a)).await?;
-        let reply: Timed<WorkReply> = guarded(cancel, a.until, || {
-            b.upload(
-                budget_work_io::WorkAction::Poll(a.lease.authority.clone()).into(),
-                a.until,
-            )
-        })
-        .await?;
+        // The poll, the binding and the acknowledgement are asked again when
+        // they get no answer (`Io::asked_again`).
+        let (b, verified, reply) = {
+            let held: &Activity = a;
+            let first = guarded(cancel, held.until, || proof(io, r, sink, held)).await?;
+            guarded(cancel, held.until, || {
+                io.asked_again(
+                    held.until,
+                    first,
+                    || proof(io, r, sink, held),
+                    |(b, verified)| async move {
+                        let reply: Timed<WorkReply> = b.upload(budget_work_io::WorkAction::Poll(held.lease.authority.clone()).into(), held.until).await?;
+                        Ok((b, verified, reply))
+                    },
+                )
+            })
+            .await?
+        };
         if let Some(w) = reply.value.work {
             w.validate().map_err(store)?;
-            if cfg!(feature = "shared-intake") {
+            let b = if cfg!(feature = "shared-intake") {
+                // Only the exchange is asked again (`Io::asked_again`); this
+                // host's record of the binding is made once, so a refusal of
+                // its own decides.
+                let (b, verified, binding) = {
+                    let held: &Activity = a;
+                    let work = &w;
+                    guarded(cancel, held.until, || {
+                        io.asked_again(
+                            held.until,
+                            (b, verified),
+                            || proof(io, r, sink, held),
+                            |(b, verified)| async move {
+                                let binding =
+                                    super::demands::budget_binding(&b, work, held.until).await?;
+                                Ok((b, verified, binding))
+                            },
+                        )
+                    })
+                    .await?
+                };
                 super::demands::bind_budget_work(
                     &b,
                     r,
                     &sink.command().original_runtime_command,
                     &w,
                     verified,
-                    a.until,
+                    binding,
                 )
                 .await?;
                 let (_, fresh) = guarded(cancel, a.until, || proof(io, r, sink, a)).await?;
                 r.receive_shared_work(fresh, w.clone())
                     .await
                     .map_err(store)?;
+                b
             } else {
                 r.receive_shared_work(verified, w.clone())
                     .await
                     .map_err(store)?;
-            }
+                b
+            };
             let input = SharedWorkInput {
                 authority: a.lease.authority.clone(),
                 work_id: w.id.clone(),
                 work_digest: digest(&w)?,
             };
-            let ack: Timed<AckReply> = guarded(cancel, a.until, || {
-                b.upload(budget_work_io::WorkAction::Ack(input).into(), a.until)
-            })
-            .await?;
+            let ack: Timed<AckReply> = {
+                let held: &Activity = a;
+                guarded(cancel, held.until, || {
+                    io.asked_again(
+                        held.until,
+                        b,
+                        || async { proof(io, r, sink, held).await.map(|(b, _)| b) },
+                        |b| {
+                            let input = input.clone();
+                            async move { b.upload(budget_work_io::WorkAction::Ack(input).into(), held.until).await }
+                        },
+                    )
+                })
+                .await?
+            };
             if !ack.value.acknowledged {
                 return Err(invalid());
             }
@@ -513,8 +556,31 @@ async fn work_loop(
     let (b, p) = guarded(cancel, a.until, || proof(io, r, sink, a)).await?;
     // Pin the exact V3 plaintext input before selecting the retained native session.
     let plaintext_input = if !work.encrypted {
-        Some(guarded(cancel, a.until, || super::budget_context_io::prepare(
-            io, &b, r, p, &work, a.lease.authority.clone(), a.until)).await?)
+        // Only the exchanges are asked again (`Io::asked_again`); this host's
+        // record of the input is made once, so a refusal of its own decides:
+        // a context for another thread is refused at once.
+        let held: &Activity = a;
+        let item = &work;
+        let (p, context) = guarded(cancel, held.until, || {
+            io.asked_again(
+                held.until,
+                (b, p),
+                || proof(io, r, sink, held),
+                |(b, p)| async move {
+                    let context =
+                        super::budget_context_io::context(&b, item, held.lease.authority.clone(), held.until)
+                            .await?;
+                    Ok((p, context))
+                },
+            )
+        })
+        .await?;
+        Some(
+            guarded(cancel, held.until, || {
+                super::context_io::prepare(r, p, item, context)
+            })
+            .await?,
+        )
     } else { None };
     let (_, p) = guarded(cancel, a.until, || proof(io, r, sink, a)).await?;
     let mut native_session = prepare_while_active(io, r, sink, control, a, cancel, async {

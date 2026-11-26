@@ -80,19 +80,17 @@ pub(super) async fn paired(b: &Bound) -> Result<(), NativeError> {
     }
     Ok(())
 }
-pub(super) async fn prepare(
-    io: &Io,
+/// The exchanges that bring the context of a plaintext work: the server's
+/// input mode for it, then its context, frozen now or recovered as it was
+/// frozen before. Neither changes what the server holds when it is asked a
+/// second time, so a driver asks them again when they get no answer
+/// (`Io::asked_again`). An answer this host cannot use decides.
+pub(super) async fn context(
     b: &Bound,
-    r: &OwnerResourceRegistry,
-    a: VerifiedSharedActivity,
     w: &SharedWorkItem,
     authority: SharedActivityRef,
     until: Instant,
-) -> Result<SharedPreparedInput, NativeError> {
-    if w.encrypted {
-        let text = super::e2ee::input(io, b, w).await?;
-        return r.prepare_shared_decrypted_input(a, w.clone(), text).await.map_err(store);
-    }
+) -> Result<(SharedWorkInputMode, SharedContextRecord), NativeError> {
     paired(b).await?;
     let mode: Timed<SharedWorkInputMode> = b
         .upload(
@@ -107,35 +105,43 @@ pub(super) async fn prepare(
             until,
         )
         .await?;
-    mode.value.validate().map_err(store)?;
+    mode.value.validate().map_err(|_| invalid())?;
     let mode = mode.value;
     if mode.mode != "thread_context_v1" {
         return Err(failure(409, "native_context_protocol_required"));
     }
-    let context = {
-        let action = if let Some(hash) = &mode.context_digest {
-            ContextAction::Recover {
-                work: w.id.clone(),
-                input: SharedContextRecoverInput {
-                    work_digest: digest(w)?,
-                    runtime_command_digest: w.runtime_command_digest.clone(),
-                    context_digest: hash.clone(),
-                },
-            }
-        } else {
-            ContextAction::Freeze {
-                work: w.id.clone(),
-                input: SharedContextInput {
-                    authority,
-                    work_digest: digest(w)?,
-                    version: 3,
-                },
-            }
-        };
-        let c: Timed<SharedContextRecord> = b.upload(action.into(), until).await?;
-        c.value.render_for(w).map_err(store)?;
-        c.value
+    let action = if let Some(hash) = &mode.context_digest {
+        ContextAction::Recover {
+            work: w.id.clone(),
+            input: SharedContextRecoverInput {
+                work_digest: digest(w)?,
+                runtime_command_digest: w.runtime_command_digest.clone(),
+                context_digest: hash.clone(),
+            },
+        }
+    } else {
+        ContextAction::Freeze {
+            work: w.id.clone(),
+            input: SharedContextInput {
+                authority,
+                work_digest: digest(w)?,
+                version: 3,
+            },
+        }
     };
+    let context: Timed<SharedContextRecord> = b.upload(action.into(), until).await?;
+    Ok((mode, context.value))
+}
+/// This host's record of a plaintext input, made once from the context in
+/// hand. Its refusal is this host's own decision and is not asked again: a
+/// context for another thread is refused before any call is held.
+pub(super) async fn prepare(
+    r: &OwnerResourceRegistry,
+    a: VerifiedSharedActivity,
+    w: &SharedWorkItem,
+    (mode, context): (SharedWorkInputMode, SharedContextRecord),
+) -> Result<SharedPreparedInput, NativeError> {
+    context.render_for(w).map_err(store)?;
     r.prepare_shared_input(a, w.clone(), mode, Some(context))
         .await
         .map_err(store)

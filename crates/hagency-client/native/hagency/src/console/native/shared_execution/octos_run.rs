@@ -143,27 +143,88 @@ async fn work(
             continue;
         };
         let found = active.wait(cancel, async {
-            let (b, proof, state) = live.proof().await?;
-            let reply: Timed<io::WorkReply> = b.upload(live.authority.work_poll(state.lease.authority.clone()), state.until).await?;
-            let Some(w) = reply.value.work else { return Ok(None); };
+            // The poll, the binding and the acknowledgement are asked again when
+            // they get no answer (`Io::asked_again`). The lease is renewed beside
+            // this block, so each attempt reads the lease as it then is.
+            let live = &live;
+            let first = live.proof().await?;
+            let (b, proof, state, reply) = live
+                .io
+                .asked_again(first.2.until, first, || live.proof(), |(b, proof, state)| async move {
+                    let reply: Timed<io::WorkReply> = b
+                        .upload(
+                            live.authority.work_poll(state.lease.authority.clone()),
+                            state.until,
+                        )
+                        .await?;
+                    Ok((b, proof, state, reply))
+                })
+                .await?;
+            let Some(w) = reply.value.work else {
+                return Ok(None);
+            };
             w.validate().map_err(store)?;
-            if cfg!(feature = "shared-intake") {
+            let (b, state) = if cfg!(feature = "shared-intake") {
+                // Only the exchange is asked again (`Io::asked_again`); this host's
+                // record of the binding is made once, so a refusal of its own decides.
+                let work = &w;
+                let (b, proof, state, binding) = live
+                    .io
+                    .asked_again(state.until, (b, proof, state), || live.proof(), |(b, proof, state)| async move {
+                        #[cfg(feature = "shared-budget-execution")]
+                        if live.authority.is_budget() {
+                            let binding = super::demands::budget_binding(&b, work, state.until).await?;
+                            return Ok((b, proof, state, binding));
+                        }
+                        let binding = super::demands::binding(&b, work, state.until).await?;
+                        Ok((b, proof, state, binding))
+                    })
+                    .await?;
+                let (registry, root) = (&live.registry, live.authority.root());
                 #[cfg(feature = "shared-budget-execution")]
                 if live.authority.is_budget() {
-                    super::demands::bind_budget_work(&b, &live.registry, live.authority.root(), &w, proof, state.until).await?;
+                    super::demands::bind_budget_work(&b, registry, root, work, proof, binding).await?;
                 } else {
-                    super::demands::bind_work(&b, &live.registry, live.authority.root(), &w, proof, state.until).await?;
+                    super::demands::bind_work(&b, registry, root, work, proof, binding).await?;
                 }
                 #[cfg(not(feature = "shared-budget-execution"))]
-                super::demands::bind_work(&b, &live.registry, live.authority.root(), &w, proof, state.until).await?;
+                super::demands::bind_work(&b, registry, root, work, proof, binding).await?;
                 let (_, fresh, _) = live.proof().await?;
-                live.registry.receive_shared_work(fresh, w.clone()).await.map_err(store)?;
+                live.registry
+                    .receive_shared_work(fresh, w.clone())
+                    .await
+                    .map_err(store)?;
+                (b, state)
             } else {
-                live.registry.receive_shared_work(proof, w.clone()).await.map_err(store)?;
-            }
-            let ack: Timed<io::AckReply> = b.upload(live.authority.work_ack(SharedWorkInput {
-                authority: state.lease.authority, work_id: w.id.clone(), work_digest: digest(&w)?,
-            }), state.until).await?;
+                live.registry
+                    .receive_shared_work(proof, w.clone())
+                    .await
+                    .map_err(store)?;
+                (b, state)
+            };
+            let (work_id, work_digest) = (w.id.clone(), digest(&w)?);
+            let ack: Timed<io::AckReply> = live
+                .io
+                .asked_again(
+                    state.until,
+                    (b, state),
+                    || async { live.proof().await.map(|(b, _, state)| (b, state)) },
+                    |(b, state)| {
+                        let (work_id, work_digest) = (work_id.clone(), work_digest.clone());
+                        async move {
+                            b.upload(
+                                live.authority.work_ack(SharedWorkInput {
+                                    authority: state.lease.authority,
+                                    work_id,
+                                    work_digest,
+                                }),
+                                state.until,
+                            )
+                            .await
+                        }
+                    },
+                )
+                .await?;
             if !ack.value.acknowledged { return Err(invalid()); }
             Ok(Some(w))
         }).await?;
@@ -173,12 +234,30 @@ async fn work(
     };
     let plaintext_input = if !work.encrypted {
         active.wait(cancel, async {
-            let (b, proof, state) = live.proof().await?;
-            #[cfg(feature = "shared-budget-execution")]
-            if live.authority.is_budget() {
-                return super::budget_context_io::prepare(&live.io, &b, &live.registry, proof, &work, state.lease.authority, state.until).await.map(Some);
-            }
-            super::context_io::prepare(&live.io, &b, &live.registry, proof, &work, state.lease.authority, state.until).await.map(Some)
+            // Only the exchanges are asked again (`Io::asked_again`); this host's
+            // record of the input is made once, so a refusal of its own decides: a
+            // context for another thread is refused at once.
+            let live = &live;
+            let item = &work;
+            let first = live.proof().await?;
+            let (proof, context) = live
+                .io
+                .asked_again(first.2.until, first, || live.proof(), |(b, proof, state)| async move {
+                    #[cfg(feature = "shared-budget-execution")]
+                    if live.authority.is_budget() {
+                        let context =
+                            super::budget_context_io::context(&b, item, state.lease.authority, state.until)
+                                .await?;
+                        return Ok((proof, context));
+                    }
+                    let context =
+                        super::context_io::context(&b, item, state.lease.authority, state.until).await?;
+                    Ok((proof, context))
+                })
+                .await?;
+            super::context_io::prepare(&live.registry, proof, item, context)
+                .await
+                .map(Some)
         }).await?
     } else { None };
     active.wait(cancel, async {

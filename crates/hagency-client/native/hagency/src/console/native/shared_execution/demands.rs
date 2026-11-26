@@ -443,34 +443,49 @@ impl SharedExecutionTransport {
         }, None, launch, None, Some(plan)).await
     }
 }
+/// The exchange of a binding: whether the server pairs demands with work
+/// and, when it does, the demand it bound this work to at the poll (`None`:
+/// it does not pair them). It reads what the server holds, so a driver asks
+/// it again when it gets no answer (`Io::asked_again`).
+pub(super) async fn binding(
+    b: &Bound,
+    w: &SharedWorkItem,
+    until: Instant,
+) -> Result<Option<Timed<demand_io::BindingReply>>, NativeError> {
+    enabled()?;
+    if !demand_io::paired(b).await? {
+        return Ok(None);
+    }
+    b.upload(
+        DemandAction::Binding {
+            work: w.id.clone(),
+            work_digest: digest(w)?,
+            runtime_digest: w.runtime_command_digest.clone(),
+        }
+        .into(),
+        until,
+    )
+    .await
+    .map(Some)
+}
 /// Promotion is descriptive. Store binding is durable before inbox/ACK, and the
 /// ordinary native call hold + central one-shot start + issue gates still follow.
+/// It is made once from the answer of `binding`: its refusal is this host's own
+/// decision and is not asked again.
 pub(super) async fn bind_work(
     b: &Bound,
     r: &OwnerResourceRegistry,
     original: &SharedRuntimeCommand,
     w: &SharedWorkItem,
     activity: VerifiedSharedActivity,
-    until: Instant,
+    binding: Option<Timed<demand_io::BindingReply>>,
 ) -> Result<(), NativeError> {
-    enabled()?;
-    if !demand_io::paired(b).await? {
+    let Some(reply) = binding else {
         return r
             .require_manual_work_without_demands(activity, w.clone())
             .await
             .map_err(store);
-    }
-    let reply: Timed<demand_io::BindingReply> = b
-        .upload(
-            DemandAction::Binding {
-                work: w.id.clone(),
-                work_digest: digest(w)?,
-                runtime_digest: w.runtime_command_digest.clone(),
-            }
-            .into(),
-            until,
-        )
-        .await?;
+    };
     let Some(link) = reply.value.demand else {
         return Ok(());
     };
@@ -504,6 +519,35 @@ pub(super) async fn bind_work(
     b.transport.check_scope(&b.scope, false).await
 }
 
+/// The exchange of a binding on the budget routes, asked again as `binding`
+/// is.
+#[cfg(feature="shared-budget-execution")]
+pub(super) async fn budget_binding(
+    b: &Bound,
+    w: &SharedWorkItem,
+    until: Instant,
+) -> Result<Option<Timed<demand_io::BindingReply>>, NativeError> {
+    enabled()?;
+    if !demand_io::paired(b).await? {
+        return Ok(None);
+    }
+    b.upload(
+        budget_work_io::WorkAction::Binding {
+            work: w.id.clone(),
+            input: SharedWorkEvidenceInput {
+                work_digest: digest(w)?,
+                runtime_command_digest: w.runtime_command_digest.clone(),
+            },
+        }
+        .into(),
+        until,
+    )
+    .await
+    .map(Some)
+}
+
+/// This host's record of a binding on the budget routes, made once from the
+/// answer of `budget_binding`.
 #[cfg(feature="shared-budget-execution")]
 pub(super) async fn bind_budget_work(
     b: &Bound,
@@ -511,25 +555,14 @@ pub(super) async fn bind_budget_work(
     original: &SharedRuntimeCommand,
     w: &SharedWorkItem,
     activity: VerifiedSharedActivity,
-    until: Instant,
+    binding: Option<Timed<demand_io::BindingReply>>,
 ) -> Result<(), NativeError> {
-    enabled()?;
-    if !demand_io::paired(b).await? {
+    let Some(reply) = binding else {
         return r
             .require_manual_work_without_demands(activity, w.clone())
             .await
             .map_err(store);
-    }
-    let reply: Timed<demand_io::BindingReply> = b
-        .upload(
-            budget_work_io::WorkAction::Binding {
-                work: w.id.clone(),
-                input:SharedWorkEvidenceInput {work_digest:digest(w)?,runtime_command_digest:w.runtime_command_digest.clone()},
-            }
-            .into(),
-            until,
-        )
-        .await?;
+    };
     let Some(link) = reply.value.demand else {
         return Ok(());
     };

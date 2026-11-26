@@ -244,6 +244,38 @@ async fn shared_successor_claim_survives_slow_contribution_reads() {
     f.stop().await;
 }
 
+/// The successor driver asks a poll for work, its acknowledgement and the
+/// freezing of its context again when they get no answer, as the other
+/// drivers do. The turn runs once.
+#[tokio::test]
+#[ignore = "requires explicit offline supervised runtime probe"]
+async fn native_shared_successor_asks_again_when_an_exchange_before_the_turn_gets_no_answer() {
+    let (f, t, c) = Box::pin(predecessor()).await;
+    prepare_lost_start(&f, &t, &c).await;
+    {
+        let mut s = f.state.lock().unwrap();
+        s.shared.unanswered_polls = 2;
+        s.shared.unanswered_acks = 1;
+        s.shared.contexts.lost_freezes = 1;
+    }
+    assert!(matches!(
+        t.poll_successor_fixture(&f.registry, launch(&f, "text-usage"))
+            .await
+            .unwrap(),
+        SharedExecutionProgress::Running { .. }
+    ));
+    wait_stopped(&f).await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.unanswered_polls, 0, "two polls got no answer first");
+        assert_eq!(s.shared.unanswered_acks, 0, "one acknowledgement got no answer first");
+        assert_eq!(s.shared.contexts.lost_freezes, 0, "the answer to one freeze was lost first");
+    }
+    let methods = std::fs::read_to_string(f._root.path().join("shared-probe/methods")).unwrap();
+    assert_eq!(methods.lines().filter(|m| *m == "turn/start").count(), 1);
+    f.stop().await;
+}
+
 #[tokio::test]
 #[ignore = "requires explicit offline supervised runtime probe"]
 async fn native_shared_successor_lost_start_replays_journal_and_one_exact_model_call() {
