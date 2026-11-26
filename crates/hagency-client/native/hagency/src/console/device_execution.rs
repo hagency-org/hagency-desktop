@@ -874,12 +874,22 @@ fn parse_response(
         } => {
             let lease: Lease = decode(&value, "lease")?;
             // Never longer than was asked, give or take a second between the
-            // two clocks.
-            let remaining = lease
-                .expires_at_ms
-                .checked_sub(now_ms()?)
+            // two clocks. The answer carries no time of the server's, so the
+            // end is read against this computer's clock: one that is ahead
+            // loses that much of every lease, and one that is behind by more
+            // than a second is refused a full-length lease. Say so, since
+            // nothing else names the clock.
+            let ahead = lease.expires_at_ms.saturating_sub(now_ms()?);
+            let remaining = Some(ahead)
                 .filter(|n| *n > 0 && *n <= ttl_ms.saturating_add(1_000))
-                .ok_or_else(invalid)?;
+                .ok_or_else(|| {
+                    tracing::warn!(
+                        lease_ends_in_ms = ahead,
+                        asked_ms = *ttl_ms,
+                        "An Agent execution lease ends outside what was asked by this computer's clock; the clock may differ from the server's"
+                    );
+                    invalid()
+                })?;
             if &lease.agent_id != agent_id
                 || lease.owner_user_id != device.user_id()
                 || lease.device_id != device.device_id()
