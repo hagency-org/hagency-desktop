@@ -75,11 +75,15 @@ fn execution_row<'a>(value:&'a Value,room:&str,thread:&str)->Option<&'a Value> {
     value["executions"].as_array()?.iter().find(|r|
         r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread))
 }
+/// Whether the server that wrote this row describes each Agent of a message:
+/// it names the Agent and says whether the message can be sent again.
+fn per_agent(row:&Value)->bool {row["canSendAgain"].is_boolean()}
 /// The newest message of this room or thread has one row for each Agent it
-/// was addressed to.
+/// was addressed to. A server that does not describe each Agent is read as
+/// it always was: by its first row.
 fn execution_rows<'a>(value:&'a Value,room:&str,thread:&str)->Vec<&'a Value> {
     let Some(first)=execution_row(value,room,thread) else {return Vec::new()};
-    let Some(event)=first["eventId"].as_str() else {return vec![first]};
+    let Some(event)=first["eventId"].as_str().filter(|_| per_agent(first)) else {return vec![first]};
     value["executions"].as_array().into_iter().flatten().filter(|r|
         r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread) && r["eventId"]==event).collect()
 }
@@ -87,16 +91,16 @@ fn execution_rows<'a>(value:&'a Value,room:&str,thread:&str)->Vec<&'a Value> {
 fn row_agent(row:&Value)->Option<&str> {
     row["agentMxid"].as_str().filter(|id| id.starts_with('@') && id.len()<=255 && !id.chars().any(char::is_control))
 }
-/// The message ended for this Agent without a turn: nothing of it reached a
-/// model or a tool, so sending it again cannot repeat anything. A message that
+/// The message ended for this Agent and was not processed. A message that
 /// is still waiting (for the owner's service, for allowance) and a run whose
 /// outcome is unknown are not such an end.
 fn row_unprocessed(row:&Value)->bool {
     match row["state"].as_str() {
-        Some("cancelled")=>row["reason"]!="explicit_stop",
-        Some("expired")=>true,
-        // The Agent's process changed under the message, or every start failed.
-        Some("blocked")=>row["reason"]=="head_changed",
+        Some("cancelled"|"expired")=>true,
+        // The Agent's process changed under the message, or every start
+        // failed: the message is lost to it. A server that does not describe
+        // each Agent keeps the text this state always had.
+        Some("blocked")=>per_agent(row) && row["reason"]=="head_changed",
         _=>false,
     }
 }
@@ -123,7 +127,10 @@ impl ExecutionLine {
 const UNPROCESSED:&str="This message was not processed; it will not retry automatically.";
 const UNPROCESSED_BY:&str="{agent} did not process this message. It will not retry automatically.";
 /// The sender's way out of a message that ended without a turn: the same
-/// message, sent again to the Agents that did not process it.
+/// message, sent again to the Agents that did not process it. The server
+/// decides for which Agents that is: it knows that nothing of the message
+/// reached a model or a tool, that the reader sent it, and that the Agent is
+/// in the room and not stopped.
 #[derive(Clone,Debug,PartialEq)]
 struct Resend {
     event:String,
@@ -134,11 +141,16 @@ struct Resend {
 fn execution_resend(value:&Value,room:&str,thread:&str)->Option<Resend> {
     let rows=execution_rows(value,room,thread);
     let event=rows.first()?["eventId"].as_str()?;
-    let agents=rows.iter().filter(|r| r["fromViewer"]==true && row_unprocessed(r))
+    let agents=rows.iter().filter(|r| r["canSendAgain"]==true)
         .filter_map(|r| row_agent(r)).map(str::to_owned).collect::<Vec<_>>();
     if agents.is_empty() {return None;}
     let root=rows[0]["threadRoot"].as_str().filter(|root| *root!=event);
     Some(Resend {event:event.to_owned(),thread:root.map(str::to_owned),agents})
+}
+/// Whether this client has already sent `event` of `room` again.
+fn sent_again(room:&str,event:&str)->bool {
+    use matrix_sdk::ruma::{EventId,RoomId};
+    matches!((<&RoomId>::try_from(room),<&EventId>::try_from(event)),(Ok(room),Ok(event)) if crate::sliding_sync::sent_again(room,event))
 }
 fn pool_request(row: &Value) -> Option<(String, String)> {
     if row["reason"] != "budget_blocked" { return None; }
@@ -287,8 +299,6 @@ pub struct SharedPermissionNotice {
     /// The newest message ended without a turn for some Agents and its sender
     /// is looking: what "Send again" would send.
     #[rust] resend:Option<Resend>,
-    /// The message this client sent again last, so one click sends once.
-    #[rust] resent:Option<String>,
     #[rust] execution_busy:bool,
     #[rust] waiting:bool,
     /// Request ids shown in this room or thread, in order, to number them.
@@ -317,7 +327,8 @@ impl SharedPermissionNotice {
             self.resend=Some(resend);
             return;
         };
-        self.resent=Some(resend.event);
+        // One click sends once, also after the room was left and opened again.
+        crate::sliding_sync::note_sent_again(&room,&event);
         crate::sliding_sync::submit_async_request(crate::sliding_sync::MatrixRequest::SendAgainToAgents {room_id:room,event_id:event,thread_root:thread,agents});
         self.render(cx);
         // The new message has rows of its own: read them soon.
@@ -498,9 +509,10 @@ impl SharedPermissionNotice {
         self.error.clear();
         self.failure=None;
         if self.active {self.room_allowances.receive(value);}
-        self.original_request=execution_row(value,&self.room,&self.thread).and_then(pool_request);
-        // The review is of the run whose outcome is unknown, whichever Agent's it is.
+        // The review is of the run whose outcome is unknown, and the request
+        // for allowance of the Agent that lacks it, whichever Agent's it is.
         let rows=execution_rows(value,&self.room,&self.thread);
+        self.original_request=rows.iter().find_map(|r|pool_request(r));
         self.execution_source=rows.iter().find(|r|matches!(r["state"].as_str(),Some("unknown"|"reply_unknown")))
             .or(rows.first()).map(|r|(*r).clone());
         self.execution_thread_filter = value["executionThreadFilter"] == true;
@@ -514,7 +526,7 @@ impl SharedPermissionNotice {
             line.name=self.execution_lines.iter().find(|old|old.agent.is_some() && old.agent==line.agent).and_then(|old|old.name.clone());
         }
         self.execution_lines=lines;
-        self.resend=execution_resend(value,&self.room,&self.thread).filter(|r|self.resent.as_deref()!=Some(r.event.as_str()));
+        self.resend=execution_resend(value,&self.room,&self.thread).filter(|r|!sent_again(&self.room,&r.event));
         self.rows=value["approvals"].as_array().cloned().unwrap_or_default().into_iter().filter(|r|r["approval"]["roomId"]==self.room && (self.thread.is_empty() || r["approval"]["threadRoot"]==self.thread)).take(16).collect();
         self.tracked |= execution_row(value,&self.room,&self.thread).is_some()
             || !self.rows.is_empty() || !self.room_allowances.text.is_empty();
@@ -661,11 +673,10 @@ impl Widget for SharedPermissionNotice {
                     if self.active && !self.loading {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
                 }
                 if action.downcast_ref::<PendingApprovalsChanged>().is_some(){self.render(cx);}
-                // Nothing went out: the same message can be sent again.
+                // Nothing went out: read again whether the message can still be sent again.
                 if let Some(failed)=action.downcast_ref::<crate::sliding_sync::SendAgainFailed>()
-                    && failed.room_id.as_str()==self.room && self.resent.as_deref()==Some(failed.event_id.as_str()) {
-                    self.resent=None;
-                    if self.active && !self.loading {self.retry.sooner(Instant::now());self.arm_timer(cx);}
+                    && failed.room_id.as_str()==self.room && self.active && !self.loading {
+                    self.retry.sooner(Instant::now());self.arm_timer(cx);
                 }
             }
             for (id,decision) in [(ids!(once),"approve_once"),(ids!(session),"approve_session"),(ids!(deny),"deny")] {
@@ -711,7 +722,7 @@ impl SharedPermissionNoticeRef {
         let Some(mut this)=self.borrow_mut()else{return};
         let account=PermissionScope::capture();
         if this.account_scope!=account || this.room!=room || this.thread!=thread {
-            this.interrupt(cx);this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_source=None;this.execution_thread_filter=false;this.tracked=false;this.identity.clear();this.account_scope=account;this.room=room.into();this.thread=thread.into();this.error.clear();this.failure=None;this.retry=PermissionRetry::default();this.execution_lines.clear();this.resend=None;this.resent=None;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx,false);
+            this.interrupt(cx);this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_source=None;this.execution_thread_filter=false;this.tracked=false;this.identity.clear();this.account_scope=account;this.room=room.into();this.thread=thread.into();this.error.clear();this.failure=None;this.retry=PermissionRetry::default();this.execution_lines.clear();this.resend=None;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx,false);
         }else if this.active && !this.loading {this.poll(cx,false);}
     }
 }
@@ -889,15 +900,20 @@ mod tests {
         })
     }
 
-    fn row(event:&str,agent:&str,state:&str,reason:Option<&str>,mine:bool)->Value {
-        json!({"roomId":"!room:x","eventId":event,"threadRoot":event,"agentMxid":agent,"agentId":agent,"state":state,"reason":reason,"fromViewer":mine})
+    /// A row as a server that describes each Agent writes it.
+    fn row(event:&str,agent:&str,state:&str,reason:Option<&str>,again:bool)->Value {
+        json!({"roomId":"!room:x","eventId":event,"threadRoot":event,"agentMxid":agent,"agentId":agent,"state":state,"reason":reason,"canSendAgain":again})
+    }
+    /// The same row as a server before that writes it.
+    fn old_row(event:&str,state:&str,reason:Option<&str>)->Value {
+        json!({"roomId":"!room:x","eventId":event,"threadRoot":event,"agentId":"agt_1","state":state,"reason":reason})
     }
     #[test]
     fn a_message_to_two_agents_says_which_one_did_not_process_it() {
         let value=json!({"executions":[
             row("$two","@first:x","cancelled",Some("never_started"),true),
-            row("$two","@second:x","replied",None,true),
-            row("$older","@second:x","cancelled",None,true),
+            row("$two","@second:x","replied",None,false),
+            row("$older","@second:x","cancelled",Some("never_started"),true),
         ]});
         let lines=execution_lines(&value,"!room:x","",|_|false);
         // The Agent that answered has nothing to say; the older message is not this one.
@@ -913,8 +929,8 @@ mod tests {
     #[test]
     fn a_message_is_busy_while_any_of_its_agents_works_and_each_line_is_named() {
         let value=json!({"executions":[
-            row("$two","@first:x","cancelled",None,true),
-            row("$two","@second:x","started",None,true),
+            row("$two","@first:x","cancelled",Some("never_started"),true),
+            row("$two","@second:x","started",None,false),
         ]});
         assert!(execution_busy(&value,"!room:x",""));
         let shown=execution_lines(&value,"!room:x","",|_|false).iter().map(ExecutionLine::shown).collect::<Vec<_>>();
@@ -925,31 +941,56 @@ mod tests {
         assert_eq!(execution_resend(&value,"!room:x","").unwrap().agents,vec!["@first:x".to_owned()]);
     }
     #[test]
-    fn send_again_is_offered_to_the_sender_only_for_an_end_without_a_turn() {
+    fn send_again_is_offered_where_the_server_says_so_and_names_the_agent() {
         let offered=|r:Value|execution_resend(&json!({"executions":[r]}),"!room:x","");
-        for (state,reason) in [("cancelled",None),("cancelled",Some("never_started")),("expired",None),("blocked",Some("head_changed"))] {
+        // The server decides: the same state is offered to its sender and not
+        // to the resource's owner, and not while the Agent is stopped.
+        for (state,reason) in [("cancelled",Some("never_started")),("expired",None),("blocked",Some("head_changed"))] {
             assert!(offered(row("$e","@a:x",state,reason,true)).is_some(),"{state} {reason:?}");
-            // Someone else's message, as its resource owner sees it.
-            assert!(offered(row("$e","@a:x",state,reason,false)).is_none(),"{state} {reason:?}: not the sender");
+            assert!(offered(row("$e","@a:x",state,reason,false)).is_none(),"{state} {reason:?}: not offered");
         }
-        // A run that may have acted, a message that still waits, and a stop
-        // that someone chose are not sent again from here.
-        for (state,reason) in [("unknown",None),("reply_unknown",None),("failed",None),("started",None),("pending",None),
-            ("blocked",Some("budget_blocked")),("blocked",Some("owner_daemon_unavailable")),("blocked",None),
-            ("cancelled",Some("explicit_stop")),("paused",None),("replied",None)] {
-            assert!(offered(row("$e","@a:x",state,reason,true)).is_none(),"{state} {reason:?}");
+        // Nothing is worked out here from a state alone.
+        for (state,reason) in [("cancelled",None),("cancelled",Some("explicit_stop")),("unknown",None),("failed",None),("blocked",None)] {
+            assert!(offered(row("$e","@a:x",state,reason,false)).is_none(),"{state} {reason:?}");
         }
-        // A server that does not name the Agent or the sender: nothing to address.
-        let mut old=row("$e","@a:x","cancelled",None,true);
-        old.as_object_mut().unwrap().remove("agentMxid");
-        assert!(offered(old.clone()).is_none());
-        // Its text is what it was.
-        assert_eq!(execution_lines(&json!({"executions":[old]}),"!room:x","",|_|false),
-            vec![ExecutionLine{agent:None,name:None,text:UNPROCESSED}]);
+        // Without an Agent to address there is nothing to send.
+        let mut unnamed=row("$e","@a:x","expired",None,true);
+        unnamed["agentMxid"]=Value::Null;
+        assert!(offered(unnamed).is_none());
         // A message of a thread goes back to its thread.
-        let mut threaded=row("$reply","@a:x","cancelled",None,true);
+        let mut threaded=row("$reply","@a:x","expired",None,true);
         threaded["threadRoot"]=json!("$root");
         assert_eq!(offered(threaded).unwrap().thread.as_deref(),Some("$root"));
+    }
+    #[test]
+    fn a_server_that_does_not_describe_each_agent_is_read_as_before() {
+        let text=|rows:Vec<Value>|execution_lines(&json!({"executions":rows}),"!room:x","",|_|false);
+        // One unnamed line, from the first row, with the text each state always had.
+        assert_eq!(text(vec![old_row("$e","cancelled",None)]),vec![ExecutionLine{agent:None,name:None,text:UNPROCESSED}]);
+        assert_eq!(text(vec![old_row("$e","expired",Some("event_expired"))]),vec![ExecutionLine{agent:None,name:None,text:UNPROCESSED}]);
+        assert_eq!(text(vec![old_row("$e","blocked",Some("head_changed"))]),
+            vec![ExecutionLine{agent:None,name:None,text:"Message could not start. Check the resource and Agent connection."}]);
+        let two=vec![old_row("$e","failed",None),old_row("$e","started",None)];
+        assert_eq!(text(two.clone()),vec![ExecutionLine{agent:None,name:None,text:"Agent run failed."}]);
+        // The second row neither spins nor is offered.
+        let value=json!({"executions":two});
+        assert!(!execution_busy(&value,"!room:x",""));
+        assert_eq!(execution_rows(&value,"!room:x","").len(),1);
+        assert!(execution_resend(&json!({"executions":[old_row("$e","cancelled",None)]}),"!room:x","").is_none());
+        // A server that describes each Agent says the same state by name.
+        assert_eq!(text(vec![row("$e","@a:x","blocked",Some("head_changed"),false)]),
+            vec![ExecutionLine{agent:Some("@a:x".into()),name:None,text:UNPROCESSED}]);
+    }
+    #[test]
+    fn the_allowance_request_is_found_on_whichever_agent_lacks_allowance() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        let mut n=widget.borrow_mut().unwrap();
+        n.room="!room:x".into();
+        let mut blocked=row("$e","@second:x","blocked",Some("budget_blocked"),false);
+        blocked["resourceRecovery"]=json!({"requestId":"req_1","role":"owner"});
+        n.read_status(&json!({"executions":[row("$e","@first:x","replied",None,false),blocked]}),|_|false);
+        assert_eq!(n.original_request,Some(("req_1".into(),"owner".into())));
     }
     #[test]
     fn send_again_shows_with_the_run_state_and_sends_one_message_for_one_click() {
@@ -957,7 +998,7 @@ mod tests {
         let widget=notice(&mut cx);
         let mut n=widget.borrow_mut().unwrap();
         n.active=true;n.room="!room:x".into();
-        let value=json!({"executions":[row("$two","@first:x","cancelled",None,true)]});
+        let value=json!({"executions":[row("$one_click","@first:x","cancelled",Some("never_started"),true)]});
         n.read_status(&value,|_|false);
         n.render(&mut cx);
         assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
@@ -968,15 +1009,22 @@ mod tests {
         n.rows.clear();
         let resend=n.resend.take().unwrap();
         n.send_again(&mut cx,resend);
-        assert_eq!(n.resent.as_deref(),Some("$two"));
+        assert!(sent_again("!room:x","$one_click"));
         assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
-        // The same state read again does not offer the same message twice.
+        // The same state read again does not offer the same message twice,
+        // and neither does the room when it is left and opened again.
         n.read_status(&value,|_|false);
         n.render(&mut cx);
         assert!(n.resend.is_none() && !n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        drop(n);
+        widget.set_room(&mut cx,"!other:x","");
+        widget.set_room(&mut cx,"!room:x","");
+        let mut n=widget.borrow_mut().unwrap();
+        n.read_status(&value,|_|false);
+        assert!(n.resend.is_none());
         // A later message that ends the same way is offered on its own.
-        n.read_status(&json!({"executions":[row("$three","@first:x","expired",None,true)]}),|_|false);
-        assert_eq!(n.resend.as_ref().map(|r|r.event.as_str()),Some("$three"));
+        n.read_status(&json!({"executions":[row("$one_click_later","@first:x","expired",None,true)]}),|_|false);
+        assert_eq!(n.resend.as_ref().map(|r|r.event.as_str()),Some("$one_click_later"));
     }
 
     #[test]

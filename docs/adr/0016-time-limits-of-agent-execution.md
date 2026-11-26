@@ -28,9 +28,13 @@ come to this:
    What it is offered (a start, a ticket, a command from a poll) has 30
    seconds and is offered again when missed. The daemon's local session bounds
    one request, never the run it belongs to.
-2. **Renew early.** Leases are renewed every 10 seconds. The access token is
-   refreshed as soon as a proof has lost 10 seconds of the window, at most
-   once a minute, so the lead stays near the window.
+2. **Renew early.** An Agent's execution lease is renewed every 5 seconds, or
+   after half of what is left when that is sooner. The access token is
+   refreshed as soon as a proof has lost 10 seconds of the window (at most
+   once a minute for that reason) and always when a proof has 20 seconds or
+   less left, so the lead stays near the window. The activity lease of a
+   working process is renewed once, when 20 seconds of it are left; that rule
+   has to change with the lease's length and is in review.
 3. **A check that cannot be made is not a refusal.** Every failed step is
    decided, not asked, or without an answer, and that is worked out in one
    place. Only a decided failure ends work. The other two wait and ask again,
@@ -50,15 +54,32 @@ For the room:
    thread. An Agent that already answered is not asked twice. The first
    message stays as it ended.
 
-   It is offered only where nothing of the message can have run: the message
-   expired, every start failed, or the Agent's process ended before the turn
-   began. It is not offered for a run whose outcome is unknown, which may have
-   acted or cost something and has its review instead, nor for a message that
-   is still waiting, nor after someone stopped the Agent.
+   The server decides where it is offered, and says so for each Agent in the
+   message's status. It offers it only where nothing of the message can have
+   run (the message expired, every start failed, or the Agent's process ended
+   before the turn began), only to the message's sender, and only while the
+   Agent is in the room and has not been stopped. It is not offered for a run
+   whose outcome is unknown, which may have acted or cost something and has
+   its review instead, nor for a message that is still waiting.
 
-   It is offered to the sender and to nobody else, and it is never pressed by
-   the program. Two devices of one person would each send it, and one message
-   would become two runs.
+   It is never pressed by the program. Two devices of one person would each
+   send it, and one message would become two runs.
+
+   What is sent is the message as its sender last edited it. A message that
+   was removed cannot be sent again. When the new message cannot be sent
+   (the room's encryption is not confirmed, the Agent's device is not ready),
+   the room says so and offers it again; nothing is put back into the
+   composer, where the text would address every Agent it first did.
+
+   One click sends once: a message that was sent again is not offered again
+   by this window, also after the room was left and opened again. The window
+   does not keep that across a restart, and another device does not know it.
+   There the offer returns until the new message has a status of its own, and
+   the new message stands in the room for its sender to see.
+
+A server that does not yet describe each Agent of a message is read as it
+always was: one line from the message's first row, in the words each state
+always had, and no "Send again".
 
 ## What is left open
 
@@ -74,13 +95,13 @@ has until it is decided.
 - All starts on one computer share one lane. A start that waits holds it for
   at most the 30 seconds an offer lasts.
 - The daemon keeps at most 16 local sessions, each used again while 30 of its
-  60 seconds are left, and admits at most 64 packages.
+  60 seconds are left, and its bridge serves at most 64 managers.
 
 ## State
 
 | Point | State |
 |---|---|
 | 2. Token refresh ahead of the expiry; one local session shared between calls | implemented |
-| 5, 6. The notice names the Agent and offers "Send again" | implemented with this record; the name and the button need a server that names the Agent and the sender in the message's status |
+| 5, 6. The notice names the Agent and offers "Send again" | implemented with this record; the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review |
 | 1. Leases follow the server's lease | Agent execution leases do; activity leases and the rest are in review |
