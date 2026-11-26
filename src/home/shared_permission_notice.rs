@@ -95,6 +95,10 @@ fn row_agent(row:&Value)->Option<&str> {
 /// is still waiting (for the owner's service, for allowance) and a run whose
 /// outcome is unknown are not such an end.
 fn row_unprocessed(row:&Value)->bool {
+    // A message its sender can send again ended without a turn, whatever
+    // state it ended in: one that arrived while the Agent was stopped reads
+    // "paused" long after the Agent runs again.
+    if row["canSendAgain"]==true {return true;}
     match row["state"].as_str() {
         Some("cancelled"|"expired")=>true,
         // The Agent's process changed under the message, or every start
@@ -203,7 +207,7 @@ fn row_notice(row:&Value,stopped:&impl Fn(&str)->bool)->Option<&'static str> {
         // The Agent records a stopped run as failed; its run card tells them apart.
         "failed" if row["eventId"].as_str().is_some_and(stopped)=>Some("Run stopped."),
         "failed"=>Some("Agent run failed."),
-        "blocked" if row_unprocessed(row)=>Some(UNPROCESSED),
+        "blocked"|"paused" if row_unprocessed(row)=>Some(UNPROCESSED),
         "blocked"=>Some("Message could not start. Check the resource and Agent connection."),
         "paused"=>Some("Agent is paused."),
         "cancelled"|"expired"=>Some(UNPROCESSED),
@@ -323,8 +327,9 @@ impl SharedPermissionNotice {
             Some((room,event,thread,agents))
         })();
         let Some((room,event,thread,agents))=parsed else {
-            crate::shared::popup_list::enqueue_popup_notification(crate::i18n::tr("Could not send the message again."),crate::shared::popup_list::PopupKind::Error,Some(5.0));
-            self.resend=Some(resend);
+            crate::shared::popup_list::enqueue_popup_notification(crate::i18n::tr("This message can no longer be sent again."),crate::shared::popup_list::PopupKind::Error,Some(5.0));
+            // What the server named cannot be addressed: it never will be.
+            self.render(cx);
             return;
         };
         // One click sends once, also after the room was left and opened again.
@@ -953,6 +958,15 @@ mod tests {
         for (state,reason) in [("cancelled",None),("cancelled",Some("explicit_stop")),("unknown",None),("failed",None),("blocked",None)] {
             assert!(offered(row("$e","@a:x",state,reason,false)).is_none(),"{state} {reason:?}");
         }
+        // A message that arrived while the Agent was stopped says so while
+        // that is all there is to say, and is offered once the Agent runs.
+        let line=|r:Value|execution_lines(&json!({"executions":[r]}),"!room:x","",|_|false).remove(0);
+        assert_eq!(line(row("$e","@a:x","paused",Some("paused_at_receipt"),false)).text,"Agent is paused.");
+        let resumed=row("$e","@a:x","paused",Some("paused_at_receipt"),true);
+        assert_eq!(line(resumed.clone()),ExecutionLine{agent:Some("@a:x".into()),name:None,text:UNPROCESSED});
+        assert!(offered(resumed).is_some());
+        // Whatever reason a start failed for good with, an offer names the Agent.
+        assert_eq!(line(row("$e","@a:x","blocked",Some("retry_exhausted"),true)).text,UNPROCESSED);
         // Without an Agent to address there is nothing to send.
         let mut unnamed=row("$e","@a:x","expired",None,true);
         unnamed["agentMxid"]=Value::Null;

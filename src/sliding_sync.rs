@@ -2766,11 +2766,18 @@ async fn matrix_worker_task(
             MatrixRequest::SendAgainToAgents { room_id, event_id, thread_root, agents } => {
                 let _send_again_task = crate::account_session::spawn(async move {
                     if let Err(again) = send_again_to_agents(&room_id, &event_id, thread_root, agents).await {
-                        // Nothing went out. Say so, and let the notice offer
-                        // the message again when another try can work.
-                        error!("Could not send a message again in {room_id}.");
-                        if again == SendAgain::Later { forget_sent_again(&room_id, &event_id); }
-                        enqueue_popup_notification(crate::i18n::tr("Could not send the message again.").to_string(), PopupKind::Error, Some(5.0));
+                        // Nothing went out. Say which kind of failure it is,
+                        // and let the notice offer the message again only
+                        // when another try can work.
+                        error!("Could not send a message again in {room_id}: {again:?}.");
+                        let text = match again {
+                            SendAgain::Later => {
+                                forget_sent_again(&room_id, &event_id);
+                                "Could not send the message again. Try again in a moment."
+                            }
+                            SendAgain::Never => "This message can no longer be sent again.",
+                        };
+                        enqueue_popup_notification(crate::i18n::tr(text).to_string(), PopupKind::Error, Some(5.0));
                         Cx::post_action(SendAgainFailed { room_id, event_id });
                     }
                     SignalToUI::set_ui_signal();
@@ -3769,26 +3776,16 @@ async fn send_again_to_agents(
 }
 
 /// What the user's own message `event_id` says now: as the timeline shows it,
-/// with the sender's last edit, or as the room has it when the timeline has
-/// not loaded it.
+/// with the sender's last edit. A message the timeline has not loaded is not
+/// sent from the room's stored event, which would be the text before any
+/// edit; the offer stays, and works once the message is on screen.
 async fn message_to_send_again(timeline: &Timeline, event_id: &EventId) -> Result<MessageType, SendAgain> {
-    if let Some(item) = timeline.item_by_event_id(event_id).await {
-        if !item.is_own() { return Err(SendAgain::Never); }
-        // Not decrypted yet: its key may still arrive.
-        if item.content().is_unable_to_decrypt() { return Err(SendAgain::Later); }
-        // A message that was removed, or is not a message, has no content to send.
-        return item.content().as_message().map(|message| message.msgtype().clone()).ok_or(SendAgain::Never);
-    }
-    let room = timeline.room();
-    let event = room.load_or_fetch_event(event_id, None).await.map_err(|_| SendAgain::Later)?;
-    match event.raw().deserialize() {
-        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
-            ruma::events::SyncMessageLikeEvent::Original(original),
-        ))) if original.sender == room.own_user_id() => Ok(original.content.msgtype),
-        // Not decrypted yet: its key may still arrive.
-        Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomEncrypted(_))) => Err(SendAgain::Later),
-        _ => Err(SendAgain::Never),
-    }
+    let item = timeline.item_by_event_id(event_id).await.ok_or(SendAgain::Later)?;
+    if !item.is_own() { return Err(SendAgain::Never); }
+    // Not decrypted yet: its key may still arrive.
+    if item.content().is_unable_to_decrypt() { return Err(SendAgain::Later); }
+    // A message that was removed, or is not a message, has no content to send.
+    item.content().as_message().map(|message| message.msgtype().clone()).ok_or(SendAgain::Never)
 }
 
 /// The same message body as a new message that mentions `agents` only. The

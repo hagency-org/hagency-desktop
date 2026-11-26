@@ -39,37 +39,50 @@ come to this:
    decided, not asked, or without an answer, and that is worked out in one
    place. Only a decided failure ends work. The other two wait and ask again,
    and a wait keeps no local session between attempts.
-4. **The computer's own clock decides nothing.** An end is the time that was
-   left when the answer arrived, counted down from the moment the request was
-   sent.
+4. **The end of a lease is the server's.** The daemon holds it two ways:
+   counted from the moment it sent the request, with the time the server put
+   in its answer, and read against its wall clock, which keeps running while
+   the computer sleeps (the counted time does not). The earlier of the two
+   ends the lease. The wall clock may only end a lease early: it extends none
+   and refuses none.
 
 For the room:
 
 5. **A message that ended without a turn says for which Agent.** When a
    message went to several Agents, the notice has a line for each one that
    has something to say, with its name. An Agent that did not process the
-   message is named even when it was the only one.
+   message is named even when it was the only one. A message that arrived
+   while its Agent was stopped says that the Agent is paused; once the Agent
+   runs again, its sender reads that the Agent did not process it.
 6. **Its sender can send it again.** "Send again" sends the same message as a
    new one that mentions only the Agents that did not process it, in the same
    thread. An Agent that already answered is not asked twice. The first
    message stays as it ended.
 
    The server decides where it is offered, and says so for each Agent in the
-   message's status. It offers it only where nothing of the message can have
-   run (the message expired, every start failed, or the Agent's process ended
-   before the turn began), only to the message's sender, and only while the
-   Agent is in the room and has not been stopped. It is not offered for a run
-   whose outcome is unknown, which may have acted or cost something and has
-   its review instead, nor for a message that is still waiting.
+   message's status. It offers it for a message that ended without a turn:
+   one that waited out its time, one that was stopped while it waited or
+   arrived while the Agent was stopped, one whose start failed for good, and
+   one whose process ended before the turn began. It offers it only to the
+   message's sender, and only while the Agent is in the room and has not been
+   stopped. It is not offered where the Agent's allowance is the reason,
+   which has a notice and a way out of its own; nor for a run whose outcome
+   is unknown, which may have acted or cost something and has its review
+   instead; nor for a message that is still waiting.
 
    It is never pressed by the program. Two devices of one person would each
    send it, and one message would become two runs.
 
-   What is sent is the message as its sender last edited it. A message that
-   was removed cannot be sent again. When the new message cannot be sent
-   (the room's encryption is not confirmed, the Agent's device is not ready),
-   the room says so and offers it again; nothing is put back into the
-   composer, where the text would address every Agent it first did.
+   What is sent is the message as its sender last edited it, read from the
+   room as it is shown; it is never taken from the stored first version. When
+   the new message cannot be sent now (the message is not loaded or not yet
+   readable, the room's encryption is not confirmed, the Agent's device is
+   not ready), the room says to try again in a moment and offers it again.
+   A message that was removed cannot be sent again: the server does not learn
+   of a removal, so it is offered until its sender presses once, and the room
+   then says that it can no longer be sent and stops offering it. Nothing is
+   put back into the composer, where the text would address every Agent it
+   first did.
 
    One click sends once: a message that was sent again is not offered again
    by this window, also after the room was left and opened again. The window
@@ -92,12 +105,24 @@ has until it is decided.
 
 ## Known bounds
 
-- All starts on one computer share one lane. A start that waits holds it for
-  at most the 30 seconds an offer lasts.
+- The steps of a computer's worker pass run one after another, so a start
+  that waits for its first report holds every later step for at most the
+  command's start window (30 seconds).
+- A reader who did not send a message that arrived while its Agent was
+  stopped keeps reading that the Agent is paused after it runs again.
+- A computer whose clock is ahead loses that much of every lease, and a
+  whole lease when it is ahead by a lease's length: that cannot be told from
+  having slept.
+- The answer that grants an Agent's execution lease carries no server time,
+  so for that lease the wall clock is the only witness, and a computer whose
+  clock is behind by more than a second is refused a full-length lease.
 - The daemon keeps at most 16 local sessions, each used again while 30 of its
   60 seconds are left, and its bridge serves at most 64 managers.
 
 ## State
+
+"Implemented" means merged into the main branch. Which release carries a
+point is in the release notes.
 
 | Point | State |
 |---|---|
@@ -105,3 +130,4 @@ has until it is decided.
 | 5, 6. The notice names the Agent and offers "Send again" | implemented with this record; the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review |
 | 1. Leases follow the server's lease | Agent execution leases do; activity leases and the rest are in review |
+| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. In review: the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
