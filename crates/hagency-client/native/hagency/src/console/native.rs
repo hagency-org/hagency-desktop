@@ -529,24 +529,40 @@ impl NativeError {
             | "shared_room_keys_pending"
             | "shared_room_send_authority_changed" => Said::Decided,
             // What the server answers while its policy does not serve a
-            // route (each is one predicate of its management policy). It
-            // gives these a status of 503, and they are decisions all the
-            // same: asked again, it says the same. This is how an operator
-            // ends pooled work (a renewal is refused and the run closes with
-            // its usage), and how a host learns that a route is not offered
-            // and takes the other one. One that is missing here is read by
-            // the rule below: asked again for a while, never taken for a
-            // refusal that was not made.
-            "agent_budget_issuance_unavailable"
+            // route. It gives these a status of 503, and they are decisions
+            // all the same: asked again, it says the same. This is how an
+            // operator ends pooled work (a renewal is refused and the run
+            // closes with its usage), and how a host learns that a route is
+            // not offered and takes the other one.
+            //
+            // The list is the server's, whole: every code it returns as
+            // unavailable right after a predicate of its management policy,
+            // and the one for a server with no such policy. It is kept by
+            // hand, as the server is another repository. One that is missing
+            // is read by the rule below: asked again for a bounded while,
+            // never taken for a refusal that was not made.
+            "agent_admission_unavailable"
+            | "agent_budget_issuance_unavailable"
             | "agent_executor_unavailable"
+            | "agent_matrix_provisioning_unavailable"
+            | "agent_runtime_provisioning_unavailable"
+            | "calendar_grants_unavailable"
             | "management_not_configured"
+            | "parent_settlement_unavailable"
+            | "pool_agents_unavailable"
+            | "pool_grant_succession_unavailable"
+            | "pool_publication_first_unavailable"
+            | "project_reservations_unavailable"
+            | "project_setup_unavailable"
+            | "shared_budget_execution_issuance_unavailable"
             | "shared_demand_issuance_unavailable"
             | "shared_demand_retry_unavailable"
             | "shared_durable_intake_unavailable"
             | "shared_encryption_unavailable"
             | "shared_execution_issuance_unavailable"
             | "shared_execution_unavailable"
-            | "shared_successor_issuance_unavailable" => Said::Decided,
+            | "shared_successor_issuance_unavailable"
+            | "shared_thread_context_issuance_unavailable" => Said::Decided,
             // Any other failure with such a status is the server's: it did
             // not serve the request. Its codes are its own and change with
             // it (its database, a restart, a full queue), so they are read
@@ -589,9 +605,20 @@ mod said_tests {
         // a decision, though it gives it that status: asked again, it says
         // the same.
         for code in [
+            "agent_admission_unavailable",
             "agent_budget_issuance_unavailable",
             "agent_executor_unavailable",
+            "agent_matrix_provisioning_unavailable",
+            "agent_runtime_provisioning_unavailable",
+            "calendar_grants_unavailable",
             "management_not_configured",
+            "parent_settlement_unavailable",
+            "pool_agents_unavailable",
+            "pool_grant_succession_unavailable",
+            "pool_publication_first_unavailable",
+            "project_reservations_unavailable",
+            "project_setup_unavailable",
+            "shared_budget_execution_issuance_unavailable",
             "shared_demand_issuance_unavailable",
             "shared_demand_retry_unavailable",
             "shared_durable_intake_unavailable",
@@ -599,6 +626,7 @@ mod said_tests {
             "shared_execution_issuance_unavailable",
             "shared_execution_unavailable",
             "shared_successor_issuance_unavailable",
+            "shared_thread_context_issuance_unavailable",
         ] {
             assert_eq!(failure(503, code).said(), Said::Decided, "{code}");
             assert!(!failure(503, code).passes(), "{code}");
