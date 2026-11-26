@@ -309,6 +309,47 @@ fn rpc_rejection(value: &Value) -> ProviderError {
     };
     failure(502, code)
 }
+/// Logs unfinished stages too, including when the enclosing identity timeout
+/// drops an in-flight RPC. No provider payloads or account identifiers are logged.
+struct ProviderTiming {
+    stage: &'static str,
+    started: Instant,
+    finished: bool,
+}
+
+impl ProviderTiming {
+    fn start(stage: &'static str) -> Self {
+        tracing::debug!(stage, "Codex provider stage started");
+        Self {
+            stage,
+            started: Instant::now(),
+            finished: false,
+        }
+    }
+
+    fn finish(mut self, outcome: &'static str) {
+        self.log(outcome);
+        self.finished = true;
+    }
+
+    fn log(&self, outcome: &'static str) {
+        tracing::debug!(
+            stage = self.stage,
+            elapsed_ms = self.started.elapsed().as_millis() as u64,
+            outcome,
+            "Codex provider stage finished"
+        );
+    }
+}
+
+impl Drop for ProviderTiming {
+    fn drop(&mut self) {
+        if !self.finished {
+            self.log("interrupted");
+        }
+    }
+}
+
 struct Process {
     child: drain::TrackedChild,
     input: ChildStdin,
@@ -332,6 +373,18 @@ impl Process {
         Self::spawn_inner(paths, executable, true, &TaskCustody::default()).await
     }
     async fn spawn_inner(
+        paths: &ProviderPaths,
+        executable: &Path,
+        identity: bool,
+        tasks: &TaskCustody,
+    ) -> Result<Self, ProviderError> {
+        let timing = ProviderTiming::start("process_start");
+        let result = Self::start_process(paths, executable, identity, tasks).await;
+        timing.finish(if result.is_ok() { "ok" } else { "error" });
+        result
+    }
+
+    async fn start_process(
         paths: &ProviderPaths,
         executable: &Path,
         identity: bool,
@@ -550,6 +603,19 @@ impl Process {
         }
     }
     async fn rpc(&mut self, method: &str, params: Value) -> Result<Value, ProviderError> {
+        let timing = match method {
+            "account/read" => Some(ProviderTiming::start("account_read")),
+            "account/rateLimits/read" => Some(ProviderTiming::start("quota_read")),
+            _ => None,
+        };
+        let result = self.rpc_inner(method, params).await;
+        if let Some(timing) = timing {
+            timing.finish(if result.is_ok() { "ok" } else { "error" });
+        }
+        result
+    }
+
+    async fn rpc_inner(&mut self, method: &str, params: Value) -> Result<Value, ProviderError> {
         let id = self.next;
         self.next += 1;
         self.write(json!({"id":id,"method":method,"params":params}))

@@ -132,6 +132,15 @@ impl NativeManagement {
     pub(super) async fn observe_account_namespace(
         &self, launch: &hagency_store::ManagedLaunch, deadline: std::time::Instant,
     ) -> Result<(VerifiedProviderAccount, super::super::owner_provider::ProviderStatus), NativeError> {
+        self.inspect_account_namespace(launch, deadline, false).await
+    }
+
+    async fn inspect_account_namespace(
+        &self,
+        launch: &hagency_store::ManagedLaunch,
+        deadline: std::time::Instant,
+        fresh_proof: bool,
+    ) -> Result<(VerifiedProviderAccount, super::super::owner_provider::ProviderStatus), NativeError> {
         #[cfg(test)]
         let fixture=self.owner.0.account_logins.executable.lock().unwrap().clone();
         #[cfg(test)]
@@ -139,7 +148,7 @@ impl NativeManagement {
         #[cfg(not(test))]
         let executable=super::super::owner_provider::executable().map_err(|e|failure(e.status,e.code))?;
         super::super::owner_provider::managed::inspect_resource(
-            launch,&self.owner.0.host.console.0.owner_provider,&executable,deadline,
+            launch,&self.owner.0.host.console.0.owner_provider,&executable,deadline,fresh_proof,
         ).await.map_err(|e|failure(e.status,e.code))
     }
     pub(super) async fn verified_resource_provider_account(
@@ -168,12 +177,17 @@ impl NativeManagement {
         let _guard=self.owner.0.calls.lock().await;
         let (context,session)=self.authorized().await?;
         for p in [Permission::ReadProviders,Permission::ConnectProviders] {session.authorize(&context,p).map_err(super::management::store_error)?;}
-        let deadline=session.valid_until().min(std::time::Instant::now()+std::time::Duration::from_secs(30));
-        let result=self.namespace_provider(&namespace,deadline).await;
+        let deadline = session.valid_until().min(
+            std::time::Instant::now()
+                + super::super::owner_provider::managed::RESOURCE_IDENTITY_TIMEOUT,
+        );
+        namespace.check().await.map_err(super::management::store_error)?;
+        let result = self.inspect_account_namespace(namespace.launch(), deadline, true).await;
+        namespace.check().await.map_err(super::management::store_error)?;
         let (fresh,live)=self.authorized().await?;
         if fresh!=context {return Err(failure(401,"management_scope_changed"));}
         for p in [Permission::ReadProviders,Permission::ConnectProviders] {live.authorize(&context,p).map_err(super::management::store_error)?;}
-        result
+        result.map(|(proof, _)| proof)
     }
 }
 

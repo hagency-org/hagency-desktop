@@ -123,7 +123,7 @@ for line in sys.stdin:
             } else {
                 Instant::now() + Duration::from_secs(30)
             };
-            let result = if resource {inspect_resource(&mut process,&paths,deadline).await.map(|(proof,_)|proof)} else {observe(&mut process, &paths, deadline).await};
+            let result = if resource {inspect_resource(&mut process,&paths,deadline,false).await.map(|(proof,_)|proof)} else {observe(&mut process, &paths, deadline).await};
             process.child.kill().await.unwrap();
             result
         }
@@ -240,6 +240,24 @@ async fn startup_rejects_effective_origin_override_before_reading_account_metada
         assert!(matches!(result, Err(error) if error.code == "provider_identity_unavailable"));
         assert_eq!(methods, ["initialize", "config/read"]);
     }
+}
+
+#[test]
+fn grant_identity_freshness_starts_after_the_probe() {
+    let observed_at = Instant::now();
+    let deadline = observed_at + Duration::from_secs(1);
+    assert_eq!(
+        resource_proof_deadline(observed_at, deadline, true).unwrap(),
+        observed_at + Duration::from_secs(30),
+    );
+    assert_eq!(
+        resource_proof_deadline(observed_at, deadline, false).unwrap(),
+        deadline,
+    );
+    assert!(matches!(
+        resource_proof_deadline(deadline, deadline, true),
+        Err(error) if error.code == "provider_identity_unavailable"
+    ));
 }
 
 #[cfg(unix)]
