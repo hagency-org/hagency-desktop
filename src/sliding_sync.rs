@@ -955,6 +955,17 @@ pub enum MatrixRequest {
         destination: MediaCacheEntryRef,
         update_sender: Option<crate::timeline_updates::Sender>,
     },
+    /// Send the user's own message `event_id` again as a new message that
+    /// addresses the given Agents only. For a message that ended without a
+    /// turn for them: a new message is taken in like any other, and the first
+    /// one stays as it ended.
+    SendAgainToAgents {
+        room_id: OwnedRoomId,
+        event_id: OwnedEventId,
+        /// The thread the message was sent in, when it was.
+        thread_root: Option<OwnedEventId>,
+        agents: Vec<OwnedUserId>,
+    },
     /// Request to send a message to the given room.
     SendMessage {
         /// Composer handoff ends when the SDK accepts the message or reports a failure.
@@ -2752,6 +2763,27 @@ async fn matrix_worker_task(
                 });
             }
 
+            MatrixRequest::SendAgainToAgents { room_id, event_id, thread_root, agents } => {
+                let _send_again_task = crate::account_session::spawn(async move {
+                    if let Err(again) = send_again_to_agents(&room_id, &event_id, thread_root, agents).await {
+                        // Nothing went out. Say which kind of failure it is,
+                        // and let the notice offer the message again only
+                        // when another try can work.
+                        error!("Could not send a message again in {room_id}: {again:?}.");
+                        let text = match again {
+                            SendAgain::Later => {
+                                forget_sent_again(&room_id, &event_id);
+                                "Could not send the message again. Try again in a moment."
+                            }
+                            SendAgain::Never => "This message can no longer be sent again.",
+                        };
+                        enqueue_popup_notification(crate::i18n::tr(text).to_string(), PopupKind::Error, Some(5.0));
+                        Cx::post_action(SendAgainFailed { room_id, event_id });
+                    }
+                    SignalToUI::set_ui_signal();
+                });
+            }
+
             MatrixRequest::SendMessage {
                 completion,
                 routing,
@@ -3660,6 +3692,110 @@ async fn get_timeline(kind: &TimelineKind) -> Option<Arc<Timeline>> {
         .map(|details| details.timeline.clone());
     if !has_timeline_interest(kind) { retire_hidden_timeline(kind); }
     result
+}
+
+/// A message could not be sent again: nothing went out for `event_id`.
+///
+/// This is *NOT* a widget action.
+#[derive(Debug)]
+pub struct SendAgainFailed {
+    pub room_id: OwnedRoomId,
+    pub event_id: OwnedEventId,
+}
+
+/// Why a message was not sent again.
+#[derive(Debug, PartialEq)]
+enum SendAgain {
+    /// Nothing went out now; another try may work.
+    Later,
+    /// The message itself cannot be sent again: it is gone, or not the user's.
+    Never,
+}
+
+/// The messages this client has sent again, newest last. A message stays here
+/// so that leaving its room and coming back does not offer it a second time
+/// while its copy has no status yet.
+static SENT_AGAIN: Mutex<Vec<(OwnedRoomId, OwnedEventId)>> = Mutex::new(Vec::new());
+
+/// Whether this client has sent `event_id` again.
+pub fn sent_again(room_id: &RoomId, event_id: &EventId) -> bool {
+    SENT_AGAIN.lock().unwrap().iter().any(|(room, event)| room == room_id && event == event_id)
+}
+
+/// Records that `event_id` is being sent again. Called where the user asks
+/// for it, before the request is handled, so the offer is gone at once.
+pub fn note_sent_again(room_id: &RoomId, event_id: &EventId) {
+    let mut sent = SENT_AGAIN.lock().unwrap();
+    if sent.len() >= 256 { sent.remove(0); }
+    sent.push((room_id.to_owned(), event_id.to_owned()));
+}
+
+fn forget_sent_again(room_id: &RoomId, event_id: &EventId) {
+    SENT_AGAIN.lock().unwrap().retain(|(room, event)| !(room == room_id && event == event_id));
+}
+
+/// Sends the user's own message `event_id` again as a new message that
+/// mentions `agents` only, in its thread when it has one. It makes the checks
+/// of an ordinary send (the room's encryption is confirmed, the Agents'
+/// devices are ready) and reports a failure to its caller instead of putting
+/// the text back into the composer: typed again from there, the message would
+/// mention every Agent it first did, also one that already answered.
+async fn send_again_to_agents(
+    room_id: &OwnedRoomId,
+    event_id: &OwnedEventId,
+    thread_root: Option<OwnedEventId>,
+    agents: Vec<OwnedUserId>,
+) -> Result<(), SendAgain> {
+    // The thread's own timeline when it is open, where the new message shows
+    // at once; the room's otherwise.
+    let mut timeline_kind = TimelineKind::MainRoom { room_id: room_id.clone() };
+    if let Some(root) = &thread_root {
+        let thread = TimelineKind::Thread { room_id: room_id.clone(), thread_root_event_id: root.clone() };
+        if get_timeline_and_sender(&thread).await.is_some() { timeline_kind = thread; }
+    }
+    let (timeline, _sender) = get_timeline_and_sender(&timeline_kind).await.ok_or(SendAgain::Later)?;
+    let message = addressed_again(message_to_send_again(&timeline, event_id).await?, agents);
+    crate::room_encryption::confirmed_state(timeline.room()).await.map_err(|_| SendAgain::Later)?;
+    #[cfg(feature = "agent_chat")]
+    crate::agent_chat::encrypted_send::ensure_ready(timeline.room(), &message).await.map_err(|_| SendAgain::Later)?;
+    let routing = crate::agent_access::routing::room_only(&crate::agent_access::current(), current_user_id().as_deref(), room_id, &message);
+    let content: AnyMessageLikeEventContent = match thread_root {
+        Some(root) => {
+            let reply = Reply {
+                event_id: root,
+                enforce_thread: matrix_sdk::room::reply::EnforceThread::Threaded(ruma::events::room::message::ReplyWithinThread::No),
+                add_mentions: ruma::events::room::message::AddMentions::No,
+            };
+            timeline.room().make_reply_event(message.into(), reply).await.map_err(|_| SendAgain::Later)?.into()
+        }
+        None => message.into(),
+    };
+    timeline.send_with_extra_content(content, routing).await.map_err(|_| SendAgain::Later)?;
+    log!("Queued a message sent again for {timeline_kind}.");
+    Ok(())
+}
+
+/// What the user's own message `event_id` says now: as the timeline shows it,
+/// with the sender's last edit. A message the timeline has not loaded is not
+/// sent from the room's stored event, which would be the text before any
+/// edit; the offer stays, and works once the message is on screen.
+async fn message_to_send_again(timeline: &Timeline, event_id: &EventId) -> Result<MessageType, SendAgain> {
+    let item = timeline.item_by_event_id(event_id).await.ok_or(SendAgain::Later)?;
+    if !item.is_own() { return Err(SendAgain::Never); }
+    // Not decrypted yet: its key may still arrive.
+    if item.content().is_unable_to_decrypt() { return Err(SendAgain::Later); }
+    // A message that was removed, or is not a message, has no content to send.
+    item.content().as_message().map(|message| message.msgtype().clone()).ok_or(SendAgain::Never)
+}
+
+/// The same message body as a new message that mentions `agents` only. The
+/// first message's relation (a reply, an edit, its thread) is not carried
+/// over, and neither are the people and Agents it mentioned: an Agent that
+/// already answered must not be asked twice.
+fn addressed_again(msgtype: MessageType, agents: Vec<OwnedUserId>) -> RoomMessageEventContent {
+    let mut message = RoomMessageEventContent::new(msgtype);
+    message.mentions = Some(ruma::events::Mentions::with_user_ids(agents));
+    message
 }
 
 /// Obtains the lock on `ALL_JOINED_ROOMS` and returns the timeline and timeline update sender for the given timeline kind.
