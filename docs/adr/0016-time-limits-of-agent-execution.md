@@ -113,12 +113,12 @@ For the room:
    message names the one it was sent for (`org.hagency.sent_again` in its
    content, encrypted with the rest in an encrypted room). Every device of
    its sender reads that name from the sender's own messages: from each one
-   the room's timeline holds when it is opened, from each one that arrives
-   later, and, for a new message that has not left the device yet, from the
-   device's send queue, which keeps it across a restart. A device that has
-   not loaded the new message, or one whose new message was removed, offers
-   the first one again; the new message stands in the room for its sender
-   to see.
+   the room's timeline, or a thread's, holds when it is opened, from each
+   one that arrives later, and, for a new message that has not left the
+   device yet, from the device's send queue, which keeps it across a
+   restart. A device that has not loaded the new message, or one whose new
+   message was removed, offers the first one again; the new message stands
+   in the room for its sender to see.
 
    The server does not read that name: its status keeps offering the first
    message, and only the sender's devices stop. In an encrypted room it

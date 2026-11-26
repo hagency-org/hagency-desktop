@@ -35,6 +35,12 @@ pub fn marker(event: &str) -> serde_json::Map<String, Value> {
     serde_json::Map::from_iter([(SENT_AGAIN_FIELD.to_owned(), serde_json::json!({"event_id": event}))])
 }
 
+/// Whether `json`, a message or its content, may name the message it was
+/// sent again for. Most messages do not, and are not parsed.
+pub fn may_name_original(json: &str) -> bool {
+    json.contains(SENT_AGAIN_FIELD)
+}
+
 /// The message that `content`, a message's content, says it was sent again
 /// for.
 pub fn original_of(content: &Value) -> Option<&str> {
@@ -70,23 +76,39 @@ pub fn of_message(rows: &[&Value]) -> Option<Resend> {
     Some(Resend { event: event.to_owned(), thread: root.map(str::to_owned), agents })
 }
 
-/// Every message of a read of `room`, or of its thread `thread`, that can be
-/// sent again, newest first as the server lists them.
-pub fn of_read(value: &Value, room: &str, thread: &str) -> Vec<Resend> {
-    let rows = value["executions"].as_array().into_iter().flatten()
+/// The rows of a read of `room`, or of its thread `thread`.
+fn rows_of<'a>(value: &'a Value, room: &str, thread: &str) -> Vec<&'a Value> {
+    value["executions"].as_array().into_iter().flatten()
         .filter(|r| r["roomId"] == room && (thread.is_empty() || r["threadRoot"] == thread))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+/// Every message that `rows` list, newest first as the server lists them,
+/// whether or not it can be sent again.
+fn listed<'a>(rows: &[&'a Value]) -> Vec<&'a str> {
     let mut events: Vec<&str> = Vec::new();
-    for row in &rows {
+    for row in rows {
         if let Some(event) = row["eventId"].as_str()
             && !events.contains(&event)
         {
             events.push(event);
         }
     }
-    events.into_iter()
-        .filter_map(|event| of_message(&rows.iter().copied().filter(|r| r["eventId"] == event).collect::<Vec<_>>()))
+    events
+}
+
+/// What each message of `events`, as `rows` list it, offers.
+fn offers_of(rows: &[&Value], events: &[&str]) -> Vec<Resend> {
+    events.iter()
+        .filter_map(|event| of_message(&rows.iter().copied().filter(|r| r["eventId"] == *event).collect::<Vec<_>>()))
         .collect()
+}
+
+/// Every message of a read of `room`, or of its thread `thread`, that can be
+/// sent again, newest first as the server lists them.
+pub fn of_read(value: &Value, room: &str, thread: &str) -> Vec<Resend> {
+    let rows = rows_of(value, room, thread);
+    offers_of(&rows, &listed(&rows))
 }
 
 #[derive(Default)]
@@ -105,16 +127,30 @@ static STATE: LazyLock<Mutex<State>> = LazyLock::new(Default::default);
 /// Keep what a read of `room`, or of its thread `thread`, offers. Returns
 /// whether that changed what this client offers.
 pub fn merge_read(identity: &str, room: &str, thread: &str, value: &Value) -> bool {
-    let offers = of_read(value, room, thread);
+    let rows = rows_of(value, room, thread);
+    let listed = listed(&rows);
+    let offers = offers_of(&rows, &listed);
     let mut state = STATE.lock().unwrap();
     if state.identity != identity {
         state.identity = identity.to_owned();
         state.reads.clear();
         state.refused.clear();
     }
+    // What this read says of a message replaces what an earlier read of the
+    // room, or of another of its threads, said of it: an old read of a thread
+    // does not keep an offer that a newer read of the room no longer makes. A
+    // read that does not list a message says nothing of it.
+    let mut changed = false;
+    for ((kept_room, kept_thread), kept) in state.reads.iter_mut() {
+        if kept_room == room && kept_thread != thread {
+            let before = kept.len();
+            kept.retain(|offer| !listed.contains(&offer.event.as_str()));
+            changed |= kept.len() != before;
+        }
+    }
     let key = (room.to_owned(), thread.to_owned());
     if state.reads.get(&key).map_or(offers.is_empty(), |kept| *kept == offers) {
-        return false;
+        return changed;
     }
     state.reads.insert(key, offers);
     true
@@ -189,6 +225,19 @@ pub fn send(room: &str, offer: &Resend) -> bool {
     true
 }
 
+/// The account every test that keeps reads reads as. The store is one for
+/// the process and forgets its reads when the account changes, so each such
+/// test reads as this one, keeps to rooms of its own, and takes `test_turn`.
+#[cfg(test)]
+pub(crate) const TEST_READER: &str = "@reader:x";
+
+/// The turn of the tests of the room's status: the notice's tests read it as
+/// other accounts while they hold the same turn.
+#[cfg(test)]
+pub(crate) fn test_turn() -> std::sync::MutexGuard<'static, ()> {
+    crate::hagency::pending_approvals::TEST_TURN.lock().unwrap_or_else(|e| e.into_inner())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -237,11 +286,12 @@ mod tests {
         for bad in [json!("$first"), json!({"event_id":"first"}), json!({"event_id":"$ first"}), json!({"event_id":7})] {
             assert_eq!(original_of(&json!({SENT_AGAIN_FIELD: bad})), None);
         }
+        // Only a message that carries the field is parsed at all.
+        assert!(may_name_original(&content.to_string()));
+        assert!(!may_name_original(r#"{"msgtype":"m.text","body":"hello"}"#));
     }
 
-    /// The store is one for the process, so every test reads as the same
-    /// account and keeps to rooms of its own.
-    const READER: &str = "@reader:x";
+    const READER: &str = TEST_READER;
 
     fn offered(room: &str, event: &str, agent: &str) -> Value {
         json!({"executions":[{"roomId":room,"threadRoot":event,"eventId":event,"agentMxid":agent,"canSendAgain":true}]})
@@ -249,6 +299,7 @@ mod tests {
 
     #[test]
     fn a_read_replaces_what_the_same_room_or_thread_offered() {
+        let _turn = test_turn();
         assert!(merge_read(READER, "!kept:x", "", &offered("!kept:x", "$kept", "@first:x")));
         // The same read again changes nothing, and neither does a read of a
         // room that offers nothing.
@@ -266,7 +317,37 @@ mod tests {
     }
 
     #[test]
+    fn the_newest_read_that_lists_a_message_decides_its_offer() {
+        let _turn = test_turn();
+        let reply = |again: bool| json!({"executions":[
+            {"roomId":"!newest:x","threadRoot":"$newest_root","eventId":"$newest_reply","agentMxid":"@first:x","canSendAgain":again},
+        ]});
+        let empty = json!({"executions":[]});
+        // The thread's read offers its reply.
+        assert!(merge_read(READER, "!newest:x", "$newest_root", &reply(true)));
+        assert!(for_event("!newest:x", "$newest_reply").is_some());
+        // A newer read of the room lists it and no longer offers it: the
+        // thread's older read does not keep the offer.
+        assert!(merge_read(READER, "!newest:x", "", &reply(false)));
+        assert!(for_event("!newest:x", "$newest_reply").is_none());
+        // The thread's next read offers it again, and decides.
+        assert!(merge_read(READER, "!newest:x", "$newest_root", &reply(true)));
+        assert!(for_event("!newest:x", "$newest_reply").is_some());
+        // A read that does not list it says nothing of it: one of the room
+        // with 16 newer rows above it, or one of another thread.
+        assert!(!merge_read(READER, "!newest:x", "", &empty));
+        assert!(!merge_read(READER, "!newest:x", "$other_root", &empty));
+        assert!(for_event("!newest:x", "$newest_reply").is_some());
+        // The other way round: a newer read of the thread withdraws what the
+        // room's read offered.
+        assert!(merge_read(READER, "!newest:x", "", &reply(true)));
+        assert!(merge_read(READER, "!newest:x", "$newest_root", &reply(false)));
+        assert!(for_event("!newest:x", "$newest_reply").is_none());
+    }
+
+    #[test]
     fn an_offer_that_cannot_be_addressed_is_made_once() {
+        let _turn = test_turn();
         // The server's row names an Agent that is no Matrix ID this client
         // can address.
         assert!(merge_read(READER, "!refused:x", "", &offered("!refused:x", "$refused", "@not an id")));
@@ -281,6 +362,7 @@ mod tests {
 
     #[test]
     fn a_message_sent_again_from_one_place_is_not_sent_from_the_other() {
+        let _turn = test_turn();
         use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId};
         assert!(merge_read(READER, "!twice:x", "", &offered("!twice:x", "$twice", "@first:x")));
         let offer = for_event("!twice:x", "$twice").unwrap();

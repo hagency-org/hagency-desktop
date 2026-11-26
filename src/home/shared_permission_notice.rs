@@ -160,6 +160,9 @@ fn execution_notice(value:&Value,room:&str,thread:&str,stopped:impl Fn(&str)->bo
     row_notice(execution_row(value,room,thread)?,&stopped)
 }
 fn row_notice(row:&Value,stopped:&impl Fn(&str)->bool)->Option<&'static str> {
+    // A message its sender can send again has ended, whatever it waited for:
+    // one held by the allowance ends when the allowance period turns.
+    if row["canSendAgain"]==true {return Some(UNPROCESSED);}
     if row["reason"]=="owner_daemon_update_required" {
         return Some("Message has not started. The resource owner needs to update Hagency and start its service; the same message can then continue.");
     }
@@ -300,6 +303,11 @@ impl SharedPermissionNotice {
         // The new message has rows of its own: read them soon.
         if self.active {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
     }
+    /// What "Send again" would send from here. The room's timeline does not
+    /// show a reply in a thread and cannot send it again: its thread can.
+    fn resend_here(&self)->Option<&Resend> {
+        self.resend.as_ref().filter(|r|r.thread.is_none() || !self.thread.is_empty())
+    }
     /// Shows the spinner while the Agent works or a decision is on its way.
     /// The spinner updates its retained draw call without re-running the draw
     /// of the timeline that contains it.
@@ -335,6 +343,8 @@ impl SharedPermissionNotice {
             let hint=match &self.last_decision {
                 Some((_,decision)) if self.execution_busy && self.error.is_empty() =>
                     format("Last request: {result}. The Agent is continuing.",&[("result",tr(approvals::decided_label(decision)).to_owned())]),
+                _ if self.resend.is_some() && self.resend_here().is_none() && !shows_error =>
+                    tr("Open its thread to send it again.").to_owned(),
                 _=>String::new(),
             };
             return Display {
@@ -441,7 +451,7 @@ impl SharedPermissionNotice {
         self.view.button(cx,ids!(execution_review)).set_enabled(cx,self.active && !self.loading);
         // Offered with the run's state only: a waiting request or a failed
         // read has the notice, and the state it would act on is not shown.
-        let resend=self.resend.is_some() && self.rows.is_empty() && !self.shows_error();
+        let resend=self.resend_here().is_some() && self.rows.is_empty() && !self.shows_error();
         self.view.widget(cx,ids!(execution_resend)).set_visible(cx,resend);
         self.view.button(cx,ids!(execution_resend)).set_enabled(cx,self.active);
         let notices=&self.room_allowances;
@@ -669,7 +679,8 @@ impl Widget for SharedPermissionNotice {
                 cx.action(crate::hagency::work_review::WorkReviewAction::Open(crate::hagency::work_review::OriginalWork{session,room,event,agent:agent.into()}));
             }
             if self.view.button(cx,ids!(execution_resend)).clicked(actions) && self.active && self.rows.is_empty() && !self.shows_error()
-                && let Some(resend)=self.resend.take() {
+                && let Some(resend)=self.resend_here().cloned() {
+                self.resend=None;
                 self.send_again(cx,resend);
             }
             if self.view.button(cx,ids!(recover)).clicked(actions) && !self.loading {
@@ -949,6 +960,54 @@ mod tests {
         let mut threaded=row("$reply","@a:x","expired",None,true);
         threaded["threadRoot"]=json!("$root");
         assert_eq!(offered(threaded).unwrap().thread.as_deref(),Some("$root"));
+    }
+    #[test]
+    fn a_message_held_by_the_allowance_is_offered_once_it_has_ended() {
+        let line=|r:Value|execution_lines(&json!({"executions":[r]}),"!room:x","",|_|false).remove(0);
+        let offered=|r:Value|execution_resend(&json!({"executions":[r]}),"!room:x","");
+        // While it waits for allowance, it says so and is not offered.
+        let mut waiting=row("$held","@a:x","blocked",Some("budget_blocked"),false);
+        waiting["budgetState"]=json!("exhausted");
+        assert_eq!(line(waiting.clone()).text,"The Agent's allowance has been used. Check its next renewal period with the resource owner.");
+        assert!(offered(waiting.clone()).is_none());
+        // The allowance period turned first: the server offers it to its
+        // sender, and it reads as not processed, with the Agent named.
+        let mut ended=waiting;
+        ended["canSendAgain"]=json!(true);
+        assert_eq!(line(ended.clone()),ExecutionLine{agent:Some("@a:x".into()),name:None,text:UNPROCESSED});
+        assert_eq!(offered(ended).unwrap().agents,vec!["@a:x".to_owned()]);
+    }
+    #[test]
+    fn a_reply_in_a_thread_is_offered_in_its_thread_and_the_room_says_where() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        let mut n=widget.borrow_mut().unwrap();
+        let in_threads=|mut r:Value,root:&str|{r["roomId"]=json!("!threads:x");r["threadRoot"]=json!(root);r};
+        let reply=json!({"executions":[in_threads(row("$thread_reply","@first:x","expired",None,true),"$thread_root")]});
+        // The room's timeline does not show the reply and cannot send it
+        // again: the room's notice names the Agent and says where it can be.
+        (n.active,n.room)=(true,"!threads:x".into());
+        n.read_status(&reply,|_|false);
+        n.render(&mut cx);
+        let shown=n.display();
+        assert!(shown.title.starts_with("@first:x did not process this message."),"{}",shown.title);
+        assert_eq!(shown.hint,"Open its thread to send it again.");
+        assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        // Its thread offers it, to be sent there.
+        n.thread="$thread_root".into();
+        n.read_status(&reply,|_|false);
+        n.render(&mut cx);
+        assert!(n.display().hint.is_empty());
+        assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        assert_eq!(n.resend_here().and_then(|r|r.thread.as_deref()),Some("$thread_root"));
+        // A message of the room's own timeline is offered in the room.
+        n.thread.clear();
+        let message=json!({"executions":[in_threads(row("$room_message","@first:x","expired",None,true),"$room_message")]});
+        n.read_status(&message,|_|false);
+        n.render(&mut cx);
+        assert!(n.display().hint.is_empty());
+        assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        assert_eq!(n.resend_here().map(|r|r.event.as_str()),Some("$room_message"));
     }
     #[test]
     fn a_server_that_does_not_describe_each_agent_is_read_as_before() {
