@@ -141,6 +141,42 @@ async fn a_session_is_replaced_when_little_of_its_term_is_left_or_the_proof_ends
     let cut = sessions.session_until(&context(1), after(45), now, &issue).unwrap();
     assert_eq!(cut.valid_until(), after(45));
 }
+/// Operations that wait keep the session they were given. However many of
+/// them wait, and for however long, a package has no more live sessions than
+/// it issued within one term: the registry's sixteen are not used up by
+/// waiting. The clock is moved by hand; a session past its end is live for
+/// nobody, whoever holds it.
+#[tokio::test]
+async fn operations_that_wait_do_not_use_up_the_sessions_of_a_package() {
+    let (_root, store) = fixture().await;
+    let start = Instant::now();
+    // The proof at `second`: a two-minute window renewed every fifteen
+    // seconds, and the default window renewed every ten.
+    let long = |second: u64| start + Duration::from_secs(second / 15 * 15 + 120);
+    let short = |second: u64| start + Duration::from_secs(second / 10 * 10 + 30);
+    for (proof, most) in [(&long as &dyn Fn(u64) -> Instant, 2), (&short, 3)] {
+        let registry = Registry::default();
+        let issue = issuing(&store, &registry);
+        let mut sessions = PackageSessions::default();
+        let mut held: Vec<service::Session> = Vec::new();
+        for second in 0..180 {
+            let now = start + Duration::from_secs(second);
+            // Every second another operation takes a session and never
+            // gives it back.
+            held.push(
+                sessions
+                    .session_until(&context(1), proof(second), now, &issue)
+                    .expect("a session is free"),
+            );
+            held.retain(|session| session.valid_until() > now);
+            let mut live: Vec<Instant> = held.iter().map(|session| session.valid_until()).collect();
+            live.sort();
+            live.dedup();
+            assert!(live.len() <= most, "{} live sessions at {second}s", live.len());
+        }
+    }
+    store.shutdown().await.unwrap();
+}
 #[test]
 fn a_session_cut_to_its_term_serves_for_half_of_it() {
     let now = Instant::now();

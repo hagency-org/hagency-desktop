@@ -276,6 +276,61 @@ async fn resumed_host_with(plaintext: bool, missing: bool, startup: Option<Start
     f.stop().await;
 }
 
+/// The Claude driver sends its ready receipt on a path of its own. When the
+/// answer is lost it sends the same receipt again, as the other drivers do:
+/// before, one lost answer ended the process, and the server then cancelled
+/// the message the process had been started for.
+#[tokio::test]
+#[ignore = "requires explicit HAGENCY_TEST_CLAUDE_RUNTIME_PROBE offline supervised process"]
+async fn native_shared_claude_full_host_sends_the_ready_receipt_again_when_its_answer_is_lost() {
+    let binding = AccountBinding::from_authenticated_profile(
+        "01234567-89ab-cdef-0123-456789abcdef",
+        "89abcdef-0123-4567-89ab-cdef01234567",
+        "owner@example.test",
+        Instant::now() + Duration::from_secs(45),
+    )
+    .unwrap();
+    let (f, transport, reserve) =
+        prepared_with(Fixture::with_provider(PROVIDER, binding.subject()).await).await;
+    let (f, transport, mut command) = runtime_fixture(f, transport, reserve).await;
+    command.version = 4;
+    command.capability = SHARED_CLAUDE_CAPABILITY.into();
+    command.policy = SHARED_CLAUDE_POLICY.into();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.shared.command = Some(command.clone());
+        state.shared.work.as_mut().unwrap().runtime_command_digest = digest(&command).unwrap();
+        state.shared.lose_qualified_reply = true;
+    }
+    let root = f._root.path().join("shared-claude-probe");
+    hagency_store::private::directory(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    assert!(matches!(
+        transport
+            .poll_claude_fixture(
+                &f.registry,
+                command.reserve_command.resource_id.clone(),
+                root,
+                binding,
+                "shared-usage"
+            )
+            .await
+            .unwrap(),
+        SharedExecutionProgress::Running { .. }
+    ));
+    stopped(&f).await;
+    {
+        let state = f.state.lock().unwrap();
+        assert!(!state.shared.lose_qualified_reply, "the answer was lost once");
+        assert_eq!(state.shared.starts, 1);
+        assert_eq!(state.shared.processes.values().filter(|r| r.state == "qualified").count(), 1);
+        let saved = state.shared.receipts.values().max_by_key(|r| r.ledger_revision).unwrap();
+        assert_eq!(saved.state, "completed");
+        assert_eq!(saved.body.as_deref(), Some("shared offline answer"));
+    }
+    f.stop().await;
+}
+
 #[tokio::test]
 #[ignore = "requires explicit HAGENCY_TEST_CLAUDE_RUNTIME_PROBE offline supervised process"]
 async fn native_shared_claude_full_host_preserves_usage_recovery_and_missing_idle() {

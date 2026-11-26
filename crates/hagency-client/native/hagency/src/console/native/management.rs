@@ -183,6 +183,13 @@ impl Registry {
         sessions.retain(service::WeakManagementAuthority::is_live);
         if sessions.len() >= 16 {
             session.retire();
+            tracing::warn!(
+                origin = "host",
+                live = sessions.len(),
+                limit = 16,
+                code = "management_capacity",
+                "No management session is free"
+            );
             return Err(failure(503, "management_capacity"));
         }
         sessions.push(session.authority().downgrade());
@@ -671,7 +678,7 @@ impl NativeManagement {
         if !committed {
             return self.authorized().await;
         }
-        check_after_change(|| self.authorized())
+        check_after_change(patience_after_change(), || self.authorized())
             .await
             .map_err(|_| failure(409, "management_outcome_unknown"))
     }
@@ -972,11 +979,12 @@ pub(super) fn device_failure(error: crate::console::Error) -> NativeError {
         failure(401, "owner_authorization_required")
     }
 }
-/// Whether an authority check failed without an answer: there was no free
-/// session, or the local service or the server did not answer. Such a check
-/// says nothing about the authority; a refusal carries another status.
+/// Whether an authority check failed without an answer (`NativeError::said`):
+/// it could not be asked, as without a free session, or it was asked and
+/// nothing came back. Such a check says nothing about the authority. That
+/// the scope was replaced is an answer to this check, as every refusal is.
 pub(super) fn unanswered(error: &NativeError) -> bool {
-    error.status == 503
+    matches!(error.said(), super::Said::NotAsked | super::Said::NoAnswer)
 }
 /// The pause before an unanswered authority check is made again.
 pub(super) const UNANSWERED_CHECK_GAP: Duration = Duration::from_millis(500);
@@ -987,14 +995,23 @@ const UNANSWERED_CHECK_PATIENCE: Duration = Duration::from_secs(20);
 /// goes unanswered. It is short: the caller still holds what it came with,
 /// and a longer outage is the caller's to wait out or to report.
 pub(super) const UNSENT_CHECK_PATIENCE: Duration = Duration::from_secs(5);
+/// The end of the time one command gives its checks after its change.
+pub(super) fn patience_after_change() -> Instant {
+    Instant::now() + UNANSWERED_CHECK_PATIENCE
+}
 /// Makes an authority check for a caller whose change is already made, and
-/// makes it again while it goes unanswered. Any other result, a refusal
-/// included, is returned at once.
-pub(super) async fn check_after_change<T, F>(check: impl Fn() -> F) -> Result<T, NativeError>
+/// makes it again until `patience` while it goes unanswered. Any other
+/// result, a refusal included, is returned at once.
+///
+/// A command takes `patience` once and gives it to every check it makes:
+/// what waits behind the command waits that long once, not once per check.
+pub(super) async fn check_after_change<T, F>(
+    patience: Instant,
+    check: impl Fn() -> F,
+) -> Result<T, NativeError>
 where
     F: std::future::Future<Output = Result<T, NativeError>>,
 {
-    let patience = Instant::now() + UNANSWERED_CHECK_PATIENCE;
     loop {
         match check().await {
             Err(error)

@@ -302,8 +302,9 @@ impl NativeManagement {
         // From here on the operation has run. A check of its authority that
         // cannot be made now is made again for a while before the outcome is
         // called unknown; a refusal is final at once.
+        let patience = super::management::patience_after_change();
         if let Some(reply) = reply {
-            let (current, live) = super::management::check_after_change(&authorize)
+            let (current, live) = super::management::check_after_change(patience, &authorize)
                 .await
                 .map_err(|_| failure(409, "management_outcome_unknown"))?;
             if current != context {
@@ -314,7 +315,7 @@ impl NativeManagement {
                 .map_err(|_| failure(409, "management_outcome_unknown"))?;
         }
         let checked = if result.is_ok() {
-            super::management::check_after_change(&authorize).await
+            super::management::check_after_change(patience, &authorize).await
         } else {
             authorize().await
         };

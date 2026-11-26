@@ -756,9 +756,15 @@ fn identity_matches(identity: &Value, binding: &Binding) -> bool {
         && identity["issuer"] == format!("{}auth/", binding.origin)
 }
 fn renewal_error(code: &str) -> Error {
+    // An answer that the session no longer belongs to this account is a
+    // refusal like the others. Read as "no answer", it left the proof in hand
+    // in use until its own end.
     if matches!(
         code,
-        "sign_in_required" | "authorization_expired" | "authentication_required"
+        "sign_in_required"
+            | "authorization_expired"
+            | "authentication_required"
+            | "identity_mapping_mismatch"
     ) {
         Error::Unauthorized
     } else {
@@ -859,7 +865,22 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
         );
     }
     let (renewed, clock) = proof_response(request_started, renewal_response).await.map_err(renewal_error)?;
-    let (mut until, mut taken) = clock.bounds(&renewed).map_err(|_| Error::Unavailable)?;
+    let (mut until, mut taken) = match clock.bounds(&renewed) {
+        Ok(bounds) => bounds,
+        Err(_) => {
+            // The server answered with a proof this host cannot use, one that
+            // has no time left for instance. Its session ends with that proof
+            // all the same, so the one in hand is cut to it before the
+            // renewal is reported as not made.
+            if let Some(end) = proof_clock::local_end(&renewed)
+                && end < session.authorized_until
+            {
+                session.authorized_until = end;
+                session.clock_allowance = Duration::ZERO;
+            }
+            return Err(Error::Unavailable);
+        }
+    };
     // The server has answered, and its session now ends with this proof. If
     // a later step gets no answer, the proof that stays in hand is the one
     // the server holds: an earlier one that ran longer no longer stands.
@@ -1076,6 +1097,7 @@ async fn response(response: reqwest::Response) -> Result<Value, &'static str> {
         }
         return Err(match value["code"].as_str() {
             Some("sign_in_required") => "sign_in_required",
+            Some("identity_mapping_mismatch") => "identity_mapping_mismatch",
             _ => "server_request_failed",
         });
     }
@@ -2133,6 +2155,8 @@ impl ServerLogin {
         } else {
             &session.token
         };
+        // What the log names a failed request by: its route without the query.
+        let route = format!("{method} {}", path.split('?').next().unwrap_or_default());
         let mut request = client
             .request(method, server.join(&path).unwrap())
             .bearer_auth(bearer);
@@ -2142,17 +2166,19 @@ impl ServerLogin {
         if let Some(body) = body {
             request = request.json(&body);
         }
-        let mut reply = request
-            .send()
-            .await
-            .map_err(|_| OwnerError::new(503, "server_unavailable"))?;
+        // A failure is logged where it is made, with who made it: this host,
+        // when the request could not be sent or its answer not be read, or
+        // the server, when it answered with a refusal.
+        let mut reply = request.send().await.map_err(|_| {
+            tracing::info!(origin = "host", stage = "send", %route, code = "server_unavailable", "Owner request got no answer");
+            OwnerError::new(503, "server_unavailable")
+        })?;
         let status = reply.status().as_u16();
         let mut raw = Vec::new();
-        while let Some(chunk) = reply
-            .chunk()
-            .await
-            .map_err(|_| OwnerError::new(503, "server_unavailable"))?
-        {
+        while let Some(chunk) = reply.chunk().await.map_err(|_| {
+            tracing::info!(origin = "host", stage = "read", %route, status, code = "server_unavailable", "Owner request got no answer");
+            OwnerError::new(503, "server_unavailable")
+        })? {
             if raw.len() + chunk.len() > 128 * 1024 {
                 return Err(OwnerError::new(502, "invalid_server_response"));
             }
@@ -2170,6 +2196,11 @@ impl ServerLogin {
                             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
                 })
                 .unwrap_or("server_request_failed");
+            if status >= 500 {
+                tracing::info!(origin = "server", %route, status, code, "Owner request was not served");
+            } else {
+                tracing::debug!(origin = "server", %route, status, code, "Owner request was refused");
+            }
             return Err(OwnerError::new(status, code));
         }
         if let Some(scope) = creation_scope {

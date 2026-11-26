@@ -137,19 +137,14 @@ pub(super) async fn upload_retry(
 /// failure (503 storage_unavailable, which includes trigger exceptions) is
 /// also undecided: falling back would end the message instead of retrying it.
 fn undecided(e: &NativeError) -> bool {
-    matches!(
-        e.code.as_str(),
-        "server_unavailable"
-            | "storage_unavailable"
-            | "invalid_server_response"
-            | "server_request_failed"
-            | "management_outcome_unknown"
-            | "allocation_ticket_expired"
-            | "management_scope_changed"
-            | "owner_authorization_required"
-            | "sign_in_required"
-            | "device_authorization_required"
-    )
+    // Not a refusal (`NativeError::said`): the retry could not be asked, or
+    // got no answer. Before, a session that was not free for a moment counted
+    // as the server refusing the retry, and the message ended there.
+    e.passes()
+        || matches!(
+            e.code.as_str(),
+            "allocation_ticket_expired" | "sign_in_required" | "device_authorization_required"
+        )
 }
 fn activity(
     sink: &SharedAttemptProcessSink,

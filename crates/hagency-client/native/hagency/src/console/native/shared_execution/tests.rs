@@ -57,6 +57,7 @@ pub(crate) struct State {
     work_starts: std::collections::BTreeSet<String>,
     activity_epoch: u64,
     refuse_renewal: bool,
+    unanswered_renewals: u32,
     delay_renewal_reply: bool,
     delay_start_reply: bool,
     delay_demand_binding: bool,
@@ -74,6 +75,9 @@ pub(crate) struct State {
     session_routes: usize,
     forged_work: bool,
     lose_stop_before_write: bool,
+    /// The ready receipt is recorded and its lease made, and the answer never
+    /// arrives. An exact replay is answered with that same lease.
+    lose_qualified_reply: bool,
     cleanup: bool,
     reply_pending: bool,
     stopped_before_reply: bool,
@@ -213,6 +217,9 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         } else {
             None
         };
+        if r.state == "qualified" && std::mem::take(&mut s.shared.lose_qualified_reply) {
+            return None;
+        }
         return Some(
             json!({"observationId":r.observation_id,"receiptDigest":digest(&r).unwrap(),"activity":active,"state":if r.state=="not_started" {"stopped"} else {&r.state},"observedAtMs":at}),
         );
@@ -254,7 +261,13 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         (digest(c).unwrap(),c.command_id.clone(),s.shared.budget_attempts.processes.values().find(|r|r.state=="qualified").and_then(|r|r.process_digest.clone()))
     }else{(h,runtime_id,process_digest)};
     if path.ends_with("/activity/renew") {
-        if s.shared.refuse_renewal { return Some(json!({"fixtureStatus":503,"error":"fixture_unavailable"})); }
+        // A refusal, in the server's words: what it answers while its policy
+        // issues nothing. A status of 503 with no decision in it is not one.
+        if s.shared.refuse_renewal { return Some(json!({"fixtureStatus":503,"code":"shared_execution_issuance_unavailable"})); }
+        if s.shared.unanswered_renewals > 0 {
+            s.shared.unanswered_renewals -= 1;
+            return Some(json!({"fixtureStatus":503,"error":"fixture_unavailable"}));
+        }
         assert_eq!(body["authority"]["epoch"], s.shared.activity_epoch);
         s.shared.activity_epoch += 1;
         return Some(
@@ -521,6 +534,31 @@ async fn native_shared_execution_history_tamper_and_expiry_never_issue() {
     }
     assert_eq!(rows(&f, "owner_shared_runtime_lifetimes"), 0);
     assert_eq!(f.state.lock().unwrap().shared.process_writes, 0);
+    f.stop().await;
+}
+/// The answer to the ready receipt is lost. Nothing has started, and the
+/// server answers an exact replay with the lease it already made, so the
+/// receipt is sent again and the turn runs once. Taken as a failure, the lost
+/// answer ended a run that had not begun.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_shared_execution_sends_the_ready_receipt_again_when_its_answer_is_lost() {
+    let (f, t, _) = fixture().await;
+    f.state.lock().unwrap().shared.lose_qualified_reply = true;
+    assert!(matches!(
+        t.poll_fixture(&f.registry, launch(&f, "text-usage"))
+            .await
+            .unwrap(),
+        SharedExecutionProgress::Running { .. }
+    ));
+    stopped(&f).await;
+    {
+        let state = f.state.lock().unwrap();
+        assert!(!state.shared.lose_qualified_reply, "the answer was lost once");
+        assert_eq!(state.shared.starts, 1);
+        assert_eq!(state.shared.processes.values().filter(|r| r.state == "qualified").count(), 1);
+        assert!(state.shared.receipts.values().any(|receipt| receipt.state == "completed"));
+    }
     f.stop().await;
 }
 #[tokio::test]
@@ -824,6 +862,43 @@ async fn native_shared_execution_cleanup_poll_stops_original_running_process() {
     ));
     stopped(&f).await;
     assert_eq!(f.state.lock().unwrap().shared.starts, 1);
+    f.stop().await;
+}
+
+/// A renewal the server did not serve was not refused. The same renewal is
+/// sent again, and the process that holds the lease works on. Taken as a
+/// refusal, one exchange without an answer ended the run.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_shared_execution_sends_a_renewal_again_when_it_gets_no_answer() {
+    let (f, t, _) = fixture().await;
+    f.state.lock().unwrap().shared.unanswered_renewals = 2;
+    t.poll_fixture(&f.registry, launch(&f, "text-renew"))
+        .await
+        .unwrap();
+    method_seen(&f, "turn/start").await;
+    tokio::time::timeout(Duration::from_secs(16), async {
+        loop {
+            if f.state.lock().unwrap().shared.activity_epoch >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the renewal is sent again until it is answered");
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.unanswered_renewals, 0, "two renewals got no answer first");
+        assert!(!s.shared.processes.values().any(|r| r.state == "stopped"));
+    }
+    std::fs::write(f._root.path().join("shared-probe/release-text"), b"release").unwrap();
+    stopped(&f).await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.starts, 1);
+        assert_eq!(s.shared.receipts.len(), 1);
+    }
     f.stop().await;
 }
 

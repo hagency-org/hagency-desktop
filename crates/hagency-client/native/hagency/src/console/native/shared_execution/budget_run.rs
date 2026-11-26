@@ -633,6 +633,7 @@ async fn work_loop(
     {
         Ok(custody) => custody,
         Err(error) => {
+            io::ended_before_its_turn("issue", &error);
             if let Ok(Some(receipt)) =
                 budget_work_io::refuse_unissued(io, r, sink.command(), &work, Some(&input)).await
             {

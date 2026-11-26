@@ -96,23 +96,47 @@ impl Authority {
         until: Instant,
         observation: SharedTextProcessObservation,
     ) -> Result<(SharedActivityLease, u64, Instant), NativeError> {
-        let b = io.bound().await?;
-        io::binding(&b.scope, self.root(), true)?;
+        // The process is recorded once; sending its receipt is what is asked
+        // again. Nothing has started yet, and the server answers an exact
+        // replay of this receipt with the lease it already made. So a scope
+        // that could not be taken, or a reply that was lost, sends the same
+        // receipt again under a fresh scope, as the other drivers do. Taken as
+        // a failure it ended a process that had not begun, and the server then
+        // cancelled the message that process was started for.
+        let root = self.root();
         match self {
             Self::Root(s, d) => {
                 let receipt = s.record(observation).await.map_err(store)?;
-                let (ack, at, sent) = run::upload_process(&b, d, until, &receipt).await?;
+                let (ack, at, sent) = io
+                    .settled(until, || async {
+                        let b = io.bound().await?;
+                        io::binding(&b.scope, root, true)?;
+                        run::upload_process(&b, d, until, &receipt).await
+                    })
+                    .await?;
                 Ok((ack.activity.ok_or_else(invalid)?, at, sent))
             }
             Self::Attempt(s, d) => {
                 let receipt = s.record(observation).await.map_err(store)?;
-                let (ack, at, sent) = attempt_run::upload_process(&b, d, until, &receipt).await?;
+                let (ack, at, sent) = io
+                    .settled(until, || async {
+                        let b = io.bound().await?;
+                        io::binding(&b.scope, root, true)?;
+                        attempt_run::upload_process(&b, d, until, &receipt).await
+                    })
+                    .await?;
                 Ok((ack.activity.ok_or_else(invalid)?, at, sent))
             }
             #[cfg(feature = "shared-budget-execution")]
             Self::Budget(s, d) => {
                 let receipt = s.record(observation).await.map_err(store)?;
-                let (ack, at, sent) = budget_run::upload_process(&b, d, until, &receipt).await?;
+                let (ack, at, sent) = io
+                    .settled(until, || async {
+                        let b = io.bound().await?;
+                        io::binding(&b.scope, root, true)?;
+                        budget_run::upload_process(&b, d, until, &receipt).await
+                    })
+                    .await?;
                 Ok((ack.activity.ok_or_else(invalid)?, at, sent))
             }
         }

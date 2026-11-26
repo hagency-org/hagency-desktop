@@ -1234,12 +1234,26 @@ fn custody(operation: Operation, arguments: &Value, saved: Option<&service::Pend
 /// an authorization check that got no answer) refused for the whole day the
 /// Desktop reuses its ID, with no way to settle it.
 ///
-/// Only commands the native journal keeps by their own ID qualify. A failed
-/// lookup is returned as it is, and the next retry asks again.
+/// Only commands the native journal keeps by their own ID qualify, and the
+/// one the server keeps itself (see `kept_by_the_server`). A failed lookup is
+/// returned as it is, and the next retry asks again.
 async fn resumes_under_original_id(manager: &Arc<NativeManagement>, operation: Operation, arguments: &Value) -> Result<bool, NativeError> {
+    if kept_by_the_server(operation, arguments) { return Ok(true) }
     let Some((id, _, _)) = original_intent(operation, arguments) else { return Ok(false) };
     let saved = manager.original_command_receipt(id).await?;
     Ok(custody(operation, arguments, saved.as_ref()) != Custody::Other)
+}
+/// A decision on an Agent's tool request has no command ID and no record in
+/// the native journal: the server keeps it under the request's own ID and
+/// digest. The same decision sent again is answered with the one recorded,
+/// another decision or a request that has ended is refused. The bridge admits
+/// a retry only with the arguments of the first run, so running it again can
+/// only repeat that decision. Without this, a decision whose first run met a
+/// passing failure stayed refused for the day the Desktop reuses its request,
+/// while the Agent's tool call waited for it.
+fn kept_by_the_server(operation: Operation, arguments: &Value) -> bool {
+    operation == Operation::central
+        && arguments.get(0).and_then(|input| input.get("operation")).and_then(Value::as_str) == Some("shared_approval_decide")
 }
 async fn matching_native_receipt(manager: &Arc<NativeManagement>, operation: Operation, arguments: &Value) -> Result<Option<Result<Value, Failure>>, NativeError> {
     if operation == Operation::observe_personal_settings {
@@ -1328,5 +1342,18 @@ mod receipt_matching_tests {
         let bare=serde_json::json!([{"resourceId":"resource-1"}]);
         assert_eq!(custody(Operation::central,&bare,None),Custody::Other);
         assert_eq!(custody(Operation::saved_commands,&serde_json::json!([]),None),Custody::Other);
+    }
+    #[test]
+    fn a_tool_decision_the_server_keeps_runs_again_as_the_same_request() {
+        let decision=serde_json::json!([{"operation":"shared_approval_decide","id":"approval","digest":"d".repeat(64),"decision":"deny"}]);
+        // It has no command ID, so the native journal cannot hold it.
+        assert_eq!(custody(Operation::central,&decision,None),Custody::Other);
+        assert!(kept_by_the_server(Operation::central,&decision));
+        // Reading a request, another command, or the same name under another
+        // bridge operation is not such a decision.
+        assert!(!kept_by_the_server(Operation::central,&serde_json::json!([{"operation":"shared_approval_get","id":"approval"}])));
+        assert!(!kept_by_the_server(Operation::central,&serde_json::json!([{"commandId":"decide-1","operation":"pool_agent_decide"}])));
+        assert!(!kept_by_the_server(Operation::saved_commands,&decision));
+        assert!(!kept_by_the_server(Operation::central,&serde_json::json!([])));
     }
 }
