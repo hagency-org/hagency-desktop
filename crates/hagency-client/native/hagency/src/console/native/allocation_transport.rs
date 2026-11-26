@@ -213,19 +213,26 @@ impl AllocationTransport {
         scope: &Scope,
         uncertain: bool,
     ) -> Result<(), NativeError> {
+        let unsent = Instant::now() + super::management::UNSENT_CHECK_PATIENCE;
         let result = loop {
             match self.check_scope_once(scope).await {
-                // The request may have committed, and this check could not be
-                // made: no free session, or the service or the server did not
-                // answer. That is not a refusal. Ask again while the scope
-                // itself stands, before the outcome is called unknown. A
-                // check before anything was sent is reported as it is, and
-                // its caller decides whether to come back.
+                // This check could not be made: no free session, or the
+                // service or the server did not answer. That is not a
+                // refusal. When the request may have committed, ask again
+                // while the scope itself stands, before the outcome is
+                // called unknown. Before anything was sent, ask again for a
+                // short while: waiting changes nothing then, and a caller
+                // that ends its run on this error would end it for a moment
+                // without a free session. After that the check is reported
+                // as it is, and its caller decides whether to come back.
                 Err(error)
-                    if uncertain
-                        && super::management::unanswered(&error)
+                    if super::management::unanswered(&error)
                         && Instant::now() + super::management::UNANSWERED_CHECK_GAP
-                            < scope.deadline =>
+                            < if uncertain {
+                                scope.deadline
+                            } else {
+                                scope.deadline.min(unsent)
+                            } =>
                 {
                     tokio::time::sleep(super::management::UNANSWERED_CHECK_GAP).await;
                 }

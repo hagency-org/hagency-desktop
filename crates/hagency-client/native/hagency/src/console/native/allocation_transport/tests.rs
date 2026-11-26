@@ -1610,14 +1610,46 @@ async fn native_allocation_transport_waits_out_a_check_that_cannot_be_made_after
     // own, and there is none free.
     tokio::time::sleep(Duration::from_millis(20)).await;
     f.owner.test_console().0.server_login.forget_recent_check().await;
+    // Before anything is sent the check is asked again only for a short
+    // while, and is then reported as it is.
+    let started = Instant::now();
     let before = f.transport.check_scope(&scope, false).await.unwrap_err();
     assert_eq!((before.status, before.code.as_str()), (503, "management_capacity"));
+    assert!(started.elapsed() >= Duration::from_secs(4));
+    assert!(started.elapsed() < Duration::from_secs(8));
     let release = tokio::spawn(async move {
         tokio::time::sleep(Duration::from_millis(1200)).await;
         drop(others);
     });
     let started = Instant::now();
     f.transport.check_scope(&scope, true).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(1000));
+    release.await.unwrap();
+    f.stop().await;
+}
+
+/// Before anything is sent, an authority check that cannot be made (here: no
+/// free management session) is asked again for a moment instead of failing
+/// the step that needed it: a run that ends on this error would otherwise
+/// end because sixteen sessions were held for half a second.
+#[tokio::test]
+async fn native_allocation_transport_asks_again_when_a_check_before_sending_cannot_be_made() {
+    let f = Fixture::new().await;
+    let scope = f.transport.scope(Permission::ExecuteAllocations).await.unwrap();
+    let mut others = Vec::new();
+    for instance in 100..115 {
+        let manager = f.owner.management(package(instance)).await.unwrap();
+        let held = manager.authorized().await.unwrap();
+        others.push((manager, held));
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        drop(others);
+    });
+    let started = Instant::now();
+    f.transport.check_scope(&scope, false).await.unwrap();
     assert!(started.elapsed() >= Duration::from_millis(1000));
     release.await.unwrap();
     f.stop().await;

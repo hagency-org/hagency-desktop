@@ -169,17 +169,26 @@ impl Authority {
         r: &OwnerResourceRegistry,
         state: &Lease,
     ) -> Result<(Bound, VerifiedSharedActivity), NativeError> {
-        let b = io.bound().await?;
-        let e = b.enrollment(r, self.root(), true).await?;
-        let deadline = state.until.min(b.scope.deadline);
-        let proof = match self {
-            Self::Root(s, _) => s.authorize_activity(e, &state.lease, deadline),
-            Self::Attempt(s, _) => s.authorize_activity(e, &state.lease, deadline),
-            #[cfg(feature = "shared-budget-execution")]
-            Self::Budget(s, _) => s.authorize_activity(e, &state.lease, deadline),
-        }
-        .map_err(store)?;
-        Ok((b, proof))
+        // Read-only until it answers: a scope, the enrollment under it and a
+        // local comparison. A check that could not be made (no free session,
+        // a credential being refreshed) is waited out while the lease lasts,
+        // as the other drivers do: taken as a failure it ended the process,
+        // and the message it had just accepted was never answered. A real
+        // revocation is not retried.
+        io.settled(state.until, || async {
+            let b = io.bound().await?;
+            let e = b.enrollment(r, self.root(), true).await?;
+            let deadline = state.until.min(b.scope.deadline);
+            let proof = match self {
+                Self::Root(s, _) => s.authorize_activity(e, &state.lease, deadline),
+                Self::Attempt(s, _) => s.authorize_activity(e, &state.lease, deadline),
+                #[cfg(feature = "shared-budget-execution")]
+                Self::Budget(s, _) => s.authorize_activity(e, &state.lease, deadline),
+            }
+            .map_err(store)?;
+            Ok((b, proof))
+        })
+        .await
     }
     pub fn work_poll(&self, a: SharedActivityRef) -> Action {
         #[cfg(feature = "shared-budget-execution")]
@@ -276,7 +285,7 @@ impl Active {
         lease: SharedActivityLease,
         observed: (u64, Instant),
     ) -> Result<Self, NativeError> {
-        let b = io.bound().await?;
+        let b = io.bound_running().await?;
         let state = Lease::new(&authority, lease, observed.0, observed.1, &b)?;
         process.install_renewable_shared_activity(state.lease.authority.epoch, state.until).map_err(|_| invalid())?;
         let control = process.shared_activity_control().map_err(|_| invalid())?;
@@ -294,7 +303,7 @@ impl Active {
         lease: SharedActivityLease,
         observed: (u64, Instant),
     ) -> Result<Self, NativeError> {
-        let b = io.bound().await?;
+        let b = io.bound_running().await?;
         let state = Lease::new(&authority, lease, observed.0, observed.1, &b)?;
         process
             .install_renewable_shared_activity(state.lease.authority.epoch, state.until)

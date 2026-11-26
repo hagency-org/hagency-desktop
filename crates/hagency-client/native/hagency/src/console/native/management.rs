@@ -983,6 +983,10 @@ pub(super) const UNANSWERED_CHECK_GAP: Duration = Duration::from_millis(500);
 /// How long a change that is already made waits for an unanswered check of
 /// its authority: the time a running task gives the same check to settle.
 const UNANSWERED_CHECK_PATIENCE: Duration = Duration::from_secs(20);
+/// How long a check made before anything was sent is asked again when it
+/// goes unanswered. It is short: the caller still holds what it came with,
+/// and a longer outage is the caller's to wait out or to report.
+pub(super) const UNSENT_CHECK_PATIENCE: Duration = Duration::from_secs(5);
 /// Makes an authority check for a caller whose change is already made, and
 /// makes it again while it goes unanswered. Any other result, a refusal
 /// included, is returned at once.
