@@ -1,5 +1,6 @@
 use makepad_widgets::*;
 
+use crate::shared::icon_button::set_button_enabled;
 use crate::sliding_sync::{submit_async_request, LoginByPassword, LoginRequest, MatrixRequest};
 
 use super::homeserver::{password_identifier, LoginMethods};
@@ -140,7 +141,7 @@ script_mod! {
                                 text: #(crate::i18n::tr("Enter your Hagency server address. Other Matrix servers are not supported.")) i18n_text: "Enter your Hagency server address. Other Matrix servers are not supported."
                             }
                         }
-                        continue_server_button := RobrixIconButton {
+                        continue_server_button := RinxPrimaryButton {
                             width: Fill, height: 42, padding: 10
                             align: Align{x: 0.5, y: 0.5}
                             text: #(crate::i18n::tr("Continue")) i18n_text: "Continue"
@@ -418,7 +419,8 @@ impl LoginScreen {
         content.set_title(cx, title);
         content.set_status(cx, status);
         content.button_ref(cx).set_text(cx, button);
-        content.button_ref(cx).set_enabled(cx, enabled);
+        let button_ref = content.button_ref(cx);
+        set_button_enabled(cx, &button_ref, enabled);
         self.view.modal(cx, ids!(login_status_modal)).open(cx);
         self.redraw(cx);
     }
@@ -718,12 +720,18 @@ impl MatchEvent for LoginScreen {
                 _ => {}
             }
         }
-        self.view.button(cx, ids!(login_button)).set_enabled(cx, !self.login_pending && !crate::sliding_sync::account_changing());
-        self.view.button(cx, ids!(browser_login_button)).set_enabled(cx, !self.login_pending);
-        self.view.button(cx, ids!(edit_server_button)).set_enabled(cx, !self.login_pending);
-        self.view.button(cx, ids!(continue_server_button)).set_enabled(cx, !self.login_pending && !self.discovery_pending);
-        self.view.button(cx, ids!(register_option_button)).set_enabled(cx, !self.login_pending);
-        self.view.button(cx, ids!(submit_registration_button)).set_enabled(cx, !self.login_pending);
+        let ready = !self.login_pending;
+        for (id, enabled) in [
+            (ids!(login_button), ready && !crate::sliding_sync::account_changing()),
+            (ids!(browser_login_button), ready),
+            (ids!(edit_server_button), ready),
+            (ids!(continue_server_button), ready && !self.discovery_pending),
+            (ids!(register_option_button), ready),
+            (ids!(submit_registration_button), ready),
+        ] {
+            let button = self.view.button(cx, id);
+            set_button_enabled(cx, &button, enabled);
+        }
         self.redraw(cx);
     }
 }

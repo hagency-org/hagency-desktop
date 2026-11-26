@@ -101,13 +101,13 @@ script_mod! {
                     .mix(self.color_disabled, self.disabled)
 
                 let stroke = self.border_color
-                    .mix(self.border_color_focus, self.focus)
                     .mix(self.border_color_hover, self.hover)
                     .mix(self.border_color_down, self.down * self.hover)
+                    .mix(self.border_color_focus, self.focus)
                     .mix(self.border_color_disabled, self.disabled)
 
                 sdf.fill_keep(fill)
-                sdf.stroke(stroke, self.border_size)
+                sdf.stroke(stroke, max(self.border_size, self.focus * (1.0 - self.disabled) * 2.0))
 
                 // Draw the down-arrow triangle on top of the filled box.
                 let c = vec2(self.rect_size.x - 14.0, self.rect_size.y * 0.5)

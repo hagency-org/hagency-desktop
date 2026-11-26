@@ -12,6 +12,8 @@
 
 use makepad_widgets::*;
 
+use crate::shared::icon_button::set_button_enabled;
+
 use super::approval::{ApprovalAction, ApprovalDecisionState, ApprovalRequest};
 
 script_mod! {
@@ -20,9 +22,7 @@ script_mod! {
 
     // Decision buttons follow robrix2's AgentApproval{Primary,Secondary,Danger}Button
     // recipes: a tinted surface with a 1px semantic stroke, RBX_CONTROL_H_MD tall.
-    // They take no key focus on a click (as RinxButton): these colors have no focus
-    // variant, so a clicked button would turn to the engine's default focus face.
-    mod.widgets.AgentApprovalPrimaryButton = Button {
+    mod.widgets.AgentApprovalPrimaryButton = RinxFocusButton {
         grab_key_focus: false
         visible: false
         width: Fit
@@ -51,7 +51,7 @@ script_mod! {
         text: ""
     }
 
-    mod.widgets.AgentApprovalSecondaryButton = Button {
+    mod.widgets.AgentApprovalSecondaryButton = RinxFocusButton {
         grab_key_focus: false
         visible: false
         width: Fit
@@ -80,7 +80,7 @@ script_mod! {
         text: ""
     }
 
-    mod.widgets.AgentApprovalDangerButton = Button {
+    mod.widgets.AgentApprovalDangerButton = RinxFocusButton {
         grab_key_focus: false
         visible: false
         width: Fit
@@ -331,7 +331,7 @@ impl AgentApprovalCard {
             if visible {
                 any_button_visible = true;
                 button.set_text(cx, &text);
-                button.set_enabled(cx, enabled);
+                set_button_enabled(cx, &button, enabled);
                 if enabled {
                     // A recycled portal-list item may carry stale hover state.
                     button.reset_hover(cx);

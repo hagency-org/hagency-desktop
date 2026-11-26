@@ -496,7 +496,50 @@ mod controls {
         mod.widgets.RinxLabel = Label {draw_text +: {color: RINX_INK text_style: theme.font_regular{font_size: RINX_BODY_SIZE}}}
         mod.widgets.RinxPageTitle = mod.widgets.RinxLabel {draw_text.text_style: theme.font_bold{font_size: RINX_TITLE_SIZE}}
         mod.widgets.RinxHint = mod.widgets.RinxLabel {draw_text +: {color: RINX_MUTED text_style.font_size: RINX_META_SIZE}}
-        mod.widgets.RinxButton = Button {
+        let button_pixel = Button.draw_bg.pixel
+        mod.widgets.RinxFocusButton = Button {
+            draw_bg +: {
+                button_pixel: button_pixel
+                focus_ring: instance(0.0)
+                focus_ring_backdrop: uniform(RINX_PAGE)
+                focus_ring_width: uniform(theme.size_focus_ring)
+                pixel: fn() {
+                    let face = self.button_pixel()
+                    if self.focus_ring <= 0.0 { return face }
+                    return self.draw_focus_ring(face, self.face_fill())
+                }
+                draw_focus_ring: fn(face: vec4, fill: vec4) -> vec4 {
+                    let opacity = self.focus_ring * (1.0 - self.disabled) * (1.0 - self.loading)
+                    if opacity <= 0.0 { return face }
+
+                    // Overlay the ring after the face, even on borderless buttons.
+                    let width = self.focus_ring_width
+                    let inset = max(self.border_size, width * 0.5) + self.material_margin * step(0.5, self.material)
+                    let sdf = Sdf2d.viewport(self.pos * self.rect_size)
+                    sdf.box_all(
+                        inset, inset, self.rect_size.x - 2.0 * inset, self.rect_size.y - 2.0 * inset,
+                        mix(self.border_radius, self.border_radius_tl, step(0.0, self.border_radius_tl)),
+                        mix(self.border_radius, self.border_radius_tr, step(0.0, self.border_radius_tr)),
+                        mix(self.border_radius, self.border_radius_br, step(0.0, self.border_radius_br)),
+                        mix(self.border_radius, self.border_radius_bl, step(0.0, self.border_radius_bl))
+                    )
+                    // Transparent controls sit on the page. Choose the ring ink
+                    // against the visible fill, including hover and pressed fills.
+                    let surface = self.focus_ring_backdrop.rgb.mix(fill.rgb, fill.a)
+                    let linear = pow((surface + vec3(0.055)) / 1.055, vec3(2.4))
+                    let luma = dot(linear, vec3(0.2126, 0.7152, 0.0722))
+                    let ink = mix(#fff, #000, step(0.179, luma))
+                    sdf.stroke(vec4(ink.rgb, opacity), width)
+                    return sdf.result + face * (1.0 - sdf.result.a)
+                }
+            }
+            animator +: {focus: {
+                default: @off
+                off: AnimatorState {from: {all: Snap} apply: {draw_bg: {focus_ring: 0.0}}}
+                on: AnimatorState {from: {all: Snap} apply: {draw_bg: {focus_ring: 1.0}}}
+            }}
+        }
+        mod.widgets.RinxButton = mod.widgets.RinxFocusButton {
             height: RINX_CONTROL_HEIGHT padding: Inset{left: 14 * RINX_SPACING right: 14 * RINX_SPACING top: 8 bottom: 8}
             grab_key_focus: false
             animator.hover.off.from.all.duration: RINX_MOTION
@@ -505,14 +548,15 @@ mod controls {
                 color: RINX_SURFACE color_focus: RINX_SURFACE color_hover: RINX_HOVER color_down: RINX_PRESSED
                 color_2: vec4(-1., -1., -1., -1.)
                 border_color: RINX_BORDER border_color_hover: RINX_BORDER border_color_down: RINX_BORDER
-                border_color_focus: RINX_ACCENT border_size: 1 border_radius: theme.corner_radius
+                border_color_focus: RINX_BORDER border_size: 1 border_radius: theme.corner_radius
             }
             draw_text +: {color: RINX_INK color_hover: RINX_INK color_down: RINX_INK color_focus: RINX_INK text_style: theme.font_regular{font_size: RINX_BODY_SIZE}}
             draw_icon +: {color: RINX_INK}
         }
         mod.widgets.RinxPrimaryButton = mod.widgets.RinxButton {
             draw_bg +: {color: RINX_ACCENT color_focus: RINX_ACCENT color_hover: RINX_ACCENT_HOVER color_down: RINX_ACCENT_DOWN
-                border_size: 1 border_color: RINX_ACCENT border_color_hover: RINX_ACCENT_HOVER border_color_down: RINX_ACCENT_DOWN border_color_focus: RINX_ON_ACCENT}
+                border_size: 1 border_color: RINX_ACCENT border_color_hover: RINX_ACCENT_HOVER border_color_down: RINX_ACCENT_DOWN
+                border_color_focus: RINX_ACCENT}
             draw_text +: {color: RINX_ON_ACCENT color_hover: RINX_ON_ACCENT color_down: RINX_ON_ACCENT color_focus: RINX_ON_ACCENT}
             draw_icon +: {color: RINX_ON_ACCENT}
         }
