@@ -24,6 +24,25 @@ pub struct Resend {
     pub agents: Vec<String>,
 }
 
+/// The field a message sent again carries in its content: the message it
+/// was sent for. Every device of the sender that has the new message stops
+/// offering the first one, also after a restart. In an encrypted room it is
+/// encrypted with the rest of the content.
+pub const SENT_AGAIN_FIELD: &str = "org.hagency.sent_again";
+
+/// The extra content of a message sent again for `event`.
+pub fn marker(event: &str) -> serde_json::Map<String, Value> {
+    serde_json::Map::from_iter([(SENT_AGAIN_FIELD.to_owned(), serde_json::json!({"event_id": event}))])
+}
+
+/// The message that `content`, a message's content, says it was sent again
+/// for.
+pub fn original_of(content: &Value) -> Option<&str> {
+    content[SENT_AGAIN_FIELD]["event_id"].as_str().filter(|id| {
+        id.starts_with('$') && (2..=255).contains(&id.len()) && !id.chars().any(|c| c.is_control() || c.is_whitespace())
+    })
+}
+
 /// What some message offers changed: the cards on the messages are drawn
 /// again.
 #[derive(Clone, Copy, Debug)]
@@ -206,6 +225,18 @@ mod tests {
         // A server that does not describe each Agent offers nothing.
         let old = json!({"executions":[{"roomId":"!room:x","eventId":"$e","state":"cancelled"}]});
         assert!(of_read(&old, "!room:x", "").is_empty());
+    }
+
+    #[test]
+    fn a_message_sent_again_names_the_message_it_was_sent_for() {
+        let mut content = json!({"msgtype":"m.text","body":"hello"});
+        content.as_object_mut().unwrap().extend(marker("$first"));
+        assert_eq!(original_of(&content), Some("$first"));
+        // Any other message names none, and a malformed name is no name.
+        assert_eq!(original_of(&json!({"msgtype":"m.text","body":"hello"})), None);
+        for bad in [json!("$first"), json!({"event_id":"first"}), json!({"event_id":"$ first"}), json!({"event_id":7})] {
+            assert_eq!(original_of(&json!({SENT_AGAIN_FIELD: bad})), None);
+        }
     }
 
     /// The store is one for the process, so every test reads as the same

@@ -91,10 +91,13 @@ For the room:
    first did.
 
    One click sends once: a message that was sent again is not offered again
-   by this window, also after the room was left and opened again. The window
-   does not keep that across a restart, and another device does not know it.
-   There the offer returns until the new message has a status of its own, and
-   the new message stands in the room for its sender to see.
+   by this window, also after the room was left and opened again. The new
+   message names the one it was sent for (`org.hagency.sent_again` in its
+   content, encrypted with the rest in an encrypted room), so every device of
+   its sender that has the new message in its timeline stops offering the
+   first one, also after a restart. A device that has not loaded the new
+   message, or one whose new message was removed, offers the first one
+   again; the new message stands in the room for its sender to see.
 
 A server that does not yet describe each Agent of a message is read as it
 always was: one line from the message's first row, in the words each state
