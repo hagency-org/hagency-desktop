@@ -171,7 +171,10 @@ pub enum SharedDemandRetry {
 impl OwnerResourceRegistry {
     /// Create or recover retry `n` of a saved demand whose earlier starts all
     /// provably never started here. A replay returns the same start intent; no
-    /// process, call or model turn is started.
+    /// process, call or model turn is started. Retry v2: the retry says
+    /// `reoffers` when its event opted in and `proof` came from a poll or
+    /// recover that sent it; this is fixed when the retry is first prepared
+    /// and every replay returns the same bytes.
     pub async fn prepare_shared_demand_retry(
         &self,
         proof: VerifiedSharedDemand,
@@ -267,6 +270,12 @@ impl OwnerResourceRegistry {
                     proof.check()?;
                     return Ok(SharedDemandRetry::Blocked(description));
                 }
+                // Retry v2: this retry's `reoffers` is fixed here, by the
+                // server that showed it. Going out without it although the
+                // event opted in ends the opt-in, saved before the intent.
+                if release::reoffering(&tx, &saved)? && !proof.reoffers {
+                    release::lapse(&tx, &proof.offer.demand_id)?;
+                }
                 start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input
             };
             let input = SharedDemandStartInput {
@@ -274,7 +283,8 @@ impl OwnerResourceRegistry {
                 expected_control_revision: proof.offer.control_revision,
                 start,
                 retry: Some(n),
-                reoffers: release::reoffering(&tx, &saved)?,
+                // As fixed when the intent was saved, on a replay too.
+                reoffers: release::said_reoffers(&tx, &saved, n)?,
             };
             input.validate_for(&proof.offer)?;
             proof.check()?;

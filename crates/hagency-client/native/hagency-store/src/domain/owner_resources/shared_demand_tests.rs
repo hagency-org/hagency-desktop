@@ -1376,6 +1376,11 @@ async fn stop_claimed(
             Ok(())
         }).await.unwrap();
     }
+    stop_attempt(f, c, claimed).await;
+    (w, binding)
+}
+/// `claimed`'s time bound stops it: stop evidence without a live child.
+async fn stop_attempt(f: &Fixture, c: &SharedRuntimeCommand, claimed: &SharedAttemptCommand) {
     f.registry.fence_shared_successor(cleanup(f, c, 1).await, claimed.clone()).await.unwrap();
     let clock = std::sync::Arc::new(std::sync::atomic::AtomicU64::new(claimed.expires_at_ms + 30_000 + UNCERTAIN_GRACE_MS));
     let worker = clock.clone();
@@ -1384,7 +1389,6 @@ async fn stop_claimed(
     assert_eq!(stop.state, "stopped");
     // Real time again after the stop.
     drop(clock);
-    (w, binding)
 }
 /// The route a stop upload reads (`shared_attempt_stop_route`).
 async fn stop_route(f: &Fixture, c: &SharedRuntimeCommand, a: &SharedAttemptCommand) -> Option<SharedAttemptStopRoute> {
@@ -1432,15 +1436,17 @@ async fn shared_demand_v2_stop_hands_unbegun_work_back_and_the_event_runs_once_m
     f.registry.recover_shared_demand_binding(cleanup(&f, &c, 1).await, lost.clone(), binding.clone()).await.unwrap();
     assert_eq!(count(&f, "owner_shared_demand_bindings").await, 0);
     assert!(save_binding(&f, &binding).await.unwrap_err().contains("released demand work"));
-    // The retry names the stopped attempt, with its process digest.
-    let retry = |n: u64| f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()), c.clone(), target.predecessor().cloned(), n);
+    // The retry names the stopped attempt, with its process digest; the
+    // server that shows it lists retry v2.
+    let retry = |n: u64| f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), target.predecessor().cloned(), n);
     assert!(retry(2).await.is_err(), "retries are numbered without gaps");
     let SharedDemandRetry::Start(first) = retry(1).await.unwrap() else {
         panic!("a retry start");
     };
     let start = first.input().clone();
     assert_eq!(start.retry, Some(1));
-    assert!(start.reoffers, "a retry shares its event's opt-in");
+    assert!(start.reoffers, "a retry shown while v2 is listed keeps its event's opt-in");
+    assert_eq!(count(&f, "owner_shared_demand_reoffer_lapses").await, 0);
     assert_eq!(start.start.start_intent_id, format!("sdr1_{}", lost.demand_id));
     assert_eq!(start.start.predecessor.command_id, claimed.command_id);
     assert_eq!(start.start.predecessor.process_attempt, claimed.process_attempt);
@@ -1536,26 +1542,72 @@ async fn shared_demand_v2_a_start_without_reoffers_never_hands_work_back() {
 }
 
 #[tokio::test]
-async fn shared_demand_v2_a_start_sent_without_reoffers_ends_the_opt_in() {
+async fn shared_demand_v2_a_saved_start_is_resent_with_its_reoffers() {
+    let (f, c) = original(true).await;
+    call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+    let lost = offer(&c, "resent_start", 1);
+    let first = f.registry.prepare_shared_demand(verified(&f, lost.clone()).with_reoffers(true), c.clone(), None).await.unwrap().input().unwrap().clone();
+    assert!(first.reoffers);
+    // The server stopped listing retry v2 before the start's answer came
+    // back: the start it recorded is sent again with exactly its bytes.
+    for listed in [false, true] {
+        let again = f.registry.prepare_shared_demand(verified(&f, lost.clone()).with_reoffers(listed), c.clone(), None).await.unwrap();
+        assert_eq!(digest(again.input().unwrap()), digest(&first));
+        let sent = f.registry.shared_demand_submission(verified(&f, lost.clone()).with_reoffers(listed), c.clone()).await.unwrap();
+        assert_eq!(digest(sent.input()), digest(&first));
+        assert_eq!(serde_json::to_value(sent.input()).unwrap()["reoffers"], true);
+    }
+    assert_eq!(count(&f, "owner_shared_demand_reoffer_lapses").await, 0);
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_retry_prepared_without_v2_ends_the_opt_in() {
     let (f, c) = original(true).await;
     call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
     let lost = offer(&c, "lapsed_event", 1);
     let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
-    let submission = || f.registry.shared_demand_submission(verified(&f, lost.clone()), c.clone());
-    let mut sent = submission().await.unwrap();
-    assert!(sent.input().reoffers);
-    // The server stopped listing retry v2 before this start went out.
-    sent.lapse_reoffers().await.unwrap();
-    assert!(!sent.input().reoffers);
-    assert!(serde_json::to_value(sent.input()).unwrap().get("reoffers").is_none());
-    sent.lapse_reoffers().await.unwrap();
+    stop_claimed(&f, &c, &lost, &claimed, true, false).await;
+    assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Retry { retry: 1, .. })));
+    let target = f.registry.shared_successor_selection(f.profile.clone(), c.assignment_id.clone()).await.unwrap().unwrap();
+    let retry = |listed: bool| f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(listed), c.clone(), target.predecessor().cloned(), 1);
+    // The server no longer lists retry v2 when it shows the retry: the retry
+    // goes out without `reoffers`, and the event's opt-in ends first.
+    let SharedDemandRetry::Start(first) = retry(false).await.unwrap() else {
+        panic!("a retry start");
+    };
+    let start = first.input().clone();
+    assert!(!start.reoffers);
+    assert!(serde_json::to_value(&start).unwrap().get("reoffers").is_none());
     assert_eq!(count(&f, "owner_shared_demand_reoffer_lapses").await, 1);
-    assert!(!submission().await.unwrap().input().reoffers, "every later send goes out without it");
-    let (w, _) = stop_claimed(&f, &c, &lost, &claimed, true, false).await;
-    assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Plain)));
-    assert!(store_sql(&f, release_by_hand()).await.unwrap_err().contains("unbegun demand work required"));
+    // Every resend has the same bytes, whatever the server lists by then.
+    for listed in [true, false] {
+        let SharedDemandRetry::Start(again) = retry(listed).await.unwrap() else {
+            panic!("a retry start");
+        };
+        assert_eq!(digest(again.input()), digest(&start));
+    }
+    assert_eq!(count(&f, "owner_shared_demand_reoffer_lapses").await, 1);
     assert!(store_sql(&f, "DELETE FROM owner_shared_demand_reoffer_lapses".into()).await.unwrap_err().contains("retained reoffer lapse"));
-    f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), w).await.unwrap();
+    // The retry's process gets the event's work and stops before it began:
+    // after the lapse its stop takes the plain route and its binding stays.
+    let mut retried = claimed.clone();
+    retried.command_id = "lapsed_event_retry".into();
+    retried.process_attempt = claimed.process_attempt + 1;
+    retried.predecessor = start.start.predecessor.clone();
+    retried.budget_observation = start.start.budget_observation.clone();
+    retried.start_intent_id = start.start.start_intent_id.clone();
+    let now = graphs::now_ms().unwrap();
+    retried.issued_at_ms = now;
+    retried.expires_at_ms = now + 20_000;
+    assert!(matches!(f.registry.claim_shared_successor(attempt_proof(&f, retried.clone())).await.unwrap(), SharedAttemptClaim::Issued(_)));
+    let second = demand_work(&c, &lost, &retried, "lapsed_event_second");
+    save_binding(&f, &work_binding(&lost, &retried, &second)).await.unwrap();
+    stop_attempt(&f, &c, &retried).await;
+    assert!(matches!(stop_route(&f, &c, &retried).await, Some(SharedAttemptStopRoute::Plain)));
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 1));
+    assert!(store_sql(&f, release_by_hand()).await.unwrap_err().contains("unbegun demand work required"));
+    f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), second).await.unwrap();
     f.registry.shutdown().await.unwrap();
 }
 

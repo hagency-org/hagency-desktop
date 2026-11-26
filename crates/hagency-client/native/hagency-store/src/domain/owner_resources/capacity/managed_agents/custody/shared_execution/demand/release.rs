@@ -38,10 +38,11 @@ pub(super) fn handed_back(
     )?)
 }
 
-/// The event's starts opt in to the server giving its message back: its
-/// original start was saved with `reoffers` (its retries share it) and no
-/// start of it went out without (`lapse`). Only such a start's work is ever
-/// handed back here: the server gives back no other.
+/// The event's opt-in stands: its original start was saved with `reoffers`
+/// and none of its retries was first prepared without it (`lapse`). Only
+/// then is a stop's work handed back here: the server gives back only the
+/// work of a start stored with `reoffers`, and after a lapse every start of
+/// the event goes out without it.
 pub(super) fn reoffering(db: &Connection, saved: &SharedDemandIntent) -> Result<bool, Error> {
     if !saved.input.as_ref().is_some_and(|i| i.reoffers) {
         return Ok(false);
@@ -53,9 +54,38 @@ pub(super) fn reoffering(db: &Connection, saved: &SharedDemandIntent) -> Result<
     )?)
 }
 
-/// Saved before a start of `demand_id` goes out without `reoffers` although
-/// its event opted in (the server no longer lists retry v2): from then on
-/// none of the event's work is handed back here.
+/// Whether start `n` of the saved event says `reoffers`, read from rows that
+/// never change, so that every send of a start has its first bytes (the
+/// server refuses other bytes for the same start): the original start as it
+/// was saved, a retry as its event's opt-in stood when its intent was saved,
+/// that is with no lapse below the intent's ledger revision.
+pub(super) fn said_reoffers(db: &Connection, saved: &SharedDemandIntent, n: u64) -> Result<bool, Error> {
+    if !saved.input.as_ref().is_some_and(|i| i.reoffers) {
+        return Ok(false);
+    }
+    if n == 0 {
+        return Ok(true);
+    }
+    let intent: u64 = db
+        .query_row(
+            "SELECT ledger_revision FROM owner_shared_start_intents WHERE id=?1",
+            [retry::start_id(&saved.offer.demand_id, n)?],
+            |r| r.get(0),
+        )
+        .optional()?
+        .ok_or(Error::Conflict)?;
+    Ok(!db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM owner_shared_demand_reoffer_lapses WHERE demand_id=?1 AND ledger_revision<?2)",
+        params![saved.offer.demand_id, intent],
+        |r| r.get::<_, bool>(0),
+    )?)
+}
+
+/// Saved, before its intent and in the same transaction, when a retry of
+/// `demand_id` is first prepared without `reoffers` although its event opted
+/// in (the server that showed the retry no longer lists retry v2): from then
+/// on none of the event's work is handed back here, and that retry and every
+/// later start of the event go out without it.
 pub(super) fn lapse(tx: &Connection, demand_id: &str) -> Result<(), Error> {
     let saved: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM owner_shared_demand_reoffer_lapses WHERE demand_id=?1)",

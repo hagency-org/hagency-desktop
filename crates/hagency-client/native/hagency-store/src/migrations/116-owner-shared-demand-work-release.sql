@@ -2,9 +2,10 @@
 -- began its demand's work, the binding moves, byte for byte, into a retained
 -- release row and the demand waits again. The released work is never bound
 -- or admitted again; a binding row still never changes in place. The server
--- gives back only the work of a start sent with `reoffers`: the event's
--- original start saves it (its retries share it), and a lapse row, saved
--- before any of its starts goes out without it, ends that for the event.
+-- gives back only the work of a start stored with `reoffers`, and a start is
+-- always sent with its first bytes: the event's original start saves it, a
+-- retry fixes it when first prepared, and a lapse row, saved when a retry of
+-- an event that opted in is first prepared without it, ends that for the event.
 CREATE TABLE owner_shared_demand_reoffer_lapses (
  demand_id TEXT PRIMARY KEY REFERENCES owner_shared_demands(id),
  ledger_revision INTEGER NOT NULL UNIQUE CHECK(ledger_revision>0 AND ledger_revision<=9007199254740991)

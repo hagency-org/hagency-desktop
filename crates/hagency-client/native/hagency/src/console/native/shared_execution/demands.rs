@@ -211,7 +211,7 @@ impl SharedExecutionTransport {
         // The server re-offered this event after this executor proved its
         // attempt never started (ADR-193 amendment): run it again in place.
         if s.state == "retry_offered" || s.state == "start_committed" && s.retry.is_some() {
-            return self.consume_retry(r, &b, &target, s, observed, launch).await;
+            return self.consume_retry(r, &b, &target, s, observed, launch, reoffers).await;
         }
         if !matches!(s.state.as_str(), "offered" | "start_committed") {
             if s.state == "bound" {
@@ -330,6 +330,9 @@ impl SharedExecutionTransport {
     /// One retry of a saved event whose earlier attempts provably never
     /// started here. A replay reuses the saved retry start; nothing calls the
     /// model unless the server issues and this installation claims it.
+    /// `reoffers`: the request that showed the retry sent it, which fixes
+    /// the retry's own `reoffers` when it is first prepared (retry v2).
+    #[allow(clippy::too_many_arguments)]
     async fn consume_retry(
         &self,
         r: &OwnerResourceRegistry,
@@ -338,10 +341,13 @@ impl SharedExecutionTransport {
         s: Status,
         observed: u64,
         launch: Option<super::super::managed_runtime::PreparedLaunch>,
+        reoffers: bool,
     ) -> Result<SharedDemandProgress, NativeError> {
         let id = s.offer.demand_id.clone();
         let n = s.retry.ok_or_else(invalid)?;
-        let proof = offer_proof(b, r, target.original(), &s, observed).await?;
+        let proof = offer_proof(b, r, target.original(), &s, observed)
+            .await?
+            .with_reoffers(reoffers);
         let prepared = r
             .prepare_shared_demand_retry(
                 proof,
@@ -415,7 +421,6 @@ impl SharedExecutionTransport {
         let mut launch = launch.map(launch::Launch::from);
         let inspected = matches!(status.state.as_str(), "offered" | "retry_offered")
             && original.runtime().map_err(store)? == "codex";
-        let listed;
         if inspected {
             // Inspect the selected provider's policy and account availability.
             // The execution process still requires H1's matching command.
@@ -449,20 +454,11 @@ impl SharedExecutionTransport {
                 return Err(invalid());
             }
             demand_io::require_pair(&fresh).await?;
-            listed = demand_io::retries_v2(&fresh).await?;
         } else {
             demand_io::require_pair(bound).await?;
-            listed = demand_io::retries_v2(bound).await?;
         }
-        // Retry v2: a start carries `reoffers` only as its event saved it, and
-        // only to a server that lists it. Before one goes out without it
-        // although its event opted in, that is saved: the server keeps what a
-        // start was stored with, so none of the event's work is handed back.
-        let mut input = input;
-        if input.reoffers && !listed {
-            submission.lapse_reoffers().await.map_err(store)?;
-            input.reoffers = false;
-        }
+        // The saved bytes, `reoffers` included, whatever the server lists
+        // now: it answers a start it recorded only when sent the same bytes.
         let plan = super::attempts::DemandPreparation { submission, inspected, original_digest: digest(original)? };
         self.process_attempt_scoped(r, attempt_io::AttemptAction::DemandStart {
             id: status.offer.demand_id.clone(), input,
