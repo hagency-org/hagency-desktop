@@ -85,9 +85,42 @@ pub fn directives(
     Ok(Some(extra))
 }
 
+/// The directive of a message that is for the room and for none of the
+/// user's own bots, whatever its text says: what a message carries when it
+/// is sent again to the Agents it names. None when the user has no bot.
+pub fn room_only(
+    settings: &AgentAccessSettings,
+    owner: Option<&UserId>,
+    room: &RoomId,
+    message: &RoomMessageEventContent,
+) -> Option<Map<String, Value>> {
+    match directives(settings, owner, room, false, message, None) {
+        Ok(None) => None,
+        _ => Some(Map::from_iter([("org.octos.explicit_room".to_owned(), json!(true))])),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn a_message_sent_again_addresses_no_bot_whatever_its_text_says() {
+        let room = matrix_sdk::ruma::room_id!("!room:example.org");
+        let again = |settings: &AgentAccessSettings, text: &str| {
+            room_only(settings, None, room, &RoomMessageEventContent::text_plain(text))
+        };
+        // Nobody to tell.
+        assert!(again(&AgentAccessSettings::default(), "/status@current").is_none());
+        let mut settings: AgentAccessSettings =
+            serde_json::from_value(json!({"agent_registry": {"@current:example.org": {}}})).unwrap();
+        settings.normalize();
+        // A command for a bot, one for a bot that does not exist, plain text.
+        for text in ["/status@current", "/status@nobody", "hello"] {
+            let routing = again(&settings, text).unwrap();
+            assert_eq!(routing.len(), 1, "{text}");
+            assert_eq!(routing["org.octos.explicit_room"], true, "{text}");
+        }
+    }
     #[test]
     fn retired_bot_list_cannot_supply_a_routing_target() {
         let mut settings: AgentAccessSettings = serde_json::from_value(json!({

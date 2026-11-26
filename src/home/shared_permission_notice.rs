@@ -75,6 +75,71 @@ fn execution_row<'a>(value:&'a Value,room:&str,thread:&str)->Option<&'a Value> {
     value["executions"].as_array()?.iter().find(|r|
         r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread))
 }
+/// The newest message of this room or thread has one row for each Agent it
+/// was addressed to.
+fn execution_rows<'a>(value:&'a Value,room:&str,thread:&str)->Vec<&'a Value> {
+    let Some(first)=execution_row(value,room,thread) else {return Vec::new()};
+    let Some(event)=first["eventId"].as_str() else {return vec![first]};
+    value["executions"].as_array().into_iter().flatten().filter(|r|
+        r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread) && r["eventId"]==event).collect()
+}
+/// The Agent a row is about, when the server names it.
+fn row_agent(row:&Value)->Option<&str> {
+    row["agentMxid"].as_str().filter(|id| id.starts_with('@') && id.len()<=255 && !id.chars().any(char::is_control))
+}
+/// The message ended for this Agent without a turn: nothing of it reached a
+/// model or a tool, so sending it again cannot repeat anything. A message that
+/// is still waiting (for the owner's service, for allowance) and a run whose
+/// outcome is unknown are not such an end.
+fn row_unprocessed(row:&Value)->bool {
+    match row["state"].as_str() {
+        Some("cancelled")=>row["reason"]!="explicit_stop",
+        Some("expired")=>true,
+        // The Agent's process changed under the message, or every start failed.
+        Some("blocked")=>row["reason"]=="head_changed",
+        _=>false,
+    }
+}
+/// One line of the notice: what happened, and for which Agent when the line
+/// would otherwise not say.
+#[derive(Clone,Debug,Default,PartialEq)]
+struct ExecutionLine {
+    /// The Agent's Matrix ID.
+    agent:Option<String>,
+    /// The Agent's name in this room, once it is known.
+    name:Option<String>,
+    text:&'static str,
+}
+impl ExecutionLine {
+    fn shown(&self)->String {
+        use crate::i18n::{format,tr};
+        match self.name.as_deref().or(self.agent.as_deref()) {
+            Some(agent) if self.text==UNPROCESSED=>format(UNPROCESSED_BY,&[("agent",agent.to_owned())]),
+            Some(agent)=>format("{agent}: {status}",&[("agent",agent.to_owned()),("status",tr(self.text).to_owned())]),
+            None=>tr(self.text).to_owned(),
+        }
+    }
+}
+const UNPROCESSED:&str="This message was not processed; it will not retry automatically.";
+const UNPROCESSED_BY:&str="{agent} did not process this message. It will not retry automatically.";
+/// The sender's way out of a message that ended without a turn: the same
+/// message, sent again to the Agents that did not process it.
+#[derive(Clone,Debug,PartialEq)]
+struct Resend {
+    event:String,
+    /// The thread the message was sent in, when it was.
+    thread:Option<String>,
+    agents:Vec<String>,
+}
+fn execution_resend(value:&Value,room:&str,thread:&str)->Option<Resend> {
+    let rows=execution_rows(value,room,thread);
+    let event=rows.first()?["eventId"].as_str()?;
+    let agents=rows.iter().filter(|r| r["fromViewer"]==true && row_unprocessed(r))
+        .filter_map(|r| row_agent(r)).map(str::to_owned).collect::<Vec<_>>();
+    if agents.is_empty() {return None;}
+    let root=rows[0]["threadRoot"].as_str().filter(|root| *root!=event);
+    Some(Resend {event:event.to_owned(),thread:root.map(str::to_owned),agents})
+}
 fn pool_request(row: &Value) -> Option<(String, String)> {
     if row["reason"] != "budget_blocked" { return None; }
     let link = &row["resourceRecovery"];
@@ -84,12 +149,27 @@ fn pool_request(row: &Value) -> Option<(String, String)> {
     Some((id.to_owned(), role.to_owned()))
 }
 fn execution_busy(value:&Value,room:&str,thread:&str)->bool {
-    execution_row(value,room,thread).is_some_and(|row|
+    execution_rows(value,room,thread).into_iter().any(|row|
         row["reason"]!="budget_blocked" && matches!(row["state"].as_str(),Some("started"|"pending"|"queued"|"acknowledged"|"bound"|"reply_pending")))
 }
+/// What the notice says about the newest message: one line for each Agent
+/// that has something to say. An Agent is named when the message went to more
+/// than one, and when it did not process the message.
 /// `stopped` says whether the run card for a message shows its run stopped.
+fn execution_lines(value:&Value,room:&str,thread:&str,stopped:impl Fn(&str)->bool)->Vec<ExecutionLine> {
+    let rows=execution_rows(value,room,thread);
+    let several=rows.len()>1;
+    rows.into_iter().filter_map(|row| {
+        let text=row_notice(row,&stopped)?;
+        let agent=row_agent(row).filter(|_| several || text==UNPROCESSED).map(str::to_owned);
+        Some(ExecutionLine {agent,name:None,text})
+    }).collect()
+}
+#[cfg(test)]
 fn execution_notice(value:&Value,room:&str,thread:&str,stopped:impl Fn(&str)->bool)->Option<&'static str> {
-    let row=execution_row(value,room,thread)?;
+    row_notice(execution_row(value,room,thread)?,&stopped)
+}
+fn row_notice(row:&Value,stopped:&impl Fn(&str)->bool)->Option<&'static str> {
     if row["reason"]=="owner_daemon_update_required" {
         return Some("Message has not started. The resource owner needs to update Hagency and start its service; the same message can then continue.");
     }
@@ -109,11 +189,12 @@ fn execution_notice(value:&Value,room:&str,thread:&str,stopped:impl Fn(&str)->bo
         "pending"|"queued"|"acknowledged"|"bound"=>Some("Message queued; waiting for Agent."),
         "unknown"=>Some("Run outcome is unknown. External actions or charges may already exist. Review the original message and task records before starting a separate request."),
         // The Agent records a stopped run as failed; its run card tells them apart.
-        "failed" if row["eventId"].as_str().is_some_and(&stopped)=>Some("Run stopped."),
+        "failed" if row["eventId"].as_str().is_some_and(stopped)=>Some("Run stopped."),
         "failed"=>Some("Agent run failed."),
+        "blocked" if row_unprocessed(row)=>Some(UNPROCESSED),
         "blocked"=>Some("Message could not start. Check the resource and Agent connection."),
         "paused"=>Some("Agent is paused."),
-        "cancelled"|"expired"=>Some("This message was not processed; it will not retry automatically."),
+        "cancelled"|"expired"=>Some(UNPROCESSED),
         "reply_pending"=>Some("Answer generated; waiting for delivery."),
         "reply_unknown"=>Some("Answer delivery could not be confirmed."),
         _=>None,
@@ -143,6 +224,7 @@ script_mod! {
             deny := Button {width: Fill text: #(crate::i18n::tr("Deny")) i18n_text: "Deny"}
         }
         execution_review := Button {visible:false width:Fill text:#(crate::i18n::tr("Review original task records")) i18n_text:"Review original task records"}
+        execution_resend := Button {visible:false width:Fill text:#(crate::i18n::tr("Send again")) i18n_text:"Send again"}
         recovery := View {width: Fill height: Fit flow: Down spacing: 6 visible: false
             recovery_hint := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
             last_checked := Label {width: Fill height: Fit flow: Flow.Right{wrap: true} draw_text.color: mod.widgets.RINX_MUTED}
@@ -201,7 +283,12 @@ pub struct SharedPermissionNotice {
     #[rust] original_request:Option<(String,String)>,
     /// The run's row of the last read, for the review of a run whose outcome is unknown.
     #[rust] execution_source:Option<Value>,
-    #[rust] execution_text:String,
+    #[rust] execution_lines:Vec<ExecutionLine>,
+    /// The newest message ended without a turn for some Agents and its sender
+    /// is looking: what "Send again" would send.
+    #[rust] resend:Option<Resend>,
+    /// The message this client sent again last, so one click sends once.
+    #[rust] resent:Option<String>,
     #[rust] execution_busy:bool,
     #[rust] waiting:bool,
     /// Request ids shown in this room or thread, in order, to number them.
@@ -210,6 +297,32 @@ pub struct SharedPermissionNotice {
     #[rust] last_decision:Option<(String,String)>,
 }
 impl SharedPermissionNotice {
+    /// Send the newest message again to the Agents that did not process it.
+    /// It goes out as a new message of the same account, so it is taken in
+    /// and counted like any other; the first one stays as it ended.
+    fn send_again(&mut self,cx:&mut Cx,resend:Resend) {
+        use matrix_sdk::ruma::{OwnedEventId,OwnedRoomId,OwnedUserId};
+        let parsed=(||{
+            let room=OwnedRoomId::try_from(self.room.as_str()).ok()?;
+            let event=OwnedEventId::try_from(resend.event.as_str()).ok()?;
+            let thread=match resend.thread.as_deref() {
+                Some(root)=>Some(OwnedEventId::try_from(root).ok()?),
+                None=>None,
+            };
+            let agents=resend.agents.iter().map(|a|OwnedUserId::try_from(a.as_str()).ok()).collect::<Option<Vec<_>>>()?;
+            Some((room,event,thread,agents))
+        })();
+        let Some((room,event,thread,agents))=parsed else {
+            crate::shared::popup_list::enqueue_popup_notification(crate::i18n::tr("Could not send the message again."),crate::shared::popup_list::PopupKind::Error,Some(5.0));
+            self.resend=Some(resend);
+            return;
+        };
+        self.resent=Some(resend.event);
+        crate::sliding_sync::submit_async_request(crate::sliding_sync::MatrixRequest::SendAgainToAgents {room_id:room,event_id:event,thread_root:thread,agents});
+        self.render(cx);
+        // The new message has rows of its own: read them soon.
+        if self.active {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
+    }
     /// Shows the spinner while the Agent works or a decision is on its way.
     /// The spinner updates its retained draw call without re-running the draw
     /// of the timeline that contains it.
@@ -248,9 +361,10 @@ impl SharedPermissionNotice {
                 _=>String::new(),
             };
             return Display {
-                visible:!self.execution_text.is_empty() || shows_error,
+                visible:!self.execution_lines.is_empty() || shows_error,
                 waiting:self.execution_busy && self.error.is_empty(),
-                title:if shows_error{tr(&self.error).to_owned()}else{tr(&self.execution_text).to_owned()},
+                title:if shows_error{tr(&self.error).to_owned()}
+                    else{self.execution_lines.iter().map(ExecutionLine::shown).collect::<Vec<_>>().join("\n")},
                 hint,
                 ..Display::default()
             };
@@ -327,7 +441,20 @@ impl SharedPermissionNotice {
             self.view.label(cx,ids!(last_checked)).set_text(cx,&std::format!("{}: {}",tr("Last checked (UTC)"),checked));
         }
     }
+    /// Look up the room names of the Agents the lines are about. A name not
+    /// yet known is asked for, and the next render has it.
+    fn name_agents(&mut self,cx:&mut Cx) {
+        use crate::profile::user_profile_cache::get_user_display_name_for_room;
+        let Ok(room)=matrix_sdk::ruma::OwnedRoomId::try_from(self.room.as_str()) else {return};
+        for line in &mut self.execution_lines {
+            let Some(Ok(agent))=line.agent.as_deref().map(matrix_sdk::ruma::OwnedUserId::try_from) else {continue};
+            if let Some(name)=get_user_display_name_for_room(cx,agent,Some(&room),true).into_option().filter(|n|!n.trim().is_empty()) {
+                line.name=Some(name);
+            }
+        }
+    }
     fn render(&mut self,cx:&mut Cx) {
+        self.name_agents(cx);
         let shown=self.display();
         self.waiting=shown.waiting;
         self.sync_animation(cx);
@@ -335,6 +462,11 @@ impl SharedPermissionNotice {
         let review=self.execution_source.as_ref().is_some_and(|r|matches!(r["state"].as_str(),Some("unknown"|"reply_unknown")) && r["eventId"].as_str().is_some() && r["agentId"].as_str().is_some());
         self.view.widget(cx,ids!(execution_review)).set_visible(cx,review);
         self.view.button(cx,ids!(execution_review)).set_enabled(cx,self.active && !self.loading);
+        // Offered with the run's state only: a waiting request or a failed
+        // read has the notice, and the state it would act on is not shown.
+        let resend=self.resend.is_some() && self.rows.is_empty() && !self.shows_error();
+        self.view.widget(cx,ids!(execution_resend)).set_visible(cx,resend);
+        self.view.button(cx,ids!(execution_resend)).set_enabled(cx,self.active);
         let notices=&self.room_allowances;
         let has_page=notices.next.is_some() || !notices.cursor.is_empty();
         self.view.set_visible(cx,shown.visible || !notices.text.is_empty() || has_page);
@@ -367,13 +499,22 @@ impl SharedPermissionNotice {
         self.failure=None;
         if self.active {self.room_allowances.receive(value);}
         self.original_request=execution_row(value,&self.room,&self.thread).and_then(pool_request);
-        self.execution_source=execution_row(value,&self.room,&self.thread).cloned();
+        // The review is of the run whose outcome is unknown, whichever Agent's it is.
+        let rows=execution_rows(value,&self.room,&self.thread);
+        self.execution_source=rows.iter().find(|r|matches!(r["state"].as_str(),Some("unknown"|"reply_unknown")))
+            .or(rows.first()).map(|r|(*r).clone());
         self.execution_thread_filter = value["executionThreadFilter"] == true;
         self.execution_busy=execution_busy(value,&self.room,&self.thread);
         // The run the last decision belonged to has ended: a later run must
         // not show it as its own last or previous request.
         if !self.execution_busy {self.last_decision=None;}
-        self.execution_text=execution_notice(value,&self.room,&self.thread,stopped).unwrap_or_default().into();
+        let mut lines=execution_lines(value,&self.room,&self.thread,stopped);
+        // A name found earlier stays until the next look-up replaces it.
+        for line in &mut lines {
+            line.name=self.execution_lines.iter().find(|old|old.agent.is_some() && old.agent==line.agent).and_then(|old|old.name.clone());
+        }
+        self.execution_lines=lines;
+        self.resend=execution_resend(value,&self.room,&self.thread).filter(|r|self.resent.as_deref()!=Some(r.event.as_str()));
         self.rows=value["approvals"].as_array().cloned().unwrap_or_default().into_iter().filter(|r|r["approval"]["roomId"]==self.room && (self.thread.is_empty() || r["approval"]["threadRoot"]==self.thread)).take(16).collect();
         self.tracked |= execution_row(value,&self.room,&self.thread).is_some()
             || !self.rows.is_empty() || !self.room_allowances.text.is_empty();
@@ -520,6 +661,12 @@ impl Widget for SharedPermissionNotice {
                     if self.active && !self.loading {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
                 }
                 if action.downcast_ref::<PendingApprovalsChanged>().is_some(){self.render(cx);}
+                // Nothing went out: the same message can be sent again.
+                if let Some(failed)=action.downcast_ref::<crate::sliding_sync::SendAgainFailed>()
+                    && failed.room_id.as_str()==self.room && self.resent.as_deref()==Some(failed.event_id.as_str()) {
+                    self.resent=None;
+                    if self.active && !self.loading {self.retry.sooner(Instant::now());self.arm_timer(cx);}
+                }
             }
             for (id,decision) in [(ids!(once),"approve_once"),(ids!(session),"approve_session"),(ids!(deny),"deny")] {
                 if self.view.button(cx,id).clicked(actions){self.decide(cx,decision);}
@@ -530,6 +677,10 @@ impl Widget for SharedPermissionNotice {
                 && let (Ok(room),Some(event),Some(agent),Some(session))=(self.room.parse(),row["eventId"].as_str().and_then(|e|e.parse().ok()),row["agentId"].as_str(),crate::matrix_context::SessionPin::capture(&client))
                 && session.is_current() {
                 cx.action(crate::hagency::work_review::WorkReviewAction::Open(crate::hagency::work_review::OriginalWork{session,room,event,agent:agent.into()}));
+            }
+            if self.view.button(cx,ids!(execution_resend)).clicked(actions) && self.active && self.rows.is_empty() && !self.shows_error()
+                && let Some(resend)=self.resend.take() {
+                self.send_again(cx,resend);
             }
             if self.view.button(cx,ids!(recover)).clicked(actions) && !self.loading {
                 match self.failure.as_ref().map(PermissionFailure::recovery) {
@@ -560,7 +711,7 @@ impl SharedPermissionNoticeRef {
         let Some(mut this)=self.borrow_mut()else{return};
         let account=PermissionScope::capture();
         if this.account_scope!=account || this.room!=room || this.thread!=thread {
-            this.interrupt(cx);this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_source=None;this.execution_thread_filter=false;this.tracked=false;this.identity.clear();this.account_scope=account;this.room=room.into();this.thread=thread.into();this.error.clear();this.failure=None;this.retry=PermissionRetry::default();this.execution_text.clear();this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx,false);
+            this.interrupt(cx);this.execution_busy=false;this.waiting=false;this.sync_animation(cx);this.room_allowances=RoomAllowances::default();this.original_request=None;this.execution_source=None;this.execution_thread_filter=false;this.tracked=false;this.identity.clear();this.account_scope=account;this.room=room.into();this.thread=thread.into();this.error.clear();this.failure=None;this.retry=PermissionRetry::default();this.execution_lines.clear();this.resend=None;this.resent=None;this.rows.clear();this.selected=0;this.seen.clear();this.last_decision=None;this.active=true;this.view.set_visible(cx,false);this.poll(cx,false);
         }else if this.active && !this.loading {this.poll(cx,false);}
     }
 }
@@ -738,6 +889,96 @@ mod tests {
         })
     }
 
+    fn row(event:&str,agent:&str,state:&str,reason:Option<&str>,mine:bool)->Value {
+        json!({"roomId":"!room:x","eventId":event,"threadRoot":event,"agentMxid":agent,"agentId":agent,"state":state,"reason":reason,"fromViewer":mine})
+    }
+    #[test]
+    fn a_message_to_two_agents_says_which_one_did_not_process_it() {
+        let value=json!({"executions":[
+            row("$two","@first:x","cancelled",Some("never_started"),true),
+            row("$two","@second:x","replied",None,true),
+            row("$older","@second:x","cancelled",None,true),
+        ]});
+        let lines=execution_lines(&value,"!room:x","",|_|false);
+        // The Agent that answered has nothing to say; the older message is not this one.
+        assert_eq!(lines,vec![ExecutionLine{agent:Some("@first:x".into()),name:None,text:UNPROCESSED}]);
+        assert!(lines[0].shown().starts_with("@first:x did not process this message."));
+        assert!(!execution_busy(&value,"!room:x",""));
+        assert_eq!(execution_resend(&value,"!room:x",""),
+            Some(Resend{event:"$two".into(),thread:None,agents:vec!["@first:x".into()]}));
+        // A name found for the room replaces the Matrix ID.
+        let named=ExecutionLine{name:Some("First".into()),..lines[0].clone()};
+        assert!(named.shown().starts_with("First did not process this message."));
+    }
+    #[test]
+    fn a_message_is_busy_while_any_of_its_agents_works_and_each_line_is_named() {
+        let value=json!({"executions":[
+            row("$two","@first:x","cancelled",None,true),
+            row("$two","@second:x","started",None,true),
+        ]});
+        assert!(execution_busy(&value,"!room:x",""));
+        let shown=execution_lines(&value,"!room:x","",|_|false).iter().map(ExecutionLine::shown).collect::<Vec<_>>();
+        assert_eq!(shown.len(),2);
+        assert!(shown[0].starts_with("@first:x did not process this message."));
+        assert_eq!(shown[1],"@second:x: Agent is working…");
+        // The one that did not process it can be asked again while the other works.
+        assert_eq!(execution_resend(&value,"!room:x","").unwrap().agents,vec!["@first:x".to_owned()]);
+    }
+    #[test]
+    fn send_again_is_offered_to_the_sender_only_for_an_end_without_a_turn() {
+        let offered=|r:Value|execution_resend(&json!({"executions":[r]}),"!room:x","");
+        for (state,reason) in [("cancelled",None),("cancelled",Some("never_started")),("expired",None),("blocked",Some("head_changed"))] {
+            assert!(offered(row("$e","@a:x",state,reason,true)).is_some(),"{state} {reason:?}");
+            // Someone else's message, as its resource owner sees it.
+            assert!(offered(row("$e","@a:x",state,reason,false)).is_none(),"{state} {reason:?}: not the sender");
+        }
+        // A run that may have acted, a message that still waits, and a stop
+        // that someone chose are not sent again from here.
+        for (state,reason) in [("unknown",None),("reply_unknown",None),("failed",None),("started",None),("pending",None),
+            ("blocked",Some("budget_blocked")),("blocked",Some("owner_daemon_unavailable")),("blocked",None),
+            ("cancelled",Some("explicit_stop")),("paused",None),("replied",None)] {
+            assert!(offered(row("$e","@a:x",state,reason,true)).is_none(),"{state} {reason:?}");
+        }
+        // A server that does not name the Agent or the sender: nothing to address.
+        let mut old=row("$e","@a:x","cancelled",None,true);
+        old.as_object_mut().unwrap().remove("agentMxid");
+        assert!(offered(old.clone()).is_none());
+        // Its text is what it was.
+        assert_eq!(execution_lines(&json!({"executions":[old]}),"!room:x","",|_|false),
+            vec![ExecutionLine{agent:None,name:None,text:UNPROCESSED}]);
+        // A message of a thread goes back to its thread.
+        let mut threaded=row("$reply","@a:x","cancelled",None,true);
+        threaded["threadRoot"]=json!("$root");
+        assert_eq!(offered(threaded).unwrap().thread.as_deref(),Some("$root"));
+    }
+    #[test]
+    fn send_again_shows_with_the_run_state_and_sends_one_message_for_one_click() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        let mut n=widget.borrow_mut().unwrap();
+        n.active=true;n.room="!room:x".into();
+        let value=json!({"executions":[row("$two","@first:x","cancelled",None,true)]});
+        n.read_status(&value,|_|false);
+        n.render(&mut cx);
+        assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        // A request that waits for an answer has the notice to itself.
+        n.rows.push(json!({"approval":{},"decision":null}));
+        n.render(&mut cx);
+        assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        n.rows.clear();
+        let resend=n.resend.take().unwrap();
+        n.send_again(&mut cx,resend);
+        assert_eq!(n.resent.as_deref(),Some("$two"));
+        assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        // The same state read again does not offer the same message twice.
+        n.read_status(&value,|_|false);
+        n.render(&mut cx);
+        assert!(n.resend.is_none() && !n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        // A later message that ends the same way is offered on its own.
+        n.read_status(&json!({"executions":[row("$three","@first:x","expired",None,true)]}),|_|false);
+        assert_eq!(n.resend.as_ref().map(|r|r.event.as_str()),Some("$three"));
+    }
+
     #[test]
     fn native_activity_spinner_shows_only_while_busy_and_starts_no_redraw_clock() {
         let mut cx=Cx::new(Box::new(|_,_|{}));
@@ -745,13 +986,13 @@ mod tests {
         let mut inner=widget.borrow_mut().unwrap();
         // (step, change, card shown, spinner shown)
         let steps:[(&str,fn(&mut SharedPermissionNotice),bool,bool);7]=[
-            ("agent working",|n|{n.active=true;n.execution_busy=true;n.execution_text="Agent is working…".into();},true,true),
+            ("agent working",|n|{n.active=true;n.execution_busy=true;n.execution_lines=vec![ExecutionLine{text:"Agent is working…",..Default::default()}];},true,true),
             ("permission requested",|n|n.rows.push(json!({"approval":{},"decision":null})),true,false),
             ("request answered",|n|n.rows.clear(),true,true),
             ("offline",|n|n.error="offline".into(),true,false),
             ("room deselected",|n|{n.error.clear();n.active=false;},true,false),
             ("room selected again",|n|n.active=true,true,true),
-            ("agent finished",|n|{n.execution_busy=false;n.execution_text.clear();},false,false),
+            ("agent finished",|n|{n.execution_busy=false;n.execution_lines.clear();},false,false),
         ];
         for (step,change,card,spinner) in steps {
             change(&mut inner);
@@ -778,7 +1019,7 @@ mod tests {
         let request=|id:&str,command:&str| json!({"approval":{"id":id,"agentName":"Claude","requesterMxid":"@e:x","deciderMxid":"@e:x",
             "request":{"method":"claude/can_use_tool","params":{"toolName":"Bash","input":{"command":command,"description":"d"}},"sessionAllowed":false}},
             "digest":"d","decision":null,"canDecide":true});
-        n.active=true;n.execution_busy=true;n.execution_text="Agent is working…".into();
+        n.active=true;n.execution_busy=true;n.execution_lines=vec![ExecutionLine{text:"Agent is working…",..Default::default()}];
         n.rows=vec![request("sap_1","ls -la")];
         let first=n.display();
         assert_eq!((first.title.as_str(),first.details.as_str()),("Claude wants to use Bash","ls -la"));

@@ -955,6 +955,17 @@ pub enum MatrixRequest {
         destination: MediaCacheEntryRef,
         update_sender: Option<crate::timeline_updates::Sender>,
     },
+    /// Send the user's own message `event_id` again as a new message that
+    /// addresses the given Agents only. For a message that ended without a
+    /// turn for them: a new message is taken in like any other, and the first
+    /// one stays as it ended.
+    SendAgainToAgents {
+        room_id: OwnedRoomId,
+        event_id: OwnedEventId,
+        /// The thread the message was sent in, when it was.
+        thread_root: Option<OwnedEventId>,
+        agents: Vec<OwnedUserId>,
+    },
     /// Request to send a message to the given room.
     SendMessage {
         /// Composer handoff ends when the SDK accepts the message or reports a failure.
@@ -2752,6 +2763,50 @@ async fn matrix_worker_task(
                 });
             }
 
+            MatrixRequest::SendAgainToAgents { room_id, event_id, thread_root, agents } => {
+                let Some(client) = get_client() else { continue };
+                let _send_again_task = crate::account_session::spawn(async move {
+                    // Nothing went out: say so, and let the notice offer it again.
+                    let failed = |room_id: OwnedRoomId, event_id: OwnedEventId| {
+                        error!("Could not send a message again in {room_id}.");
+                        enqueue_popup_notification(crate::i18n::tr("Could not send the message again.").to_string(), PopupKind::Error, Some(5.0));
+                        Cx::post_action(SendAgainFailed { room_id, event_id });
+                        SignalToUI::set_ui_signal();
+                    };
+                    let message = match client.get_room(&room_id) {
+                        Some(room) => message_for_agents_again(&room, &event_id, agents).await,
+                        None => None,
+                    };
+                    let Some(message) = message else { return failed(room_id, event_id) };
+                    // The thread's own timeline when it is open, where the new
+                    // message shows at once; the room's otherwise.
+                    let mut timeline_kind = TimelineKind::MainRoom { room_id: room_id.clone() };
+                    if let Some(root) = &thread_root {
+                        let thread = TimelineKind::Thread { room_id: room_id.clone(), thread_root_event_id: root.clone() };
+                        if get_timeline_and_sender(&thread).await.is_some() { timeline_kind = thread; }
+                    }
+                    if get_timeline_and_sender(&timeline_kind).await.is_none() { return failed(room_id, event_id) }
+                    let replied_to = thread_root.map(|root| Reply {
+                        event_id: root,
+                        enforce_thread: matrix_sdk::room::reply::EnforceThread::Threaded(ruma::events::room::message::ReplyWithinThread::No),
+                        add_mentions: ruma::events::room::message::AddMentions::No,
+                    });
+                    let routing = crate::agent_access::routing::room_only(&crate::agent_access::current(), current_user_id().as_deref(), &room_id, &message);
+                    // The ordinary send: it confirms the room's encryption and
+                    // the Agents' devices like a message typed again would. A
+                    // message it cannot send goes back to the composer.
+                    submit_async_request(MatrixRequest::SendMessage {
+                        completion: None,
+                        routing,
+                        timeline_kind,
+                        message,
+                        replied_to,
+                        #[cfg(feature = "tsp")]
+                        sign_with_tsp: false,
+                    });
+                });
+            }
+
             MatrixRequest::SendMessage {
                 completion,
                 routing,
@@ -3660,6 +3715,36 @@ async fn get_timeline(kind: &TimelineKind) -> Option<Arc<Timeline>> {
         .map(|details| details.timeline.clone());
     if !has_timeline_interest(kind) { retire_hidden_timeline(kind); }
     result
+}
+
+/// A message could not be sent again: nothing went out for `event_id`.
+///
+/// This is *NOT* a widget action.
+#[derive(Debug)]
+pub struct SendAgainFailed {
+    pub room_id: OwnedRoomId,
+    pub event_id: OwnedEventId,
+}
+
+/// The content of the user's own message `event_id`, addressed to `agents`
+/// and to nobody else. None when the event cannot be read, is not a message,
+/// or was sent by someone else.
+async fn message_for_agents_again(room: &Room, event_id: &EventId, agents: Vec<OwnedUserId>) -> Option<RoomMessageEventContent> {
+    let event = room.load_or_fetch_event(event_id, None).await.ok()?;
+    let Ok(AnySyncTimelineEvent::MessageLike(AnySyncMessageLikeEvent::RoomMessage(
+        ruma::events::SyncMessageLikeEvent::Original(original),
+    ))) = event.raw().deserialize() else { return None };
+    (original.sender == room.own_user_id()).then(|| addressed_again(original.content.msgtype, agents))
+}
+
+/// The same message body as a new message that mentions `agents` only. The
+/// first message's relation (a reply, an edit, its thread) is not carried
+/// over, and neither are the people and Agents it mentioned: an Agent that
+/// already answered must not be asked twice.
+fn addressed_again(msgtype: MessageType, agents: Vec<OwnedUserId>) -> RoomMessageEventContent {
+    let mut message = RoomMessageEventContent::new(msgtype);
+    message.mentions = Some(ruma::events::Mentions::with_user_ids(agents));
+    message
 }
 
 /// Obtains the lock on `ALL_JOINED_ROOMS` and returns the timeline and timeline update sender for the given timeline kind.
