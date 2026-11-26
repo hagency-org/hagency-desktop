@@ -34,6 +34,7 @@ fn account_settings_reflow_with_the_pane() {
         settings.register_as_ui_root(vm);
         settings
     });
+    let scroll = settings.widget(&cx, ids!(account_settings_page));
     let banner = settings.widget(&cx, ids!(verification_banner_verified));
     let recovery = settings.widget(&cx, ids!(encryption_recovery));
     let status = recovery.label(&cx, ids!(status));
@@ -60,11 +61,18 @@ fn account_settings_reflow_with_the_pane() {
     let mut heights = Vec::new();
     for width in [1280.0, 816.0, 375.0, 816.0] {
         draw(&mut cx, &settings, width);
+        let scroll_rect = scroll.area().rect(&cx);
         let banner_rect = banner.area().rect(&cx);
         let recovery_rect = recovery.area().rect(&cx);
         assert!((banner_rect.size.x - recovery_rect.size.x).abs() < 1.0);
-        assert!(banner_rect.size.x > width.min(700.0) - 40.0);
-        assert!(recovery_rect.pos.x + recovery_rect.size.x <= width);
+        assert!(banner_rect.size.x > (width - 12.0).min(700.0) - 40.0);
+        let scrollbar_left = scroll_rect.pos.x + scroll_rect.size.x - 10.0;
+        for rect in [banner_rect, recovery_rect] {
+            assert!(
+                rect.pos.x + rect.size.x <= scrollbar_left,
+                "account content {rect:?} overlaps the scroll bar in {scroll_rect:?}"
+            );
+        }
         for label in [&device_info, &status, &description] {
             let ink = label.borrow().unwrap().draw_text.area();
             let bounds = ink.rect_union(&cx);

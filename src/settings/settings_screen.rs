@@ -142,6 +142,8 @@ script_mod! {
                 account_settings_page := ScrollYView {
                     width: Fill, height: Fill
                     flow: Down
+                    // Keep the account cards clear of the overlay scroll bar.
+                    padding: Inset{right: 12}
                     account_settings := AccountSettings {}
                     // The TSP wallet settings section (a placeholder without the `tsp` feature).
                     tsp_settings_screen := TspSettingsScreen {}
