@@ -1405,6 +1405,7 @@ async fn heartbeat_retries_transport_failure_but_never_extends_unconfirmed_lease
             device_generation: 1,
             epoch: 1,
             expires_at_ms: wall_ms() + 6_000,
+            held_until: None,
         };
         let (stop, receiver) = watch::channel(false);
         let failed = Arc::new(std::sync::atomic::AtomicU8::new(0));

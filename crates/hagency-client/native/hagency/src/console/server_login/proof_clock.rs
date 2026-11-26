@@ -17,28 +17,34 @@ pub(super) struct ProofClock {
     server_second_ms: Option<u64>,
 }
 
+/// The server's time in a fresh answer, cut to its second: the date of a
+/// non-storable response that has exactly one date and was not served from
+/// a cache. An undated response gives none, and is read with the local clock.
+pub(in crate::console) fn server_date_ms(headers: &HeaderMap) -> Option<u64> {
+    let no_store = headers
+        .get_all(CACHE_CONTROL)
+        .iter()
+        .filter_map(|v| v.to_str().ok())
+        .flat_map(|s| s.split(','))
+        .any(|s| s.trim().eq_ignore_ascii_case("no-store"));
+    let mut dates = headers.get_all(DATE).iter();
+    dates
+        .next()
+        .filter(|_| {
+            dates.next().is_none() && no_store && headers.get_all(AGE).iter().all(|v| v == "0")
+        })
+        .and_then(|v| httpdate::parse_http_date(v.to_str().ok()?).ok())
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+}
+
 impl ProofClock {
     pub(super) fn new(started: Instant, headers: &HeaderMap) -> Self {
         // Only use the date on this fresh, non-storable authorization response.
         // An undated response retains the original local-clock check.
-        let no_store = headers
-            .get_all(CACHE_CONTROL)
-            .iter()
-            .filter_map(|v| v.to_str().ok())
-            .flat_map(|s| s.split(','))
-            .any(|s| s.trim().eq_ignore_ascii_case("no-store"));
-        let mut dates = headers.get_all(DATE).iter();
-        let server_second_ms = dates
-            .next()
-            .filter(|_| {
-                dates.next().is_none() && no_store && headers.get_all(AGE).iter().all(|v| v == "0")
-            })
-            .and_then(|v| httpdate::parse_http_date(v.to_str().ok()?).ok())
-            .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
-            .and_then(|d| u64::try_from(d.as_millis()).ok());
         Self {
             started,
-            server_second_ms,
+            server_second_ms: server_date_ms(headers),
         }
     }
 

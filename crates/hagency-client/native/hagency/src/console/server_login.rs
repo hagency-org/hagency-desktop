@@ -20,6 +20,7 @@ pub(super) mod matrix_creations;
 mod profiles;
 mod proof_clock;
 use proof_clock::ProofClock;
+pub(super) use proof_clock::server_date_ms;
 mod sdk_resume;
 mod shared_matrix;
 mod room_binding;

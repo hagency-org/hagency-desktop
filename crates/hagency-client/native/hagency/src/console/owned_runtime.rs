@@ -1322,12 +1322,31 @@ async fn operation<T: Transport>(
     tokio::select! { biased; _=canceled(receiver)=>Err(RuntimeError::Stopped), response=console.execute(op)=>response }
 }
 fn deadline(lease: &Lease) -> Result<Instant, RuntimeError> {
-    let remaining = i128::from(lease.expires_at_ms) - i128::from(wall_ms());
-    // The device layer has already held the lease to what was asked for it.
-    if remaining <= 0 || remaining > i128::from(MAX_LEASE_TTL_MS) + 1_000 {
+    lease_deadline(lease, Instant::now(), wall_ms())
+}
+/// Where `lease` ends, read at `now` with the wall clock at `local_ms`. The
+/// device layer has already held the lease to what was asked for it, and
+/// counted it from its request with the server's time where the answer had
+/// it. The wall clock, which runs on while the computer sleeps, may then only
+/// end the lease early. A lease that came without that count is read with the
+/// wall clock alone, which refuses one that ends later than any lease asked.
+fn lease_deadline(lease: &Lease, now: Instant, local_ms: i64) -> Result<Instant, RuntimeError> {
+    let remaining = i128::from(lease.expires_at_ms) - i128::from(local_ms);
+    if remaining <= 0 {
         return Err(RuntimeError::Authorization);
     }
-    Ok(Instant::now() + Duration::from_millis(remaining as u64))
+    let by_wall = now.checked_add(Duration::from_millis(remaining.min(i128::from(u64::MAX)) as u64));
+    let end = match lease.held_until {
+        Some(held) => by_wall.map_or(held, |wall| wall.min(held)),
+        None if remaining <= i128::from(MAX_LEASE_TTL_MS) + 1_000 => {
+            by_wall.ok_or(RuntimeError::Authorization)?
+        }
+        None => return Err(RuntimeError::Authorization),
+    };
+    if end <= now {
+        return Err(RuntimeError::Authorization);
+    }
+    Ok(end)
 }
 fn heartbeat_next(now: Instant, expiry: Instant) -> Instant {
     now + Duration::from_secs(5).min(expiry.saturating_duration_since(now) / 2)
@@ -3340,6 +3359,40 @@ mod tests {
             now + std::time::Duration::from_secs(2)
         );
         assert_eq!(super::heartbeat_next(now, now), now);
+    }
+    #[test]
+    fn a_counted_lease_ends_at_its_count_or_earlier_by_the_wall_clock() {
+        let now = Instant::now();
+        let lease = |expires_at_ms: i64, held_until: Option<Instant>| Lease {
+            agent_id: "agent-a".into(),
+            owner_user_id: "uid".into(),
+            device_id: "device-a".into(),
+            device_generation: 1,
+            epoch: 1,
+            expires_at_ms,
+            held_until,
+        };
+        let held = now + Duration::from_millis(119_000);
+        // This computer's clock is 5 s behind the server's: by the wall clock
+        // the lease ends in 125 s, later than any lease is asked for. Counted
+        // from its request with the server's time, it holds to the count.
+        assert_eq!(lease_deadline(&lease(1_125_000, Some(held)), now, 1_000_000).ok(), Some(held));
+        // Read with the wall clock alone, as before, it is refused.
+        assert!(lease_deadline(&lease(1_125_000, None), now, 1_000_000).is_err());
+        assert_eq!(
+            lease_deadline(&lease(1_100_000, None), now, 1_000_000).ok(),
+            Some(now + Duration::from_millis(100_000))
+        );
+        // The wall clock ends a counted lease early: a clock that is ahead...
+        assert_eq!(
+            lease_deadline(&lease(1_100_000, Some(held)), now, 1_000_000).ok(),
+            Some(now + Duration::from_millis(100_000))
+        );
+        // ...and a computer that slept past the end, which the count, kept on
+        // a clock that stops in sleep, does not see.
+        assert!(lease_deadline(&lease(1_100_000, Some(held)), now, 1_100_000).is_err());
+        // A count that has run out ends the lease too.
+        assert!(lease_deadline(&lease(1_100_000, Some(now)), now, 1_000_000).is_err());
     }
     use super::super::device_execution::{ExecutionStart, ReplyReceipt};
     use super::*;
@@ -5750,6 +5803,7 @@ for raw in sys.stdin:
             device_generation: 1,
             epoch: 2,
             expires_at_ms: wall_ms() + 30000,
+            held_until: None,
         });
         let fake = HistoryFake {
             pages: StdMutex::new([history_page("b", history, 2, None), Ok(response)].into()),
@@ -5780,6 +5834,7 @@ for raw in sys.stdin:
                         device_generation: 1,
                         epoch: 2,
                         expires_at_ms: wall_ms() + 30000,
+                        held_until: None,
                     })),
                 ]
                 .into(),
@@ -6164,6 +6219,7 @@ for raw in sys.stdin:
                             device_generation: 2,
                             epoch: 2,
                             expires_at_ms: wall_ms() + 30000,
+                            held_until: None,
                         }))
                     }
                 }
@@ -6317,6 +6373,7 @@ for raw in sys.stdin:
             device_generation: 1,
             epoch: 1,
             expires_at_ms: wall_ms() + 30000,
+            held_until: None,
         });
         let fake = HistoryFake {
             pages: StdMutex::new(
