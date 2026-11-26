@@ -5,6 +5,7 @@ use std::time::{Duration, Instant};
 use super::permission_retry::PermissionRetry;
 use crate::hagency::backend::Service;
 use crate::hagency::permission_failure::{PermissionFailure, Recovery};
+use crate::hagency::resend_offers::{self, Resend, UNPROCESSED_BY, row_agent, sent_again};
 
 /// The account session a read belongs to. An answer from another one is dropped.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -87,10 +88,6 @@ fn execution_rows<'a>(value:&'a Value,room:&str,thread:&str)->Vec<&'a Value> {
     value["executions"].as_array().into_iter().flatten().filter(|r|
         r["roomId"]==room && (thread.is_empty() || r["threadRoot"]==thread) && r["eventId"]==event).collect()
 }
-/// The Agent a row is about, when the server names it.
-fn row_agent(row:&Value)->Option<&str> {
-    row["agentMxid"].as_str().filter(|id| id.starts_with('@') && id.len()<=255 && !id.chars().any(char::is_control))
-}
 /// The message ended for this Agent and was not processed. A message that
 /// is still waiting (for the owner's service, for allowance) and a run whose
 /// outcome is unknown are not such an end.
@@ -129,32 +126,9 @@ impl ExecutionLine {
     }
 }
 const UNPROCESSED:&str="This message was not processed; it will not retry automatically.";
-const UNPROCESSED_BY:&str="{agent} did not process this message. It will not retry automatically.";
-/// The sender's way out of a message that ended without a turn: the same
-/// message, sent again to the Agents that did not process it. The server
-/// decides for which Agents that is: it knows that nothing of the message
-/// reached a model or a tool, that the reader sent it, and that the Agent is
-/// in the room and not stopped.
-#[derive(Clone,Debug,PartialEq)]
-struct Resend {
-    event:String,
-    /// The thread the message was sent in, when it was.
-    thread:Option<String>,
-    agents:Vec<String>,
-}
+/// What "Send again" would send for the newest message.
 fn execution_resend(value:&Value,room:&str,thread:&str)->Option<Resend> {
-    let rows=execution_rows(value,room,thread);
-    let event=rows.first()?["eventId"].as_str()?;
-    let agents=rows.iter().filter(|r| r["canSendAgain"]==true)
-        .filter_map(|r| row_agent(r)).map(str::to_owned).collect::<Vec<_>>();
-    if agents.is_empty() {return None;}
-    let root=rows[0]["threadRoot"].as_str().filter(|root| *root!=event);
-    Some(Resend {event:event.to_owned(),thread:root.map(str::to_owned),agents})
-}
-/// Whether this client has already sent `event` of `room` again.
-fn sent_again(room:&str,event:&str)->bool {
-    use matrix_sdk::ruma::{EventId,RoomId};
-    matches!((<&RoomId>::try_from(room),<&EventId>::try_from(event)),(Ok(room),Ok(event)) if crate::sliding_sync::sent_again(room,event))
+    resend_offers::of_message(&execution_rows(value,room,thread))
 }
 fn pool_request(row: &Value) -> Option<(String, String)> {
     if row["reason"] != "budget_blocked" { return None; }
@@ -315,26 +289,13 @@ impl SharedPermissionNotice {
     /// It goes out as a new message of the same account, so it is taken in
     /// and counted like any other; the first one stays as it ended.
     fn send_again(&mut self,cx:&mut Cx,resend:Resend) {
-        use matrix_sdk::ruma::{OwnedEventId,OwnedRoomId,OwnedUserId};
-        let parsed=(||{
-            let room=OwnedRoomId::try_from(self.room.as_str()).ok()?;
-            let event=OwnedEventId::try_from(resend.event.as_str()).ok()?;
-            let thread=match resend.thread.as_deref() {
-                Some(root)=>Some(OwnedEventId::try_from(root).ok()?),
-                None=>None,
-            };
-            let agents=resend.agents.iter().map(|a|OwnedUserId::try_from(a.as_str()).ok()).collect::<Option<Vec<_>>>()?;
-            Some((room,event,thread,agents))
-        })();
-        let Some((room,event,thread,agents))=parsed else {
+        if !resend_offers::send(&self.room,&resend) {
             crate::shared::popup_list::enqueue_popup_notification(crate::i18n::tr("This message can no longer be sent again."),crate::shared::popup_list::PopupKind::Error,Some(5.0));
             // What the server named cannot be addressed: it never will be.
             self.render(cx);
             return;
-        };
-        // One click sends once, also after the room was left and opened again.
-        crate::sliding_sync::note_sent_again(&room,&event);
-        crate::sliding_sync::submit_async_request(crate::sliding_sync::MatrixRequest::SendAgainToAgents {room_id:room,event_id:event,thread_root:thread,agents});
+        }
+        cx.action(resend_offers::ResendOffersChanged);
         self.render(cx);
         // The new message has rows of its own: read them soon.
         if self.active {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
@@ -622,6 +583,10 @@ impl SharedPermissionNotice {
                 self.retry.success(Instant::now());
                 let room=self.room.clone();
                 self.read_status(value,|event|crate::hagency::run_controls::stopped(&room,event));
+                // The cards on the messages offer each message that can be sent again.
+                if resend_offers::merge_read(&self.identity,&self.room,&self.thread,value) {
+                    cx.action(resend_offers::ResendOffersChanged);
+                }
                 // The cards on the messages read the same requests.
                 if crate::hagency::pending_approvals::merge_room(&self.identity,&self.room,value,self.active){
                     cx.action(crate::hagency::pending_approvals::PendingApprovalsChanged);
@@ -678,6 +643,12 @@ impl Widget for SharedPermissionNotice {
                     if self.active && !self.loading {self.retry.sooner(Instant::now()+Duration::from_millis(500));self.arm_timer(cx);}
                 }
                 if action.downcast_ref::<PendingApprovalsChanged>().is_some(){self.render(cx);}
+                // The card on the message sent it again: this offer is gone too.
+                if action.downcast_ref::<resend_offers::ResendOffersChanged>().is_some()
+                    && self.resend.as_ref().is_some_and(|r|sent_again(&self.room,&r.event)) {
+                    self.resend=None;
+                    self.render(cx);
+                }
                 // Nothing went out: read again whether the message can still be sent again.
                 if let Some(failed)=action.downcast_ref::<crate::sliding_sync::SendAgainFailed>()
                     && failed.room_id.as_str()==self.room && self.active && !self.loading {
@@ -1005,6 +976,26 @@ mod tests {
         blocked["resourceRecovery"]=json!({"requestId":"req_1","role":"owner"});
         n.read_status(&json!({"executions":[row("$e","@first:x","replied",None,false),blocked]}),|_|false);
         assert_eq!(n.original_request,Some(("req_1".into(),"owner".into())));
+    }
+    #[test]
+    fn the_notice_drops_its_offer_when_the_card_on_the_message_sent_it() {
+        use matrix_sdk::ruma::{OwnedEventId,OwnedRoomId};
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        {
+            let mut n=widget.borrow_mut().unwrap();
+            n.active=true;n.room="!card:x".into();
+            n.read_status(&json!({"executions":[{"roomId":"!card:x","eventId":"$by_card","threadRoot":"$by_card","agentMxid":"@first:x","agentId":"@first:x","state":"expired","reason":null,"canSendAgain":true}]}),|_|false);
+            n.render(&mut cx);
+            assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        }
+        // The card on the message was pressed.
+        crate::sliding_sync::note_sent_again(&OwnedRoomId::try_from("!card:x").unwrap(),&OwnedEventId::try_from("$by_card").unwrap());
+        let actions=cx.capture_actions(|cx|cx.action(resend_offers::ResendOffersChanged));
+        widget.handle_event(&mut cx,&Event::Actions(actions),&mut Scope::empty());
+        let mut n=widget.borrow_mut().unwrap();
+        assert!(n.resend.is_none());
+        assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
     }
     #[test]
     fn send_again_shows_with_the_run_state_and_sends_one_message_for_one_click() {
