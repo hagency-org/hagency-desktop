@@ -327,7 +327,9 @@ impl<R, W, E> Driver<R, W, E> {
     /// live; an expired transport cannot be revived by a later central reply.
     pub(in crate::codex) fn renew_shared_activity(&mut self, until: Instant) -> Result<(), Error> {
         self.check(self.lifetime)?;
-        if until <= Instant::now() || until > Instant::now() + Duration::from_secs(30) {
+        if until <= Instant::now()
+            || until > Instant::now() + crate::owned::LONGEST_ACTIVITY_LEASE
+        {
             return Err(Error::Configuration);
         }
         self.lifetime = until;

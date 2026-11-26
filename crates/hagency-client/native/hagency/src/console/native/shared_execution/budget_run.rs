@@ -12,6 +12,8 @@ use tokio::sync::{oneshot, watch};
 struct Activity {
     lease: SharedActivityLease,
     until: Instant,
+    /// See `io::renewal_moment`.
+    renew_at: Instant,
 }
 pub(super) async fn upload_process(
     b: &Bound,
@@ -87,12 +89,12 @@ fn activity(
     {
         return Err(invalid());
     }
-    let until = io::window(
+    let until = io::lease_end(
         &lease.authority.token,
         lease.expires_at_ms,
         observed,
         started,
-        &b.scope,
+        b.scope.authority_end,
     )?;
     if Instant::now() >= until {
         return Err(failure(409, "shared_execution_expired"));
@@ -100,6 +102,7 @@ fn activity(
     Ok(Activity {
         lease,
         until,
+        renew_at: io::renewal_moment(started, until),
     })
 }
 async fn proof(
@@ -189,7 +192,7 @@ async fn maybe_renew(
     control: &SharedTextActivityControl,
     a: &mut Activity,
 ) -> Result<(), NativeError> {
-    if a.until.saturating_duration_since(Instant::now()) <= Duration::from_secs(20) {
+    if Instant::now() >= a.renew_at {
         renew(io, r, sink, control, a).await.inspect_err(|error| {
             tracing::warn!(code = %error.code, "Shared activity renewal failed");
         })?
@@ -211,10 +214,7 @@ async fn prepare_while_active<T>(
 ) -> Result<T, NativeError> {
     tokio::pin!(preparation);
     loop {
-        let wake = a
-            .until
-            .checked_sub(Duration::from_secs(20))
-            .unwrap_or_else(Instant::now);
+        let wake = a.renew_at;
         tokio::select! { biased;
             _ = cancel.changed() => return Err(failure(409, "shared_execution_closed")),
             _ = tokio::time::sleep_until(a.until.into()) => return Err(failure(409, "shared_execution_expired")),
@@ -256,10 +256,7 @@ async fn start_while_active(
     }
     tokio::pin!(start);
     loop {
-        let wake = a
-            .until
-            .checked_sub(Duration::from_secs(20))
-            .unwrap_or_else(Instant::now);
+        let wake = a.renew_at;
         let error = tokio::select! { biased;
             _ = cancel.changed() => failure(409, "shared_execution_closed"),
             _ = tokio::time::sleep_until(a.until.into()) => failure(409, "shared_execution_expired"),
@@ -728,7 +725,7 @@ async fn work_loop(
             loop {
                 // Anchor renewal to the lease, not to the latest stream event.
                 // A ready event must not starve an already-due renewal.
-                let wake = a.until.checked_sub(Duration::from_secs(20)).unwrap_or_else(Instant::now);
+                let wake = a.renew_at;
                 let event = tokio::select! {biased;
                     _ = cancel.changed()=>break read.as_mut().await.map_err(|_|failure(409,"shared_execution_event_unknown")),
                     _ = tokio::time::sleep_until(a.until.into())=>break Err(failure(409,"shared_execution_expired")),

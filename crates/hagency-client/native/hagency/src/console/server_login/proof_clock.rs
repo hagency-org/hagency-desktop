@@ -5,7 +5,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_WINDOW_MS: u64 = 31_000;
 /// The authorization window this host asks the server for when it renews its
 /// proof. A server that grants no more than the default one ignores the ask.
-pub(super) const REQUESTED_WINDOW_MS: u64 = 120_000;
+/// It is the longest activity lease a process accepts: a lease follows the
+/// window, and one constant says how long both may be.
+pub(super) const REQUESTED_WINDOW_MS: u64 =
+    hagency_runtime::owned::LONGEST_ACTIVITY_LEASE.as_millis() as u64;
 /// The longest window of a proof from a server that granted what was asked.
 const MAX_REQUESTED_WINDOW_MS: u64 = REQUESTED_WINDOW_MS + 1_000;
 
@@ -71,18 +74,58 @@ impl ProofClock {
             .duration_since(UNIX_EPOCH)
             .map_err(|_| "invalid_local_clock")?
             .as_millis() as u64;
-        let remaining = remaining_ms(
-            until,
-            local_ms,
-            self.server_second_ms,
-            now.duration_since(self.started),
-        )
-        .ok_or("authorization_time_window_unavailable")?;
+        let elapsed = now.duration_since(self.started);
+        if let Some(ahead) = self
+            .server_second_ms
+            .and_then(|server| clock_lead_ms(local_ms, server, elapsed))
+        {
+            say_clock_lead(ahead);
+        }
+        let remaining = remaining_ms(until, local_ms, self.server_second_ms, elapsed)
+            .ok_or("authorization_time_window_unavailable")?;
         let bound = window_bound(until, self.server_second_ms);
         Ok((
             now + Duration::from_millis(remaining),
             Duration::from_millis(allowance_ms(until, local_ms, remaining, bound)),
         ))
+    }
+}
+
+/// A difference between the two clocks smaller than this is not reported.
+const CLOCK_LEAD_WORTH_SAYING_MS: i64 = 2_000;
+
+/// How far this computer's clock is ahead of the server's (negative: behind),
+/// when that is more than the two readings can explain. The server's date is
+/// cut to its second, and it was written at some moment of the round trip, so
+/// the lead lies between the two values below; the one nearer zero is given.
+fn clock_lead_ms(local_ms: u64, server_second_ms: u64, elapsed: Duration) -> Option<i64> {
+    let local = i64::try_from(local_ms).ok()?;
+    let server = i64::try_from(server_second_ms).ok()?;
+    let elapsed = i64::try_from(elapsed.as_millis()).ok()?;
+    let least = local.checked_sub(elapsed)?.checked_sub(server.checked_add(1_000)?)?;
+    let most = local.checked_sub(server)?;
+    if least > CLOCK_LEAD_WORTH_SAYING_MS {
+        Some(least)
+    } else if most < -CLOCK_LEAD_WORTH_SAYING_MS {
+        Some(most)
+    } else {
+        None
+    }
+}
+
+/// Every limit the server sets is also read with this computer's clock, which
+/// may only cut it short: a computer that slept must not find its leases
+/// still running. A clock that is wrong therefore costs time on every lease,
+/// or all of it, and this line is the one place that says so. It is written
+/// when the difference changes by a second, not at every proof.
+fn say_clock_lead(ahead_ms: i64) {
+    static SAID_SECONDS: std::sync::atomic::AtomicI64 = std::sync::atomic::AtomicI64::new(0);
+    let seconds = ahead_ms / 1_000;
+    if SAID_SECONDS.swap(seconds, std::sync::atomic::Ordering::Relaxed) != seconds {
+        tracing::warn!(
+            clock_ahead_ms = ahead_ms,
+            "This computer's clock differs from the server's; a time limit the server sets is cut short or refused by about that much"
+        );
     }
 }
 
@@ -151,6 +194,22 @@ mod tests {
         let ahead = local_end(&serde_json::json!({"validUntilMs": now_ms + 10_000})).unwrap();
         assert!(ahead > before + Duration::from_secs(9) && ahead <= Instant::now() + Duration::from_secs(10));
         assert!(local_end(&serde_json::json!({})).is_none());
+    }
+
+    #[test]
+    fn a_clock_difference_is_reported_only_beyond_what_the_readings_explain() {
+        let second = Duration::from_secs(1);
+        // The server's date is cut to its second and the round trip took one:
+        // up to two seconds either way say nothing.
+        assert_eq!(clock_lead_ms(100_000, 100_000, second), None);
+        assert_eq!(clock_lead_ms(102_900, 100_000, second), None);
+        assert_eq!(clock_lead_ms(98_100, 100_000, second), None);
+        // Ahead by ten seconds: at least eight of them cannot be explained.
+        assert_eq!(clock_lead_ms(110_000, 100_000, second), Some(8_000));
+        // Behind by ten seconds.
+        assert_eq!(clock_lead_ms(90_000, 100_000, second), Some(-10_000));
+        // Two minutes ahead, the case in which no proof can be taken at all.
+        assert_eq!(clock_lead_ms(220_000, 100_000, Duration::ZERO), Some(119_000));
     }
 
     #[test]

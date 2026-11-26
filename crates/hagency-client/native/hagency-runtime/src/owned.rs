@@ -7,7 +7,8 @@ mod managed;
 mod shared_text;
 pub use shared_text::{
     SHARED_WEB_INSTRUCTIONS, SHARED_WEB_INSTRUCTIONS_FILE, shared_text_policy,
-    SHARED_TEXT_INSTRUCTIONS, SHARED_TEXT_INSTRUCTIONS_FILE, SharedTextActivityControl,
+    LONGEST_ACTIVITY_LEASE, SHARED_TEXT_INSTRUCTIONS, SHARED_TEXT_INSTRUCTIONS_FILE,
+    SharedTextActivityControl,
     SharedTextEvent, SharedTextProcessObservation, SharedTextProcessSource,
 };
 mod session;

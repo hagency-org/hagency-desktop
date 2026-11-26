@@ -408,6 +408,19 @@ mod tests {
                         });
                         body["fixtureDeviceGrant"] = json!(device_grant);
                     }
+                    if path == "/hagency/api/v1/sessions/current/renew" {
+                        // What the renewal asked for in its headers.
+                        let asked = |name: &str| {
+                            headers.lines().find_map(|line| {
+                                line.split_once(':')
+                                    .filter(|(key, _)| key.eq_ignore_ascii_case(name))
+                                    .map(|(_, value)| value.trim().to_owned())
+                            })
+                        };
+                        body["fixtureAuthorizationWindow"] =
+                            json!(asked("x-hagency-authorization-window-ms"));
+                        body["fixtureActivityWindow"] = json!(asked("x-hagency-activity-window"));
+                    }
                     // A token five seconds from its expiry, and one eighty
                     // seconds from it: the server never trusts a proof longer.
                     let token = body["accessToken"].as_str().unwrap_or_default().to_owned();
@@ -1069,6 +1082,31 @@ mod tests {
         let device = login.authorized_device().await.unwrap();
         assert_eq!(source.refreshes.load(Ordering::Relaxed), 2);
         assert!(device.valid_until > Instant::now() + Duration::from_secs(100));
+        native.shutdown().await;
+        task.abort();
+    }
+    #[tokio::test]
+    async fn every_renewal_asks_for_the_window_and_says_that_the_activity_lease_follows_it() {
+        let (native, source, requests, task, _root) = two_minute_owner("sdk-first").await;
+        let login = &native.test_console().0.server_login;
+        // The renewal made with the token the SDK refreshed says it too.
+        *source.token.lock().unwrap() = "sdk-aging".into();
+        login.forget_recent_check().await;
+        login.authorized_device().await.unwrap();
+        assert_eq!(source.refreshes.load(Ordering::Relaxed), 1);
+        let renewals: Vec<Value> = requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|(path, _)| path == "/hagency/api/v1/sessions/current/renew")
+            .map(|(_, body)| body.clone())
+            .collect();
+        assert!(renewals.len() >= 2, "{renewals:?}");
+        assert!(renewals.iter().any(|body| body["accessToken"] == "sdk-refreshed"));
+        for body in &renewals {
+            assert_eq!(body["fixtureAuthorizationWindow"], "120000", "{body}");
+            assert_eq!(body["fixtureActivityWindow"], "session", "{body}");
+        }
         native.shutdown().await;
         task.abort();
     }

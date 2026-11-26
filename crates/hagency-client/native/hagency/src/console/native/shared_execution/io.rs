@@ -833,6 +833,47 @@ pub(super) struct AckReply {
 pub(super) struct TicketReply {
     pub ticket: SharedWorkResultTicket,
 }
+/// When an activity lease is renewed: ten seconds after it was granted, and
+/// no later than twenty seconds before its end. A thirty-second lease is
+/// renewed when it always was. One that follows a longer authorization
+/// window is renewed as often, so a renewal that gets no answer has the rest
+/// of the lease to be asked again. A lease that is shorter than twenty
+/// seconds, because its authority ends, is renewed half-way through it and
+/// not at once: at once, each renewal would be due the moment it is answered.
+pub(super) fn renewal_moment(granted: Instant, until: Instant) -> Instant {
+    let length = until.saturating_duration_since(granted);
+    match length.checked_sub(Duration::from_secs(20)) {
+        Some(early) if !early.is_zero() => granted + early.min(Duration::from_secs(10)),
+        _ => granted + length / 2,
+    }
+}
+/// The local end of an activity lease: what the server issued, counted from
+/// the moment the request for it was sent, and never past the end of the
+/// authority it is held under (`Scope::authority_end`).
+///
+/// A lease is what a process holds between steps. It is not cut to the scope
+/// of the request that brought it, as a ticket is (`window`): each step takes
+/// a scope of its own, and that scope ends within a minute. Cut to it, a
+/// lease that follows a two-minute window would end after one.
+pub(super) fn lease_end(
+    token: &str,
+    until: u64,
+    observed: u64,
+    started: Instant,
+    authority_end: Instant,
+) -> Result<Instant, NativeError> {
+    hash(token)?;
+    let longest = hagency_runtime::owned::LONGEST_ACTIVITY_LEASE.as_millis() as u64;
+    let remaining = until
+        .checked_sub(observed)
+        .filter(|v| *v > 0 && *v <= longest)
+        .ok_or_else(invalid)?;
+    let end = (started + Duration::from_millis(remaining)).min(authority_end);
+    if Instant::now() >= end {
+        return Err(failure(409, "shared_execution_expired"));
+    }
+    Ok(end)
+}
 pub(super) fn window(
     token: &str,
     until: u64,
@@ -850,6 +891,67 @@ pub(super) fn window(
         return Err(failure(409, "shared_execution_ticket_expired"));
     }
     Ok(deadline)
+}
+
+#[cfg(test)]
+mod lease_tests {
+    use super::*;
+
+    fn end(lease_ms: u64, authority_in: u64) -> Result<Instant, NativeError> {
+        let started = Instant::now();
+        lease_end(
+            &"c".repeat(64),
+            1_000_000 + lease_ms,
+            1_000_000,
+            started,
+            started + Duration::from_secs(authority_in),
+        )
+    }
+    fn secs(until: Instant) -> u64 {
+        until.saturating_duration_since(Instant::now()).as_secs()
+    }
+
+    /// A lease that follows a two-minute window lasts as long as it was
+    /// issued for. The scope of one request ends within a minute; a lease
+    /// that ended with it would be half as long.
+    #[test]
+    fn a_lease_lasts_as_long_as_it_was_issued_for_under_its_authority() {
+        assert!((118..=120).contains(&secs(end(120_000, 300).unwrap())));
+        assert!((88..=90).contains(&secs(end(90_000, 300).unwrap())));
+        assert!((28..=30).contains(&secs(end(30_000, 300).unwrap())));
+        // The authority it is held under ends first.
+        assert!((98..=100).contains(&secs(end(120_000, 100).unwrap())));
+        assert!((8..=10).contains(&secs(end(120_000, 10).unwrap())));
+    }
+
+    #[test]
+    fn a_lease_longer_than_the_longest_window_is_refused() {
+        assert!(end(120_001, 300).is_err());
+        assert!(end(0, 300).is_err());
+        let started = Instant::now();
+        let passed = lease_end(&"c".repeat(64), 999_999, 1_000_000, started, started);
+        assert!(passed.is_err());
+        // An authority that has ended leaves nothing of the lease.
+        assert_eq!(end(30_000, 0).unwrap_err().code, "shared_execution_expired");
+    }
+
+    #[test]
+    fn a_lease_is_renewed_ten_seconds_after_its_grant_whatever_its_length() {
+        let granted = Instant::now();
+        let after = |ms: u64| granted + Duration::from_millis(ms);
+        // Thirty seconds: twenty seconds before the end, the moment before.
+        assert_eq!(renewal_moment(granted, after(30_000)), after(10_000));
+        // One that follows a longer window is not left until its last moments.
+        assert_eq!(renewal_moment(granted, after(120_000)), after(10_000));
+        assert_eq!(renewal_moment(granted, after(60_000)), after(10_000));
+        // One a little shorter is renewed twenty seconds before its end, as before.
+        assert_eq!(renewal_moment(granted, after(25_000)), after(5_000));
+        // One that leaves less than that is renewed half-way through, never
+        // at once.
+        assert_eq!(renewal_moment(granted, after(20_000)), after(10_000));
+        assert_eq!(renewal_moment(granted, after(8_000)), after(4_000));
+        assert_eq!(renewal_moment(granted, granted), granted);
+    }
 }
 
 #[cfg(test)]

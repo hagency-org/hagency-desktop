@@ -58,6 +58,11 @@ pub(crate) struct State {
     activity_epoch: u64,
     refuse_renewal: bool,
     unanswered_renewals: u32,
+    /// Added to the end of every activity lease this server issues, and to
+    /// nothing else: its start windows, delivery leases and tickets stay as
+    /// they are. Ninety-five seconds is a server whose session follows a
+    /// two-minute window.
+    lease_stretch_ms: u64,
     delay_renewal_reply: bool,
     delay_start_reply: bool,
     delay_demand_binding: bool,
@@ -212,7 +217,7 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         let active = if r.state == "qualified" {
             s.shared.activity_epoch = 1;
             Some(
-                json!({"authority":{"runtimeCommandId":c.command_id,"epoch":1,"token":"c".repeat(64)},"commandDigest":h,"processDigest":r.process_digest,"expiresAtMs":at+25000}),
+                json!({"authority":{"runtimeCommandId":c.command_id,"epoch":1,"token":"c".repeat(64)},"commandDigest":h,"processDigest":r.process_digest,"expiresAtMs":at+25000+s.shared.lease_stretch_ms}),
             )
         } else {
             None
@@ -271,7 +276,7 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         assert_eq!(body["authority"]["epoch"], s.shared.activity_epoch);
         s.shared.activity_epoch += 1;
         return Some(
-            json!({"activity":{"authority":{"runtimeCommandId":runtime_id,"epoch":s.shared.activity_epoch,"token":"c".repeat(64)},"commandDigest":h,"processDigest":process_digest,"expiresAtMs":at+25000},"observedAtMs":at}),
+            json!({"activity":{"authority":{"runtimeCommandId":runtime_id,"epoch":s.shared.activity_epoch,"token":"c".repeat(64)},"commandDigest":h,"processDigest":process_digest,"expiresAtMs":at+25000+s.shared.lease_stretch_ms},"observedAtMs":at}),
         );
     }
     if path.ends_with("/work/poll") && s.shared.idle_work {
@@ -355,6 +360,13 @@ async fn fixture() -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) 
         .try_init();
     let (f, t, c) =
         prepared_with(Fixture::with_provider("openai.chatgpt", "fixture_account").await).await;
+    runtime_fixture(f, t, c).await
+}
+
+/// As `fixture`, with a delegation and a reservation that last `lifetime_ms`.
+async fn fixture_lifetime(lifetime_ms: u64) -> (Fixture, SharedExecutionTransport, SharedRuntimeCommand) {
+    let f = Fixture::with_provider_budget_lifetime("openai.chatgpt", "fixture_account", 1000, 700, lifetime_ms).await;
+    let (f, t, c) = prepared_with_budget_lifetime(f, 300, 100, lifetime_ms).await;
     runtime_fixture(f, t, c).await
 }
 
@@ -862,6 +874,75 @@ async fn native_shared_execution_cleanup_poll_stops_original_running_process() {
     ));
     stopped(&f).await;
     assert_eq!(f.state.lock().unwrap().shared.starts, 1);
+    f.stop().await;
+}
+
+/// A process under a server whose session follows a two-minute window holds
+/// a two-minute lease, while everything it is offered (its start window, its
+/// delivery lease, its tickets) lasts thirty seconds as before. The server
+/// then answers no renewal for more than a minute. The lease in hand covers
+/// that: the process is there when the server answers again, and runs its
+/// work once. Under a thirty-second lease, or one cut to the scope of the
+/// request that brought it, the process had ended meanwhile.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe; waits more than a minute without a renewal"]
+async fn native_shared_execution_holds_a_two_minute_lease_through_a_minute_without_an_answer() {
+    let (f, t, c) = fixture_lifetime(600_000).await;
+    {
+        let mut state = f.state.lock().unwrap();
+        state.proof_stretch_ms = 90_000;
+        state.shared.lease_stretch_ms = 95_000;
+        state.shared.idle_work = true;
+    }
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    // What is offered keeps thirty seconds.
+    assert!(c.expires_at_ms - c.issued_at_ms <= 30_000);
+    t.poll_fixture(&f.registry, launch(&f, "text-usage"))
+        .await
+        .unwrap();
+    // A two-minute lease is renewed as often as a thirty-second one.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if f.state.lock().unwrap().shared.activity_epoch >= 2 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the lease is renewed ten seconds after its grant");
+    let silent = Instant::now();
+    f.state.lock().unwrap().shared.unanswered_renewals = u32::MAX;
+    tokio::time::sleep(Duration::from_secs(70)).await;
+    let epoch = {
+        let mut state = f.state.lock().unwrap();
+        assert!(state.shared.unanswered_renewals < u32::MAX, "no renewal was asked meanwhile");
+        assert!(
+            state.shared.processes.values().all(|r| r.state != "stopped"),
+            "the process ended {} s into a silence its lease covers",
+            silent.elapsed().as_secs()
+        );
+        assert_eq!(state.shared.starts, 0);
+        state.shared.unanswered_renewals = 0;
+        state.shared.activity_epoch
+    };
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            if f.state.lock().unwrap().shared.activity_epoch > epoch {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the same renewal is answered once the server answers again");
+    f.state.lock().unwrap().shared.idle_work = false;
+    stopped(&f).await;
+    {
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.shared.starts, 1);
+        assert!(state.shared.receipts.values().any(|receipt| receipt.state == "completed"));
+    }
     f.stop().await;
 }
 
