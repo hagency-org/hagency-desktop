@@ -255,6 +255,55 @@ impl PackageSessions {
             authority.retire();
         }
     }
+    /// The session a new operation runs under: the cached one while it still
+    /// serves, else one that `issue` makes. `bound` is the end of everything
+    /// the session may not outlive: the proof of identity and the package's
+    /// and the controller's deadlines.
+    fn session_until(
+        &mut self,
+        context: &service::HostContext,
+        bound: Instant,
+        now: Instant,
+        issue: impl FnOnce(Instant) -> Result<service::Session, NativeError>,
+    ) -> Result<service::Session, NativeError> {
+        let expires = bound.min(now + SESSION_TERM);
+        if let Some((_, session)) = &self.current
+            && session.is_live()
+            && session_serves(session.valid_until(), expires, bound, now)
+        {
+            return Ok(session.clone());
+        }
+        // A fresh operation uses the current authenticated deadline. Drop only
+        // the cache's strong reference; queued/in-flight copies keep their own
+        // unchanged deadline and remain revocable through the weak handles.
+        self.current.take();
+        let session = issue(expires)?;
+        self.issued.push(session.authority().downgrade());
+        self.current = Some((context.clone(), session.clone()));
+        Ok(session)
+    }
+}
+
+/// The longest a management session lasts, whatever the proof behind it.
+const SESSION_TERM: Duration = Duration::from_secs(60);
+/// How long a session cut to `SESSION_TERM` serves new operations before the
+/// next one is issued.
+const SESSION_REUSE: Duration = Duration::from_secs(30);
+
+/// Whether the cached session serves an operation that may run until
+/// `expires`, the nearer of `bound` and `SESSION_TERM` from `now`.
+///
+/// While `bound` is the nearer end, every call under one proof of identity
+/// computes the same end and shares the session; a new proof gets a new one.
+/// When the term is the nearer end (a proof longer than the term, as under a
+/// two-minute authorization window), the end moves with the clock, no two
+/// calls agree, and each would issue a session of its own until the sixteen
+/// that the registry admits are all alive. Such a session is kept for
+/// `SESSION_REUSE` instead: it ends no later than `bound` allows, and at
+/// least the rest of its term is left to the operation.
+fn session_serves(session_until: Instant, expires: Instant, bound: Instant, now: Instant) -> bool {
+    session_until == expires
+        || (session_until <= bound && session_until + SESSION_REUSE >= now + SESSION_TERM)
 }
 
 pub struct NativeManagement {
@@ -592,32 +641,21 @@ impl NativeManagement {
         current
             .issued
             .retain(service::WeakManagementAuthority::is_live);
-        let mut expires = device
-            .valid_until()
-            .min(Instant::now() + Duration::from_secs(60));
-        if let Some(deadline) = current.deadline { expires = expires.min(deadline); }
-        if let Some(deadline) = self.controller_deadline()? { expires = expires.min(deadline); }
-        if let Some((_, session)) = &current.current
-            && session.is_live()
-            && session.valid_until() == expires
-        {
-            return Ok((context, session.clone(), device));
-        }
-        // A fresh operation uses the current authenticated deadline. Drop only
-        // the cache's strong reference; queued/in-flight copies keep their own
-        // unchanged deadline and remain revocable through the weak handles.
-        current.current.take();
-        let session = self
-            .store
-            .session(
-                context.clone(),
-                self.package.permissions.iter().copied(),
-                expires,
-            )
-            .map_err(store_error)?;
-        self.owner.0.management.remember(session.clone())?;
-        current.issued.push(session.authority().downgrade());
-        current.current = Some((context.clone(), session.clone()));
+        let mut bound = device.valid_until();
+        if let Some(deadline) = current.deadline { bound = bound.min(deadline); }
+        if let Some(deadline) = self.controller_deadline()? { bound = bound.min(deadline); }
+        let session = current.session_until(&context, bound, Instant::now(), |expires| {
+            let session = self
+                .store
+                .session(
+                    context.clone(),
+                    self.package.permissions.iter().copied(),
+                    expires,
+                )
+                .map_err(store_error)?;
+            self.owner.0.management.remember(session.clone())?;
+            Ok(session)
+        })?;
         Ok((context, session, device))
     }
     pub(super) async fn finish<T>(
