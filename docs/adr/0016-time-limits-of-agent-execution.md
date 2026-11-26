@@ -37,8 +37,8 @@ come to this:
    The activity lease of a working process, in review (Desktop #243 and the
    follow-up on `fix/end-a-lease-by-the-wall-clock`): renewed ten seconds
    after its grant, no later than twenty seconds before its end and no
-   sooner than five seconds after its grant; a lease with less than twenty
-   seconds left is renewed half-way through. Its end is the earlier of the
+   sooner than five seconds after its grant; a lease of twenty seconds or
+   less is renewed half-way through. Its end is the earlier of the
    end counted from the request and the end on this computer's wall clock.
    All four drivers of a process take that moment from one function,
    `io::renewal_moment`. Main still renews it once, when 20 seconds of it
@@ -163,13 +163,17 @@ document states the case, and its option A is drafted (Desktop #249, server
   `fix/end-a-lease-by-the-wall-clock`): a computer whose clock is ahead
   holds what its clock leaves of each lease and renews it before that runs
   out, more often the further it is ahead: every five seconds while more
-  than twenty seconds are left, half-way through what is left below that.
+  than twenty seconds are left, and half-way through what is left once
+  twenty seconds or fewer remain.
   Only a clock ahead by the whole lease loses it, and every process then
   ends at its first lease. After a sleep through a lease's end, the turn
   ends at its next renewal moment, at most ten seconds of awake time; the
   store refuses its records, and the commit gate its messages, from the
   wall-clock end on. On main, such a computer still loses that much of
-  every lease, and a whole lease when it is ahead by a lease's length.
+  every lease, and a whole lease when it is ahead by a lease's length; and
+  after a sleep through a lease's end, a turn on main runs on for the
+  counted time that was left when the computer slept: 20 to 30 seconds
+  with 30-second leases, 110 to 120 seconds with two-minute leases.
 - The answer that grants an Agent's execution lease carries no server time,
   so for that lease the wall clock is the only witness, and a computer whose
   clock is behind by more than a second is refused a full-length lease.
