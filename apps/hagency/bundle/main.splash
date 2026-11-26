@@ -7511,7 +7511,16 @@ A.pool_list_unknown=fn(){
     for row in H.resources {if A.pool_row(row).unknown {return true}}
     return false
 }
-A.pool_create_tokens=fn(text){if H.enrollment_draft==nil || H.busy || H.command!=nil {return} H.enrollment_draft.tokens=text ui.pool_create_submit.set_enabled(A.pool_create_valid())}
+A.pool_create_tokens=fn(text){
+    let d=H.enrollment_draft
+    if d==nil || H.busy || H.command!=nil {return}
+    let before=A.pool_whole(d.tokens)
+    let after=A.pool_whole(text)
+    d.tokens=text
+    ui.pool_create_submit.set_enabled(A.pool_create_valid())
+    // Refresh the selection without replacing the focused input or slider.
+    if before!=after {for amount in A.pool_create_quick_amounts(A.pool_create_quota()) {if amount==before || amount==after {ui.pool_create_presets.render() return}}}
+}
 A.pool_create_preset=fn(amount){if H.enrollment_draft==nil || H.busy || H.command!=nil {return} H.enrollment_draft.tokens=""+amount A.redraw()}
 A.pool_model_enrolled=fn(model){let {enrolled=false}=model return enrolled==true}
 A.pool_create_duplicate=fn(){
@@ -7561,6 +7570,27 @@ A.pool_create_quota=fn(){
     if !sourceRequired || source==nil || H.resource_detail==nil || H.resource_detail.resource.id!=source.id {return -1}
     let b=A.pool_budget(H.resource_detail.resource)
     return if b.quota!=nil && b.quota>0 {b.quota} else {-1}
+}
+// Space the presets across the same track as MiniAppNumberInput, whose
+// fallback is 1B when the account limit is unknown.
+A.pool_create_quick_amounts=fn(quota){
+    let top=if quota>0 {quota} else {1000000000}
+    let quarter=A.pool_div(top,4)
+    let presets=[] let previous=0
+    for amount in [quarter,A.pool_div(top,2),top-quarter,top] {
+        if amount>previous {presets.push(amount) previous=amount}
+    }
+    return presets
+}
+A.pool_create_preset_row=fn(){
+    let presets=A.pool_create_quick_amounts(A.pool_create_quota())
+    let selected=A.pool_whole(H.enrollment_draft.tokens)
+    return View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
+        for amount in presets {let value=amount let enabled=!H.busy && H.command==nil View{width:Fit height:Fit
+            if selected==value {pool_create_preset := mod.widgets.HagencyPresetOn{text:A.tokens(value) enabled:enabled on_click:||A.pool_create_preset(value)}}
+            if selected!=value {pool_create_preset := mod.widgets.HagencyPreset{text:A.tokens(value) enabled:enabled on_click:||A.pool_create_preset(value)}}
+        }}
+    }
 }
 A.new_resource = fn(){
     if H.busy || H.command != nil {return}
@@ -10553,12 +10583,9 @@ A.render_page = fn(){
                 }}
                 mod.widgets.HagencyListLabel{text:A.t("MONTHLY MAXIMUM","每月上限")}
                 mod.widgets.HagencyList{View{width:Fill height:Fit flow:Down spacing:8 padding:Inset{left:16 right:16 top:12 bottom:12}
-                    pool_create_tokens := mod.widgets.HagencyNumberInput{minimum:1 maximum:quota text:d.tokens empty_text:A.t("e.g. 1.5","例如 1.5") on_change:|text| A.pool_create_tokens(text)}
-                    View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
-                        for amount in [500000,1000000,2000000,5000000] {let value=amount let on=A.pool_whole(d.tokens)==value View{width:Fit height:Fit
-                            if on {pool_create_preset := mod.widgets.HagencyPresetOn{text:A.tokens(value) enabled:!H.busy && H.command==nil && (quota<0 || value<=quota) on_click:||A.pool_create_preset(value)}}
-                            if !on {pool_create_preset := mod.widgets.HagencyPreset{text:A.tokens(value) enabled:!H.busy && H.command==nil && (quota<0 || value<=quota) on_click:||A.pool_create_preset(value)}}
-                        }}
+                    pool_create_tokens := mod.widgets.HagencyNumberInput{minimum:1 maximum:quota text:d.tokens empty_text:A.t("e.g. 250","例如 250") on_change:|text| A.pool_create_tokens(text)}
+                    pool_create_presets := View{width:Fill height:Fit flow:Down on_render:A.pool_create_preset_row
+                        presets := A.pool_create_preset_row()
                     }
                 }}
                 mod.widgets.HagencyListNote{text:(if quota>0 {A.t("Pools on this account share its limit of "+A.tokens(quota)+". ","此账号的资源池共用账号上限 "+A.tokens(quota)+"；")} else if c.account.runtime=="octos" {A.t("This first pool also sets the total limit shared by this Octos profile. ","第一个资源池的上限也将作为此 Octos 配置的共享总上限；")} else {""})+A.t("Next, connect it to a server and publish it from its page.","创建后在资源池页面连接服务器并发布。")}
@@ -15177,8 +15204,8 @@ View{width:Fill height:Fit flow:Down spacing:(12 * mod.widgets.RINX_SPACING)    
                         mod.widgets.HagencyListValue{text:if ctop>0 {A.t("Account limit ","账号上限 ")+A.tokens(ctop)} else {A.t("Account limit unknown","账号上限未知")}}
                     }}
                     View{width:Fill height:Fit flow:Flow.Right{wrap:true} spacing:8
-                        for amount in [500000,1000000,2000000,5000000] {let value=amount View{width:Fit height:Fit
-                            resource_create_preset := mod.widgets.HagencyPreset{text:A.tokens(value) enabled:!H.busy && H.command==nil && (ctop<0 || value<=ctop) on_click:||{d.tokens=""+value A.redraw()}}
+                        for amount in A.pool_create_quick_amounts(ctop) {let value=amount View{width:Fit height:Fit
+                            resource_create_preset := mod.widgets.HagencyPreset{text:A.tokens(value) enabled:!H.busy && H.command==nil on_click:||{d.tokens=""+value A.redraw()}}
                         }}
                     }
                 }}
