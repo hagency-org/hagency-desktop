@@ -507,12 +507,16 @@ impl NativeError {
             | "server_request_failed"
             | "invalid_server_response"
             | "management_outcome_unknown" => Said::NoAnswer,
+            // The time this request was given ran out before an answer came:
+            // a ticket, like every offer, is asked for again.
+            "allocation_ticket_expired" => Said::NoAnswer,
             // What this host makes itself with a status of 500 or more. Each
             // is the failure of a step of its own and is handled where it is
             // made. They are named so that the rule below is about the
             // server only; `every_failure_made_on_the_pooled_path_is_read`
             // fails when one is made and not named.
             "invalid_allocation_response"
+            | "invalid_shared_execution_response"
             | "management_drain_unavailable"
             | "management_state_unavailable"
             | "native_random_unavailable"
@@ -647,6 +651,7 @@ mod said_tests {
     /// host makes it on the pooled path, with the three that are made
     /// elsewhere (by the server, or where a request is sent).
     const READ: &[(&str, u16, Said)] = &[
+        ("allocation_ticket_expired", 409, Said::NoAnswer),
         ("domain_writer_busy", 403, Said::Decided),
         ("domain_writer_busy", 503, Said::NotAsked),
         ("invalid_server_response", 502, Said::NoAnswer),
@@ -667,10 +672,11 @@ mod said_tests {
     const DECIDED: &[&str] = &[
         "agent_executor_ledger_retired", "allocation_acknowledgement_conflict",
         "allocation_enrollment_changed", "allocation_receipt_conflict",
-        "allocation_ticket_expired", "call_timed_out", "device_setup_required",
+        "call_timed_out", "device_setup_required",
         "empty_device_already_active", "encrypted_approval_device_changed",
         "grant_publication_receipt_missing", "invalid_allocation_response",
         "invalid_management_arguments", "invalid_management_revision",
+        "invalid_shared_execution_response",
         "management_agent_control_local_stop_pending", "management_backing_changed",
         "management_change_cancelled", "management_drain_outcome_unknown",
         "management_drain_unavailable", "management_model_unqualified", "management_not_found",
@@ -721,7 +727,11 @@ mod said_tests {
     /// `failure(..)` is given there, directly or as a pair.
     fn made_on_the_pooled_path() -> std::collections::BTreeSet<(u16, String)> {
         let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/console/native");
-        let mut files = vec![root.join("allocation_transport.rs"), root.join("management.rs")];
+        let mut files = vec![
+            root.join("allocation_transport.rs"),
+            root.join("management.rs"),
+            root.join("shared_execution.rs"),
+        ];
         let mut directories = vec![root.join("shared_execution"), root.join("allocation_transport")];
         while let Some(directory) = directories.pop() {
             for entry in std::fs::read_dir(directory).unwrap() {

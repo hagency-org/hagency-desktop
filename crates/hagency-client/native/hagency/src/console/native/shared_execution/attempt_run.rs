@@ -140,11 +140,7 @@ fn undecided(e: &NativeError) -> bool {
     // Not a refusal (`NativeError::said`): the retry could not be asked, or
     // got no answer. Before, a session that was not free for a moment counted
     // as the server refusing the retry, and the message ended there.
-    e.passes()
-        || matches!(
-            e.code.as_str(),
-            "allocation_ticket_expired" | "sign_in_required" | "device_authorization_required"
-        )
+    e.passes() || matches!(e.code.as_str(), "sign_in_required" | "device_authorization_required")
 }
 fn activity(
     sink: &SharedAttemptProcessSink,

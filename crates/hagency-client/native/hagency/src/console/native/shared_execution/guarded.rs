@@ -66,15 +66,11 @@ where
 
 /// Retry the saved terminal receipt while the original activity can still send.
 pub(super) fn retry_reply_report(error: &NativeError) -> bool {
-    // The report was not refused (`NativeError::said`), the server is still
-    // delivering the reply, or this request ran out of its own time. The
-    // saved receipt is sent again under a fresh scope; the server answers an
-    // exact replay with what it recorded.
-    error.passes()
-        || matches!(
-            error.code.as_str(),
-            "shared_message_delivery_pending" | "allocation_ticket_expired"
-        )
+    // The report was not refused (`NativeError::said`; a request that ran
+    // out of its own time is one of those), or the server is still
+    // delivering the reply. The saved receipt is sent again under a fresh
+    // scope; the server answers an exact replay with what it recorded.
+    error.passes() || error.code == "shared_message_delivery_pending"
 }
 
 /// Whether a driver's wait for the central reply is over.
