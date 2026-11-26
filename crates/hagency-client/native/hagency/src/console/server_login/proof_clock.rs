@@ -5,7 +5,10 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 const MAX_WINDOW_MS: u64 = 31_000;
 /// The authorization window this host asks the server for when it renews its
 /// proof. A server that grants no more than the default one ignores the ask.
-pub(super) const REQUESTED_WINDOW_MS: u64 = 120_000;
+/// It is the longest activity lease a process accepts: a lease follows the
+/// window, and one constant says how long both may be.
+pub(super) const REQUESTED_WINDOW_MS: u64 =
+    hagency_runtime::owned::LONGEST_ACTIVITY_LEASE.as_millis() as u64;
 /// The longest window of a proof from a server that granted what was asked.
 const MAX_REQUESTED_WINDOW_MS: u64 = REQUESTED_WINDOW_MS + 1_000;
 

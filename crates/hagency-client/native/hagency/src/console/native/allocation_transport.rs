@@ -78,6 +78,11 @@ pub(super) struct Scope {
     pub(super) profile: ProfileAuthority,
     permission: Permission,
     pub(super) deadline: Instant,
+    /// The end of the authority this scope was taken under: the proof of the
+    /// device, and the deadlines of the package and of its controller. The
+    /// scope itself ends sooner, within a minute. What a process holds from
+    /// one step to the next (its activity lease) ends with this.
+    pub(super) authority_end: Instant,
     host_gate: Option<Arc<dyn Fn() -> bool + Send + Sync>>,
     created: Instant,
 }
@@ -179,6 +184,7 @@ impl AllocationTransport {
             device.owner_mxid(),
         )
         .map_err(|_| failure(401, "management_profile_mismatch"))?;
+        let authority_end = self.manager.authority_end(&device)?;
         let deadline = device
             .valid_until()
             .min(session.valid_until())
@@ -202,6 +208,7 @@ impl AllocationTransport {
             profile,
             permission,
             deadline,
+            authority_end,
             host_gate: self.host_gate.clone(),
             created: Instant::now(),
         };

@@ -257,12 +257,12 @@ impl Lease {
         {
             return Err(invalid());
         }
-        let until = io::window(
+        let until = io::lease_end(
             &lease.authority.token,
             lease.expires_at_ms,
             observed,
             started,
-            &b.scope,
+            b.scope.authority_end,
         )?;
         if until <= Instant::now() {
             return Err(failure(409, "shared_execution_expired"));
@@ -270,7 +270,7 @@ impl Lease {
         Ok(Self {
             lease,
             until,
-            renew_at: renewal_time(until),
+            renew_at: io::renewal_moment(started, until),
         })
     }
 }
@@ -407,10 +407,6 @@ impl Active {
     }
 }
 
-fn renewal_time(until: Instant) -> Instant {
-    let left = until.saturating_duration_since(Instant::now());
-    until - Duration::from_secs(20).min(left / 2)
-}
 trait LeaseDriver: Send {
     fn times(&self) -> (Instant, Instant);
     fn transient(&self, error: &NativeError) -> bool;
@@ -455,7 +451,7 @@ mod tests {
                 return Err(failure(409, "management_scope_changed"));
             }
             self.until = Instant::now() + Duration::from_millis(80);
-            self.renew_at = renewal_time(self.until);
+            self.renew_at = io::renewal_moment(Instant::now(), self.until);
             Ok(())
         }
     }

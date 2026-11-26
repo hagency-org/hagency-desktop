@@ -160,6 +160,9 @@ struct State {
     /// The server does not answer a renewal: neither a grant nor a refusal.
     unanswered_renewal: bool,
     renewals_unanswered: usize,
+    /// Added to the thirty seconds every proof of sign-in is granted for.
+    /// Ninety seconds is a server that grants a two-minute window.
+    proof_stretch_ms: u64,
     invalidate_at_contribution: bool,
     invalidate_at_result: bool,
     lose_before_publication: bool,
@@ -453,16 +456,16 @@ async fn server(state: Arc<Mutex<State>>) -> (String, tokio::task::JoinHandle<()
                             json!({"product":"hagency-server","version":"0.1.0","protocolVersion":3,"capabilities":caps,"homeserver":origin,"issuer":issuer})
                         }
                         "/hagency/api/v1/sessions/pasion" => {
-                            json!({"token":"a".repeat(64),"userId":"uid","mxid":"@owner:test","validUntilMs":at+30000})
+                            json!({"token":"a".repeat(64),"userId":"uid","mxid":"@owner:test","validUntilMs":at+30000+state.lock().unwrap().proof_stretch_ms})
                         }
                         "/hagency/api/v1/identity" => {
-                            json!({"userId":"uid","mxid":"@owner:test","issuer":issuer,"subject":"sub","clientId":"sdk-client","validUntilMs":at+30000})
+                            json!({"userId":"uid","mxid":"@owner:test","issuer":issuer,"subject":"sub","clientId":"sdk-client","validUntilMs":at+30000+state.lock().unwrap().proof_stretch_ms})
                         }
                         "/hagency/api/v1/devices/current" => {
-                            json!({"deviceId":"device","userId":"uid","mxid":"@owner:test","issuer":issuer,"subject":"sub","clientId":"sdk-client","generation":state.lock().unwrap().generation.max(1),"validUntilMs":at+30000})
+                            json!({"deviceId":"device","userId":"uid","mxid":"@owner:test","issuer":issuer,"subject":"sub","clientId":"sdk-client","generation":state.lock().unwrap().generation.max(1),"validUntilMs":at+30000+state.lock().unwrap().proof_stretch_ms})
                         }
                         "/hagency/api/v1/devices" => {
-                            json!({"deviceId":"device","token":"b".repeat(64),"generation":state.lock().unwrap().generation.max(1),"validUntilMs":at+30000})
+                            json!({"deviceId":"device","token":"b".repeat(64),"generation":state.lock().unwrap().generation.max(1),"validUntilMs":at+30000+state.lock().unwrap().proof_stretch_ms})
                         }
                         "/hagency/api/v1/sessions/current/renew" => {
                             let mut state = state.lock().unwrap();
@@ -472,7 +475,7 @@ async fn server(state: Arc<Mutex<State>>) -> (String, tokio::task::JoinHandle<()
                             } else if state.refuse_renewal {
                                 json!({"code":"sign_in_required","fixtureStatus":401})
                             } else {
-                                json!({"validUntilMs":at+30000})
+                                json!({"validUntilMs":at+30000+state.proof_stretch_ms})
                             }
                         }
                         "/hagency/api/v1/sessions/current" => json!({}),
@@ -531,8 +534,18 @@ async fn server(state: Arc<Mutex<State>>) -> (String, tokio::task::JoinHandle<()
                             200
                         };
                     let body = value.to_string();
+                    // A host takes a proof longer than thirty seconds only
+                    // from an answer that carries the server's own date.
+                    let dated = if state.lock().unwrap().proof_stretch_ms > 0 {
+                        format!(
+                            "Date: {}\r\nCache-Control: no-store\r\n",
+                            httpdate::fmt_http_date(std::time::SystemTime::now())
+                        )
+                    } else {
+                        String::new()
+                    };
                     let response = format!(
-                        "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                        "HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{dated}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
                         body.len()
                     );
                     let _ = stream.write_all(response.as_bytes()).await;

@@ -66,8 +66,9 @@ impl ProcessBinding {
             || lease.process_digest != self.process_digest()?
             || expires <= checked_at
             || remaining == 0
-            || remaining > 30_000
-            || expires > checked_at + Duration::from_secs(30)
+            // As long as the process itself takes one, and no longer.
+            || u128::from(remaining) > hagency_runtime::owned::LONGEST_ACTIVITY_LEASE.as_millis()
+            || expires > checked_at + hagency_runtime::owned::LONGEST_ACTIVITY_LEASE
             || self
                 .source()
                 .activity_deadline(lease.authority.epoch)

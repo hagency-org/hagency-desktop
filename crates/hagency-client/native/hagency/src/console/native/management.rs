@@ -472,6 +472,26 @@ impl NativeManagement {
         Ok(())
     }
 
+    /// The end of the authority this package acts under: the proof of its
+    /// device, its own deadline and its controller's. A management session
+    /// ends sooner and is taken again for every step.
+    pub(super) fn authority_end(
+        &self,
+        device: &crate::console::AuthorizedDevice,
+    ) -> Result<Instant, NativeError> {
+        let package = self
+            .session
+            .lock()
+            .map_err(|_| failure(503, "management_unavailable"))?
+            .deadline;
+        self.bounded(device.valid_until(), package)
+    }
+    fn bounded(&self, proof: Instant, package: Option<Instant>) -> Result<Instant, NativeError> {
+        let mut bound = proof;
+        if let Some(deadline) = package { bound = bound.min(deadline); }
+        if let Some(deadline) = self.controller_deadline()? { bound = bound.min(deadline); }
+        Ok(bound)
+    }
     fn controller_deadline(&self) -> Result<Option<Instant>, NativeError> {
         let bound = self.controller_lifetime.lock().map_err(|_| failure(503,"management_unavailable"))?;
         match bound.as_ref() {
@@ -648,9 +668,7 @@ impl NativeManagement {
         current
             .issued
             .retain(service::WeakManagementAuthority::is_live);
-        let mut bound = device.valid_until();
-        if let Some(deadline) = current.deadline { bound = bound.min(deadline); }
-        if let Some(deadline) = self.controller_deadline()? { bound = bound.min(deadline); }
+        let bound = self.bounded(device.valid_until(), current.deadline)?;
         let session = current.session_until(&context, bound, Instant::now(), |expires| {
             let session = self
                 .store
