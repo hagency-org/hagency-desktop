@@ -410,6 +410,10 @@ impl Active {
 
 trait LeaseDriver: Send {
     fn times(&self) -> (Instant, Instant);
+    /// The lease's end on the wall clock, as the server issued it.
+    fn wall_end_ms(&self) -> Option<u64> {
+        None
+    }
     fn transient(&self, error: &NativeError) -> bool;
     fn renew(&mut self) -> impl std::future::Future<Output = Result<(), NativeError>> + Send;
 }
@@ -523,6 +527,9 @@ impl LeaseDriver for Active {
         let state = self.live.state();
         (state.until, state.renew_at)
     }
+    fn wall_end_ms(&self) -> Option<u64> {
+        Some(self.live.state().lease.expires_at_ms)
+    }
     fn transient(&self, error: &NativeError) -> bool {
         self.live.io.transient(error)
     }
@@ -542,10 +549,11 @@ async fn wait<T>(
             return Err(failure(409, "shared_execution_closed"));
         }
         let (until, wake) = driver.times();
+        let wall_end_ms = driver.wall_end_ms();
         tokio::select! {biased;
             result = &mut future => return result,
             _ = cancel.changed() => return Err(failure(409, "shared_execution_closed")),
-            _ = tokio::time::sleep_until(until.into()) => return Err(failure(409, "shared_execution_expired")),
+            _ = tokio::time::sleep_until(until.into()) => return Err(lapsed(wall_end_ms)),
             _ = tokio::time::sleep_until(wake.max(retry_at).into()) => {}
         }
         // Renewal IO can take most of a lease. Continue polling the SAME
@@ -553,15 +561,35 @@ async fn wait<T>(
         let renewed = tokio::select! {biased;
             result = &mut future => return result,
             _ = cancel.changed() => return Err(failure(409, "shared_execution_closed")),
-            _ = tokio::time::sleep_until(until.into()) => return Err(failure(409, "shared_execution_expired")),
+            _ = tokio::time::sleep_until(until.into()) => return Err(lapsed(wall_end_ms)),
             result = driver.renew() => result,
         };
         if let Err(error) = renewed {
             if !driver.transient(&error) {
                 return Err(error);
             }
-            tracing::info!(code = %error.code, said = ?error.said(), "Claude continues reading during transient renewal failure");
+            // With what each clock leaves of the lease: the end counted from
+            // its request (`until`) and its end on the wall clock.
+            tracing::info!(
+                code = %error.code,
+                said = ?error.said(),
+                counted_left_ms = until.saturating_duration_since(Instant::now()).as_millis() as u64,
+                wall_left_ms = ?wall_end_ms.and_then(io::wall_left_ms),
+                "Claude continues reading during transient renewal failure"
+            );
             retry_at = Instant::now() + Duration::from_millis(500);
         }
     }
+}
+/// The lease ended before it was renewed, at the end this computer holds
+/// (`io::lease_end`). What the wall clock leaves of it says which clock ended
+/// it: nothing, when that clock ended it too; more, when the end counted from
+/// the request came first. After a sleep the store says the other case
+/// itself (`An activity lease has ended on the wall clock`).
+fn lapsed(wall_end_ms: Option<u64>) -> NativeError {
+    tracing::warn!(
+        wall_left_ms = ?wall_end_ms.and_then(io::wall_left_ms),
+        "A Claude turn's lease ended before it was renewed"
+    );
+    failure(409, "shared_execution_expired")
 }

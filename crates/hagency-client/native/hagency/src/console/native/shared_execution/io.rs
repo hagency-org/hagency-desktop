@@ -537,6 +537,12 @@ impl Io {
             drop(b);
             tokio::time::sleep(RETRY_GAP).await;
             if wall_ended(wall_end_ms) {
+                // What the other clock still counted says that this was a
+                // sleep, not the end counted from the request.
+                tracing::warn!(
+                    counted_left_ms = until.saturating_duration_since(Instant::now()).as_millis() as u64,
+                    "A renewal is not sent again: the wall clock has ended its lease"
+                );
                 return Err(failure(409, "shared_execution_expired"));
             }
             b = match self.bound().await {
@@ -558,6 +564,13 @@ pub(super) const RETRY_GAP: std::time::Duration = std::time::Duration::from_secs
 /// (`authorize_activity`), so that both see a sleep of the computer alike.
 fn wall_ended(wall_end_ms: u64) -> bool {
     hagency_store::owner_resources::wall_clock_ms().is_ok_and(|now| now >= wall_end_ms)
+}
+/// What the wall clock leaves of a lease that ends at `wall_end_ms`, for the
+/// log; nothing when that clock cannot be read.
+pub(super) fn wall_left_ms(wall_end_ms: u64) -> Option<u64> {
+    hagency_store::owner_resources::wall_clock_ms()
+        .ok()
+        .map(|now| wall_end_ms.saturating_sub(now))
 }
 
 /// The one line for work that ends before its turn began: the step it ended
