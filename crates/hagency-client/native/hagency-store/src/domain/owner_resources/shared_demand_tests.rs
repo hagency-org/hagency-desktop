@@ -1996,6 +1996,36 @@ use super::observed::budget_execution::increase;
 
 #[cfg(feature = "shared-budget-execution")]
 #[tokio::test]
+async fn shared_demand_v2_a_shown_retry_saves_no_start_after_a_budget_is_applied() {
+    // The stop asked for retry 1 before a budget was applied to the Agent.
+    // When the server shows the retry, the plain prepare saves no start of
+    // an Agent with an applied budget: the retry waits, and nothing of its
+    // transaction stays, neither the opt-in's lapse nor the work's release.
+    let (f, c) = original(true).await;
+    call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+    let lost = offer(&c, "shown_after_the_budget", 1);
+    let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
+    stop_claimed(&f, &c, &lost, &claimed, true, false).await;
+    assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Retry { retry: 1, .. })));
+    increase(&f, &c, "applied_before_the_retry", 50).await;
+    // Shown without retry v2 listed, the retry would end the opt-in first.
+    for listed in [false, true] {
+        let retry = f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(listed), c.clone(), Some(claimed.clone()), 1).await;
+        let got = match &retry {
+            Ok(SharedDemandRetry::Start(_)) => "a retry start".to_string(),
+            Ok(SharedDemandRetry::Blocked(_)) => "a block".into(),
+            Err(e) => format!("{e:?}"),
+        };
+        assert!(matches!(retry, Err(Error::Conflict)), "the retry waits, got {got}");
+        assert_eq!(count(&f, "owner_shared_start_intents").await, 1, "no retry start");
+        assert_eq!(count(&f, "owner_shared_demand_reoffer_lapses").await, 0, "the opt-in holds");
+        assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 0), "the work stays bound");
+    }
+    f.registry.shutdown().await.unwrap();
+}
+
+#[cfg(feature = "shared-budget-execution")]
+#[tokio::test]
 async fn shared_demand_v2_a_stop_after_a_budget_is_applied_asks_for_no_retry() {
     // The event opted in, and its claimed process stops before its turn
     // began after a budget was applied to the Agent. The plain prepare would
@@ -2017,6 +2047,33 @@ async fn shared_demand_v2_a_stop_after_a_budget_is_applied_asks_for_no_retry() {
     f.registry.shutdown().await.unwrap();
 }
 
+/// The name and SQL digest a store records for schema 117.
+fn schema117_record(db: &Connection) -> (String, String) {
+    db.query_row("SELECT name,sql_sha256 FROM hagency_store_migrations WHERE version=117", [], |r| Ok((r.get(0)?, r.get(1)?))).unwrap()
+}
+fn schema117_expected() -> (String, String) {
+    use sha2::{Digest, Sha256};
+    let sql = include_str!("../../migrations/119-owner-shared-demand-work-release.sql");
+    ("119-owner-shared-demand-work-release.sql".into(), format!("{:x}", Sha256::digest(sql.as_bytes())))
+}
+
+#[test]
+fn shared_demand_v2_schema117_is_recorded_by_name_and_digest() {
+    // A fresh store records schema 117 as this build's file and SQL, and an
+    // up-to-date store is only read when it is opened again.
+    let root = tempfile::tempdir().unwrap();
+    let state = root.path().join("domain");
+    drop(crate::DomainRepository::open(&state).unwrap());
+    for _ in 0..2 {
+        let repo = crate::DomainRepository::open(&state).unwrap();
+        assert_eq!(repo.db.total_changes(), 0, "reopening writes nothing");
+        assert_eq!(repo.db.pragma_query_value::<i32, _>(None, "user_version", |r| r.get(0)).unwrap(), 117);
+        assert_eq!(schema117_record(&repo.db), schema117_expected());
+        let count: i64 = repo.db.query_row("SELECT count(*) FROM hagency_store_migrations", [], |r| r.get(0)).unwrap();
+        assert_eq!(count, 116, "one record for each of versions 2 to 117");
+    }
+}
+
 #[tokio::test]
 async fn shared_demand_v2_release_migration_keeps_bindings_of_the_previous_schema() {
     let (mut f, c) = original(true).await;
@@ -2033,6 +2090,7 @@ async fn shared_demand_v2_release_migration_keeps_bindings_of_the_previous_schem
     f.registry = OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).unwrap();
     let db = Connection::open(&path).unwrap();
     assert_eq!(db.pragma_query_value::<u64, _>(None, "user_version", |r| r.get(0)).unwrap(), 117);
+    assert_eq!(schema117_record(&db), schema117_expected(), "the upgrade records this build's step");
     drop(db);
     assert_eq!(count(&f, "owner_shared_demand_bindings").await, 1);
     f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), w.clone()).await.unwrap();
