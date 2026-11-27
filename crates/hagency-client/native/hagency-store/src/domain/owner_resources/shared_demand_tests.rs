@@ -1991,6 +1991,32 @@ async fn shared_demand_v2_a_route_decided_late_skips_a_start_that_gave_its_place
     }
 }
 
+#[cfg(feature = "shared-budget-execution")]
+use super::observed::budget_execution::increase;
+
+#[cfg(feature = "shared-budget-execution")]
+#[tokio::test]
+async fn shared_demand_v2_a_stop_after_a_budget_is_applied_asks_for_no_retry() {
+    // The event opted in, and its claimed process stops before its turn
+    // began after a budget was applied to the Agent. The plain prepare would
+    // save no retry, so the stop asks for none: it takes the plain route,
+    // and its work stays bound.
+    let (f, c) = original(true).await;
+    call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+    let lost = offer(&c, "stopped_after_the_budget", 1);
+    let (claimed, input) = claimed_demand_attempt(&f, &c, &lost, true).await;
+    assert!(input.reoffers);
+    increase(&f, &c, "applied_before_the_stop", 50).await;
+    stop_claimed(&f, &c, &lost, &claimed, true, false).await;
+    assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Plain)));
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 0));
+    // No retry follows a plain stop.
+    let retry = f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed.clone()), 1).await;
+    assert!(matches!(retry, Err(Error::LocalAuthority)), "no retry of a plain stop");
+    assert_eq!(count(&f, "owner_shared_start_intents").await, 1);
+    f.registry.shutdown().await.unwrap();
+}
+
 #[tokio::test]
 async fn shared_demand_v2_release_migration_keeps_bindings_of_the_previous_schema() {
     let (mut f, c) = original(true).await;

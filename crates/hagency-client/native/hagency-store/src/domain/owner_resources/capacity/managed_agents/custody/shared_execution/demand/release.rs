@@ -175,6 +175,13 @@ fn retryable(
         Err(Error::LocalAuthority) => return Ok(None),
         Err(e) => return Err(e),
     }
+    // The plain prepare saves no start of an Agent this computer has applied
+    // a budget to (`start_intent::prepare_in_transaction`), so its stop asks
+    // for no retry: the stop stays plain and the work stays bound.
+    #[cfg(feature = "shared-budget-execution")]
+    if super::super::super::budget::execution::applied(db, child)? {
+        return Ok(None);
+    }
     let terminal: bool = db.query_row(
         "SELECT EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals WHERE demand_id=?1)",
         [&id],
@@ -182,9 +189,11 @@ fn retryable(
     )?;
     // No other start holds this attempt's place as predecessor. A start the
     // server never made, of an event it ended, holds none (schema 114), also
-    // for a route decided at the stop's first upload, after such a start.
+    // for a route decided at the stop's first upload, after such a start; in
+    // the budget lane too (schema 115), as the budget lane and the plain
+    // prepare read the place.
     let competing: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id)) OR EXISTS(SELECT 1 FROM owner_shared_budget_start_intents WHERE child_id=?1 AND predecessor_digest=?2)",
+        "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id)) OR EXISTS(SELECT 1 FROM owner_shared_budget_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND NOT EXISTS(SELECT 1 FROM owner_shared_budget_start_releases r WHERE r.start_intent_id=owner_shared_budget_start_intents.id))",
         params![child, digest],
         |r| r.get(0),
     )?;

@@ -5,7 +5,9 @@ use crate::owner_resources::budget::*;
 fn enrollment(f: &Fixture) -> VerifiedManagementEnrollment {
     enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1)
 }
-async fn increase(f: &Fixture, c: &SharedRuntimeCommand, id: &str, add: u64) -> AgentBudgetReceipt {
+/// Applies a budget increase of `add` tokens to `c`'s Agent; the demand
+/// tests apply a budget with it too.
+pub(in super::super) async fn increase(f: &Fixture, c: &SharedRuntimeCommand, id: &str, add: u64) -> AgentBudgetReceipt {
     let receipt = f
         .registry
         .recover_managed_agent_reservation(

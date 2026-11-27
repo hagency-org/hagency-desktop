@@ -229,8 +229,10 @@ pub(super) fn prepare_in_transaction(
         return Ok(None);
     }
     // A new v3 journal for this predecessor cannot be bypassed by downgrading
-    // to a v2 caller, including builds with v3 issuance disabled.
-    let budget_intent:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_budget_start_intents WHERE id=?1 OR (child_id=?2 AND predecessor_digest=?3))",params![start_id,original.agent_reservation_id,predecessor_digest],|r|r.get(0))?;
+    // to a v2 caller, including builds with v3 issuance disabled. A budget
+    // start the server never made, of a message it ended, holds no place
+    // (schema 115), as the budget lane reads it.
+    let budget_intent:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_budget_start_intents i WHERE i.id=?1 OR (i.child_id=?2 AND i.predecessor_digest=?3 AND NOT EXISTS(SELECT 1 FROM owner_shared_budget_start_releases r WHERE r.start_intent_id=i.id)))",params![start_id,original.agent_reservation_id,predecessor_digest],|r|r.get(0))?;
     if budget_intent{return Err(Error::Conflict)}
     // Advance before snapshot so journal persistence itself does not
     // immediately invalidate the exact observed global ledger revision.
