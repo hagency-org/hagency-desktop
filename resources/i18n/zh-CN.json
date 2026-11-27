@@ -2783,6 +2783,7 @@
   "At each new period, the pool renews and approved Agents receive their allowance. Unused tokens do not carry over.": "每个新周期自动续期，已批准的 Agent 获得本期额度；未用完的额度不累积。",
   "The pool pauses at period end. Publish the next period to renew all approved Agents together.": "周期结束后暂停；发布下一周期额度后，所有已批准的 Agent 一起续期。",
   "The previous call has not been settled. Its reserved allowance is unavailable until usage is confirmed.": "上一轮调用尚未结清，预留额度仍被占用，需确认用量后释放。",
+  "This message ended without a turn: the Agent's earlier usage could not be counted. If its allowance renews, it can be sent again in the Agent's next period.": "这条消息未经处理即已结束：无法统计该 Agent 之前的用量。如果它的额度按周期续期，可在下个周期重新发送。",
   "Could not open the original pool request.": "未能打开原资源池申请。",
   "Other room Agents": "其他房间 Agent",
   "{agent}: allowance used up.": "{agent} 的额度已用完。",

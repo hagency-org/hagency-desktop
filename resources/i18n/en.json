@@ -2658,6 +2658,7 @@
   "Invalid room registration.": "Invalid room registration.",
   "The room has conflicting registration states.": "The room has conflicting registration states.",
   "The previous call has not been settled. Its reserved allowance is unavailable until usage is confirmed.": "The previous call has not been settled. Its reserved allowance is unavailable until usage is confirmed.",
+  "This message ended without a turn: the Agent's earlier usage could not be counted. If its allowance renews, it can be sent again in the Agent's next period.": "This message ended without a turn: the Agent's earlier usage could not be counted. If its allowance renews, it can be sent again in the Agent's next period.",
   "Could not open the original pool request.": "Could not open the original pool request.",
   "Other room Agents": "Other room Agents",
   "{agent}: allowance used up.": "{agent}: allowance used up.",
