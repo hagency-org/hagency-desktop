@@ -913,7 +913,7 @@ mod tests {
         {
             let db = Connection::open(root.join("domain.sqlite3")).unwrap();
             db.execute("UPDATE owner_octos_profiles SET configuration_digest=?1 WHERE profile_digest=?2", params![legacy, digest]).unwrap();
-            db.execute_batch("DROP TRIGGER IF EXISTS owner_shared_start_intent_place;DROP VIEW IF EXISTS owner_shared_start_releasable;DROP TABLE IF EXISTS owner_shared_start_releases;DROP TABLE owner_octos_model_resources; PRAGMA user_version=112;").unwrap();
+            db.execute_batch("DROP TRIGGER IF EXISTS owner_shared_budget_start_intent_place;DROP VIEW IF EXISTS owner_shared_budget_start_releasable;DROP TABLE IF EXISTS owner_shared_budget_start_releases;DROP TRIGGER IF EXISTS owner_shared_start_intent_place;DROP VIEW IF EXISTS owner_shared_start_releasable;DROP TABLE IF EXISTS owner_shared_demand_second_terminals;DROP TABLE IF EXISTS owner_shared_start_releases;DROP TABLE owner_octos_model_resources; PRAGMA user_version=112;").unwrap();
         }
         let registry = OwnerResourceRegistry::open_root(&root).unwrap();
         assert!(registry.verify_octos_resource(authority(), enrolled.resource_id.clone(), observe(&registry, &home, "coding").await).await.is_ok());
