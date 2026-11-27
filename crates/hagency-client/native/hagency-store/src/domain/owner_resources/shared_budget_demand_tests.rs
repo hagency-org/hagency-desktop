@@ -332,7 +332,7 @@ async fn budget_execution_v3_a_budget_start_given_back_still_bars_a_plain_start(
     // The server refuses every plain start of an Agent with an applied budget
     // (`shared_budget_execution_required`). A plain start saved after a budget
     // start of the same predecessor could only be refused, and it would hold
-    // the place the budget lane's next message needs.
+    // the place the budget lane's next message needs: the plain lane saves none.
     let(f,c)=synthetic().await;
     let refused=offer(&c,"refused_start",1);let s=status(&f,&c,&refused).await;
     let held=prepare(&f,&c,s.clone()).await.unwrap().input().unwrap().start.start_intent_id.clone();
@@ -341,9 +341,55 @@ async fn budget_execution_v3_a_budget_start_given_back_still_bars_a_plain_start(
     let mut next=offer(&c,"next_message",1);next.received_at_ms=refused.received_at_ms+1;
     let plain=f.registry.prepare_shared_demand(proof_for(&f,&next),c.clone(),None).await;
     let plain=plain.as_ref().map(|s|s.disposition().clone()).map_err(|e|e.to_string());
-    assert_eq!(plain,Err(Error::Conflict.to_string()));
+    assert_eq!(plain,Ok(SharedDemandDisposition::Pending));
+    assert_eq!(count(&f,"owner_shared_start_intents").await,0,"no plain start");
     let saved=prepare(&f,&c,status(&f,&c,&next).await).await.unwrap();
     assert_eq!(*saved.disposition(),SharedDemandDisposition::StartPrepared);
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn budget_execution_v3_the_plain_lane_starts_no_message_after_a_budget_is_applied(){
+    // Both lanes read every saved message. The server refuses every plain
+    // start of an Agent with an applied budget, and the budget lane cannot
+    // take up a message the plain lane started, so it would wait out its time.
+    let(f,c)=synthetic().await;
+    let o=offer(&c,"budget_message",1);
+    let plain=f.registry.prepare_shared_demand(proof_for(&f,&o),c.clone(),None).await.unwrap();
+    assert_eq!(*plain.disposition(),SharedDemandDisposition::Pending,"the plain lane leaves it to the budget lane");
+    assert!(plain.input().is_none());
+    assert_eq!(count(&f,"owner_shared_start_intents").await,0,"no plain start");
+    assert_eq!(count(&f,"owner_shared_demand_decisions").await,0,"no plain decision");
+    let saved=prepare(&f,&c,status(&f,&c,&o).await).await.unwrap();
+    assert_eq!(*saved.disposition(),SharedDemandDisposition::StartPrepared,"the budget lane takes it up");
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn budget_execution_v3_a_plain_start_saved_before_a_budget_is_applied_still_replays(){
+    // Two messages wait in the plain lane when a budget is applied: the first
+    // has a saved start, and the second waits behind it. The saved start is
+    // sent again unchanged. Once the first message has ended, the second gets
+    // no plain start, and the budget lane takes it up.
+    let f=fixture().await;let c=command(&f).await;
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let first=offer(&c,"saved_plain_start",1);
+    let saved=f.registry.prepare_shared_demand(proof_for(&f,&first),c.clone(),None).await.unwrap();
+    let held=saved.input().unwrap().start.start_intent_id.clone();let sent=digest(saved.input().unwrap());
+    let mut second=offer(&c,"waits_behind_it",1);second.received_at_ms=first.received_at_ms+1;
+    assert_eq!(*f.registry.prepare_shared_demand(proof_for(&f,&second),c.clone(),None).await.unwrap().disposition(),SharedDemandDisposition::Pending);
+    increase(&f,&c,"applied_while_both_wait",50).await;
+    let replayed=f.registry.prepare_shared_demand(proof_for(&f,&first),c.clone(),None).await.unwrap();
+    assert_eq!(*replayed.disposition(),SharedDemandDisposition::StartPrepared);
+    assert_eq!(digest(replayed.input().unwrap()),sent,"the saved start is sent again unchanged");
+    f.registry.retain_shared_demand_terminal(cleanup(&f,&c,1).await,first.clone(),"expired".into(),None).await.unwrap();
+    assert_eq!(released_in(&f,"owner_shared_start_releases").await,vec![held]);
+    let plain=f.registry.prepare_shared_demand(proof_for(&f,&second),c.clone(),None).await.unwrap();
+    assert_eq!(*plain.disposition(),SharedDemandDisposition::Pending,"no plain start after the budget");
+    assert_eq!(count(&f,"owner_shared_start_intents").await,1);
+    let taken=prepare(&f,&c,status(&f,&c,&second).await).await.unwrap();
+    assert_eq!(*taken.disposition(),SharedDemandDisposition::StartPrepared,"the budget lane takes it up");
     f.registry.shutdown().await.unwrap();
 }
 

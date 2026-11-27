@@ -74,6 +74,12 @@ come to this:
    both protocols, the budget one and the one before it, and each names only
    the starts of its own protocol. It keeps the end each one shows, so a
    start of either kind gives its place back whichever end it read first.
+   It decides no new start in the protocol before the budget for an Agent
+   this computer has applied a budget to, also when that protocol offers the
+   message: the server refuses every such start, and the budget protocol
+   could not take up a message one was decided for, which would wait out
+   its time. A start decided before the budget was applied is still sent
+   again unchanged and gives its place back as above.
    Such an Agent's starts have no allowance period, so on main a start the
    server refused keeps its place for as long as the Agent's reservation
    lasts, also after its message ended, and so does a start that gave its

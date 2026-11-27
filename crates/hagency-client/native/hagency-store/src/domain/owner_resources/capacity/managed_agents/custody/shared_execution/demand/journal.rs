@@ -267,7 +267,15 @@ impl OwnerResourceRegistry {
                     let id=format!("sdstart_{}",&canonical::digest(&json!({"registry":registry.id,"profile":profile.digest,"demandId":proof.offer.demand_id,"demandDigest":proof.offer.digest()?}))?[..40]);
                     // A start the server never made, of an event it ended, holds no place.
                     let competing:Option<String>=tx.query_row("SELECT id FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id)",params![child,head_digest,periods::current_id(&tx,child)?],|r|r.get(0)).optional()?;
-                    if competing.as_ref().is_some_and(|old|old!=&id){
+                    // An Agent this computer has applied a budget to starts in
+                    // the budget lane only: the server refuses its plain starts,
+                    // and the budget lane cannot take up a message this lane
+                    // started. A start saved before that still replays above.
+                    #[cfg(feature="shared-budget-execution")]
+                    let budgeted=competing.is_none()&&super::super::super::budget::execution::applied(&tx,child)?;
+                    #[cfg(not(feature="shared-budget-execution"))]
+                    let budgeted=false;
+                    if budgeted||competing.as_ref().is_some_and(|old|old!=&id){
                         (SharedDemandDisposition::Pending,None,None,pending_revision()?)
                     }else{
                         let saved=start_intent::prepare_in_transaction(&tx,e,original.clone(),predecessor.clone(),id)?;
