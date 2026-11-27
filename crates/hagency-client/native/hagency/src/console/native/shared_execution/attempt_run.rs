@@ -232,7 +232,12 @@ async fn renew(
         renewal_id: id,
     };
     let (b, reply): (Bound, Timed<ActivityReply>) = io
-        .upload_renewal(b, || Action::Renew(renewal.clone()), a.until)
+        .upload_renewal(
+            b,
+            || Action::Renew(renewal.clone()),
+            a.until,
+            a.lease.expires_at_ms,
+        )
         .await?;
     let next = activity(
         sink,

@@ -167,6 +167,7 @@ async fn renew(
             b,
             || Action::BudgetWork(Box::new(budget_work_io::WorkAction::Renew(renewal.clone()))),
             a.until,
+            a.lease.expires_at_ms,
         )
         .await?;
     let next = activity(

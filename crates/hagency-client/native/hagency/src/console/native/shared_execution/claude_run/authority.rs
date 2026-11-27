@@ -379,6 +379,7 @@ impl Active {
                 b,
                 || self.live.authority.renewal(input.clone()),
                 state.until,
+                state.lease.expires_at_ms,
             )
             .await?;
         let next = Lease::new(
@@ -559,7 +560,7 @@ async fn wait<T>(
             if !driver.transient(&error) {
                 return Err(error);
             }
-            tracing::debug!(code = %error.code, "Claude continues reading during transient renewal failure");
+            tracing::info!(code = %error.code, said = ?error.said(), "Claude continues reading during transient renewal failure");
             retry_at = Instant::now() + Duration::from_millis(500);
         }
     }

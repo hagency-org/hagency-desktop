@@ -67,6 +67,11 @@ pub(crate) struct State {
     /// they are. Ninety-five seconds is a server whose session follows a
     /// two-minute window.
     lease_stretch_ms: u64,
+    /// How far this server's clock is behind the host's, read on the
+    /// activity leases it issues and on the answers that carry them, and on
+    /// nothing else. Twenty seconds of a twenty-five-second lease is a host
+    /// whose clock is ahead by most of a lease.
+    activity_clock_behind_ms: u64,
     delay_renewal_reply: bool,
     delay_start_reply: bool,
     delay_demand_binding: bool,
@@ -218,10 +223,11 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
                 .processes
                 .insert(r.observation_id.clone(), r.clone());
         }
+        let lease_at = at - s.shared.activity_clock_behind_ms;
         let active = if r.state == "qualified" {
             s.shared.activity_epoch = 1;
             Some(
-                json!({"authority":{"runtimeCommandId":c.command_id,"epoch":1,"token":"c".repeat(64)},"commandDigest":h,"processDigest":r.process_digest,"expiresAtMs":at+25000+s.shared.lease_stretch_ms}),
+                json!({"authority":{"runtimeCommandId":c.command_id,"epoch":1,"token":"c".repeat(64)},"commandDigest":h,"processDigest":r.process_digest,"expiresAtMs":lease_at+25000+s.shared.lease_stretch_ms}),
             )
         } else {
             None
@@ -230,7 +236,7 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
             return None;
         }
         return Some(
-            json!({"observationId":r.observation_id,"receiptDigest":digest(&r).unwrap(),"activity":active,"state":if r.state=="not_started" {"stopped"} else {&r.state},"observedAtMs":at}),
+            json!({"observationId":r.observation_id,"receiptDigest":digest(&r).unwrap(),"activity":active,"state":if r.state=="not_started" {"stopped"} else {&r.state},"observedAtMs":if r.state == "qualified" {lease_at} else {at}}),
         );
     }
     #[cfg(feature = "shared-successors")]
@@ -279,6 +285,7 @@ pub(crate) fn management(path: &str, body: &Value, s: &mut super::State) -> Opti
         }
         assert_eq!(body["authority"]["epoch"], s.shared.activity_epoch);
         s.shared.activity_epoch += 1;
+        let at = at - s.shared.activity_clock_behind_ms;
         return Some(
             json!({"activity":{"authority":{"runtimeCommandId":runtime_id,"epoch":s.shared.activity_epoch,"token":"c".repeat(64)},"commandDigest":h,"processDigest":process_digest,"expiresAtMs":at+25000+s.shared.lease_stretch_ms},"observedAtMs":at}),
         );
@@ -533,6 +540,39 @@ async fn wait_original_stopped(f: &Fixture) {
 async fn stopped(f: &Fixture) {
     wait_original_stopped(f).await;
     f.owner.0.shared_execution.drain().await.unwrap();
+}
+/// A sleep of the computer through the end of the lease that its process
+/// holds: the wall clock moves five minutes ahead while the monotonic clock
+/// stands still. It stays ahead until the process has stopped, or for fifteen
+/// seconds: past the next renewal of any lease these fixtures issue, which
+/// comes no later than ten seconds after its grant. Then the two clocks agree
+/// again, and a run that only waited the refusal out goes on. Returns how
+/// long after the sleep the process stopped.
+async fn sleep_through_the_lease(f: &Fixture) -> Duration {
+    let slept = Instant::now();
+    let ended = || {
+        f.state
+            .lock()
+            .unwrap()
+            .shared
+            .processes
+            .values()
+            .any(|r| r.state == "stopped")
+    };
+    {
+        let _ahead = hagency_store::owner_resources::WallClockAhead::by(Duration::from_secs(300));
+        while !ended() && slept.elapsed() < Duration::from_secs(15) {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(40), async {
+        while !ended() {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the run ends once the wall clock has ended its lease");
+    slept.elapsed()
 }
 #[tokio::test]
 async fn native_shared_execution_history_tamper_and_expiry_never_issue() {
@@ -991,6 +1031,131 @@ async fn native_shared_execution_sends_a_renewal_again_when_it_gets_no_answer() 
         let s = f.state.lock().unwrap();
         assert_eq!(s.shared.starts, 1);
         assert_eq!(s.shared.receipts.len(), 1);
+    }
+    f.stop().await;
+}
+
+/// A computer that sleeps through the end of the two-minute lease its turn
+/// works under. The monotonic clock stands still in a sleep and the wall clock
+/// does not. On waking, the store refuses the turn's next proof on the wall
+/// clock, and the run ends then, as at the lease's counted end: the turn does
+/// not finish and no renewal leaves. Read as a replaced scope, that refusal
+/// was waited out until the other clock's end, and the turn worked on past
+/// the end that the server keeps, for as long as its lease had been left
+/// before the sleep: up to almost two minutes.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_shared_execution_ends_a_turn_whose_lease_ended_by_the_wall_clock() {
+    let (f, t, _) = fixture_lifetime(600_000).await;
+    {
+        let mut state = f.state.lock().unwrap();
+        state.proof_stretch_ms = 90_000;
+        state.shared.lease_stretch_ms = 95_000;
+    }
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    // The turn works until it is interrupted.
+    t.poll_fixture(&f.registry, launch(&f, "text-interrupt-usage"))
+        .await
+        .unwrap();
+    method_seen(&f, "turn/start").await;
+    let after = sleep_through_the_lease(&f).await;
+    assert!(
+        after < Duration::from_secs(30),
+        "the run ended {} s after the sleep",
+        after.as_secs()
+    );
+    stopped(&f).await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.starts, 1);
+        assert!(
+            !s.shared.receipts.values().any(|r| r.state == "completed"),
+            "the turn did not finish"
+        );
+    }
+    f.stop().await;
+}
+
+/// A renewal that gets no answer is sent again while the lease lasts, and the
+/// computer sleeps between two sends, through the lease's end. The next send
+/// is not made: the wall clock has ended the lease, and the run ends then.
+/// Counted on the other clock alone, the renewal was sent again, and the turn
+/// worked on, for as long as the lease had been left before the sleep.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_shared_execution_stops_a_renewal_sent_again_whose_lease_ended_by_the_wall_clock() {
+    let (f, t, _) = fixture_lifetime(600_000).await;
+    {
+        let mut state = f.state.lock().unwrap();
+        state.proof_stretch_ms = 90_000;
+        state.shared.lease_stretch_ms = 95_000;
+    }
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    // The turn works until it is interrupted.
+    t.poll_fixture(&f.registry, launch(&f, "text-interrupt-usage"))
+        .await
+        .unwrap();
+    method_seen(&f, "turn/start").await;
+    f.state.lock().unwrap().shared.unanswered_renewals = u32::MAX;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while f.state.lock().unwrap().shared.unanswered_renewals == u32::MAX {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("a renewal is sent and gets no answer");
+    let after = sleep_through_the_lease(&f).await;
+    assert!(
+        after < Duration::from_secs(30),
+        "the run ended {} s after the sleep",
+        after.as_secs()
+    );
+    f.state.lock().unwrap().shared.unanswered_renewals = 0;
+    stopped(&f).await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.starts, 1);
+        assert!(
+            !s.shared.receipts.values().any(|r| r.state == "completed"),
+            "the turn did not finish"
+        );
+    }
+    f.stop().await;
+}
+
+/// A computer whose clock is ahead of the server's by most of a lease: the
+/// end its wall clock gives each lease comes before the end counted from the
+/// request, and the lease is renewed before that. The process works on and
+/// runs its turn once. Renewed on the counted end alone, its renewal came
+/// after the store had refused the lease on the wall clock, and the process
+/// ended at its first renewal.
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_shared_execution_keeps_a_lease_by_the_wall_clock_of_a_computer_that_is_ahead() {
+    let (f, t, _) = fixture().await;
+    f.state.lock().unwrap().shared.activity_clock_behind_ms = 20_000;
+    t.poll_fixture(&f.registry, launch(&f, "text-renew"))
+        .await
+        .unwrap();
+    method_seen(&f, "turn/start").await;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        loop {
+            if f.state.lock().unwrap().shared.activity_epoch >= 4 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the lease is renewed before the wall clock ends it");
+    assert!(!f.state.lock().unwrap().shared.processes.values().any(|r| r.state == "stopped"));
+    std::fs::write(f._root.path().join("shared-probe/release-text"), b"release").unwrap();
+    stopped(&f).await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.starts, 1);
+        assert_eq!(s.shared.receipts.len(), 1);
+        assert!(!s.shared.stopped_before_reply);
     }
     f.stop().await;
 }

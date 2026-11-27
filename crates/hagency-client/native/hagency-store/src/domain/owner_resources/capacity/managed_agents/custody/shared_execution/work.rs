@@ -7,6 +7,9 @@ pub struct VerifiedSharedActivity {
     pub(super) enrollment: VerifiedManagementEnrollment,
     pub(super) epoch: u64,
     pub(super) expires: Instant,
+    /// The end of the lease on the wall clock, in milliseconds since the Unix
+    /// epoch, as the server issued it.
+    pub(super) wall_end_ms: u64,
 }
 impl SharedProcessSink {
     pub fn authorize_activity(
@@ -52,20 +55,29 @@ impl ProcessBinding {
         lease: &SharedActivityLease,
         expires: Instant,
     ) -> Result<VerifiedSharedActivity, Error> {
+        // What the wall clock leaves of the lease. That clock is the second
+        // witness, for a computer that slept while the other clock stood
+        // still: it may end a lease early and decides nothing else. That it
+        // has ended is said first, and in words of its own
+        // (`Error::ActivityLeaseEnded`): taken for a refused scope, it was
+        // waited out while the other clock still counted, and a turn worked
+        // on past the end that the server keeps. Read alone, a clock that is
+        // slow made a fresh lease look longer than any lease is, and the
+        // lease was refused.
+        let left = lease.expires_at_ms.saturating_sub(graphs::now_ms()?);
+        if left == 0 {
+            tracing::warn!(
+                counted_left_ms = expires.saturating_duration_since(Instant::now()).as_millis() as u64,
+                "An activity lease has ended on the wall clock"
+            );
+            return Err(Error::ActivityLeaseEnded);
+        }
         enrollment.check()?;
         lease.authority.validate()?;
         let original = self.enrollment();
         let checked_at = Instant::now();
-        // What the wall clock leaves of the lease. That clock is the second
-        // witness, for a computer that slept while the other clock stood
-        // still: it may end a lease early and decides nothing else. Read
-        // alone, a clock that is slow made a fresh lease look longer than
-        // any lease is, and the lease was refused.
         let longest = hagency_runtime::owned::LONGEST_ACTIVITY_LEASE;
-        let remaining = lease
-            .expires_at_ms
-            .saturating_sub(graphs::now_ms()?)
-            .min(longest.as_millis() as u64);
+        let remaining = left.min(longest.as_millis() as u64);
         if enrollment.profile.digest != original.profile.digest
             || enrollment.executor_device_id != original.executor_device_id
             || enrollment.executor_generation != original.executor_generation
@@ -74,7 +86,6 @@ impl ProcessBinding {
             || lease.command_digest != self.command_digest()
             || lease.process_digest != self.process_digest()?
             || expires <= checked_at
-            || remaining == 0
             // As long as the process itself takes one, and no longer: held
             // on the end that is counted from the moment the request was
             // sent.
@@ -97,9 +108,13 @@ impl ProcessBinding {
         let prior = enrollment.profile.clone();
         let source = self.source().clone();
         let epoch = lease.authority.epoch;
+        let wall_end_ms = lease.expires_at_ms;
         enrollment.profile.native_gate = Some(Arc::new(move || {
             prior.check().is_ok()
                 && Instant::now() < expires
+                // Read on each commit: after a sleep, the clock above has not
+                // counted it.
+                && graphs::now_ms().is_ok_and(|now| now < wall_end_ms)
                 && source
                     .activity_deadline(epoch)
                     .is_some_and(|d| Instant::now() < d)
@@ -109,6 +124,7 @@ impl ProcessBinding {
             enrollment,
             epoch,
             expires,
+            wall_end_ms,
         };
         value.check()?;
         Ok(value)
@@ -116,6 +132,11 @@ impl ProcessBinding {
 }
 impl VerifiedSharedActivity {
     pub(super) fn check(&self) -> Result<(), Error> {
+        // A decision, and so said before the checks of the scope, as in
+        // `authorize_activity`.
+        if graphs::now_ms()? >= self.wall_end_ms {
+            return Err(Error::ActivityLeaseEnded);
+        }
         self.enrollment.check()?;
         if Instant::now() >= self.expires
             || self
