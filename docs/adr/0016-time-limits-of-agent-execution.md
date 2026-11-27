@@ -74,16 +74,24 @@ come to this:
    both protocols, the budget one and the one before it, and each names only
    the starts of its own protocol. It keeps the end each one shows, so a
    start of either kind gives its place back whichever end it read first.
-   It decides no new start in the protocol before the budget for an Agent
-   this computer has applied a budget to, also when that protocol offers the
-   message: the server refuses every such start, and the budget protocol
-   could not take up a message one was decided for, which would wait out
-   its time. A start decided before the budget was applied is still sent
-   again unchanged and gives its place back as above.
-   Such an Agent's starts have no allowance period, so on main a start the
-   server refused keeps its place for as long as the Agent's reservation
-   lasts, also after its message ended, and so does a start that gave its
-   place back before the budget was applied.
+   The starts of an Agent with an applied budget have no allowance period:
+   one that does not give its place back holds it for as long as the
+   Agent's reservation lasts.
+
+   In review (Desktop #259): the daemon decides no new start in the
+   protocol before the budget for an Agent this computer has applied a
+   budget to, also when that protocol offers the message. Once this
+   computer has reported the budget, which it does right after applying it,
+   the server refuses every such start, and the budget protocol cannot take
+   up a message one was decided for. A message that comes before the report
+   waits for it. A start decided before the budget was applied is still
+   sent again unchanged and gives its place back as above. On main the
+   daemon can still decide such a start, until a first start of the Agent
+   in the budget protocol is made: for a message that waited in the
+   protocol before the budget when the budget was applied, or one that the
+   budget protocol left waiting behind an older message. Once the budget is
+   reported, the server refuses that start, the message waits out its time,
+   and the Agent's later messages wait behind it until it ends.
 
    In review (Desktop #246): an owned Agent's own steps and the session's
    renewal are read by the same rule. A refusal this computer makes itself
@@ -281,8 +289,9 @@ describes. "Send again" is what the sender has until it is decided.
   refuses to open it ("state format is corrupt or newer than this
   binary"): no Agent on that computer runs again until a build at least as
   new is installed. A host is rolled back by a newer build that undoes the
-  change, never by installing an older one. #252's place records (schema
-  114) are such a step, and so is every store migration in review here.
+  change, never by installing an older one. #252's and #256's place records
+  (schemas 114 and 115) are such steps, and so is every store migration in
+  review here.
 
 ## State
 
@@ -295,6 +304,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and #251) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review (Desktop #242, #247; an owned Agent's steps and the session's renewal: #246). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
-| 3. A refused start gives its place back when its message ends | implemented (Desktop #252); for an Agent with an applied budget, in review (Desktop #256) |
+| 3. A refused start gives its place back when its message ends | implemented (Desktop #252); for an Agent with an applied budget, implemented (Desktop #256) |
+| 3. No new start in the protocol before the budget for an Agent with an applied budget | in review (Desktop #259) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
 | 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
