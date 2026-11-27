@@ -2267,6 +2267,7 @@
   "This message can no longer be sent again.": "This message can no longer be sent again.",
   "Not processed": "Not processed",
   "Can be sent again": "Can be sent again",
+  "Open its thread to send it again.": "Open its thread to send it again.",
   "Answer generated; waiting for delivery.": "Answer generated; waiting for delivery.",
   "Answer delivery could not be confirmed.": "Answer delivery could not be confirmed.",
   "This message was blocked by the budget limit. After the resource owner adds capacity, send a new message.": "This message was blocked by the budget limit. After the resource owner adds capacity, send a new message.",
