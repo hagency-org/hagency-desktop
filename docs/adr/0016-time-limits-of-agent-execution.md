@@ -165,8 +165,9 @@ document states the case, and its option A is drafted (Desktop #249, server
   process then ends at its first lease. After a sleep through a lease's
   end, the turn ends at its next renewal moment, at most ten seconds of
   awake time; the store refuses its records, and the commit gate its
-  messages, from the wall-clock end on. On main, such a computer still loses that much of
-  every lease, and a whole lease when it is ahead by a lease's length; and
+  messages, from the wall-clock end on. On main, such a computer still
+  loses as much of every lease as its clock is ahead, and the whole lease
+  when it is ahead by a lease's length; and
   after a sleep through a lease's end, a turn on main runs on for the
   counted time that was left when the computer slept: 20 to 30 seconds
   with 30-second leases, 110 to 120 seconds with two-minute leases.
