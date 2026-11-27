@@ -42,7 +42,11 @@ impl Repository {
                 lock: "owner.lock",
                 application_id: APPLICATION_ID,
                 version: VERSION,
-                migrations: &[(2, include_str!("custody-migrations/002-outbound.sql"))],
+                migrations: &[crate::database::Migration {
+                    version: 2,
+                    name: "002-outbound.sql",
+                    sql: include_str!("custody-migrations/002-outbound.sql"),
+                }],
                 sql: include_str!("schema.sql"),
                 verify: &[
                     "SELECT id,lane,binding,generation,digest,payload,receipt FROM inbox LIMIT 0",

@@ -135,6 +135,16 @@ pub enum Error {
     Locked,
     #[error("state format is corrupt or newer than this binary")]
     Schema,
+    /// The store ran a migration of this number that is not this build's
+    /// migration of the number (ADR 0016, Known bounds). Nothing ran.
+    #[error(
+        "store migration {version} was made by another build: the store ran {stored}, this build has {expected}"
+    )]
+    MigrationMadeByAnotherBuild {
+        version: i32,
+        stored: String,
+        expected: String,
+    },
     #[error("state must be an owner-private directory containing regular files")]
     Private,
     #[error("private state on this platform has not passed the native permission gate")]

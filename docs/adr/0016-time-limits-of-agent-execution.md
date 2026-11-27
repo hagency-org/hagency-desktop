@@ -58,26 +58,47 @@ come to this:
 
    A refusal ends no more than its own message. The daemon saves each start
    of an Agent's process before it asks for it, and a saved start holds the
-   place after the process it follows for the rest of the allowance period:
-   no second start follows the same process, so the server is never asked to
-   start one twice. When the server refused a start, the first one of a
-   message or one that runs it again, and the message then ended (it waited
-   out its time, it was stopped, or it was ended because the Agent had moved
-   on), the start gives that place back as soon as the daemon reads the end,
-   and the Agent's next message starts. It gives it back only when the
-   message's status names no start the server made from it and this computer
-   holds no command issued for it; the server starts nothing for a message
-   that ended. Until the message ends, a refused start keeps its place and is
-   sent again unchanged. An Agent with an applied budget gives the place back
-   the same way, and a start that gave its place back before the budget was
-   applied holds none after that. The daemon reads a message's status in
+   place after the process it follows for the rest of the allowance period.
+   The server may still make that start, so it is the one start the daemon
+   asks for after that process; the server makes no second one either. When
+   the server refused a start, the first one of a message or one that runs
+   it again, and the message then ended (it waited out its time, it was
+   stopped, or it was ended because the Agent had moved on), the start gives
+   that place back as soon as the daemon reads the end, and the Agent's next
+   message starts. It gives it back only when the message's status names no
+   start the server made from it and this computer holds no command issued
+   for it; the server starts nothing for a message that ended. Until the
+   message ends, a refused start keeps its place and is sent again
+   unchanged, unless the server refused it for the Agent's applied budget
+   (below). An Agent with an applied budget gives the place back the same
+   way, and a start that gave its place back before the budget was applied
+   holds none after that. The daemon reads a message's status in
    both protocols, the budget one and the one before it, and each names only
    the starts of its own protocol. It keeps the end each one shows, so a
    start of either kind gives its place back whichever end it read first.
-   Such an Agent's starts have no allowance period, so on main a start the
-   server refused keeps its place for as long as the Agent's reservation
-   lasts, also after its message ended, and so does a start that gave its
-   place back before the budget was applied.
+   The starts of an Agent with an applied budget have no allowance period:
+   one that does not give its place back holds it for as long as the
+   Agent's reservation lasts.
+
+   The daemon decides no new start in the protocol before the budget, first
+   or retry, for an Agent this computer has applied a budget to, also when
+   that protocol offers the message, and it starts no such Agent in that
+   protocol for no message either. A message that comes before the budget
+   is reported waits for the report, which this computer sends right after
+   applying the budget. A start decided before the budget was applied is
+   still sent. Once the budget is reported, the server refuses it
+   (`shared_budget_execution_required`), and refuses it again every time,
+   since an applied budget stays applied. It looks for a start of the
+   message that it made before it reads the budget, so the refusal also
+   says that it made none. The daemon keeps that refusal, with the start
+   and the digest of the request it answered, and the start gives its place
+   back at once and is never sent again. A message whose first start was
+   refused is then taken up by the budget protocol, as if no start had been
+   decided for it. A message whose retry was refused has a start the server
+   made, so the budget protocol ends it, and the retry holds no place a
+   later message needs. No other refusal gives a place back before its
+   message ends: the server's other refusals of a start can change from one
+   try to the next, or name a start it made.
 
    In review (Desktop #246): an owned Agent's own steps and the session's
    renewal are read by the same rule. A refusal this computer makes itself
@@ -138,8 +159,9 @@ For the room:
    Agent's earlier usage cannot run in that period, whatever anyone does.
    When the server ends it at once (`endReason`), its notice says so, and it
    is offered only once the Agent's next period has begun, never for an
-   Agent without periods. When the server lets it wait out its time, its
-   notice says that it cannot start and when it ends.
+   Agent without periods; until then its notice says that a copy would end
+   the same way. When the server lets it wait out its time, its notice says
+   that it cannot start and that it ends within a day.
 
    It is offered on the message itself, on every message the room's status
    lists that can be sent again, and the notice at the end of the timeline
@@ -214,14 +236,17 @@ describes. "Send again" is what the sender has until it is decided.
 - A start the server refused for a message it still offers keeps its place,
   and the Agent's later messages wait behind that message, until it ends: at
   the latest when it has waited a day, or when the allowance period turns.
+  A start refused for the Agent's applied budget is the one exception: it
+  gives its place back at once (rule 3).
 - An Agent with an applied budget can also be started for no message, after
   the process it follows. No message's end shows that the server will never
   make such a start, and the server keeps no record of one it refused, so
-  it never gives its place back. The daemon makes no such start; only tests
-  ask for one. If one were made and refused, every later message after the
-  same process would wait for as long as the Agent's reservation lasts. Only
-  the end of the reservation, or the same start sent again and made, would
-  end the wait; there is no other way out.
+  it never gives its place back. The daemon makes no such start: the one
+  function that asks for one is built into tests only. If one were made
+  and refused, every later message after the same process would wait for
+  as long as the Agent's reservation lasts. Only the end of the
+  reservation, or the same start sent again and made, would end the wait;
+  there is no other way out.
 - A reader who did not send a message that arrived while its Agent was
   stopped keeps reading that the Agent is paused after it runs again.
 - A message is offered while the room's status lists it. The status holds
@@ -275,8 +300,24 @@ describes. "Send again" is what the sender has until it is decided.
   refuses to open it ("state format is corrupt or newer than this
   binary"): no Agent on that computer runs again until a build at least as
   new is installed. A host is rolled back by a newer build that undoes the
-  change, never by installing an older one. #252's place records (schema
-  114) are such a step, and so is every store migration in review here.
+  change, never by installing an older one. #252's, #256's and #259's place
+  records (schemas 114, 115 and 116) are such steps, and so is every store
+  migration in review here. A store migration is known by its file name and
+  the SHA-256 of its SQL, not by its number alone. The store records both
+  for each migration it runs, and every start compares them with the
+  build's own list. A store that ran another build's migration of the same
+  number, such as an earlier draft's, is refused by name ("store migration
+  N was made by another build") before any later migration runs over it.
+  A store from before these records takes the build's own for the versions
+  it has, once: released builds come from the main branch, where a
+  migration's number, name and SQL never change once it lands. A store
+  that a draft build migrated must not be opened by a later release. Since
+  Desktop #261 the release refuses it by name wherever the draft's step
+  differs from its own, and no Agent on that computer runs until the store
+  is replaced. A store migrated by a draft build from before #261 has no
+  records and cannot be told apart: the release takes its own steps for
+  the draft's. A build from a draft pull request therefore runs only on a
+  daemon home made for it and thrown away afterwards.
 
 ## State
 
@@ -289,6 +330,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and #251) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review (Desktop #242, #247; an owned Agent's steps and the session's renewal: #246). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
-| 3. A refused start gives its place back when its message ends | implemented (Desktop #252); for an Agent with an applied budget, in review (Desktop #256) |
+| 3. A refused start gives its place back when its message ends | implemented (Desktop #252); for an Agent with an applied budget, implemented (Desktop #256) |
+| 3. No new start in the protocol before the budget for an Agent with an applied budget; a start the server refused for that budget gives its place back at once | implemented (Desktop #259) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
-| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
+| 4. The wall clock only ends a lease early | holds for a ticket and a start window; not yet for the session's proof, whose wall-clock end is in review (Desktop #246). For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |

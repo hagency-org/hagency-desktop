@@ -119,7 +119,10 @@ impl OwnerResourceRegistry {
             let old=demand::journal::load(&tx,&e.profile.digest,child,&proof.offer.demand_id)?;
             if let Some(old)=&old {
                 if old.offer().digest()?!=proof.offer.digest()? {return Err(Error::Conflict)}
-                if matches!(old.disposition(),SharedDemandDisposition::StartPrepared|SharedDemandDisposition::HeadChanged){return Err(Error::LocalAuthority)}
+                // The plain lane's start of this message may have been made,
+                // unless the server refused it for this budget (schema 116).
+                let refused=match old.input() {Some(i)=>demand::refused(&tx,&i.start.start_intent_id)?,None=>false};
+                if matches!(old.disposition(),SharedDemandDisposition::HeadChanged)||matches!(old.disposition(),SharedDemandDisposition::StartPrepared)&&!refused{return Err(Error::LocalAuthority)}
                 if let Some(b)=old.budget() {
                     if b.state!="exhausted" {return Err(Error::LocalAuthority)}
                     let expected=canonical::digest(&json!({"demandDigest":proof.offer.digest()?,"expectedControlRevision":proof.offer.control_revision,"reason":"budget_blocked","budget":b.observation}))?;

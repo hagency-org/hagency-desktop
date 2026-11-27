@@ -234,6 +234,12 @@ impl OwnerResourceRegistry {
                 if bound {
                     return Err(Error::LocalAuthority);
                 }
+                // A retry the server refused for the Agent's budget is never
+                // sent again (schema 116); it waits, as when another start
+                // holds the place below.
+                if refused(&tx, &id)? {
+                    return Err(Error::Conflict);
+                }
                 // Replay of the same retry: its saved bytes, never a new start.
                 saved_start(&tx, &profile.digest, &child, &saved, n)?
             } else {
@@ -284,7 +290,15 @@ impl OwnerResourceRegistry {
                     release::lapse(&tx, &proof.offer.demand_id)?;
                     lapsed = true;
                 }
-                let start = start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input;
+                // This computer has applied a budget to the Agent: its place
+                // is the budget lane's, and the retry waits as when another
+                // start holds the place above. Nothing of this transaction is
+                // kept then: no retry went out without `reoffers`, so the
+                // event's opt-in holds until a retry is saved without it, and
+                // the stopped head's binding stays.
+                let start = start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?
+                    .ok_or(Error::Conflict)?
+                    .input;
                 // Retry v2: the server showed this retry, so it gave the
                 // stopped head's work back; its binding here is released.
                 if bound {

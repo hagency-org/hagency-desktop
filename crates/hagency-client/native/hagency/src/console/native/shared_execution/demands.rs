@@ -460,9 +460,27 @@ impl SharedExecutionTransport {
         // The saved bytes, `reoffers` included, whatever the server lists
         // now: it answers a start it recorded only when sent the same bytes.
         let plan = super::attempts::DemandPreparation { submission, inspected, original_digest: digest(original)? };
-        self.process_attempt_scoped(r, attempt_io::AttemptAction::DemandStart {
+        #[cfg(feature = "shared-budget-execution")]
+        let sent = input.clone();
+        let result = self.process_attempt_scoped(r, attempt_io::AttemptAction::DemandStart {
             id: status.offer.demand_id.clone(), input,
-        }, None, launch, None, Some(plan)).await
+        }, None, launch, None, Some(plan)).await;
+        // The server refuses every start of this lane of an Agent with an
+        // applied budget, and again every time: the start gives its place
+        // back and is never sent again, and the budget lane takes up a
+        // message whose first start it was.
+        #[cfg(feature = "shared-budget-execution")]
+        if let Err(e) = &result
+            && e.status == 409
+            && e.code == SHARED_BUDGET_EXECUTION_REQUIRED
+        {
+            let fresh = self.io.bound().await?;
+            let proof = offer_proof(&fresh, r, original, status, observed).await?;
+            r.release_refused_shared_demand_start(proof, original.clone(), sent, e.code.clone())
+                .await
+                .map_err(store)?;
+        }
+        result
     }
 }
 /// The exchange of a binding: whether the server pairs demands with work
