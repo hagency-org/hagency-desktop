@@ -177,14 +177,16 @@ always had, and no "Send again".
 Whether accepted work that never began should be given to the next process
 without anyone asking. The owner's policy says that what is confirmed not to
 have run is run again. For a start that never happened it is: a message has
-its first attempt and at most three more. Three kinds of start are not tried
-again and end the message, as the server's document says: one whose process
-reported and then ended before it was given the message, any start of an
-Agent with an applied budget, and any start on a computer whose daemon does
-not ask for retries; their sender can send the message again. For accepted
-work it needs a second binding of one message on both sides. The server's
-document states the case, and its option A is drafted (Desktop #249, server
-#102); "Send again" is what the sender has until it is decided.
+its first attempt and at most three more. On main, three kinds of start are
+not tried again and end the message, as the server's document says: one
+whose process reported and then ended before it was given the message, any
+start of an Agent with an applied budget, and any start on a computer whose
+daemon does not ask for retries; their sender can send the message again.
+Option A, drafted as Desktop #249 and server #102, hands the first kind back
+and runs it again, when the server's switch is on and the start asked for it
+(`reoffers`); the other two stay as they are. For accepted work that needs a
+second binding of one message on both sides, which the server's document
+describes. "Send again" is what the sender has until it is decided.
 
 ## Known bounds
 
