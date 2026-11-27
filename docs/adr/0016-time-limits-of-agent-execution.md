@@ -79,19 +79,22 @@ come to this:
    Agent's reservation lasts.
 
    In review (Desktop #259): the daemon decides no new start in the
-   protocol before the budget for an Agent this computer has applied a
-   budget to, also when that protocol offers the message. Once this
-   computer has reported the budget, which it does right after applying it,
-   the server refuses every such start, and the budget protocol cannot take
-   up a message one was decided for. A message that comes before the report
-   waits for it. A start decided before the budget was applied is still
-   sent again unchanged and gives its place back as above. On main the
-   daemon can still decide such a start, until a first start of the Agent
-   in the budget protocol is made: for a message that waited in the
-   protocol before the budget when the budget was applied, or one that the
-   budget protocol left waiting behind an older message. Once the budget is
-   reported, the server refuses that start, the message waits out its time,
-   and the Agent's later messages wait behind it until it ends.
+   protocol before the budget, first or retry, for an Agent this computer
+   has applied a budget to, also when that protocol offers the message, and
+   it starts no such Agent in that protocol for no message either. Once
+   this computer has reported the budget, which it does right after
+   applying it, the server refuses every such start of a message, and the
+   budget protocol cannot take up a message one was decided for. A message
+   that comes before the report waits for it. A retry waits too: its
+   message has a start already, so it waits out its time. A start decided
+   before the budget was applied is still sent again unchanged and gives
+   its place back as above. On main the daemon can still decide such a
+   start, until a first start of the Agent in the budget protocol is made:
+   for a message that waited in the protocol before the budget when the
+   budget was applied, for one that the budget protocol left waiting behind
+   an older message, and for a retry. Once the budget is reported, the
+   server refuses that start, the message waits out its time, and the
+   Agent's later messages wait behind it until it ends.
 
    In review (Desktop #246): an owned Agent's own steps and the session's
    renewal are read by the same rule. A refusal this computer makes itself

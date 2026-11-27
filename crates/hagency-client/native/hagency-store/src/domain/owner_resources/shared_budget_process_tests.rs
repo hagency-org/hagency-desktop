@@ -393,8 +393,16 @@ async fn budget_execution_v3_start_journal_recovers_original_head_and_rejects_re
 }
 #[tokio::test]
 async fn budget_execution_v3_does_not_bypass_existing_v2_start_intent() {
-    let (f,c)=synthetic().await;
-    f.registry.prepare_shared_attempt_start(enrollment(&f),c.clone(),None,"original_v2".into()).await.unwrap();
+    // The v2 start is saved before the budget is applied: after it, no new
+    // v2 start is saved, and the saved one is returned unchanged.
+    let f=fixture().await;let c=command(&f).await;
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let saved=f.registry.prepare_shared_attempt_start(enrollment(&f),c.clone(),None,"original_v2".into()).await.unwrap();
+    increase(&f,&c,"initial",50).await;
+    assert!(matches!(f.registry.prepare_shared_attempt_start(enrollment(&f),c.clone(),None,"after_budget_v2".into()).await,Err(Error::Conflict)));
+    let again=f.registry.prepare_shared_attempt_start(enrollment(&f),c.clone(),None,"original_v2".into()).await.unwrap();
+    assert_eq!(digest(again.input()),digest(saved.input()));
     assert!(f.registry.prepare_shared_budget_attempt_start(enrollment(&f),c,"new_v3".into()).await.is_err());
     f.registry.shutdown().await.unwrap();
 }

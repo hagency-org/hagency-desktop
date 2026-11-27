@@ -393,6 +393,28 @@ async fn budget_execution_v3_a_plain_start_saved_before_a_budget_is_applied_stil
     f.registry.shutdown().await.unwrap();
 }
 
+#[tokio::test]
+async fn budget_execution_v3_a_plain_retry_saves_no_start_after_a_budget_is_applied(){
+    // A message started in the plain lane before the budget. Its start was
+    // made and never claimed here, so the server opens a retry of it. Once a
+    // budget is applied, the retry saves no plain start: it waits, as when
+    // another start holds the place.
+    let f=fixture().await;let c=command(&f).await;
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let lost=offer(&c,"retried_after_the_budget",1);
+    let input=f.registry.prepare_shared_demand(proof_for(&f,&lost),c.clone(),None).await.unwrap().input().unwrap().clone();
+    let mut failed=attempt(&f,&c).await;
+    failed.start_intent_id=input.start.start_intent_id.clone();failed.predecessor=input.start.predecessor.clone();failed.budget_observation=input.start.budget_observation.clone();
+    f.registry.fence_shared_successor(cleanup(&f,&c,1).await,failed.clone()).await.unwrap();
+    increase(&f,&c,"applied_before_the_retry",50).await;
+    let retry=f.registry.prepare_shared_demand_retry(proof_for(&f,&lost),c.clone(),Some(failed),1).await;
+    let got=match &retry {Ok(SharedDemandRetry::Start(_))=>"a retry start".to_string(),Ok(SharedDemandRetry::Blocked(_))=>"a block".into(),Err(e)=>format!("{e:?}")};
+    assert!(matches!(retry,Err(Error::Conflict)),"the retry waits, got {got}");
+    assert_eq!(count(&f,"owner_shared_start_intents").await,1,"no plain retry start");
+    f.registry.shutdown().await.unwrap();
+}
+
 /// The budget start table as schema 114 left it: one start for each child
 /// and predecessor, for good; no release rows and no second ends.
 const SCHEMA114_BUDGET_STARTS: &str = "DROP TRIGGER owner_shared_budget_start_intent_place;DROP VIEW owner_shared_budget_start_releasable;DROP TABLE owner_shared_budget_start_releases;PRAGMA foreign_keys=OFF;
