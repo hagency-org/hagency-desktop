@@ -302,13 +302,22 @@ describes. "Send again" is what the sender has until it is decided.
   new is installed. A host is rolled back by a newer build that undoes the
   change, never by installing an older one. #252's, #256's and #259's place
   records (schemas 114, 115 and 116) are such steps, and so is every store
-  migration in review here.
-- The store knows each of its migrations by its number only, and two drafts
-  can give one number to different steps. A build from a draft pull request
-  therefore runs only on a daemon home made for it and thrown away
-  afterwards. A daemon home that ran a draft's migration must not be opened
-  by a later release, which would either refuse it or take the draft's step
-  for its own step of the same number.
+  migration in review here. A store migration is known by its file name and
+  the SHA-256 of its SQL, not by its number alone. The store records both
+  for each migration it runs, and every start compares them with the
+  build's own list. A store that ran another build's migration of the same
+  number, such as an earlier draft's, is refused by name ("store migration
+  N was made by another build") before any later migration runs over it.
+  A store from before these records takes the build's own for the versions
+  it has, once: released builds come from the main branch, where a
+  migration's number, name and SQL never change once it lands. A store
+  that a draft build migrated must not be opened by a later release. Since
+  Desktop #261 the release refuses it by name wherever the draft's step
+  differs from its own, and no Agent on that computer runs until the store
+  is replaced. A store migrated by a draft build from before #261 has no
+  records and cannot be told apart: the release takes its own steps for
+  the draft's. A build from a draft pull request therefore runs only on a
+  daemon home made for it and thrown away afterwards.
 
 ## State
 
