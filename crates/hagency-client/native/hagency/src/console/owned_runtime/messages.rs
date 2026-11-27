@@ -322,7 +322,9 @@ impl PersonalReportPermit {
             &dispatch.room_id, puppet, generation, now).map_err(|_| ())?;
         let route = Route::personal(dispatch, execution).ok_or(())?;
         let remaining = u64::try_from(proof.valid_until_ms.checked_sub(now).ok_or(())?).map_err(|_| ())?;
-        let deadline = std::time::Instant::now().checked_add(std::time::Duration::from_millis(remaining)).ok_or(())?;
+        let by_wall = std::time::Instant::now().checked_add(std::time::Duration::from_millis(remaining)).ok_or(())?;
+        // Counted from its request; the wall clock may only end it earlier.
+        let deadline = proof.held_until.ok_or(())?.min(by_wall);
         Ok(Self { route_id: route.id, room_id: route.room_id, puppet: puppet.into(),
             encrypted: proof.encrypted, valid_until_ms: proof.valid_until_ms, deadline })
     }
@@ -1127,15 +1129,28 @@ mod tests {
             execution_id: Some("execution".into()), outcome: None,
         };
         let lease = LeaseRef { agent_id: "agent".into(), epoch: 3 };
-        let proof = AgentMessageAuthorization { agent_id: "agent".into(), binding_id: "binding".into(),
+        let counted = std::time::Instant::now() + std::time::Duration::from_secs(20);
+        let mut proof = AgentMessageAuthorization { agent_id: "agent".into(), binding_id: "binding".into(),
             binding_generation: 4, room_id: "!room:test".into(), puppet_mxid: "@agent:test".into(),
-            encrypted: true, lease_epoch: 3, device_generation: 2, valid_until_ms: 40_000 };
+            encrypted: true, lease_epoch: 3, device_generation: 2, valid_until_ms: 40_000,
+            held_until: Some(counted) };
         let permit = PersonalReportPermit::new(&proof, &lease, &dispatch, "execution", 2,
             "@agent:test", 10_000).unwrap();
+        // The 30 s the wall clock reads are cut to the 20 s counted from the
+        // request.
+        assert_eq!(permit.deadline, counted);
         let route = Route::personal(&dispatch, "execution").unwrap();
         assert!(permit.allows(&route, "@agent:test", 10_000));
         assert!(!permit.allows(&route, "@other:test", 10_000));
         assert!(!permit.allows(&route, "@agent:test", 40_000));
+        // A wall clock that reads less ends it earlier.
+        let early = PersonalReportPermit::new(&proof, &lease, &dispatch, "execution", 2,
+            "@agent:test", 35_000).unwrap();
+        assert!(early.deadline <= std::time::Instant::now() + std::time::Duration::from_secs(5));
+        // One not counted from an answer is not taken.
+        proof.held_until = None;
+        assert!(PersonalReportPermit::new(&proof, &lease, &dispatch, "execution", 2, "@agent:test", 10_000).is_err());
+        proof.held_until = Some(counted);
         assert!(!permit.allows(&Route::personal(&dispatch, "other").unwrap(), "@agent:test", 10_000));
         assert!(PersonalReportPermit::new(&proof, &lease, &dispatch, "execution", 3, "@agent:test", 10_000).is_err());
         dispatch.binding_generation += 1;

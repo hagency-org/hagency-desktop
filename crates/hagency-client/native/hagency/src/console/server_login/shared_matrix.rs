@@ -106,7 +106,7 @@ impl ServerLogin {
             if self.stopped.load(Ordering::Acquire) { return Err("matrix_account_changed"); }
             for previous in sessions.values_mut() { self.queue_revocation(previous).await; }
             sessions.clear();
-            sessions.insert(session_key(&cookie), RemoteSession { matrix_source: Some(source), token: token.clone(), oauth_token: String::new(), user_id: user.into(), device: Some(device), refresh_token: None, oauth_expires: until, authorized_until: until, clock_allowance: Duration::ZERO, full_window: Duration::ZERO, sdk_refreshed: None, invalidated: false, binding, checked: Instant::now(), expires: Instant::now() + Duration::from_secs(900) });
+            sessions.insert(session_key(&cookie), RemoteSession { matrix_source: Some(source), token: token.clone(), oauth_token: String::new(), user_id: user.into(), device: Some(device), refresh_token: None, oauth_expires: until, authorized_until: until, authorized_until_ms: stated_end(&[&grant, &identity]), clock_allowance: Duration::ZERO, full_window: Duration::ZERO, sdk_refreshed: None, invalidated: false, binding, checked: Instant::now(), expires: Instant::now() + Duration::from_secs(900) });
             *self.status.lock().await = json!({"state":"device_authorized","deviceAuthorized":true,"transportOnline":false});
             Self::start_worker(console);
             tracing::info!(stage="owner_adoption",elapsed_ms=started.elapsed().as_millis() as u64,"SDK owner authorization ready");

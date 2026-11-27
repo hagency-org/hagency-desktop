@@ -357,6 +357,7 @@ impl ServerLogin {
                 .ok_or("native_resume_unavailable")?,
             user_id: record.user_id.clone(),
             valid_until: now,
+            valid_until_ms: 0,
             clock_allowance: std::time::Duration::ZERO,
             revoked: std::sync::Arc::new(AtomicBool::new(false)),
             stopped: self.stopped.clone(),
@@ -370,6 +371,7 @@ impl ServerLogin {
             refresh_token: None,
             oauth_expires: now,
             authorized_until: now,
+            authorized_until_ms: 0,
             clock_allowance: std::time::Duration::ZERO,
             full_window: std::time::Duration::ZERO,
             sdk_refreshed: None,
@@ -426,6 +428,7 @@ impl ServerLogin {
             clock.deadline_ms(proof.valid_until_ms)
                 .map_err(|_| "native_resume_unavailable")?,
         );
+        session.authorized_until_ms = session.authorized_until_ms.min(proof.valid_until_ms);
         let after = source
             .access_token()
             .await

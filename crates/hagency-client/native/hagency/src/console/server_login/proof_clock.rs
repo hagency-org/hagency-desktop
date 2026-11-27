@@ -74,6 +74,20 @@ impl ProofClock {
         )
     }
 
+    /// Where the proof in `body` ends as the server counted it: from the
+    /// moment its request went out, by the server's own date, less the second
+    /// the date rounds away. Unlike the deadline, it is not cut by this
+    /// computer's clock, so it says how long the server holds the proof, not
+    /// how long this host may use it. None without the server's date. It is
+    /// never longer than the window the deadline allows.
+    pub(super) fn counted_end(&self, body: &Value) -> Option<Instant> {
+        let until = body["validUntilMs"].as_u64()?;
+        let second = self.server_second_ms?;
+        let window = until.checked_sub(second)?.min(window_bound(until, Some(second)));
+        self.started
+            .checked_add(Duration::from_millis(window.checked_sub(1_000)?))
+    }
+
     fn bounds_ms(&self, until: u64) -> Result<(Instant, Duration), &'static str> {
         let now = Instant::now();
         let local_ms = SystemTime::now()
@@ -304,5 +318,45 @@ mod tests {
         headers.remove(AGE);
         headers.append(DATE, "Thu, 01 Jan 1970 00:02:13 GMT".parse().unwrap());
         assert_eq!(ProofClock::new(started, &headers).server_second_ms, None);
+    }
+
+    #[test]
+    fn a_proof_is_expiring_by_the_end_the_server_counted_not_by_a_clock_that_is_ahead() {
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let started = Instant::now();
+        // This computer's clock is ten seconds ahead of the server's, which
+        // grants a thirty-second window.
+        let ahead = ProofClock { started, server_second_ms: Some(now_ms - 10_000) };
+        let fresh = serde_json::json!({"validUntilMs": now_ms + 20_000});
+        let (deadline, _) = ahead.bounds(&fresh).unwrap();
+        // The deadline is cut by the clock that is ahead: by it alone, every
+        // fresh proof would be expiring and the token refreshed each time.
+        assert!(deadline <= Instant::now() + Duration::from_secs(20));
+        assert!(deadline <= Instant::now() + super::super::EXPIRING_PROOF);
+        // The server holds it for the window it gave, less the second its date
+        // rounds away. That end is not expiring.
+        assert_eq!(ahead.counted_end(&fresh), Some(started + Duration::from_secs(29)));
+        assert!(started + Duration::from_secs(29) > Instant::now() + super::super::EXPIRING_PROOF);
+        // A proof the token's own end cut short is expiring by either end.
+        let short = serde_json::json!({"validUntilMs": now_ms + 5_000});
+        assert_eq!(ahead.counted_end(&short), Some(started + Duration::from_secs(14)));
+        // A clock that is behind: both ends are the window.
+        let behind = ProofClock { started, server_second_ms: Some(now_ms + 10_000) };
+        let fresh = serde_json::json!({"validUntilMs": now_ms + 40_000});
+        let (deadline, _) = behind.bounds(&fresh).unwrap();
+        assert!(deadline <= started + Duration::from_secs(29));
+        assert!(deadline > started + Duration::from_secs(28));
+        assert_eq!(behind.counted_end(&fresh), Some(started + Duration::from_secs(29)));
+        // No longer than the window the deadline allows; nothing without the
+        // server's date, or for an end before it.
+        let long = serde_json::json!({"validUntilMs": now_ms - 10_000 + 600_000});
+        assert_eq!(
+            ahead.counted_end(&long),
+            Some(started + Duration::from_millis(MAX_REQUESTED_WINDOW_MS - 1_000))
+        );
+        let undated = ProofClock { started, server_second_ms: None };
+        assert_eq!(undated.counted_end(&fresh), None);
+        assert_eq!(ahead.counted_end(&serde_json::json!({"validUntilMs": now_ms - 20_000})), None);
+        assert_eq!(ahead.counted_end(&serde_json::json!({})), None);
     }
 }

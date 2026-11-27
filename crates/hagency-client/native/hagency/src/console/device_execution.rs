@@ -66,6 +66,17 @@ impl std::fmt::Display for DeviceError {
     }
 }
 impl std::error::Error for DeviceError {}
+impl DeviceError {
+    /// What the failure says about its step, read as every failure of this
+    /// host is: by `said()`.
+    pub(super) fn said(&self) -> super::native::Said {
+        super::native::NativeError {
+            status: self.status,
+            code: self.code.clone(),
+        }
+        .said()
+    }
+}
 fn error(status: u16, code: &str) -> DeviceError {
     DeviceError {
         status,
@@ -319,15 +330,48 @@ pub struct AgentMessageAuthorization {
     pub lease_epoch: i64,
     pub device_generation: i64,
     pub valid_until_ms: i64,
+    /// Where it ends on this computer's monotonic clock: counted from its
+    /// request with the server's date, and cut by the wall clock (see
+    /// `message_end`). None until an answer was read.
+    #[serde(skip)]
+    pub held_until: Option<std::time::Instant>,
+}
+/// The longest a message authorization may last. The server issues thirty
+/// seconds or less.
+const MAX_MESSAGE_AUTHORIZATION_MS: i64 = 60_000;
+/// Where a message authorization that ends at `valid_until_ms` ends here. It
+/// is read as an execution lease is: counted from its request with the
+/// server's date, and ended early by the wall clock, which lengthens and
+/// refuses none. One longer than any the server issues is refused: by the
+/// server's own date, as an answer this host cannot hold; without that date,
+/// as this computer's clock being behind the server's.
+fn message_end(
+    valid_until_ms: i64,
+    clock: AnswerClock,
+    now: std::time::Instant,
+    local_ms: i64,
+) -> Result<std::time::Instant, DeviceError> {
+    let (granted, end) = lease_end(valid_until_ms, clock, now, local_ms);
+    if granted > MAX_MESSAGE_AUTHORIZATION_MS + 1_000 && clock.server_second_ms.is_none() {
+        Err(error(409, "execution_clock_behind"))
+    } else if granted <= 0 || granted > MAX_MESSAGE_AUTHORIZATION_MS + 1_000 {
+        Err(error(502, "execution_scope_mismatch"))
+    } else {
+        Ok(end)
+    }
 }
 impl AgentMessageAuthorization {
+    /// Whether the authorization is for this route and still holds: its end
+    /// as counted from its request has not come, and the wall clock, which
+    /// may only end it early, has not passed it either.
     pub(super) fn validate(&self, lease: &LeaseRef, binding: &str, generation: i64,
         room: &str, puppet: &str, device_generation: u64, now: i64) -> Result<(), DeviceError> {
         if self.agent_id != lease.agent_id || self.binding_id != binding
             || self.binding_generation != generation || self.room_id != room
             || self.puppet_mxid != puppet || self.lease_epoch != lease.epoch
             || u64::try_from(self.device_generation).ok() != Some(device_generation)
-            || self.valid_until_ms <= now || self.valid_until_ms > now.saturating_add(60_000)
+            || self.held_until.is_none_or(|end| end <= std::time::Instant::now())
+            || self.valid_until_ms <= now
         {
             return Err(error(502, "execution_scope_mismatch"));
         }
@@ -933,7 +977,7 @@ fn parse_response(
                     dated = clock.server_second_ms.is_some(),
                     "An Agent execution lease ends outside what was asked; an answer without the server's date is read with this computer's clock, which may differ from the server's"
                 );
-                return Err(invalid());
+                return Err(if granted > 0 && clock.server_second_ms.is_none() { error(409, "execution_clock_behind") } else { invalid() });
             }
             if &lease.agent_id != agent_id
                 || lease.owner_user_id != device.user_id()
@@ -1018,9 +1062,16 @@ fn parse_response(
             Ok(DeviceResponse::ToolAuthorized(dispatch))
         }
         DeviceOperation::AuthorizeMessage { lease, binding_id, binding_generation, room_id, puppet_mxid } => {
-            let authorization: AgentMessageAuthorization = decode(&value, "authorization")?;
+            let mut authorization: AgentMessageAuthorization = decode(&value, "authorization")?;
+            let local_ms = now_ms()?;
+            authorization.held_until = Some(message_end(
+                authorization.valid_until_ms,
+                clock,
+                std::time::Instant::now(),
+                local_ms,
+            )?);
             authorization.validate(lease, binding_id, *binding_generation, room_id, puppet_mxid,
-                device.generation(), now_ms()?)?;
+                device.generation(), local_ms)?;
             Ok(DeviceResponse::MessageAuthorized(authorization))
         }
         DeviceOperation::Reply {
@@ -1376,11 +1427,14 @@ mod processing_tests {
             server_second_ms: Some(second as u64),
         };
         // Read with this computer's clock alone, the lease ends 125 s away,
-        // more than was asked: refused, as before.
-        assert_eq!(
-            code(parse_response(&renew, answer(server_ms + 120_000), &device, AnswerClock::undated())),
-            "invalid_execution_response"
-        );
+        // more than was asked: refused, as before, and decided, for what it
+        // says. The server grants no more than is asked, so without its date
+        // this computer's clock is behind; asked again, it reads the same.
+        let behind = parse_response(&renew, answer(server_ms + 120_000), &device, AnswerClock::undated())
+            .err()
+            .unwrap();
+        assert_eq!(behind, error(409, "execution_clock_behind"));
+        assert_eq!(behind.said(), super::super::native::Said::Decided);
         // By the server's date it is the 120 s that were asked, held from the
         // moment the request went out.
         let Ok(DeviceResponse::Lease(lease)) =
@@ -1443,7 +1497,7 @@ mod processing_tests {
             .unwrap();
         assert_eq!(
             (refused.status, refused.code),
-            (502, "invalid_execution_response".to_owned())
+            (409, "execution_clock_behind".to_owned())
         );
     }
     #[test]
@@ -1458,11 +1512,14 @@ mod processing_tests {
         assert_eq!(serde_json::from_slice::<Value>(&body).unwrap(), json!({
             "lease":{"agentId":"agent-a","epoch":3},"bindingId":"binding-a","bindingGeneration":4
         }));
-        let proof: AgentMessageAuthorization = serde_json::from_value(json!({
+        let mut proof: AgentMessageAuthorization = serde_json::from_value(json!({
             "agentId":"agent-a","bindingId":"binding-a","bindingGeneration":4,
             "roomId":"!room:example.test","puppetMxid":"@agent:example.test",
             "encrypted":true,"leaseEpoch":3,"deviceGeneration":2,"validUntilMs":12000
         })).unwrap();
+        // Not read from an answer: not counted, so not held.
+        assert!(proof.validate(&lease, "binding-a", 4, "!room:example.test", "@agent:example.test", 2, 10_000).is_err());
+        proof.held_until = Some(std::time::Instant::now() + Duration::from_secs(2));
         let validate = |room: &str, puppet: &str, generation: i64, device: u64, now: i64|
             proof.validate(&lease, "binding-a", generation, room, puppet, device, now);
         assert!(validate("!room:example.test", "@agent:example.test", 4, 2, 10_000).is_ok());
@@ -1470,7 +1527,75 @@ mod processing_tests {
         assert!(validate("!room:example.test", "@other:example.test", 4, 2, 10_000).is_err());
         assert!(validate("!room:example.test", "@agent:example.test", 5, 2, 10_000).is_err());
         assert!(validate("!room:example.test", "@agent:example.test", 4, 3, 10_000).is_err());
+        // The wall clock past its end ends it, as after a sleep through it.
         assert!(validate("!room:example.test", "@agent:example.test", 4, 2, 12_000).is_err());
+        // So does the end counted from its request.
+        proof.held_until = Some(std::time::Instant::now());
+        assert!(proof.validate(&lease, "binding-a", 4, "!room:example.test", "@agent:example.test", 2, 10_000).is_err());
+    }
+    #[test]
+    fn a_message_authorization_is_counted_from_its_request_and_cut_by_the_wall_clock() {
+        let started = std::time::Instant::now();
+        let now = started + Duration::from_millis(400);
+        let dated = |second: u64| AnswerClock { started, server_second_ms: Some(second) };
+        let undated = AnswerClock { started, server_second_ms: None };
+        // The server issued 30 s at 1 000 s by its own date. This computer's
+        // clock is a minute behind, which read the authorization as 90 s and
+        // refused it.
+        assert_eq!(
+            message_end(1_030_000, dated(1_000_000), now, 940_400),
+            Ok(started + Duration::from_millis(29_000))
+        );
+        // Without the date that reading is all there is: the clock is behind.
+        assert_eq!(
+            message_end(1_030_000, undated, now, 940_400).unwrap_err(),
+            error(409, "execution_clock_behind")
+        );
+        // A clock 10 s ahead ends it 10 s early; one 30 s ahead ends it at once.
+        assert_eq!(
+            message_end(1_030_000, dated(1_000_000), now, 1_010_400),
+            Ok(now + Duration::from_millis(19_600))
+        );
+        assert_eq!(message_end(1_030_000, dated(1_000_000), now, 1_030_400), Ok(now));
+        // One the server's own date reads as longer than any it issues, or
+        // as over, is not held.
+        for until in [1_062_000, 1_000_000] {
+            assert_eq!(
+                message_end(until, dated(1_000_000), now, 1_000_400).unwrap_err(),
+                error(502, "execution_scope_mismatch")
+            );
+        }
+        // Read from an answer, with the server's date.
+        let op = DeviceOperation::AuthorizeMessage {
+            lease: LeaseRef { agent_id: "agent-a".into(), epoch: 3 },
+            binding_id: "binding-a".into(), binding_generation: 4,
+            room_id: "!room:example.test".into(), puppet_mxid: "@agent:example.test".into(),
+        };
+        let device = super::super::server_login::fixture_device(
+            "https://example.test/", "owner-subject", "@owner:example.test",
+        )
+        .0;
+        // The server's clock is a minute ahead of this computer's.
+        let server_ms = now_ms().unwrap() + 60_000;
+        let second = server_ms - server_ms % 1_000;
+        let answer = json!({"authorization":{
+            "agentId":"agent-a","bindingId":"binding-a","bindingGeneration":4,
+            "roomId":"!room:example.test","puppetMxid":"@agent:example.test",
+            "encrypted":false,"leaseEpoch":3,"deviceGeneration":1,"validUntilMs":second + 30_000
+        }});
+        let clock = AnswerClock { started: std::time::Instant::now(), server_second_ms: Some(second as u64) };
+        let Ok(DeviceResponse::MessageAuthorized(proof)) =
+            parse_response(&op, answer.clone(), &device, clock)
+        else {
+            panic!("an authorization of 30 s by the server's date was refused");
+        };
+        let held = proof.held_until.unwrap();
+        assert!(held >= clock.started + Duration::from_millis(29_000));
+        assert!(held < clock.started + Duration::from_millis(30_000));
+        assert_eq!(
+            parse_response(&op, answer, &device, AnswerClock::undated()).err().unwrap(),
+            error(409, "execution_clock_behind")
+        );
     }
     #[test]
     fn encrypted_candidate_confirmation_accepts_real_matrix_event_ids() {

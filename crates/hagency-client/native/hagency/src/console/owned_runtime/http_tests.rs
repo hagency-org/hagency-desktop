@@ -38,6 +38,10 @@ struct WireState {
     device_generation: i64,
     restart_busy_remaining: usize,
     renewal_failures: usize,
+    /// Answers every renewal with a lease that, read with this computer's
+    /// clock as an undated answer is, ends later than any that was asked: what
+    /// a computer whose clock is behind the server's sees.
+    renewal_reads_long: bool,
     events: Vec<Value>,
     paths: Vec<String>,
     replies: usize,
@@ -157,6 +161,8 @@ impl WireState {
                 if self.renewal_failures > 0 {
                     self.renewal_failures -= 1;
                     (503, json!({"code":"server_unavailable"}))
+                } else if self.renewal_reads_long {
+                    (200, json!({"lease":{"agentId":"agent-a","ownerUserId":"uid","deviceId":"device-a","deviceGeneration":generation,"epoch":self.epoch,"expiresAtMs":wall_ms() + 200_000}}))
                 } else {
                     (200, lease(self.epoch))
                 }
@@ -1378,6 +1384,67 @@ async fn typed_http_runtime_intent_positive_restore_child() {
     let _ = server.await;
 }
 
+/// An undated renewal answer that reads a lease longer than asked says this
+/// computer's clock is behind. The heartbeat stops on the first one and says
+/// so; it used to ask again every second until the lease was gone and report
+/// that as a transport failure.
+#[tokio::test]
+async fn heartbeat_stops_at_once_when_this_clock_is_behind_and_says_so() {
+    let (origin, state, server) = server(false, 0).await;
+    let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+    let native =
+        NativeOwner::open_with_matrix(&root.path().join("state"), &origin, OWNER, Arc::new(Source))
+            .await
+            .unwrap();
+    let console = native.test_console().clone();
+    let device = console.authorized_device().await.unwrap();
+    {
+        let mut wire = state.lock().unwrap();
+        wire.epoch = 1;
+        wire.renewal_reads_long = true;
+    }
+    let lease = Lease {
+        agent_id: "agent-a".into(),
+        owner_user_id: "uid".into(),
+        device_id: "device-a".into(),
+        device_generation: 1,
+        epoch: 1,
+        expires_at_ms: wall_ms() + 20_000,
+        held_until: None,
+    };
+    let (stop, receiver) = watch::channel(false);
+    let failed = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let task = tokio::spawn(heartbeat(
+        console,
+        device,
+        lease,
+        stop.clone(),
+        receiver,
+        failed.clone(),
+    ));
+    // The first renewal goes out 5 s into the 20 s lease.
+    tokio::time::timeout(Duration::from_secs(15), task)
+        .await
+        .expect("a clock behind must stop the heartbeat before the lease is gone")
+        .unwrap();
+    assert!(*stop.borrow());
+    let failed = failed.load(std::sync::atomic::Ordering::Acquire);
+    assert_eq!(failed, 3);
+    assert_eq!(
+        failure_code(&heartbeat_result(failed, Ok(()))),
+        Some("execution_clock_behind")
+    );
+    let renewals = state
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .filter(|p| p.ends_with("/leases/renew"))
+        .count();
+    assert_eq!(renewals, 1, "asked once, not until the lease is gone");
+    native.shutdown().await;
+    server.abort();
+}
 #[tokio::test]
 async fn heartbeat_retries_transport_failure_but_never_extends_unconfirmed_lease() {
     for recover in [true, false] {

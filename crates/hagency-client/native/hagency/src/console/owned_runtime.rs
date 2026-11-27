@@ -1279,9 +1279,13 @@ impl Transport for PinnedConsole {
 }
 // Only explicit per-event refusals are isolated. Authentication, device and
 // current-lease failures still fence execution; status alone cannot distinguish them.
+// Everything else is read by `said()`, as every failure of this host is: what
+// it decides stops the runtime, the rest is asked again.
 fn transport_error(status: u16, code: &str, acquiring: bool, request: bool) -> RuntimeError {
     if acquiring && status == 409 && code == "agent_leased_to_another_device" {
         RuntimeError::LeaseBusy
+    } else if code == CLOCK_BEHIND {
+        RuntimeError::Execution(CLOCK_BEHIND)
     } else if matches!(
         code,
         "execution_history_changed" | "ledger_recovery_required"
@@ -1308,12 +1312,19 @@ fn transport_error(status: u16, code: &str, acquiring: bool, request: bool) -> R
         )
     {
         RuntimeError::Request
-    } else if matches!(status, 401 | 403 | 409) {
+    } else if (super::device_execution::DeviceError { status, code: code.into() }).said()
+        == super::native::Said::Decided
+    {
         RuntimeError::Authorization
     } else {
         RuntimeError::Transport
     }
 }
+/// An answer without the server's date that read a lease longer than was
+/// asked: this computer's clock is behind the server's. It is decided, and the
+/// runtime stops with this code, as asked again it reads the same; the
+/// service tries again later, when the clock may have been set.
+const CLOCK_BEHIND: &str = "execution_clock_behind";
 async fn operation<T: Transport>(
     console: &T,
     receiver: &mut watch::Receiver<bool>,
@@ -1375,7 +1386,7 @@ async fn heartbeat(
             let renewed = tokio::select! { biased; _=canceled(&mut receiver)=>return, _=tokio::time::sleep_until(expiry.into())=>break "lease_renewal_deadline", result=console.execution_api_pinned(Op::Renew{lease:lease.reference(),ttl_ms:MAX_LEASE_TTL_MS},&pin)=>result };
             let value = match renewed {
                 Ok(Response::Lease(value)) => value,
-                Err(error) if !matches!(error.status, 401 | 403 | 409) => {
+                Err(error) if error.said() != super::native::Said::Decided => {
                     tracing::warn!(
                         stage = "lease_renewal",
                         status = error.status,
@@ -1389,6 +1400,9 @@ async fn heartbeat(
                     _=tokio::time::sleep_until(next.min(expiry).into())=>{}}
                     continue;
                 }
+                // Asked again, the same answer reads the same: the runtime
+                // stops now and says why, rather than once the lease is gone.
+                Err(error) if error.code == CLOCK_BEHIND => break CLOCK_BEHIND,
                 _ => break "lease_renewal_rejected",
             };
             lease = value;
@@ -1443,7 +1457,14 @@ async fn heartbeat(
         reason,
         "lease_renewal_rejected" | "device_identity_changed" | "device_authorization_required"
     );
-    failed.store(if terminal { 1 } else { 2 }, Ordering::Release);
+    let failure = if reason == CLOCK_BEHIND {
+        3
+    } else if terminal {
+        1
+    } else {
+        2
+    };
+    failed.store(failure, Ordering::Release);
     stop.send_replace(true);
 }
 /// Whether a device refresh that has had no answer since `since` is given up:
@@ -1655,12 +1676,31 @@ struct RecoveryLeaseWait {
     total: Duration,
     interval: Duration,
 }
-impl Default for RecoveryLeaseWait {
-    fn default() -> Self {
+/// What a recovering start waits beyond the longest lease: for the request
+/// that renewed the earlier lease last, and for the try that finds it ended.
+const RECOVERY_LEASE_MARGIN: Duration = Duration::from_secs(5);
+impl RecoveryLeaseWait {
+    /// How long a start that recovers an Agent waits for a lease that another
+    /// holder still has. A holder that ended without giving its lease back (it
+    /// crashed, or its release got no answer) keeps it until it runs out: at
+    /// most the longest lease, renewed just before it ended. The server gives
+    /// the same device of the same generation its own lease back at once, so
+    /// the wait is for another device, or for this one after a new sign-in.
+    /// Thirty-five seconds covered leases of thirty; with leases of two
+    /// minutes a recovery gave up before the old lease ran out, and the Agent
+    /// stayed stopped.
+    fn for_longest_lease(longest_lease_ms: i64) -> Self {
         Self {
-            total: Duration::from_secs(35),
+            total: Duration::from_millis(u64::try_from(longest_lease_ms).unwrap_or(0))
+                + RECOVERY_LEASE_MARGIN,
             interval: Duration::from_secs(1),
         }
+    }
+}
+impl Default for RecoveryLeaseWait {
+    /// The server grants no lease longer than this host asks for.
+    fn default() -> Self {
+        Self::for_longest_lease(MAX_LEASE_TTL_MS)
     }
 }
 #[allow(clippy::too_many_arguments)]
@@ -1821,12 +1861,71 @@ async fn run_host(
     }.await;
     monitor.abort();
     let _ = monitor.await;
-    let _ = transport.execute(Op::Release { lease: reference }).await;
-    match heartbeat_failed.load(std::sync::atomic::Ordering::Acquire) {
+    release(&transport, &reference, RELEASE_TIME, RELEASE_RESEND_PAUSE).await;
+    heartbeat_result(heartbeat_failed.load(std::sync::atomic::Ordering::Acquire), result)
+}
+/// What a runtime ends with, given how its heartbeat stopped (see
+/// `heartbeat`): a refusal, no answer, or this computer's clock behind.
+fn heartbeat_result(failed: u8, result: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
+    match failed {
         1 => Err(RuntimeError::Authorization),
         2 => Err(RuntimeError::Transport),
+        3 => Err(RuntimeError::Execution(CLOCK_BEHIND)),
         _ => result,
     }
+}
+/// How many more times a release that got no answer is sent.
+const RELEASE_RESENDS: usize = 3;
+/// The pause before each of them.
+const RELEASE_RESEND_PAUSE: Duration = Duration::from_secs(1);
+/// The longest a release takes, its resends included: as long as one request
+/// may take (the client's timeout), so that a stop waits no longer than it did
+/// with a single send.
+const RELEASE_TIME: Duration = Duration::from_secs(15);
+/// Gives the Agent's lease back when its runtime ends, so that the next start
+/// does not wait for the lease to run out: one on another device, or on this
+/// one after a new sign-in, waits up to the whole lease otherwise, two
+/// minutes. A release that got no answer may not have arrived, so it is sent
+/// again, at most `RELEASE_RESENDS` times and within `time`; a second copy is
+/// harmless, as the server releases only a lease that still holds and refuses
+/// the rest. A decided answer ends it. This runs under the Agent's process
+/// lock, so no newer runtime of the Agent holds the lease it names.
+async fn release<T: Transport>(transport: &T, lease: &LeaseRef, time: Duration, pause: Duration) {
+    let until = tokio::time::Instant::now() + time;
+    for attempt in 0..=RELEASE_RESENDS {
+        if attempt > 0 {
+            let resend = tokio::time::Instant::now() + pause;
+            if resend >= until {
+                break;
+            }
+            tokio::time::sleep_until(resend).await;
+        }
+        let sent = tokio::time::timeout_at(
+            until,
+            transport.execute(Op::Release {
+                lease: lease.clone(),
+            }),
+        )
+        .await;
+        match sent {
+            Ok(Ok(_)) => return,
+            // Not decided: it may not have reached the server.
+            Ok(Err(RuntimeError::Transport)) => {}
+            Ok(Err(_)) => {
+                tracing::debug!(
+                    stage = "lease_release",
+                    "The server refused the release, as it does for a lease it no longer holds"
+                );
+                return;
+            }
+            Err(_) => break,
+        }
+    }
+    tracing::warn!(
+        stage = "lease_release",
+        epoch = lease.epoch,
+        "An Agent lease release got no answer; the lease runs out on the server by itself"
+    );
 }
 /// One supervisor owns the lease. Workers can never acquire, renew or release it.
 /// All cancellation paths join workers before the supervisor releases the lease.
@@ -6360,6 +6459,137 @@ for raw in sys.stdin:
             );
             assert_eq!(observed.borrow().phase, "starting");
         }
+    }
+    #[test]
+    fn a_recovery_waits_out_the_longest_lease_another_holder_may_keep() {
+        // A lease of two minutes, renewed just before its holder ended, and
+        // the request that finds it gone.
+        let wait = RecoveryLeaseWait::default();
+        assert_eq!(wait.total, Duration::from_secs(125));
+        assert_eq!(
+            wait.total,
+            Duration::from_millis(MAX_LEASE_TTL_MS as u64) + RECOVERY_LEASE_MARGIN
+        );
+        assert_eq!(wait.interval, Duration::from_secs(1));
+        // The thirty-five seconds of before were this for leases of thirty.
+        assert_eq!(
+            RecoveryLeaseWait::for_longest_lease(30_000).total,
+            Duration::from_secs(35)
+        );
+    }
+    struct ReleaseFake {
+        answers: StdMutex<std::collections::VecDeque<Result<Response, RuntimeError>>>,
+        sent: std::sync::atomic::AtomicUsize,
+        hang: bool,
+    }
+    impl Transport for ReleaseFake {
+        async fn execute(&self, op: Op) -> Result<Response, RuntimeError> {
+            let Op::Release { lease } = op else {
+                panic!("only the release is sent");
+            };
+            assert_eq!((lease.agent_id.as_str(), lease.epoch), ("agent-a", 4));
+            self.sent.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            if self.hang {
+                return std::future::pending().await;
+            }
+            let answer = self.answers.lock().unwrap().pop_front();
+            answer.unwrap_or(Err(RuntimeError::Transport))
+        }
+    }
+    fn release_fake<const N: usize>(answers: [Result<Response, RuntimeError>; N], hang: bool) -> ReleaseFake {
+        ReleaseFake {
+            answers: StdMutex::new(answers.into()),
+            sent: std::sync::atomic::AtomicUsize::new(0),
+            hang,
+        }
+    }
+    #[tokio::test(start_paused = true)]
+    async fn a_release_with_no_answer_is_sent_again_a_bounded_number_of_times() {
+        let lease = LeaseRef { agent_id: "agent-a".into(), epoch: 4 };
+        let sent = |fake: &ReleaseFake| fake.sent.load(std::sync::atomic::Ordering::SeqCst);
+        // No answer to any: the first send and three more, a second apart.
+        let fake = release_fake([], false);
+        let started = tokio::time::Instant::now();
+        release(&fake, &lease, RELEASE_TIME, RELEASE_RESEND_PAUSE).await;
+        assert_eq!(sent(&fake), 1 + RELEASE_RESENDS);
+        assert_eq!(started.elapsed(), RELEASE_RESEND_PAUSE * RELEASE_RESENDS as u32);
+        // An answer ends it: the release, or the server's word that it holds
+        // no such lease, as it says to a second copy.
+        for answer in [Ok(Response::Released), Err(RuntimeError::Authorization)] {
+            let fake = release_fake([Err(RuntimeError::Transport), answer], false);
+            release(&fake, &lease, RELEASE_TIME, RELEASE_RESEND_PAUSE).await;
+            assert_eq!(sent(&fake), 2);
+        }
+        // One that hangs takes no longer than a single request may, so a stop
+        // waits no longer than it did with one send.
+        let fake = release_fake([], true);
+        let started = tokio::time::Instant::now();
+        release(&fake, &lease, RELEASE_TIME, RELEASE_RESEND_PAUSE).await;
+        assert_eq!(sent(&fake), 1);
+        assert_eq!(started.elapsed(), RELEASE_TIME);
+        // No resend starts that could not end in time.
+        let fake = release_fake([], false);
+        let started = tokio::time::Instant::now();
+        release(&fake, &lease, Duration::from_millis(1_500), RELEASE_RESEND_PAUSE).await;
+        assert_eq!(sent(&fake), 2);
+        assert_eq!(started.elapsed(), Duration::from_secs(1));
+    }
+    #[test]
+    fn the_owned_path_reads_a_failure_as_said_does() {
+        // Decided, whatever the status: the runtime stops.
+        for (status, code) in [
+            (400, "invalid_lease_ttl"),
+            (401, "device_authorization_required"),
+            (404, "not_found"),
+            (409, "a_code_of_the_server"),
+            (503, "shared_execution_unavailable"),
+            (503, "invalid_local_clock"),
+        ] {
+            assert!(
+                matches!(transport_error(status, code, false, false), RuntimeError::Authorization),
+                "{status} {code}"
+            );
+        }
+        // Not decided: asked again. An answer with no code of the server's,
+        // one this host cannot read or hold, and the server not serving it.
+        for (status, code) in [
+            (409, "execution_request_failed"),
+            (401, "execution_request_failed"),
+            (502, "invalid_execution_response"),
+            (502, "execution_scope_mismatch"),
+            (502, "execution_response_too_large"),
+            (503, "server_unavailable"),
+            (503, "domain_writer_busy"),
+            (500, "internal"),
+        ] {
+            assert!(
+                matches!(transport_error(status, code, false, false), RuntimeError::Transport),
+                "{status} {code}"
+            );
+        }
+        // A clock behind is decided, and the runtime says so.
+        for acquiring in [true, false] {
+            let behind = transport_error(409, CLOCK_BEHIND, acquiring, false);
+            assert!(matches!(behind, RuntimeError::Execution("execution_clock_behind")));
+            assert_eq!(failure_code(&Err(behind)), Some("execution_clock_behind"));
+        }
+        // As before, another device's lease is busy, not refused.
+        assert!(matches!(
+            transport_error(409, "agent_leased_to_another_device", true, false),
+            RuntimeError::LeaseBusy
+        ));
+    }
+    #[test]
+    fn a_runtime_ends_with_what_stopped_its_heartbeat() {
+        let code = |failed: u8| failure_code(&heartbeat_result(failed, Ok(())));
+        assert_eq!(code(0), None);
+        assert_eq!(code(1), Some("authorization_or_lease_lost"));
+        assert_eq!(code(2), Some("device_transport_unavailable"));
+        assert_eq!(code(3), Some("execution_clock_behind"));
+        assert!(matches!(
+            heartbeat_result(0, Err(RuntimeError::Stopped)),
+            Err(RuntimeError::Stopped)
+        ));
     }
     #[tokio::test]
     async fn fresh_history_acquire_sends_snapshot_and_post_check_keeps_models_allowed() {
