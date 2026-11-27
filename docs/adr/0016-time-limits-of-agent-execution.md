@@ -48,12 +48,31 @@ come to this:
    decided, not asked, or without an answer, and that is worked out in one
    place. Only a decided failure ends work. The other two wait and ask again,
    and a wait keeps no local session between attempts.
+
+   In review (Desktop #246): an owned Agent's own steps and the session's
+   renewal are read by the same rule. A refusal this computer makes itself
+   is decided and says why: an answer with no time, on a computer whose
+   clock is behind, ends the run as `execution_clock_behind` instead of being
+   asked again until the lease is gone. An answer that does not carry the
+   server's code is not a decision, so a 401 or 403 without one no longer
+   signs the owner out; the proof in hand is kept and the renewal asked
+   again.
 4. **The end of a lease is the server's.** The daemon holds it two ways:
    counted from the moment it sent the request, with the time the server put
    in its answer, and read against its wall clock, which keeps running while
    the computer sleeps (the counted time does not). The earlier of the two
    ends the lease. The wall clock may only end a lease early: it extends none
    and refuses none.
+
+   In review (Desktop #246): an Agent's execution lease and the
+   authorization of each reply of an owned Agent are counted from their
+   request with the answer's date, and the session's proof is held against
+   both ends, so a proof slept through is not used for its last awake
+   seconds. Whether the token needs refreshing is decided on the end the
+   server counted, not on what the wall clock left of it. Counting takes the
+   time in the answer's `Date` header, which the server process or a proxy
+   in front of it writes, against the end the server wrote from its database
+   clock: it assumes the two clocks agree to within a second.
 
 For the room:
 
@@ -173,9 +192,21 @@ document states the case, and its option A is drafted (Desktop #249, server
   computer slept: 20 to 30 seconds with main's 30-second leases, and 110
   to 120 seconds with #243's two-minute leases if #251 did not land with
   it.
-- The answer that grants an Agent's execution lease carries no server time,
-  so for that lease the wall clock is the only witness, and a computer whose
-  clock is behind by more than a second is refused a full-length lease.
+- On main, the answer that grants an Agent's execution lease is read without
+  its time, so for that lease the wall clock is the only witness, and a
+  computer whose clock is behind by more than a second is refused a
+  full-length lease. In review (Desktop #246) the lease is counted from its
+  request with the answer's date. Only an answer without a date, behind a
+  proxy that drops it, still leaves the wall clock as the only witness; on a
+  computer whose clock is behind, the run then ends as
+  `execution_clock_behind` and says that the clock is behind.
+- An Agent's execution lease that its daemon did not release stays with
+  that daemon for up to 120 seconds from its last renewal. The same device
+  under the same sign-in takes it back at once. Another device, or this one
+  after a new sign-in, has to wait for it: on main a room's restore gives up
+  after 35 seconds and the service tries again later; in review (Desktop
+  #246) it waits up to 125 seconds, and a daemon that stops sends its
+  release up to four times within 15 seconds while it gets no answer.
 - A request to the server is given up after 15 seconds, 10 of them for
   connecting, whatever the window. A renewal that hangs that long, and the
   2 seconds before it is asked again, use 17 seconds of its lease: a
@@ -196,9 +227,6 @@ point is in the release notes. Pull requests named "in review" are open.
 | 2. Token refresh ahead of the expiry; one local session shared between calls | implemented |
 | 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and #251) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
-| 3. Three classes of failure | in review (Desktop #242, #247). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
+| 3. Three classes of failure | in review (Desktop #242, #247; an owned Agent's steps and the session's renewal: #246). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
-| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
-
-Also in review: Desktop #246 counts an Agent execution lease from its
-request with the server's date (point 4, and the known bound on that lease).
+| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
