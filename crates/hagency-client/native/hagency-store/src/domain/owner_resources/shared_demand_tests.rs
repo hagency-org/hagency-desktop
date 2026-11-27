@@ -264,7 +264,7 @@ async fn shared_demand_schema85_failed_upgrade_preserves_old_charge() {
     f.registry.shutdown().await.unwrap();
     let path = f._temp.path().join("owner/domain.sqlite3");
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("DROP TRIGGER IF EXISTS owner_shared_demand_bindings_released;DROP TRIGGER IF EXISTS owner_shared_demand_bindings_retained;DROP TABLE IF EXISTS owner_shared_stop_routes;DROP TABLE IF EXISTS owner_shared_demand_released_bindings;DROP TABLE IF EXISTS owner_shared_demand_reoffer_lapses;DROP TABLE IF EXISTS owner_octos_model_resources;DROP TABLE IF EXISTS owner_octos_enrollments;DROP TABLE IF EXISTS owner_octos_profiles;DROP TABLE IF EXISTS owner_octos_key;DROP TABLE IF EXISTS owner_shared_native_checkpoints;DROP TABLE IF EXISTS owner_shared_native_turns;DROP TABLE IF EXISTS owner_shared_unstarted_runtimes;DROP TABLE IF EXISTS owner_shared_decrypted_inputs;DROP TABLE IF EXISTS owner_web_catalog_settings; DROP TABLE IF EXISTS owner_operator_graph_recipients; DROP TABLE IF EXISTS owner_operator_graph_outbox; DROP TABLE IF EXISTS owner_operator_graph_commands; DROP TABLE IF EXISTS owner_operator_graphs; DROP TABLE IF EXISTS owner_operator_graph_archive_chunks; DROP TABLE IF EXISTS owner_operator_graph_archives; DROP TABLE IF EXISTS owned_dispatch_execution_policies;DROP TABLE IF EXISTS approval_binding_incarnations;DROP TRIGGER IF EXISTS owner_resource_provenance_immutable;DROP TRIGGER IF EXISTS owner_resource_provenance_retained;DROP TABLE IF EXISTS owner_resource_provenance;DROP TABLE IF EXISTS owner_namespace_enrollments;DROP TABLE IF EXISTS owner_resource_namespaces;DROP TABLE IF EXISTS management_account_profiles;DROP TABLE IF EXISTS owner_shared_budget_demand_decisions;DROP TABLE IF EXISTS owner_shared_budget_work_refusals;DROP TABLE IF EXISTS owner_shared_budget_start_intents;DROP TABLE IF EXISTS owner_managed_budget_deltas;DROP TABLE IF EXISTS owner_managed_budget_commands;DROP TABLE IF EXISTS owner_operator_task_transfer_comments;DROP TABLE IF EXISTS owner_operator_task_transfer_tasks;DROP TABLE IF EXISTS owner_shared_context_call_pins;DROP TABLE IF EXISTS owner_shared_reply_deliveries;DROP TABLE IF EXISTS owner_shared_contexts;DROP TABLE IF EXISTS owner_shared_input_modes;DROP TABLE IF EXISTS owner_shared_stop_receipts;DROP TABLE IF EXISTS owner_shared_stop_intents;DROP TABLE owner_shared_demand_bindings;DROP TABLE owner_shared_demand_decisions;DROP TABLE owner_shared_demands;DROP TABLE owner_shared_demand_controls;DROP TRIGGER IF EXISTS owner_resource_amended_ceiling_retained;DROP TABLE IF EXISTS owner_resource_ceiling_amendments;DROP TABLE IF EXISTS owner_shared_unstarted_attempts;DROP TABLE IF EXISTS owner_shared_budget_demand_terminals;DROP TABLE IF EXISTS owner_shared_tool_policies;PRAGMA user_version=84;CREATE TABLE owner_shared_demand_decisions(collision INTEGER);").unwrap();
+    db.execute_batch("DROP TRIGGER IF EXISTS owner_shared_demand_bindings_released;DROP TRIGGER IF EXISTS owner_shared_demand_bindings_retained;DROP TABLE IF EXISTS owner_shared_stop_routes;DROP TABLE IF EXISTS owner_shared_demand_released_bindings;DROP TABLE IF EXISTS owner_shared_demand_reoffer_lapses;DROP TRIGGER IF EXISTS owner_shared_start_intent_place;DROP VIEW IF EXISTS owner_shared_start_releasable;DROP TABLE IF EXISTS owner_shared_start_releases;DROP TABLE IF EXISTS owner_octos_model_resources;DROP TABLE IF EXISTS owner_octos_enrollments;DROP TABLE IF EXISTS owner_octos_profiles;DROP TABLE IF EXISTS owner_octos_key;DROP TABLE IF EXISTS owner_shared_native_checkpoints;DROP TABLE IF EXISTS owner_shared_native_turns;DROP TABLE IF EXISTS owner_shared_unstarted_runtimes;DROP TABLE IF EXISTS owner_shared_decrypted_inputs;DROP TABLE IF EXISTS owner_web_catalog_settings; DROP TABLE IF EXISTS owner_operator_graph_recipients; DROP TABLE IF EXISTS owner_operator_graph_outbox; DROP TABLE IF EXISTS owner_operator_graph_commands; DROP TABLE IF EXISTS owner_operator_graphs; DROP TABLE IF EXISTS owner_operator_graph_archive_chunks; DROP TABLE IF EXISTS owner_operator_graph_archives; DROP TABLE IF EXISTS owned_dispatch_execution_policies;DROP TABLE IF EXISTS approval_binding_incarnations;DROP TRIGGER IF EXISTS owner_resource_provenance_immutable;DROP TRIGGER IF EXISTS owner_resource_provenance_retained;DROP TABLE IF EXISTS owner_resource_provenance;DROP TABLE IF EXISTS owner_namespace_enrollments;DROP TABLE IF EXISTS owner_resource_namespaces;DROP TABLE IF EXISTS management_account_profiles;DROP TABLE IF EXISTS owner_shared_budget_demand_decisions;DROP TABLE IF EXISTS owner_shared_budget_work_refusals;DROP TABLE IF EXISTS owner_shared_budget_start_intents;DROP TABLE IF EXISTS owner_managed_budget_deltas;DROP TABLE IF EXISTS owner_managed_budget_commands;DROP TABLE IF EXISTS owner_operator_task_transfer_comments;DROP TABLE IF EXISTS owner_operator_task_transfer_tasks;DROP TABLE IF EXISTS owner_shared_context_call_pins;DROP TABLE IF EXISTS owner_shared_reply_deliveries;DROP TABLE IF EXISTS owner_shared_contexts;DROP TABLE IF EXISTS owner_shared_input_modes;DROP TABLE IF EXISTS owner_shared_stop_receipts;DROP TABLE IF EXISTS owner_shared_stop_intents;DROP TABLE owner_shared_demand_bindings;DROP TABLE owner_shared_demand_decisions;DROP TABLE owner_shared_demands;DROP TABLE owner_shared_demand_controls;DROP TRIGGER IF EXISTS owner_resource_amended_ceiling_retained;DROP TABLE IF EXISTS owner_resource_ceiling_amendments;DROP TABLE IF EXISTS owner_shared_unstarted_attempts;DROP TABLE IF EXISTS owner_shared_budget_demand_terminals;DROP TABLE IF EXISTS owner_shared_tool_policies;PRAGMA user_version=84;CREATE TABLE owner_shared_demand_decisions(collision INTEGER);").unwrap();
     drop(db);
     assert!(OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).is_err());
     let db = Connection::open(&path).unwrap();
@@ -773,7 +773,7 @@ async fn shared_demand_stop_schema86_failed_upgrade_preserves_original_717_overr
     f.registry.shutdown().await.unwrap();
     let path = f._temp.path().join("owner/domain.sqlite3");
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("DROP TRIGGER IF EXISTS owner_shared_demand_bindings_released;DROP TRIGGER IF EXISTS owner_shared_demand_bindings_retained;DROP TABLE IF EXISTS owner_shared_stop_routes;DROP TABLE IF EXISTS owner_shared_demand_released_bindings;DROP TABLE IF EXISTS owner_shared_demand_reoffer_lapses;DROP TABLE IF EXISTS owner_octos_model_resources;DROP TABLE IF EXISTS owner_octos_enrollments;DROP TABLE IF EXISTS owner_octos_profiles;DROP TABLE IF EXISTS owner_octos_key;DROP TABLE IF EXISTS owner_shared_native_checkpoints;DROP TABLE IF EXISTS owner_shared_native_turns;DROP TABLE IF EXISTS owner_shared_unstarted_runtimes;DROP TABLE IF EXISTS owner_shared_decrypted_inputs;DROP TABLE IF EXISTS owner_web_catalog_settings; DROP TABLE IF EXISTS owner_operator_graph_recipients; DROP TABLE IF EXISTS owner_operator_graph_outbox; DROP TABLE IF EXISTS owner_operator_graph_commands; DROP TABLE IF EXISTS owner_operator_graphs; DROP TABLE IF EXISTS owner_operator_graph_archive_chunks; DROP TABLE IF EXISTS owner_operator_graph_archives; DROP TABLE IF EXISTS owned_dispatch_execution_policies;DROP TABLE IF EXISTS approval_binding_incarnations;DROP TRIGGER IF EXISTS owner_resource_provenance_immutable;DROP TRIGGER IF EXISTS owner_resource_provenance_retained;DROP TABLE IF EXISTS owner_resource_provenance;DROP TABLE IF EXISTS owner_namespace_enrollments;DROP TABLE IF EXISTS owner_resource_namespaces;DROP TABLE IF EXISTS management_account_profiles;DROP TABLE IF EXISTS owner_shared_budget_demand_decisions;DROP TABLE IF EXISTS owner_shared_budget_work_refusals;DROP TABLE IF EXISTS owner_shared_budget_start_intents;DROP TABLE IF EXISTS owner_managed_budget_deltas;DROP TABLE IF EXISTS owner_managed_budget_commands;DROP TABLE IF EXISTS owner_operator_task_transfer_comments;DROP TABLE IF EXISTS owner_operator_task_transfer_tasks;DROP TABLE IF EXISTS owner_shared_context_call_pins;DROP TABLE IF EXISTS owner_shared_reply_deliveries;DROP TABLE IF EXISTS owner_shared_contexts;DROP TABLE IF EXISTS owner_shared_input_modes;DROP TABLE owner_shared_stop_receipts;DROP TABLE owner_shared_stop_intents;DROP TRIGGER IF EXISTS owner_resource_amended_ceiling_retained;DROP TABLE IF EXISTS owner_resource_ceiling_amendments;DROP TABLE IF EXISTS owner_shared_unstarted_attempts;DROP TABLE IF EXISTS owner_shared_budget_demand_terminals;DROP TABLE IF EXISTS owner_shared_tool_policies;PRAGMA user_version=85;CREATE TABLE owner_shared_stop_receipts(collision INTEGER);").unwrap();
+    db.execute_batch("DROP TRIGGER IF EXISTS owner_shared_demand_bindings_released;DROP TRIGGER IF EXISTS owner_shared_demand_bindings_retained;DROP TABLE IF EXISTS owner_shared_stop_routes;DROP TABLE IF EXISTS owner_shared_demand_released_bindings;DROP TABLE IF EXISTS owner_shared_demand_reoffer_lapses;DROP TRIGGER IF EXISTS owner_shared_start_intent_place;DROP VIEW IF EXISTS owner_shared_start_releasable;DROP TABLE IF EXISTS owner_shared_start_releases;DROP TABLE IF EXISTS owner_octos_model_resources;DROP TABLE IF EXISTS owner_octos_enrollments;DROP TABLE IF EXISTS owner_octos_profiles;DROP TABLE IF EXISTS owner_octos_key;DROP TABLE IF EXISTS owner_shared_native_checkpoints;DROP TABLE IF EXISTS owner_shared_native_turns;DROP TABLE IF EXISTS owner_shared_unstarted_runtimes;DROP TABLE IF EXISTS owner_shared_decrypted_inputs;DROP TABLE IF EXISTS owner_web_catalog_settings; DROP TABLE IF EXISTS owner_operator_graph_recipients; DROP TABLE IF EXISTS owner_operator_graph_outbox; DROP TABLE IF EXISTS owner_operator_graph_commands; DROP TABLE IF EXISTS owner_operator_graphs; DROP TABLE IF EXISTS owner_operator_graph_archive_chunks; DROP TABLE IF EXISTS owner_operator_graph_archives; DROP TABLE IF EXISTS owned_dispatch_execution_policies;DROP TABLE IF EXISTS approval_binding_incarnations;DROP TRIGGER IF EXISTS owner_resource_provenance_immutable;DROP TRIGGER IF EXISTS owner_resource_provenance_retained;DROP TABLE IF EXISTS owner_resource_provenance;DROP TABLE IF EXISTS owner_namespace_enrollments;DROP TABLE IF EXISTS owner_resource_namespaces;DROP TABLE IF EXISTS management_account_profiles;DROP TABLE IF EXISTS owner_shared_budget_demand_decisions;DROP TABLE IF EXISTS owner_shared_budget_work_refusals;DROP TABLE IF EXISTS owner_shared_budget_start_intents;DROP TABLE IF EXISTS owner_managed_budget_deltas;DROP TABLE IF EXISTS owner_managed_budget_commands;DROP TABLE IF EXISTS owner_operator_task_transfer_comments;DROP TABLE IF EXISTS owner_operator_task_transfer_tasks;DROP TABLE IF EXISTS owner_shared_context_call_pins;DROP TABLE IF EXISTS owner_shared_reply_deliveries;DROP TABLE IF EXISTS owner_shared_contexts;DROP TABLE IF EXISTS owner_shared_input_modes;DROP TABLE owner_shared_stop_receipts;DROP TABLE owner_shared_stop_intents;DROP TRIGGER IF EXISTS owner_resource_amended_ceiling_retained;DROP TABLE IF EXISTS owner_resource_ceiling_amendments;DROP TABLE IF EXISTS owner_shared_unstarted_attempts;DROP TABLE IF EXISTS owner_shared_budget_demand_terminals;DROP TABLE IF EXISTS owner_shared_tool_policies;PRAGMA user_version=85;CREATE TABLE owner_shared_stop_receipts(collision INTEGER);").unwrap();
     drop(db);
     assert!(OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).is_err());
     let db = Connection::open(&path).unwrap();
@@ -1283,6 +1283,211 @@ async fn shared_demand_v2_blocked_retry_ends_locally_and_releases_the_queue() {
     f.registry.shutdown().await.unwrap();
 }
 
+/// Start intents whose place the server's end of their event gave back.
+async fn released(f: &Fixture) -> Vec<String> {
+    f.registry
+        .0
+        .store
+        .call(4096, |db| {
+            let mut rows = db.db.prepare("SELECT start_intent_id FROM owner_shared_start_releases ORDER BY start_intent_id")?;
+            let ids = rows.query_map([], |r| r.get(0))?.collect::<Result<Vec<String>, _>>()?;
+            Ok(ids)
+        })
+        .await
+        .unwrap()
+}
+
+/// SQL run as is, with SQLite's own message on failure.
+async fn store_sql(f: &Fixture, statement: String) -> Result<(), String> {
+    f.registry
+        .0
+        .store
+        .call(4096, move |db| Ok(db.db.execute_batch(&statement)?))
+        .await
+        .map_err(|e| match e {
+            Error::Sqlite(e) => e.to_string(),
+            e => e.to_string(),
+        })
+}
+
+/// A start of this predecessor that is no event's: refused while another
+/// start holds the place.
+async fn manual_start(f: &Fixture, c: &SharedRuntimeCommand) -> Result<SharedAttemptStartIntent, Error> {
+    f.registry
+        .prepare_shared_attempt_start(
+            enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+            c.clone(),
+            None,
+            "manual_start".into(),
+        )
+        .await
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_refused_start_gives_its_place_back_when_its_event_ends() {
+    let mut waiting = Vec::new();
+    for state in ["expired", "cancelled", "head_changed"] {
+        let (f, c) = original(true).await;
+        let refused = offer(&c, "refused_start", 1);
+        let first = f.registry.prepare_shared_demand(verified(&f, refused.clone()), c.clone(), None).await.unwrap();
+        let held = first.input().unwrap().start.start_intent_id.clone();
+        // The server refused that start (a 409 such as
+        // `shared_demand_not_current`) and saved nothing for it. Until the
+        // event ends it may still be sent again, so it keeps its place. The
+        // next message names the same predecessor; a cancelled event's comes
+        // in the next Run.
+        assert!(manual_start(&f, &c).await.is_err(), "{state}");
+        let run = if state == "cancelled" { 2 } else { 1 };
+        let mut next = offer(&c, "next_message", run);
+        next.received_at_ms = refused.received_at_ms + 1;
+        if run == 1 {
+            let saved = f.registry.prepare_shared_demand(verified(&f, next.clone()), c.clone(), None).await.unwrap();
+            assert_eq!(*saved.disposition(), SharedDemandDisposition::Pending, "{state}: the earlier event still holds the queue");
+        }
+        // The next read of the event shows it ended, with no start of it;
+        // that read may come twice.
+        for _ in 0..2 {
+            f.registry.retain_shared_demand_terminal(cleanup(&f, &c, 1).await, refused.clone(), state.into(), None).await.unwrap();
+        }
+        if state == "cancelled" {
+            f.registry.stop_shared_demand_revision(cleanup(&f, &c, 1).await, 1).await.unwrap();
+        }
+        let saved = f.registry.prepare_shared_demand(verified(&f, next.clone()), c.clone(), None).await.unwrap();
+        if *saved.disposition() != SharedDemandDisposition::StartPrepared {
+            waiting.push(state);
+            f.registry.shutdown().await.unwrap();
+            continue;
+        }
+        let start = &saved.input().unwrap().start;
+        assert_eq!(start.predecessor.command_id, c.command_id);
+        assert_ne!(start.start_intent_id, held);
+        assert_eq!(released(&f).await, vec![held.clone()], "{state}: released once");
+        // The place is the new start's now: no other start of this
+        // predecessor in this period.
+        let manual = manual_start(&f, &c).await;
+        assert!(matches!(manual, Err(Error::Sqlite(ref e)) if e.to_string().contains("shared start place held")), "{state}");
+        f.registry.shutdown().await.unwrap();
+    }
+    assert!(waiting.is_empty(), "the next message waits after: {waiting:?}");
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_refused_retry_gives_its_place_back_when_its_event_ends() {
+    let mut waiting = Vec::new();
+    for state in ["expired", "cancelled", "head_changed"] {
+        let (f, c) = original(true).await;
+        call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+        let lost = offer(&c, "refused_retry", 1);
+        let input = f.registry.prepare_shared_demand(verified(&f, lost.clone()), c.clone(), None).await.unwrap().input().unwrap().clone();
+        // The server accepted the first start; its attempt never started.
+        let mut failed = attempt(&f, &c).await;
+        failed.start_intent_id = input.start.start_intent_id.clone();
+        failed.predecessor = input.start.predecessor.clone();
+        failed.budget_observation = input.start.budget_observation.clone();
+        f.registry.fence_shared_successor(cleanup(&f, &c, 1).await, failed.clone()).await.unwrap();
+        let SharedDemandRetry::Start(retry) = f
+            .registry
+            .prepare_shared_demand_retry(verified(&f, lost.clone()), c.clone(), Some(failed.clone()), 1)
+            .await
+            .unwrap()
+        else {
+            panic!("a retry start");
+        };
+        let held = retry.input().start.start_intent_id.clone();
+        // The server refused the retry's start, and the event ended. Its
+        // latest start is still the first one.
+        f.registry
+            .retain_shared_demand_terminal(cleanup(&f, &c, 1).await, lost.clone(), state.into(), Some(failed.command_id.clone()))
+            .await
+            .unwrap();
+        let run = if state == "cancelled" { 2 } else { 1 };
+        if state == "cancelled" {
+            f.registry.stop_shared_demand_revision(cleanup(&f, &c, 1).await, 1).await.unwrap();
+        }
+        let mut next = offer(&c, "next_message", run);
+        next.received_at_ms = lost.received_at_ms + 1;
+        next.predecessor_command_id = failed.command_id.clone();
+        next.predecessor_command_digest = digest(&failed);
+        let saved = f.registry.prepare_shared_demand(verified(&f, next.clone()), c.clone(), Some(failed.clone())).await.unwrap();
+        if *saved.disposition() != SharedDemandDisposition::StartPrepared {
+            waiting.push(state);
+            f.registry.shutdown().await.unwrap();
+            continue;
+        }
+        let start = &saved.input().unwrap().start;
+        assert_eq!(start.predecessor.command_id, failed.command_id);
+        assert_ne!(start.start_intent_id, held);
+        // Only the refused retry: the server made the first start.
+        assert_eq!(released(&f).await, vec![held.clone()], "{state}");
+        f.registry.shutdown().await.unwrap();
+    }
+    assert!(waiting.is_empty(), "the next message waits after: {waiting:?}");
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_start_the_server_may_have_made_keeps_its_place() {
+    // The event's status names a start of it: the server made this start
+    // and its reply was lost.
+    let (f, c) = original(true).await;
+    let made = offer(&c, "made_start", 1);
+    let held = f.registry.prepare_shared_demand(verified(&f, made.clone()), c.clone(), None).await.unwrap().input().unwrap().start.start_intent_id.clone();
+    f.registry
+        .retain_shared_demand_terminal(cleanup(&f, &c, 1).await, made.clone(), "expired".into(), Some("sat_reply_lost".into()))
+        .await
+        .unwrap();
+    let mut next = offer(&c, "next_message", 1);
+    next.received_at_ms = made.received_at_ms + 1;
+    let waiting = f.registry.prepare_shared_demand(verified(&f, next), c.clone(), None).await.unwrap();
+    assert_eq!(*waiting.disposition(), SharedDemandDisposition::Pending);
+    assert!(released(&f).await.is_empty());
+    let forged = format!("INSERT INTO owner_shared_start_releases VALUES('{held}','{}')", made.demand_id);
+    assert!(store_sql(&f, forged).await.unwrap_err().contains("unproven shared start release"));
+    f.registry.shutdown().await.unwrap();
+    // This computer holds the command issued for the start: whatever the
+    // event's status says, the start keeps its place.
+    let (f, c) = original(true).await;
+    call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+    let issued = offer(&c, "issued_start", 1);
+    let input = f.registry.prepare_shared_demand(verified(&f, issued.clone()), c.clone(), None).await.unwrap().input().unwrap().clone();
+    let mut failed = attempt(&f, &c).await;
+    failed.start_intent_id = input.start.start_intent_id.clone();
+    failed.predecessor = input.start.predecessor.clone();
+    failed.budget_observation = input.start.budget_observation.clone();
+    f.registry.fence_shared_successor(cleanup(&f, &c, 1).await, failed).await.unwrap();
+    f.registry.retain_shared_demand_terminal(cleanup(&f, &c, 1).await, issued.clone(), "expired".into(), None).await.unwrap();
+    assert!(released(&f).await.is_empty());
+    let forged = format!("INSERT INTO owner_shared_start_releases VALUES('{}','{}')", input.start.start_intent_id, issued.demand_id);
+    assert!(store_sql(&f, forged).await.unwrap_err().contains("unproven shared start release"));
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_demand_v2_schema114_gives_back_the_place_an_ended_event_held() {
+    let (mut f, c) = original(true).await;
+    let refused = offer(&c, "refused_before_upgrade", 1);
+    let held = f.registry.prepare_shared_demand(verified(&f, refused.clone()), c.clone(), None).await.unwrap().input().unwrap().start.start_intent_id.clone();
+    f.registry.retain_shared_demand_terminal(cleanup(&f, &c, 1).await, refused.clone(), "expired".into(), None).await.unwrap();
+    assert_eq!(released(&f).await, vec![held.clone()]);
+    assert!(store_sql(&f, "DELETE FROM owner_shared_start_releases".into()).await.unwrap_err().contains("retained shared start release"));
+    assert!(store_sql(&f, "UPDATE owner_shared_start_releases SET demand_id=demand_id".into()).await.unwrap_err().contains("immutable shared start release"));
+    f.registry.shutdown().await.unwrap();
+    // The rows the previous schema saved: the same start and end, no release.
+    let path = f._temp.path().join("owner/domain.sqlite3");
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("DROP TABLE owner_shared_stop_routes;DROP TABLE owner_shared_demand_released_bindings;DROP TABLE owner_shared_demand_reoffer_lapses;DROP TRIGGER owner_shared_demand_bindings_released;DROP TRIGGER owner_shared_demand_bindings_retained;CREATE TRIGGER owner_shared_demand_bindings_retained BEFORE DELETE ON owner_shared_demand_bindings BEGIN SELECT RAISE(ABORT,'retained demand work binding'); END;DROP TRIGGER owner_shared_start_intent_place;DROP TABLE owner_shared_start_releases;DROP INDEX owner_shared_start_intent_predecessor;CREATE UNIQUE INDEX owner_shared_start_intent_period ON owner_shared_start_intents(child_id,predecessor_digest,COALESCE(period_id,''));PRAGMA user_version=113;").unwrap();
+    drop(db);
+    f.registry = OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).unwrap();
+    let db = Connection::open(&path).unwrap();
+    assert_eq!(db.pragma_query_value::<u64, _>(None, "user_version", |r| r.get(0)).unwrap(), 115);
+    drop(db);
+    assert_eq!(released(&f).await, vec![held], "the upgrade gives the place back");
+    let mut next = offer(&c, "next_message", 1);
+    next.received_at_ms = refused.received_at_ms + 1;
+    let saved = f.registry.prepare_shared_demand(verified(&f, next), c, None).await.unwrap();
+    assert_eq!(*saved.disposition(), SharedDemandDisposition::StartPrepared);
+    f.registry.shutdown().await.unwrap();
+}
+
 /// The work a claimed attempt received for `lost`, as the server sent it.
 fn demand_work(c: &SharedRuntimeCommand, lost: &SharedDemandOffer, attempt: &SharedAttemptCommand, id: &str) -> SharedWorkItem {
     use sha2::Digest;
@@ -1330,10 +1535,6 @@ async fn save_binding(f: &Fixture, b: &SharedDemandBinding) -> Result<(), String
             rusqlite::params![b.demand_id, b.work_id, payload, digest(&b), rev],
         ).map(|_| ()).map_err(|e| e.to_string()))
     }).await.unwrap()
-}
-/// Runs `sql` on the store and returns SQLite's refusal, if any.
-async fn store_sql(f: &Fixture, sql: String) -> Result<(), String> {
-    f.registry.0.store.call(16 * 1024, move |db| Ok(db.db.execute_batch(&sql).map_err(|e| e.to_string()))).await.unwrap()
 }
 /// A claimed attempt started for `lost`; `reoffers`: the server that showed
 /// the offer listed retry v2 when its original start was prepared.
@@ -1744,11 +1945,11 @@ async fn shared_demand_v2_release_migration_keeps_bindings_of_the_previous_schem
     f.registry.shutdown().await.unwrap();
     let path = f._temp.path().join("owner/domain.sqlite3");
     let db = Connection::open(&path).unwrap();
-    db.execute_batch("DROP TABLE owner_shared_stop_routes;DROP TABLE owner_shared_demand_released_bindings;DROP TABLE owner_shared_demand_reoffer_lapses;DROP TRIGGER owner_shared_demand_bindings_released;DROP TRIGGER owner_shared_demand_bindings_retained;CREATE TRIGGER owner_shared_demand_bindings_retained BEFORE DELETE ON owner_shared_demand_bindings BEGIN SELECT RAISE(ABORT,'retained demand work binding'); END;PRAGMA user_version=113;").unwrap();
+    db.execute_batch("DROP TABLE owner_shared_stop_routes;DROP TABLE owner_shared_demand_released_bindings;DROP TABLE owner_shared_demand_reoffer_lapses;DROP TRIGGER owner_shared_demand_bindings_released;DROP TRIGGER owner_shared_demand_bindings_retained;CREATE TRIGGER owner_shared_demand_bindings_retained BEFORE DELETE ON owner_shared_demand_bindings BEGIN SELECT RAISE(ABORT,'retained demand work binding'); END;PRAGMA user_version=114;").unwrap();
     drop(db);
     f.registry = OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).unwrap();
     let db = Connection::open(&path).unwrap();
-    assert_eq!(db.pragma_query_value::<u64, _>(None, "user_version", |r| r.get(0)).unwrap(), 114);
+    assert_eq!(db.pragma_query_value::<u64, _>(None, "user_version", |r| r.get(0)).unwrap(), 115);
     drop(db);
     assert_eq!(count(&f, "owner_shared_demand_bindings").await, 1);
     f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), w.clone()).await.unwrap();

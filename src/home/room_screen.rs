@@ -1713,6 +1713,8 @@ impl Widget for RoomScreen {
                 if action.downcast_ref::<crate::hagency::pending_approvals::PendingApprovalsChanged>().is_some()
                     || action.downcast_ref::<crate::hagency::pending_approvals::PendingApprovalDecided>().is_some()
                     || action.downcast_ref::<crate::hagency::pending_questions::PendingQuestionsChanged>().is_some()
+                    || action.downcast_ref::<crate::hagency::resend_offers::ResendOffersChanged>().is_some()
+                    || action.downcast_ref::<crate::sliding_sync::SendAgainFailed>().is_some()
                 {
                     if let Some(tl) = self.tl_state.as_mut() {
                         tl.content_drawn_since_last_update.clear();
@@ -4506,6 +4508,20 @@ impl RoomScreen {
         // A shared-execution request is decided through authenticated management,
         // never by a chat message. The card already filtered the offered actions.
         let in_room_timeline = matches!(tl.kind, TimelineKind::MainRoom { .. });
+        // A message that ended without a turn is sent again as a new one.
+        if action.id == "send_again" {
+            let room = tl.kind.room_id().to_string();
+            if let Some(offer) = crate::hagency::resend_offers::for_event(&room, event_id.as_str()) {
+                if !crate::hagency::resend_offers::send(&room, &offer) {
+                    enqueue_popup_notification(crate::i18n::tr("This message can no longer be sent again."), PopupKind::Error, Some(5.0));
+                }
+                // The notice at the end of the timeline offers the same message.
+                cx.action(crate::hagency::resend_offers::ResendOffersChanged);
+            }
+            tl.content_drawn_since_last_update.remove(details.item_id .. details.item_id + 1);
+            self.view.portal_list(cx, ids!(timeline.list)).redraw(cx);
+            return;
+        }
         if let Some(pending) = crate::hagency::pending_approvals::for_event(tl.kind.room_id(), event_id.as_str(), in_room_timeline) {
             let decision = match action.id.as_str() {
                 "approve_once" | "approve_session" | "deny" => action.id.as_str(),
@@ -6241,8 +6257,8 @@ fn populate_message_view(
             agent_chat_message.as_ref(),
             agent_chat_approvals,
         );
-        if agent_chat_message.is_none() {
-            populate_shared_permission_card(cx, &item, event_tl_item, timeline_kind);
+        if agent_chat_message.is_none() && !populate_shared_permission_card(cx, &item, event_tl_item, timeline_kind) {
+            populate_resend_card(cx, &item, event_tl_item, timeline_kind);
         }
         populate_agent_question_card(cx, &item, event_tl_item, timeline_kind);
     }
@@ -6428,20 +6444,21 @@ fn populate_agent_chat_approval_card(
 /// raised it (the thread root in the room timeline), with the same buttons
 /// the owner console offers. The request itself lives on the management
 /// server; this card only presents it and sends the click back through it.
+/// Returns whether the message has such a request.
 #[cfg(feature = "agent_chat")]
 fn populate_shared_permission_card(
     cx: &mut Cx,
     item: &WidgetRef,
     event_tl_item: &EventTimelineItem,
     timeline_kind: &TimelineKind,
-) {
+) -> bool {
     use crate::agent_chat::approval::{ActionStyle, ApprovalAction, ApprovalDecisionState};
     use crate::hagency::pending_approvals::{self, LocalDecision};
     let card = item.agent_approval_card(cx, ids!(content.agent_approval_card));
-    let Some(event_id) = event_tl_item.event_id() else { return };
+    let Some(event_id) = event_tl_item.event_id() else { return false };
     let in_room_timeline = matches!(timeline_kind, TimelineKind::MainRoom { .. });
     let Some(pending) = pending_approvals::for_event(timeline_kind.room_id(), event_id.as_str(), in_room_timeline) else {
-        return;
+        return false;
     };
     let (title, summary) = pending_approvals::describe(&pending.row);
     // The same words as the notice at the end of the timeline; the card
@@ -6466,6 +6483,39 @@ fn populate_shared_permission_card(
     card.set_state(cx, Some(&crate::agent_chat::approval_card::ApprovalCardState { title, summary, decision, actions,
         }),
     );
+    true
+}
+
+/// Offers "Send again" on a message that ended without a turn for some of
+/// the Agents it was sent to, for as long as the room's status says it can
+/// be sent again: the offer of the notice at the end of the timeline, on
+/// every message the status lists and not only on the newest.
+#[cfg(feature = "agent_chat")]
+fn populate_resend_card(
+    cx: &mut Cx,
+    item: &WidgetRef,
+    event_tl_item: &EventTimelineItem,
+    timeline_kind: &TimelineKind,
+) {
+    use crate::agent_chat::approval::{ActionStyle, ApprovalAction, ApprovalDecisionState};
+    use crate::hagency::resend_offers;
+    let Some(event_id) = event_tl_item.event_id() else { return };
+    let room = timeline_kind.room_id();
+    let Some(offer) = resend_offers::for_event(room.as_str(), event_id.as_str()) else { return };
+    let summary = offer.agents.iter().map(|agent| {
+        let name = OwnedUserId::try_from(agent.as_str()).ok()
+            .and_then(|id| crate::profile::user_profile_cache::get_user_display_name_for_room(cx, id, Some(room), true).into_option())
+            .filter(|name| !name.trim().is_empty())
+            .unwrap_or_else(|| agent.clone());
+        crate::i18n::format(resend_offers::UNPROCESSED_BY, &[("agent", name)])
+    }).collect::<Vec<_>>().join("\n");
+    let card = item.agent_approval_card(cx, ids!(content.agent_approval_card));
+    card.set_state(cx, Some(&crate::agent_chat::approval_card::ApprovalCardState {
+        title: crate::i18n::tr("Not processed").to_owned(),
+        summary,
+        decision: ApprovalDecisionState::Offered("Can be sent again".into()),
+        actions: vec![ApprovalAction { id: "send_again".into(), label: "Send again".into(), style: ActionStyle::Primary }],
+    }));
 }
 
 fn populate_agent_run_cards(

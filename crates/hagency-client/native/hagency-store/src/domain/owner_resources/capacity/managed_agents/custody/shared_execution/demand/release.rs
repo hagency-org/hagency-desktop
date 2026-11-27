@@ -22,7 +22,7 @@ pub enum SharedAttemptStopRoute {
 /// the answer that recorded its start (`start_confirmed`), an issued call, an
 /// observed reply, a work observation or a reply delivery. The server's record
 /// of the start decides; this only refuses a release that contradicts what
-/// the server already said here. Migration 116 checks the same facts.
+/// the server already said here. Migration 117 checks the same facts.
 fn started(db: &Connection, work_id: &str) -> Result<bool, Error> {
     Ok(db.query_row(
         "SELECT EXISTS(SELECT 1 FROM owner_shared_work_events WHERE work_id=?1 AND kind IN('start_confirmed','call_issued','reply_observed')) OR EXISTS(SELECT 1 FROM owner_shared_work_observations WHERE work_id=?1) OR EXISTS(SELECT 1 FROM owner_shared_reply_deliveries WHERE work_id=?1)",

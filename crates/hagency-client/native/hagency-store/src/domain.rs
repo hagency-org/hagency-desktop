@@ -143,7 +143,7 @@ pub struct DomainRepository {
     _legacy_writer: Option<hagency_platform::legacy_writer::LegacyWriterAdmission>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 114;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 115;
 const DOMAIN_MIGRATIONS: &[(i32, &str)] = &[
     (2, include_str!("migrations/002-role-publication.sql")),
     (3, include_str!("migrations/003-task-dispatch.sql")),
@@ -405,7 +405,8 @@ const DOMAIN_MIGRATIONS: &[(i32, &str)] = &[
     (111, include_str!("migrations/113-owner-shared-native-sessions.sql")),
     (112, include_str!("migrations/114-owner-octos-profiles.sql")),
     (113, include_str!("migrations/115-owner-octos-model-resources.sql")),
-    (114, include_str!("migrations/116-owner-shared-demand-work-release.sql")),
+    (114, include_str!("migrations/116-owner-shared-start-releases.sql")),
+    (115, include_str!("migrations/117-owner-shared-demand-work-release.sql")),
 ];
 
 impl DomainRepository {
@@ -1399,6 +1400,8 @@ impl DomainRepository {
                     "SELECT id,child_id,profile,device_id,device_generation,event_id,offer_payload,offer_digest,ledger_revision FROM owner_shared_demands LIMIT 0",
                     "SELECT demand_id,disposition,start_intent_id,input_payload,input_digest,budget_payload,ledger_revision FROM owner_shared_demand_decisions LIMIT 0",
                     "SELECT demand_id,work_id,binding_payload,binding_digest,ledger_revision FROM owner_shared_demand_bindings LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_start_releases LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_start_releasable LIMIT 0",
                     "SELECT work_id,demand_id,binding_payload,binding_digest,ledger_revision,released_revision,released_at_ms FROM owner_shared_demand_released_bindings LIMIT 0",
                     "SELECT attempt_id,child_id,profile,observation_id,route,demand_id,retry,ledger_revision FROM owner_shared_stop_routes LIMIT 0",
                     "SELECT demand_id,ledger_revision FROM owner_shared_demand_reoffer_lapses LIMIT 0",

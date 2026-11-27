@@ -18,3 +18,4 @@ implemented. An ADR is not evidence that a feature has shipped.
 | [0013](0013-spontaneous-agent-messages.md) | Accepted; implementation and end-to-end acceptance pending | Independent coding-Agent reports, durable Matrix delivery and cross-client presentation |
 | [0014](0014-room-standing-role.md) | Accepted; implemented for local Agents | A standing role that a local Agent keeps for a room across its conversations |
 | [0015](0015-pooled-claude-containers.md) | Accepted; implemented for pooled Claude as each pool's choice, in Hosting or when the pool is created (macOS checked) | Pooled Claude Agents in a Docker-compatible container instead of the macOS sandbox |
+| [0016](0016-time-limits-of-agent-execution.md) | Accepted; the room notice is implemented, the daemon's part is in review | Time limits of Agent execution on the daemon's side, and what a message that ended without a turn tells its sender |

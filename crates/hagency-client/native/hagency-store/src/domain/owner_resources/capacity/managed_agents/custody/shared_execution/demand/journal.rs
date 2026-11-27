@@ -265,7 +265,8 @@ impl OwnerResourceRegistry {
                     (SharedDemandDisposition::BudgetBlocked,None,Some(description),revision(&tx)?)
                 }else{
                     let id=format!("sdstart_{}",&canonical::digest(&json!({"registry":registry.id,"profile":profile.digest,"demandId":proof.offer.demand_id,"demandDigest":proof.offer.digest()?}))?[..40]);
-                    let competing:Option<String>=tx.query_row("SELECT id FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3",params![child,head_digest,periods::current_id(&tx,child)?],|r|r.get(0)).optional()?;
+                    // A start the server never made, of an event it ended, holds no place.
+                    let competing:Option<String>=tx.query_row("SELECT id FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id)",params![child,head_digest,periods::current_id(&tx,child)?],|r|r.get(0)).optional()?;
                     if competing.as_ref().is_some_and(|old|old!=&id){
                         (SharedDemandDisposition::Pending,None,None,pending_revision()?)
                     }else{
