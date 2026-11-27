@@ -143,6 +143,7 @@ pub fn store_error_label(error: &hagency_store::Error) -> &'static str {
         ManagementChangeCancelled => "management_change_cancelled",
         Locked => "locked",
         Schema => "schema",
+        MigrationMadeByAnotherBuild { .. } => "migration_made_by_another_build",
         Private => "private",
         PlatformUnavailable => "platform_unavailable",
         Capacity => "capacity",
