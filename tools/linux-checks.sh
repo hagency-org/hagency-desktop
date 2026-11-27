@@ -69,6 +69,9 @@ lib-store)
     library
     runtime_probe
     step tests "$client" "${tests[@]}" --locked -p hagency-store --all-targets -- "${skip[@]}"
+    # The store's tests of shared work are behind its features.
+    step feature-tests "$client" "${tests[@]}" --locked -p hagency-store \
+        --features shared-budget-execution,resource-adoption --lib
     ;;
 lib-runtime)
     library
