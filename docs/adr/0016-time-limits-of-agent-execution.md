@@ -214,19 +214,46 @@ always had, and no "Send again".
 
 ## What is left open
 
-Whether accepted work that never began should be given to the next process
-without anyone asking. The owner's policy says that what is confirmed not to
-have run is run again. For a start that never happened it is: a message has
-its first attempt and at most three more. On main, three kinds of start are
-not tried again and end the message, as the server's document says: one
-whose process reported and then ended before it was given the message, any
-start of an Agent with an applied budget, and any start on a computer whose
-daemon does not ask for retries; their sender can send the message again.
-Option A, drafted as Desktop #249 and server #102, hands the first kind back
-and runs it again, when the server's switch is on and the start asked for it
-(`reoffers`); the other two stay as they are. For accepted work that needs a
-second binding of one message on both sides, which the server's document
-describes. "Send again" is what the sender has until it is decided.
+Whether a message whose process ended before its turn began should be run
+again without anyone asking. The owner's policy says that what is confirmed
+not to have run is run again. For a start that never happened it is: a
+message has its first attempt and at most three more. On main, three kinds
+of start are not tried again and end the message, as the server's document
+says: one whose process reported and then ended before it was given the
+message, any start of an Agent with an applied budget, and any start on a
+computer whose daemon does not ask for retries. Work that a process was
+given and accepted, and whose process then ended before the turn began, is
+not run again either. Their sender can send the message again.
+
+Option A, in review as Desktop #249 and server #102, runs such a message
+again, whether or not its process had been given it:
+
+- The daemon opts in. Each demand start, poll, recover and block request
+  says `reoffers` while the server lists demand retries and the re-offer
+  (`shared-demand-retry-v2`). The server lists the re-offer only while its
+  operator has switched it on; it is off unless configured. A start is
+  always sent with the bytes it was first prepared with.
+- The daemon sends the stop of such a process as a request for the
+  message's next retry, with its evidence that the process stopped. The
+  server opens a retry only at that request, and decides by its own record
+  of the turn's start: work whose turn it never recorded it takes back from
+  the process and shows the retry; the stop of a turn it recorded leaves
+  the message with that process. When the server shows the retry, the
+  daemon releases its binding of the work and starts the retry.
+- For work the process had been given, this takes a second binding of one
+  message on both sides. Each side keeps the first binding as a released
+  copy, and released work is never bound again.
+- A message that waits for its retry ends if the daemon does not come back
+  for it in time: 3 minutes after the later of the end of the grace before
+  its first process is given up and the daemon's first request to run it
+  again. Its block payload then says `retry_lapsed`.
+- A retry the daemon prepares while the server no longer lists the
+  re-offer goes out without `reoffers`, and the message's later stops are
+  reported as before.
+- An Agent with an applied budget keeps the behaviour of main: the server
+  takes nothing back from it, and the daemon asks for no retry for it.
+
+"Send again" is what the sender has until the owner decides.
 
 ## Known bounds
 
@@ -331,6 +358,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review (Desktop #242, #247; an owned Agent's steps and the session's renewal: #246). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
 | 3. A refused start gives its place back when its message ends | implemented (Desktop #252); for an Agent with an applied budget, implemented (Desktop #256) |
+| 3. A message whose process ended before its turn began is run again (option A, "What is left open") | in review (Desktop #249, server #102), waiting for the owner's decision |
 | 3. No new start in the protocol before the budget for an Agent with an applied budget; a start the server refused for that budget gives its place back at once | implemented (Desktop #259) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
 | 4. The wall clock only ends a lease early | holds for a ticket and a start window; not yet for the session's proof, whose wall-clock end is in review (Desktop #246). For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
