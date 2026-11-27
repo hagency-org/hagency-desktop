@@ -195,6 +195,12 @@ impl OwnerResourceRegistry {
                 |r| r.get(0),
             )?;
             let start = if exists {
+                // A retry the server refused for the Agent's budget is never
+                // sent again (schema 116); it waits, as when another start
+                // holds the place below.
+                if refused(&tx, &id)? {
+                    return Err(Error::Conflict);
+                }
                 // Replay of the same retry: its saved bytes, never a new start.
                 saved_start(&tx, &profile.digest, &child, &saved, n)?
             } else {

@@ -235,6 +235,13 @@ impl OwnerResourceRegistry {
             let old=load(&tx,&profile.digest,child,&proof.offer.demand_id)?;
             if let Some(old)=&old {
                 if old.offer.digest()?!=proof.offer.digest()?{return Err(Error::Conflict)}
+                // A first start the server refused for the Agent's budget gave
+                // its place back (schema 116): the budget lane takes the
+                // message up, and this lane never sends that start again.
+                if let Some(i)=&old.input && refused(&tx,&i.start.start_intent_id)? {
+                    proof.check()?;
+                    return Ok(SharedDemandIntent{offer:old.offer.clone(),disposition:SharedDemandDisposition::Pending,input:None,budget:None});
+                }
                 if old.disposition!=SharedDemandDisposition::Pending {proof.check()?;return Ok(old.clone())}
             }
             observe_control(&tx,&profile.digest,child,proof.offer.control_revision)?;

@@ -415,6 +415,127 @@ async fn budget_execution_v3_a_plain_retry_saves_no_start_after_a_budget_is_appl
     f.registry.shutdown().await.unwrap();
 }
 
+/// The server's refusal of a plain start for the Agent's budget, as read.
+async fn refuse(f:&Fixture,c:&SharedRuntimeCommand,o:&SharedDemandOffer,sent:&SharedDemandStartInput,code:&str)->Result<(),Error> {
+    f.registry.release_refused_shared_demand_start(proof_for(f,o),c.clone(),sent.clone(),code.into()).await
+}
+
+#[tokio::test]
+async fn budget_execution_v3_a_plain_start_refused_for_the_budget_gives_its_place_back_at_once(){
+    // A message's plain start was saved before a budget was applied. Once the
+    // budget is reported, the server refuses that start
+    // (`shared_budget_execution_required`), and again every time; it made no
+    // start of the message. The start gives its place back at once, and the
+    // budget lane starts the message after the same process.
+    let f=fixture().await;let c=command(&f).await;
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let refused=offer(&c,"refused_for_the_budget",1);
+    let sent=f.registry.prepare_shared_demand(proof_for(&f,&refused),c.clone(),None).await.unwrap().input().unwrap().clone();
+    let held=sent.start.start_intent_id.clone();
+    let got=refuse(&f,&c,&refused,&sent,SHARED_BUDGET_EXECUTION_REQUIRED).await;
+    assert!(matches!(got,Err(Error::LocalAuthority)),"no budget is applied here: {got:?}");
+    increase(&f,&c,"applied_after_the_start",50).await;
+    assert!(prepare(&f,&c,status(&f,&c,&refused).await).await.is_err(),"the plain start may have been made");
+    let got=refuse(&f,&c,&refused,&sent,"shared_demand_not_current").await;
+    assert!(matches!(got,Err(Error::LocalAuthority)),"a refusal that can change: {got:?}");
+    let mut other=sent.clone();other.start.web_search=!other.start.web_search;
+    let got=refuse(&f,&c,&refused,&other,SHARED_BUDGET_EXECUTION_REQUIRED).await;
+    assert!(matches!(got,Err(Error::Conflict)),"a request this computer did not save: {got:?}");
+    let forged=format!("INSERT INTO owner_shared_start_releases VALUES('{held}','{}')",refused.demand_id);
+    assert!(store_sql(&f,forged).await.unwrap_err().contains("unproven shared start release"));
+    // The refusal, read twice.
+    for _ in 0..2 {refuse(&f,&c,&refused,&sent,SHARED_BUDGET_EXECUTION_REQUIRED).await.unwrap();}
+    assert_eq!(released_in(&f,"owner_shared_start_releases").await,vec![held.clone()],"the place comes back at once");
+    assert_eq!(count(&f,"owner_shared_start_refusals").await,1);
+    let taken=prepare(&f,&c,status(&f,&c,&refused).await).await.unwrap();
+    assert_eq!(*taken.disposition(),SharedDemandDisposition::StartPrepared,"the budget lane starts the message");
+    let start=&taken.input().unwrap().start;
+    assert_eq!(start.predecessor.command_id,c.command_id);
+    assert_ne!(start.start_intent_id,held);
+    // The Agent's next message waits behind it, in the budget lane.
+    let mut next=offer(&c,"next_message",1);next.received_at_ms=refused.received_at_ms+1;
+    assert_eq!(*prepare(&f,&c,status(&f,&c,&next).await).await.unwrap().disposition(),SharedDemandDisposition::Pending);
+    // Its plain end, read later, finds the place given back already.
+    f.registry.retain_shared_demand_terminal(cleanup(&f,&c,1).await,refused.clone(),"expired".into(),None).await.unwrap();
+    assert_eq!(released_in(&f,"owner_shared_start_releases").await,vec![held]);
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn budget_execution_v3_a_plain_start_refused_for_the_budget_is_never_sent_again(){
+    // A first start: after its refusal, also after a restart, the plain lane
+    // leaves the message to the budget lane and has no request to send.
+    let(mut f,c)={let f=fixture().await;let c=command(&f).await;(f,c)};
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let refused=offer(&c,"refused_for_the_budget",1);
+    let sent=f.registry.prepare_shared_demand(proof_for(&f,&refused),c.clone(),None).await.unwrap().input().unwrap().clone();
+    increase(&f,&c,"applied_after_the_start",50).await;
+    refuse(&f,&c,&refused,&sent,SHARED_BUDGET_EXECUTION_REQUIRED).await.unwrap();
+    f.registry.shutdown().await.unwrap();f.registry=OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).unwrap();
+    let plain=f.registry.prepare_shared_demand(proof_for(&f,&refused),c.clone(),None).await.unwrap();
+    assert_eq!(*plain.disposition(),SharedDemandDisposition::Pending,"the budget lane takes it up");
+    assert!(plain.input().is_none());
+    let got=f.registry.shared_demand_submission(proof_for(&f,&refused),c.clone()).await.err();
+    assert!(matches!(got,Some(Error::LocalAuthority)),"no request to send: {got:?}");
+    assert_eq!(count(&f,"owner_shared_start_intents").await,1,"no other plain start");
+    assert!(store_sql(&f,"DELETE FROM owner_shared_start_refusals".into()).await.unwrap_err().contains("retained shared start refusal"));
+    assert!(store_sql(&f,"UPDATE owner_shared_start_refusals SET code=code".into()).await.unwrap_err().contains("immutable shared start refusal"));
+    f.registry.shutdown().await.unwrap();
+    // A retry, saved before the budget, of a message whose start the server
+    // made and that never started here.
+    let f=fixture().await;let c=command(&f).await;
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let lost=offer(&c,"retried_before_the_budget",1);
+    let first=f.registry.prepare_shared_demand(proof_for(&f,&lost),c.clone(),None).await.unwrap().input().unwrap().clone();
+    let mut failed=attempt(&f,&c).await;
+    failed.start_intent_id=first.start.start_intent_id.clone();failed.predecessor=first.start.predecessor.clone();failed.budget_observation=first.start.budget_observation.clone();
+    f.registry.fence_shared_successor(cleanup(&f,&c,1).await,failed.clone()).await.unwrap();
+    let Ok(SharedDemandRetry::Start(retry))=f.registry.prepare_shared_demand_retry(proof_for(&f,&lost),c.clone(),Some(failed.clone()),1).await else {panic!("a retry start")};
+    let retried=retry.input().clone();
+    increase(&f,&c,"applied_after_the_retry",50).await;
+    let got=refuse(&f,&c,&lost,&first,SHARED_BUDGET_EXECUTION_REQUIRED).await;
+    assert!(matches!(got,Err(Error::Conflict)),"a start the server made: {got:?}");
+    refuse(&f,&c,&lost,&retried,SHARED_BUDGET_EXECUTION_REQUIRED).await.unwrap();
+    assert_eq!(released_in(&f,"owner_shared_start_releases").await,vec![retried.start.start_intent_id.clone()]);
+    let again=f.registry.prepare_shared_demand_retry(proof_for(&f,&lost),c.clone(),Some(failed),1).await;
+    let got=match &again {Ok(SharedDemandRetry::Start(_))=>"the retry start".to_string(),Ok(SharedDemandRetry::Blocked(_))=>"a block".into(),Err(e)=>format!("{e:?}")};
+    assert!(matches!(again,Err(Error::Conflict)),"the retry waits, got {got}");
+    assert_eq!(count(&f,"owner_shared_start_intents").await,2);
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn budget_execution_v3_schema116_keeps_every_place_given_back(){
+    // A place an ended message gave back before the upgrade stays given back.
+    let f=fixture().await;let c=command(&f).await;
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let refused=offer(&c,"refused_before_upgrade",1);
+    let held=f.registry.prepare_shared_demand(proof_for(&f,&refused),c.clone(),None).await.unwrap().input().unwrap().start.start_intent_id.clone();
+    f.registry.retain_shared_demand_terminal(cleanup(&f,&c,1).await,refused.clone(),"expired".into(),None).await.unwrap();
+    f.registry.shutdown().await.unwrap();
+    // The release table as schema 115 left it: a release named an end.
+    let path=f._temp.path().join("owner/domain.sqlite3");
+    let db=Connection::open(&path).unwrap();
+    db.execute_batch("DROP TRIGGER owner_shared_start_intent_place;DROP TRIGGER owner_shared_start_releases_proof;DROP VIEW owner_shared_start_releasable;DROP TABLE owner_shared_start_refusals;
+        CREATE TABLE releases_115(start_intent_id TEXT PRIMARY KEY REFERENCES owner_shared_start_intents(id),demand_id TEXT NOT NULL REFERENCES owner_shared_budget_demand_terminals(demand_id)) STRICT;
+        INSERT INTO releases_115 SELECT start_intent_id,demand_id FROM owner_shared_start_releases;DROP TABLE owner_shared_start_releases;
+        ALTER TABLE releases_115 RENAME TO owner_shared_start_releases;PRAGMA user_version=115;").unwrap();
+    drop(db);
+    let mut f=f;f.registry=OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).unwrap();
+    let db=Connection::open(&path).unwrap();
+    assert_eq!(db.pragma_query_value::<u64,_>(None,"user_version",|r|r.get(0)).unwrap(),116);
+    let parent:String=db.query_row("SELECT \"table\" FROM pragma_foreign_key_list('owner_shared_start_releases') WHERE \"from\"='demand_id'",[],|r|r.get(0)).unwrap();
+    assert_eq!(parent,"owner_shared_demands","a release names its message");
+    drop(db);
+    assert_eq!(released_in(&f,"owner_shared_start_releases").await,vec![held]);
+    assert_eq!(count(&f,"owner_shared_start_refusals").await,0);
+    f.registry.shutdown().await.unwrap();
+}
+
 /// The budget start table as schema 114 left it: one start for each child
 /// and predecessor, for good; no release rows and no second ends.
 const SCHEMA114_BUDGET_STARTS: &str = "DROP TRIGGER owner_shared_budget_start_intent_place;DROP VIEW owner_shared_budget_start_releasable;DROP TABLE owner_shared_budget_start_releases;PRAGMA foreign_keys=OFF;
@@ -459,7 +580,7 @@ async fn budget_execution_v3_schema115_gives_back_the_place_an_ended_message_hel
     drop(db);
     f.registry=OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).unwrap();
     let db=Connection::open(&path).unwrap();
-    assert_eq!(db.pragma_query_value::<u64,_>(None,"user_version",|r|r.get(0)).unwrap(),115);
+    assert_eq!(db.pragma_query_value::<u64,_>(None,"user_version",|r|r.get(0)).unwrap(),116);
     assert!(!unique_pair(&db),"the place is the trigger's now");
     let decisions:u64=db.query_row("SELECT count(*) FROM owner_shared_budget_demand_decisions d JOIN owner_shared_budget_start_intents i ON i.id=d.start_intent_id",[],|r|r.get(0)).unwrap();
     assert_eq!(decisions,1,"the rebuilt table keeps the start its decision names");
