@@ -1,9 +1,16 @@
 //! An authenticated terminal state for an exact saved v2 offer (ADR-193). It
-//! only releases the offer's FIFO position: no work, call, start, process or
-//! capacity history changes, and its event is never offered or started again.
-//! Same-installation cleanup authority suffices, so an offer older than a
-//! day can still end; the server's state is the only input that is trusted.
+//! releases the offer's FIFO position, and the place after its predecessor
+//! of each start of it the server never made: no work, call, start, process
+//! or capacity history changes, and its event is never offered or started
+//! again. Same-installation cleanup authority suffices, so an offer older
+//! than a day can still end; the server's state is the only input that is
+//! trusted.
 use super::*;
+
+/// The server makes no start of an ended event, and its status names the
+/// event's latest start. Each start of the event it never made, and for which
+/// no command was issued here, gives its place back (schema 114).
+const RELEASE: &str = "INSERT INTO owner_shared_start_releases(start_intent_id,demand_id) SELECT start_intent_id,demand_id FROM owner_shared_start_releasable WHERE demand_id=?1";
 
 /// Budget blocks end an event here only after a retry (ADR-193 amendment):
 /// the original start's own block is its saved decision.
@@ -66,6 +73,7 @@ impl OwnerResourceRegistry {
                 "INSERT INTO owner_shared_budget_demand_terminals VALUES(?1,?2,?3,?4)",
                 params![offer.demand_id, canonical::encode(&value)?, canonical::digest(&value)?, revision],
             )?;
+            tx.execute(RELEASE, [&offer.demand_id])?;
             authority.check(&registry)?;
             tx.commit()?;
             authority.check(&registry).map_err(|_| Error::OutcomeUnknown)
