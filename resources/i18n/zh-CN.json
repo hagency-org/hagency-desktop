@@ -1672,6 +1672,7 @@
   "Loading…": "正在加载…",
   "Connecting…": "正在连接…",
   "The previous runtime lease is still active. Wait briefly and retry.": "上一运行租约仍有效，请稍候重试。",
+  "This computer's clock does not match the server's. Turn on setting the date and time automatically, then start the Agent again.": "这台电脑的时钟与服务器不一致。请开启自动设置日期与时间，然后重新启动 Agent。",
   "Reasoning effort": "推理强度",
   "Advanced settings": "高级设置",
   "Automatic: private workspace for this Agent": "自动使用此 Agent 的私有工作目录",

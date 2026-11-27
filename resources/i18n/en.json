@@ -1665,6 +1665,7 @@
   "Loading…": "Loading…",
   "Connecting…": "Connecting…",
   "The previous runtime lease is still active. Wait briefly and retry.": "The previous runtime lease is still active. Wait briefly and retry.",
+  "This computer's clock does not match the server's. Turn on setting the date and time automatically, then start the Agent again.": "This computer's clock does not match the server's. Turn on setting the date and time automatically, then start the Agent again.",
   "Reasoning effort": "Reasoning effort",
   "Advanced settings": "Advanced settings",
   "Automatic: private workspace for this Agent": "Automatic: private workspace for this Agent",
