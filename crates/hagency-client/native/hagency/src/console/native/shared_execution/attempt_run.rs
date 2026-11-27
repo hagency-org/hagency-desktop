@@ -139,9 +139,18 @@ pub(super) async fn upload_retry(
 /// failure (503 storage_unavailable, which includes trigger exceptions) is
 /// also undecided: falling back would end the message instead of retrying it.
 fn undecided(e: &NativeError) -> bool {
-    // Not a refusal (`NativeError::said`): the retry could not be asked, or
-    // got no answer. Before, a session that was not free for a moment counted
-    // as the server refusing the retry, and the message ended there.
+    // Whether the server left the retry undecided, so that the work keeps
+    // it: the retry could not be asked, or got no answer
+    // (`NativeError::said`). Two codes more say that the request had no
+    // session or device proof that holds. This host makes them when it has
+    // none for the request, before it leaves or after its answer; the
+    // server answers `device_authorization_required` to a device proof it
+    // does not accept. For a step they are decided, and nothing waits them
+    // out: asking again with the same proof gets the same answer. But
+    // neither refuses the retry itself, and without such a proof the
+    // evidence alone could not be reported either. Before, a session that
+    // was not free for a moment counted as the server refusing the retry,
+    // and the message ended there.
     e.passes() || matches!(e.code.as_str(), "sign_in_required" | "device_authorization_required")
 }
 fn activity(
