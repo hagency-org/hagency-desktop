@@ -166,11 +166,13 @@ document states the case, and its option A is drafted (Desktop #249, server
   end, the turn ends at its next renewal moment, at most ten seconds of
   awake time; the store refuses its records, and the commit gate its
   messages, from the wall-clock end on. On main, such a computer still
-  loses as much of every lease as its clock is ahead, and the whole lease
-  when it is ahead by a lease's length; and
-  after a sleep through a lease's end, a turn on main runs on for the
-  counted time that was left when the computer slept: 20 to 30 seconds
-  with 30-second leases, 110 to 120 seconds with two-minute leases.
+  loses as much of every lease as its clock is ahead, and ahead by the
+  lease less the ten seconds to its renewal (20 seconds), no process
+  outlives its first lease; and after a sleep through a lease's end, a
+  turn on main runs on for the counted time that was left when the
+  computer slept: 20 to 30 seconds with main's 30-second leases, and 110
+  to 120 seconds with #243's two-minute leases if #251 did not land with
+  it.
 - The answer that grants an Agent's execution lease carries no server time,
   so for that lease the wall clock is the only witness, and a computer whose
   clock is behind by more than a second is refused a full-length lease.
