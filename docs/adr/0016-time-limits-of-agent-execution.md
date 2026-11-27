@@ -278,6 +278,15 @@ describes. "Send again" is what the sender has until it is decided.
   new is installed. A host is rolled back by a newer build that undoes the
   change, never by installing an older one. #252's place records (schema
   114) are such a step, and so is every store migration in review here.
+  A store migration is known by its file name and the SHA-256 of its SQL,
+  not by its number alone. The store records both for each migration it
+  runs, and every start compares them with the build's own list. A store
+  that ran another build's migration of the same number, such as an
+  earlier draft's, is refused by name ("store migration N was made by
+  another build") before any later migration runs over it. A store from
+  before these records takes the build's own for the versions it has,
+  once: released builds come from the main branch, where a migration's
+  number, name and SQL never change once it lands.
 
 ## State
 
