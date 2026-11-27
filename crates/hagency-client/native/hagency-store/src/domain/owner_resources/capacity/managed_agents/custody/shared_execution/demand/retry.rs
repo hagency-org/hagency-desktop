@@ -203,9 +203,10 @@ impl OwnerResourceRegistry {
                     return Err(Error::Conflict);
                 };
                 // No other start (manual or another event) holds this head's
-                // slot in the current period (owner_shared_start_intent_period).
+                // place in the current period (owner_shared_start_intent_place);
+                // a start the server never made, of an event it ended, holds none.
                 let competing: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND id<>?4)",
+                    "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND id<>?4 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id))",
                     params![child, canonical::digest(&serde_json::to_value(c)?)?, periods::current_id(&tx, &child)?, id],
                     |r| r.get(0),
                 )?;
