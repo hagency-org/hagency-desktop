@@ -176,10 +176,12 @@ fn row_notice(row:&Value,stopped:&impl Fn(&str)->bool)->Option<&'static str> {
             _ => "No allowance is currently available for this message. Check the Agent's allowance and unsettled calls.",
         });
     }
-    // The server ends such a message at once: nothing settles the Agent's
-    // uncounted usage within its period, so it offers "Send again" (above)
-    // only once the Agent's next period has begun.
-    if row["reason"]=="usage_unrepresentable" {return Some("This message ended without a turn: the Agent's earlier usage could not be counted. If its allowance renews, it can be sent again in the Agent's next period.");}
+    // A block on usage: nothing settles the Agent's uncounted usage within its
+    // period. A server that ends such a message at once says so (`endReason`),
+    // and offers "Send again" (above) once the Agent's next period has begun.
+    if row["endReason"]=="usage_unrepresentable" {return Some("This message ended without a turn: the Agent's earlier usage could not be counted. If its allowance renews, it can be sent again in the Agent's next period.");}
+    // Otherwise (an older server, or a budget's queue) it waits out its time.
+    if row["reason"]=="usage_unrepresentable" {return Some("This message cannot start: the Agent's earlier usage could not be counted. It ends once it has waited a day, or at the turn of the Agent's allowance period.");}
     match row["state"].as_str()? {
         "started"=>Some("Agent is working…"),
         "pending"|"queued"|"acknowledged"|"bound"=>Some("Message queued; waiting for Agent."),
@@ -810,14 +812,20 @@ mod tests {
             assert!(execution_notice(&v,"!room","",never).unwrap().contains(expected));
             assert!(!execution_busy(&v,"!room",""));
         }
-        // A block on usage without a budget has ended: it says so, and why it is
-        // not offered again in the same period; once offered, it reads as unprocessed.
-        let usage=json!({"executions":[{"roomId":"!room","state":"blocked","reason":"usage_unrepresentable"}]});
-        let notice=execution_notice(&usage,"!room","",never).unwrap();
+        // A block on usage that the server ended says so, and why it is not
+        // offered again in the same period; once offered, it reads as unprocessed.
+        let ended=json!({"executions":[{"roomId":"!room","state":"blocked","reason":"usage_unrepresentable","endReason":"usage_unrepresentable"}]});
+        let notice=execution_notice(&ended,"!room","",never).unwrap();
         assert!(notice.contains("ended without a turn") && notice.contains("next period"), "{notice}");
-        assert!(!execution_busy(&usage,"!room",""));
-        let offered=json!({"executions":[{"roomId":"!room","state":"blocked","reason":"usage_unrepresentable","canSendAgain":true}]});
+        assert!(!execution_busy(&ended,"!room",""));
+        let offered=json!({"executions":[{"roomId":"!room","state":"blocked","reason":"usage_unrepresentable","endReason":"usage_unrepresentable","canSendAgain":true}]});
         assert_eq!(execution_notice(&offered,"!room","",never),Some(UNPROCESSED));
+        // One that still waits (no end: an older server, or a budget's queue)
+        // says it cannot start and when it ends, never that it ended.
+        let waiting=json!({"executions":[{"roomId":"!room","state":"blocked","reason":"usage_unrepresentable"}]});
+        let notice=execution_notice(&waiting,"!room","",never).unwrap();
+        assert!(notice.contains("cannot start") && notice.contains("a day") && !notice.contains("ended"), "{notice}");
+        assert!(!execution_busy(&waiting,"!room",""));
     }
 
     /// The Agent records a stopped run as failed. When the run card for that
