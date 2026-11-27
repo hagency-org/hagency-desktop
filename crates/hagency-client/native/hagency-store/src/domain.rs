@@ -143,7 +143,7 @@ pub struct DomainRepository {
     _legacy_writer: Option<hagency_platform::legacy_writer::LegacyWriterAdmission>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 114;
+pub const DOMAIN_SCHEMA_VERSION: i32 = 115;
 const DOMAIN_MIGRATIONS: &[(i32, &str)] = &[
     (2, include_str!("migrations/002-role-publication.sql")),
     (3, include_str!("migrations/003-task-dispatch.sql")),
@@ -406,6 +406,7 @@ const DOMAIN_MIGRATIONS: &[(i32, &str)] = &[
     (112, include_str!("migrations/114-owner-octos-profiles.sql")),
     (113, include_str!("migrations/115-owner-octos-model-resources.sql")),
     (114, include_str!("migrations/116-owner-shared-start-releases.sql")),
+    (115, include_str!("migrations/117-owner-shared-budget-start-releases.sql")),
 ];
 
 impl DomainRepository {
@@ -1401,6 +1402,8 @@ impl DomainRepository {
                     "SELECT demand_id,work_id,binding_payload,binding_digest,ledger_revision FROM owner_shared_demand_bindings LIMIT 0",
                     "SELECT start_intent_id,demand_id FROM owner_shared_start_releases LIMIT 0",
                     "SELECT start_intent_id,demand_id FROM owner_shared_start_releasable LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_budget_start_releases LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_budget_start_releasable LIMIT 0",
                     "SELECT child_id,command_id,command_payload,command_digest,fence_revision FROM owner_managed_runtime_stops LIMIT 0",
                     "SELECT id,child_id,command_id,payload,digest,ledger_revision FROM owner_managed_runtime_observations LIMIT 0",
                     "SELECT actor_scope,command_id,operation,digest,result FROM management_commands LIMIT 0",
