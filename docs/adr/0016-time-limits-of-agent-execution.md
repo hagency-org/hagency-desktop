@@ -125,6 +125,13 @@ For the room:
    is unknown, which may have acted or cost something and has its review
    instead, nor for a message that is still waiting.
 
+   A message that the computer blocked because it could not count the
+   Agent's earlier usage cannot run in that period, whatever anyone does.
+   When the server ends it at once (`endReason`), its notice says so, and it
+   is offered only once the Agent's next period has begun, never for an
+   Agent without periods. When the server lets it wait out its time, its
+   notice says that it cannot start and when it ends.
+
    It is offered on the message itself, on every message the room's status
    lists that can be sent again, and the notice at the end of the timeline
    offers it for the newest message too. Both read the same status, so an
@@ -160,7 +167,9 @@ For the room:
    device yet, from the device's send queue, which keeps it across a
    restart. A device that has not loaded the new message, or one whose new
    message was removed, offers the first one again; the new message stands
-   in the room for its sender to see.
+   in the room for its sender to see. A new message whose sending is
+   cancelled on its device before it left keeps the first one from being
+   offered by that window until the app starts again.
 
    The server does not read that name: its status keeps offering the first
    message, and only the sender's devices stop. In an encrypted room it
