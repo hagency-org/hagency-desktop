@@ -61,7 +61,12 @@ come to this:
    message's status names no start the server made from it and this computer
    holds no command issued for it; the server starts nothing for a message
    that ended. Until the message ends, a refused start keeps its place and is
-   sent again unchanged.
+   sent again unchanged. An Agent with an applied budget gives the place back
+   the same way, and a start that gave its place back before the budget was
+   applied holds none after that. Such an Agent's starts have no allowance
+   period, so on main a start the server refused keeps its place for as long
+   as the Agent's reservation lasts, also after its message ended, and so
+   does a start that gave its place back before the budget was applied.
 4. **The end of a lease is the server's.** The daemon holds it two ways:
    counted from the moment it sent the request, with the time the server put
    in its answer, and read against its wall clock, which keeps running while
@@ -214,7 +219,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and #251) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review (Desktop #242, #247). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
-| 3. A refused start gives its place back when its message ends | in review (Desktop #252) |
+| 3. A refused start gives its place back when its message ends | in review (Desktop #252); for an Agent with an applied budget, in review (Desktop #256) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
 | 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
 
