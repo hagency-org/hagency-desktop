@@ -244,6 +244,13 @@ describes. "Send again" is what the sender has until it is decided.
   the timeouts are not scaled to it.
 - The daemon keeps at most 16 local sessions, each used again while 30 of its
   60 seconds are left, and its bridge serves at most 64 managers.
+- The daemon's store only moves forward. Every store migration raises the
+  store's schema version, and a build that finds a newer store than it knows
+  refuses to open it ("state format is corrupt or newer than this
+  binary"): no Agent on that computer runs again until a build at least as
+  new is installed. A host is rolled back by a newer build that undoes the
+  change, never by installing an older one. #252's place records (schema
+  114) are such a step, and so is every store migration in review here.
 
 ## State
 
