@@ -1404,6 +1404,7 @@ impl DomainRepository {
                     "SELECT start_intent_id,demand_id FROM owner_shared_start_releasable LIMIT 0",
                     "SELECT start_intent_id,demand_id FROM owner_shared_budget_start_releases LIMIT 0",
                     "SELECT start_intent_id,demand_id FROM owner_shared_budget_start_releasable LIMIT 0",
+                    "SELECT demand_id,payload,digest,ledger_revision FROM owner_shared_demand_second_terminals LIMIT 0",
                     "SELECT child_id,command_id,command_payload,command_digest,fence_revision FROM owner_managed_runtime_stops LIMIT 0",
                     "SELECT id,child_id,command_id,payload,digest,ledger_revision FROM owner_managed_runtime_observations LIMIT 0",
                     "SELECT actor_scope,command_id,operation,digest,result FROM management_commands LIMIT 0",

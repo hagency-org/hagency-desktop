@@ -272,21 +272,83 @@ async fn budget_execution_v3_a_plain_start_given_back_holds_no_place_after_a_bud
 }
 
 #[tokio::test]
-async fn budget_execution_v3_a_budget_start_given_back_holds_no_place_in_the_plain_lane(){
+async fn budget_execution_v3_a_plain_start_gives_its_place_back_when_the_budget_lane_read_its_end_first(){
+    // A plain message's start was refused, and a budget is applied while the
+    // message waits. Both lanes read every saved message, and the budget lane
+    // reads this one's end first; its status names no plain start.
+    let f=fixture().await;let c=command(&f).await;
+    f.registry.claim_shared_runtime(proof(&f,c.clone())).await.unwrap();
+    stopped(&f,&c,"stopped").await;
+    let refused=offer(&c,"refused_plain_start",1);
+    let held=f.registry.prepare_shared_demand(proof_for(&f,&refused),c.clone(),None).await.unwrap().input().unwrap().start.start_intent_id.clone();
+    increase(&f,&c,"applied_while_it_waits",50).await;
+    let s=status(&f,&c,&refused).await;
+    f.registry.retain_shared_budget_demand_terminal(verified(&f,ended(&s,"expired",None)),c.clone()).await.unwrap();
+    assert!(released_in(&f,"owner_shared_start_releases").await.is_empty());
+    let mut next=offer(&c,"next_message",1);next.received_at_ms=refused.received_at_ms+1;
+    assert_eq!(*prepare(&f,&c,status(&f,&c,&next).await).await.unwrap().disposition(),SharedDemandDisposition::Pending);
+    // The plain lane's read of the same end, which may come twice.
+    for _ in 0..2 {
+        f.registry.retain_shared_demand_terminal(cleanup(&f,&c,1).await,refused.clone(),"expired".into(),None).await.unwrap();
+    }
+    assert_eq!(released_in(&f,"owner_shared_start_releases").await,vec![held.clone()],"the plain end gives the plain start back");
+    assert!(f.registry.retain_shared_demand_terminal(cleanup(&f,&c,1).await,refused.clone(),"cancelled".into(),None).await.is_err(),"another plain end");
+    // Only the other lane's end goes beside the saved one.
+    let copy=format!("INSERT INTO owner_shared_demand_second_terminals SELECT demand_id,payload,digest,ledger_revision FROM owner_shared_budget_demand_terminals WHERE demand_id='{}'",refused.demand_id);
+    assert!(store_sql(&f,copy).await.unwrap_err().contains("unpaired second demand terminal"));
+    let saved=prepare(&f,&c,status(&f,&c,&next).await).await.unwrap();
+    assert_eq!(*saved.disposition(),SharedDemandDisposition::StartPrepared,"the next message waits behind a start that gave its place back");
+    assert_ne!(saved.input().unwrap().start.start_intent_id,held);
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn budget_execution_v3_a_budget_start_gives_its_place_back_when_the_plain_lane_read_its_end_first(){
+    // Both lanes read every saved message, and the plain lane may read this
+    // one's end first; its status names no budget start.
+    let(f,c)=synthetic().await;
+    let refused=offer(&c,"refused_start",1);let s=status(&f,&c,&refused).await;
+    let held=prepare(&f,&c,s.clone()).await.unwrap().input().unwrap().start.start_intent_id.clone();
+    f.registry.retain_shared_demand_terminal(cleanup(&f,&c,1).await,refused.clone(),"expired".into(),None).await.unwrap();
+    assert!(released_in(&f,"owner_shared_budget_start_releases").await.is_empty());
+    let mut next=offer(&c,"next_message",1);next.received_at_ms=refused.received_at_ms+1;
+    assert_eq!(*prepare(&f,&c,status(&f,&c,&next).await).await.unwrap().disposition(),SharedDemandDisposition::Pending);
+    // The budget lane's read of the same end, which may come twice.
+    for _ in 0..2 {
+        f.registry.retain_shared_budget_demand_terminal(verified(&f,ended(&s,"expired",None)),c.clone()).await.unwrap();
+    }
+    assert_eq!(released_in(&f,"owner_shared_budget_start_releases").await,vec![held.clone()],"the budget end gives the budget start back");
+    assert!(f.registry.retain_shared_budget_demand_terminal(verified(&f,ended(&s,"cancelled",None)),c.clone()).await.is_err(),"another budget end");
+    assert!(store_sql(&f,"DELETE FROM owner_shared_demand_second_terminals".into()).await.unwrap_err().contains("retained second demand terminal"));
+    assert!(store_sql(&f,"UPDATE owner_shared_demand_second_terminals SET digest=digest".into()).await.unwrap_err().contains("immutable second demand terminal"));
+    let saved=prepare(&f,&c,status(&f,&c,&next).await).await.unwrap();
+    assert_eq!(*saved.disposition(),SharedDemandDisposition::StartPrepared,"the next message waits behind a start that gave its place back");
+    assert_ne!(saved.input().unwrap().start.start_intent_id,held);
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn budget_execution_v3_a_budget_start_given_back_still_bars_a_plain_start(){
+    // The server refuses every plain start of an Agent with an applied budget
+    // (`shared_budget_execution_required`). A plain start saved after a budget
+    // start of the same predecessor could only be refused, and it would hold
+    // the place the budget lane's next message needs.
     let(f,c)=synthetic().await;
     let refused=offer(&c,"refused_start",1);let s=status(&f,&c,&refused).await;
     let held=prepare(&f,&c,s.clone()).await.unwrap().input().unwrap().start.start_intent_id.clone();
     f.registry.retain_shared_budget_demand_terminal(verified(&f,ended(&s,"expired",None)),c.clone()).await.unwrap();
-    let mut next=offer(&c,"next_message",1);next.received_at_ms=refused.received_at_ms+1;
-    let saved=f.registry.prepare_shared_demand(proof_for(&f,&next),c.clone(),None).await;
-    let disposition=saved.as_ref().map(|s|s.disposition().clone()).map_err(|e|e.to_string());
-    assert_eq!(disposition,Ok(SharedDemandDisposition::StartPrepared));
     assert_eq!(released_in(&f,"owner_shared_budget_start_releases").await,vec![held]);
+    let mut next=offer(&c,"next_message",1);next.received_at_ms=refused.received_at_ms+1;
+    let plain=f.registry.prepare_shared_demand(proof_for(&f,&next),c.clone(),None).await;
+    let plain=plain.as_ref().map(|s|s.disposition().clone()).map_err(|e|e.to_string());
+    assert_eq!(plain,Err(Error::Conflict.to_string()));
+    let saved=prepare(&f,&c,status(&f,&c,&next).await).await.unwrap();
+    assert_eq!(*saved.disposition(),SharedDemandDisposition::StartPrepared);
     f.registry.shutdown().await.unwrap();
 }
 
 /// The budget start table as schema 114 left it: one start for each child
-/// and predecessor, for good; no release rows.
+/// and predecessor, for good; no release rows and no second ends.
 const SCHEMA114_BUDGET_STARTS: &str = "DROP TRIGGER owner_shared_budget_start_intent_place;DROP VIEW owner_shared_budget_start_releasable;DROP TABLE owner_shared_budget_start_releases;PRAGMA foreign_keys=OFF;
 CREATE TABLE owner_shared_budget_start_intents_schema114 (
  id TEXT PRIMARY KEY,
@@ -307,6 +369,7 @@ DROP TABLE owner_shared_budget_start_intents;
 ALTER TABLE owner_shared_budget_start_intents_schema114 RENAME TO owner_shared_budget_start_intents;
 CREATE TRIGGER owner_shared_budget_start_intents_immutable BEFORE UPDATE ON owner_shared_budget_start_intents BEGIN SELECT RAISE(ABORT,'immutable budget start intent'); END;
 CREATE TRIGGER owner_shared_budget_start_intents_retained BEFORE DELETE ON owner_shared_budget_start_intents BEGIN SELECT RAISE(ABORT,'retained budget start intent'); END;
+DROP TABLE owner_shared_demand_second_terminals;
 PRAGMA foreign_keys=ON;PRAGMA user_version=114;";
 
 #[tokio::test]

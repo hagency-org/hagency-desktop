@@ -20,4 +20,4 @@ pub(super) use guard::{
 };
 pub(super) use promotion::check_work_control;
 #[cfg(feature = "shared-budget-execution")]
-pub(super) use terminal::same_terminal;
+pub(super) use terminal::second_terminal;

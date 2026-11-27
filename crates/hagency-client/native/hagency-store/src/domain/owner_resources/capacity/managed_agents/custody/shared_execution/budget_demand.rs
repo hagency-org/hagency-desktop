@@ -229,12 +229,13 @@ impl OwnerResourceRegistry {
             let Some(old)=old else{return Ok(())};
             if old.offer().digest()?!=v.status.demand_digest{return Err(Error::Conflict)}
             let saved:Option<String>=tx.query_row("SELECT payload FROM owner_shared_budget_demand_terminals WHERE demand_id=?1",[&v.status.offer.demand_id],|r|r.get(0)).optional()?;
-            if let Some(saved)=saved {
-                if !demand::same_terminal(&saved,&v.status.offer,&v.status.state)?{return Err(Error::Conflict)}
-                return Ok(())
-            }
+            // An end the plain lane read first keeps this one beside it.
+            let table=match saved {
+                None=>"owner_shared_budget_demand_terminals",
+                Some(saved)=>{if !demand::second_terminal(&tx,&saved,false,&v.status.offer,&v.status.state)?{return Ok(())}"owner_shared_demand_second_terminals"}
+            };
             let payload=canonical::encode(&serde_json::to_value(&v.status)?)?;let digest=canonical::digest(&serde_json::to_value(&v.status)?)?;let revision=revision(&tx)?;
-            tx.execute("INSERT INTO owner_shared_budget_demand_terminals VALUES(?1,?2,?3,?4)",params![v.status.offer.demand_id,payload,digest,revision])?;
+            tx.execute(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4)"),params![v.status.offer.demand_id,payload,digest,revision])?;
             tx.execute(RELEASE,[&v.status.offer.demand_id])?;
             v.proof.check()?;tx.commit()?;v.proof.check().map_err(|_|Error::OutcomeUnknown)
         }).await

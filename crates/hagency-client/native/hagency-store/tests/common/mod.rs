@@ -211,6 +211,7 @@ pub fn remove_owner_resource_additions_after_schema98(db: &rusqlite::Connection)
          DROP TABLE IF EXISTS owner_shared_budget_start_releases;
          DROP TRIGGER IF EXISTS owner_shared_start_intent_place;
          DROP VIEW IF EXISTS owner_shared_start_releasable;
+         DROP TABLE IF EXISTS owner_shared_demand_second_terminals;
          DROP TABLE IF EXISTS owner_shared_start_releases;
          DROP TABLE IF EXISTS owner_octos_model_resources;
          DROP TABLE IF EXISTS owner_octos_enrollments;

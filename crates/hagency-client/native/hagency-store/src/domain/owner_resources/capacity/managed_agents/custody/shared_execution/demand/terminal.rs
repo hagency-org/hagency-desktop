@@ -23,10 +23,38 @@ const TERMINAL: [&str; 5] = [
 ];
 
 /// Version-neutral idempotency check over a retained terminal payload.
-pub(in super::super) fn same_terminal(saved: &str, offer: &SharedDemandOffer, state: &str) -> Result<bool, Error> {
+fn same_terminal(saved: &str, offer: &SharedDemandOffer, state: &str) -> Result<bool, Error> {
     let saved: serde_json::Value = serde_json::from_str(saved)?;
     let old: SharedDemandOffer = serde_json::from_value(saved["offer"].clone())?;
     Ok(old.digest()? == offer.digest()? && saved["state"] == state)
+}
+
+/// Both lanes read every saved event, and the status each lane reads names
+/// only that lane's starts. The end read first is the event's end, `saved`;
+/// the other lane's end is kept beside it (schema 115), so it gives back
+/// that lane's starts too. True: this lane's end is to be kept beside
+/// `saved`. False: this lane's end is saved already.
+pub(in super::super) fn second_terminal(
+    tx: &Connection,
+    saved: &str,
+    plain: bool,
+    offer: &SharedDemandOffer,
+    state: &str,
+) -> Result<bool, Error> {
+    let saved_plain = serde_json::from_str::<serde_json::Value>(saved)?.get("version").is_some();
+    let own: Option<String> = if saved_plain == plain {
+        Some(saved.to_owned())
+    } else {
+        tx.query_row(
+            "SELECT payload FROM owner_shared_demand_second_terminals WHERE demand_id=?1",
+            [&offer.demand_id], |r| r.get(0),
+        ).optional()?
+    };
+    match own {
+        Some(own) if same_terminal(&own, offer, state)? => Ok(false),
+        Some(_) => Err(Error::Conflict),
+        None => Ok(true),
+    }
 }
 
 impl OwnerResourceRegistry {
@@ -63,14 +91,19 @@ impl OwnerResourceRegistry {
                 "SELECT payload FROM owner_shared_budget_demand_terminals WHERE demand_id=?1",
                 [&offer.demand_id], |r| r.get(0),
             ).optional()?;
-            if let Some(saved) = saved {
-                authority.check(&registry)?;
-                return if same_terminal(&saved, &offer, &state)? { Ok(()) } else { Err(Error::Conflict) };
-            }
+            // An end the budget lane read first keeps this one beside it.
+            let table = match saved.map(|saved| second_terminal(&tx, &saved, true, &offer, &state)) {
+                None => "owner_shared_budget_demand_terminals",
+                Some(Ok(true)) => "owner_shared_demand_second_terminals",
+                Some(saved) => {
+                    authority.check(&registry)?;
+                    return saved.map(|_| ());
+                }
+            };
             let value = json!({"version":1,"offer":offer,"demandDigest":offer.digest()?,"state":state,"runtimeCommandId":runtime_command_id});
             let revision = revision(&tx)?;
             tx.execute(
-                "INSERT INTO owner_shared_budget_demand_terminals VALUES(?1,?2,?3,?4)",
+                &format!("INSERT INTO {table} VALUES(?1,?2,?3,?4)"),
                 params![offer.demand_id, canonical::encode(&value)?, canonical::digest(&value)?, revision],
             )?;
             tx.execute(RELEASE, [&offer.demand_id])?;

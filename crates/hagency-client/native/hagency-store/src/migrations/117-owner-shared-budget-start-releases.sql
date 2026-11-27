@@ -8,8 +8,17 @@
 -- back with a retained release row, written beside the event's end. The table
 -- is rebuilt without the pair; at most one budget start intent without a
 -- release holds each place.
+--
+-- Both lanes read every saved event, and the status each lane reads names
+-- only that lane's starts. The end read first is the event's end; the other
+-- lane's end is kept beside it, so each lane's end gives back that lane's
+-- starts, whichever lane read its end first. An end saved before this schema
+-- has none beside it: both lanes read every saved event again, and the next
+-- read by the other lane keeps its end and writes its releases.
 DROP TRIGGER IF EXISTS owner_shared_budget_start_releases_proof;
 DROP VIEW IF EXISTS owner_shared_budget_start_releasable;
+DROP TRIGGER IF EXISTS owner_shared_start_releases_proof;
+DROP VIEW IF EXISTS owner_shared_start_releasable;
 PRAGMA defer_foreign_keys=ON;
 CREATE TABLE owner_shared_budget_start_intents_release_migration (
  id TEXT PRIMARY KEY,
@@ -35,6 +44,34 @@ CREATE TEMP TABLE budget_start_release_migration_check(valid INTEGER NOT NULL CH
 INSERT INTO budget_start_release_migration_check SELECT NOT EXISTS(SELECT 1 FROM pragma_foreign_key_check);
 DROP TABLE budget_start_release_migration_check;
 PRAGMA defer_foreign_keys=OFF;
+-- The other lane's end of an event, one for each event: of the same event
+-- (its demand digest), with a version when the saved end has none (the
+-- plain lane's), and with none when the saved end has one.
+CREATE TABLE IF NOT EXISTS owner_shared_demand_second_terminals (
+ demand_id TEXT PRIMARY KEY REFERENCES owner_shared_budget_demand_terminals(demand_id),
+ payload TEXT NOT NULL, digest TEXT NOT NULL, ledger_revision INTEGER NOT NULL
+) STRICT;
+DROP TRIGGER IF EXISTS owner_shared_demand_second_terminals_immutable;
+CREATE TRIGGER owner_shared_demand_second_terminals_immutable BEFORE UPDATE ON owner_shared_demand_second_terminals BEGIN SELECT RAISE(ABORT,'immutable second demand terminal');END;
+DROP TRIGGER IF EXISTS owner_shared_demand_second_terminals_retained;
+CREATE TRIGGER owner_shared_demand_second_terminals_retained BEFORE DELETE ON owner_shared_demand_second_terminals BEGIN SELECT RAISE(ABORT,'retained second demand terminal');END;
+DROP TRIGGER IF EXISTS owner_shared_demand_second_terminals_pair;
+CREATE TRIGGER owner_shared_demand_second_terminals_pair BEFORE INSERT ON owner_shared_demand_second_terminals WHEN NOT EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals t WHERE t.demand_id=NEW.demand_id AND json_extract(t.payload,'$.demandDigest')=json_extract(NEW.payload,'$.demandDigest') AND (json_type(t.payload,'$.version') IS NULL)<>(json_type(NEW.payload,'$.version') IS NULL)) BEGIN SELECT RAISE(ABORT,'unpaired second demand terminal');END;
+-- Schema 114's view, which now reads the plain lane's end from either place.
+CREATE VIEW owner_shared_start_releasable AS
+ SELECT i.id AS start_intent_id,t.demand_id AS demand_id
+ FROM (SELECT demand_id,payload FROM owner_shared_budget_demand_terminals
+  UNION ALL SELECT demand_id,payload FROM owner_shared_demand_second_terminals) t
+ JOIN owner_shared_demands o ON o.id=t.demand_id
+ JOIN owner_shared_start_intents i ON i.child_id=o.child_id AND i.profile=o.profile
+  AND (i.id IN('sdr1_'||t.demand_id,'sdr2_'||t.demand_id,'sdr3_'||t.demand_id)
+   OR i.id=(SELECT d.start_intent_id FROM owner_shared_demand_decisions d WHERE d.demand_id=t.demand_id))
+ WHERE json_extract(t.payload,'$.version')=1
+  AND (json_type(t.payload,'$.runtimeCommandId')='null'
+   OR json_extract(t.payload,'$.runtimeCommandId')=json_extract(i.input_payload,'$.predecessor.commandId'))
+  AND NOT EXISTS(SELECT 1 FROM owner_shared_successor_attempts a WHERE a.start_intent_id=i.id)
+  AND NOT EXISTS(SELECT 1 FROM owner_shared_successor_fences f WHERE f.start_intent_id=i.id);
+CREATE TRIGGER owner_shared_start_releases_proof BEFORE INSERT ON owner_shared_start_releases WHEN NOT EXISTS(SELECT 1 FROM owner_shared_start_releasable v WHERE v.start_intent_id=NEW.start_intent_id AND v.demand_id=NEW.demand_id) BEGIN SELECT RAISE(ABORT,'unproven shared start release');END;
 CREATE TABLE IF NOT EXISTS owner_shared_budget_start_releases (
  start_intent_id TEXT PRIMARY KEY REFERENCES owner_shared_budget_start_intents(id),
  demand_id TEXT NOT NULL REFERENCES owner_shared_budget_demand_terminals(demand_id)
@@ -43,12 +80,13 @@ DROP TRIGGER IF EXISTS owner_shared_budget_start_releases_immutable;
 CREATE TRIGGER owner_shared_budget_start_releases_immutable BEFORE UPDATE ON owner_shared_budget_start_releases BEGIN SELECT RAISE(ABORT,'immutable budget start release');END;
 DROP TRIGGER IF EXISTS owner_shared_budget_start_releases_retained;
 CREATE TRIGGER owner_shared_budget_start_releases_retained BEFORE DELETE ON owner_shared_budget_start_releases BEGIN SELECT RAISE(ABORT,'retained budget start release');END;
--- An end read from the budget lane's status (no version, an execution budget)
--- that names no start of the event; its start, of the same Agent, for which
--- this computer holds no claim and no fence.
+-- An end read from the budget lane's status (no version, an execution budget),
+-- from either place, that names no start of the event; its start, of the same
+-- Agent, for which this computer holds no claim and no fence.
 CREATE VIEW owner_shared_budget_start_releasable AS
  SELECT i.id AS start_intent_id,t.demand_id AS demand_id
- FROM owner_shared_budget_demand_terminals t
+ FROM (SELECT demand_id,payload FROM owner_shared_budget_demand_terminals
+  UNION ALL SELECT demand_id,payload FROM owner_shared_demand_second_terminals) t
  JOIN owner_shared_demands o ON o.id=t.demand_id
  JOIN owner_shared_budget_demand_decisions d ON d.demand_id=t.demand_id
  JOIN owner_shared_budget_start_intents i ON i.id=d.start_intent_id AND i.child_id=o.child_id AND i.profile=o.profile
