@@ -161,6 +161,8 @@ fn runtime_diagnostic(code: &str) -> String {
         "agent_execution_device_required" => "Assign this Agent to this device before starting it here.",
         "ledger_recovery_required" => "Restore this owner's complete ledger before new requests. Only known original replies may be recovered.",
         "room_worker_stopped" | "runtime_start_failed" => "A Room worker stopped before becoming ready. The service will retry automatically.",
+        // Asking again cannot help while this computer's clock is wrong.
+        "execution_clock_behind" | "invalid_local_clock" => "This computer's clock does not match the server's. Turn on setting the date and time automatically, then start the Agent again.",
         // The engine reports a failed run of any local tool (Codex, Claude Code, Octos) under one code family.
         // An Agent's own run must not be told to check Codex when it runs another tool.
         "codex_provider_timeout" | "codex_provider_unavailable" => "The Agent's coding tool did not respond. Check that it can run on this computer, then retry.",
@@ -4861,6 +4863,11 @@ mod tests {
         for code in ["codex_protocol_mismatch", "codex_provider_timeout", "codex_provider_unavailable"] {
             let message = runtime_diagnostic(code);
             assert!(message.contains(code) && !message.replace(code, "").contains("Codex"), "{message}");
+        }
+        // A clock the server's answers show to be wrong is named, with what to change.
+        for code in ["execution_clock_behind", "invalid_local_clock"] {
+            let message = runtime_diagnostic(code);
+            assert!(message.contains(code) && message.contains("clock") && message.contains("date and time"), "{message}");
         }
     }
     #[test]
