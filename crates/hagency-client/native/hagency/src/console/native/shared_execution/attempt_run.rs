@@ -217,7 +217,12 @@ fn retry_answer(
             return Err(e);
         }
         // Refused (gate off, demand moved on, stop): report the evidence alone.
-        Err(_) => return Ok(false),
+        // The message is then not run again here, so say so.
+        Err(e) => {
+            tracing::warn!(demand_id = %offer.demand_id, status = e.status, code = %e.code,
+                "Shared demand retry request refused; the stop is reported on the plain route");
+            return Ok(false);
+        }
     };
     let ack = &reply.acknowledgement;
     reply.demand.validate()?;

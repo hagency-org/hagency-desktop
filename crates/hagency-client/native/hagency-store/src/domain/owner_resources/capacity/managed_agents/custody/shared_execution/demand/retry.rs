@@ -228,6 +228,7 @@ impl OwnerResourceRegistry {
                 [&id],
                 |r| r.get(0),
             )?;
+            let mut lapsed = false;
             let start = if exists {
                 // The retry's own work is bound: the event is finished here.
                 if bound {
@@ -281,6 +282,7 @@ impl OwnerResourceRegistry {
                 // event opted in ends the opt-in, saved before the intent.
                 if release::reoffering(&tx, &saved)? && !proof.reoffers {
                     release::lapse(&tx, &proof.offer.demand_id)?;
+                    lapsed = true;
                 }
                 let start = start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input;
                 // Retry v2: the server showed this retry, so it gave the
@@ -301,6 +303,11 @@ impl OwnerResourceRegistry {
             input.validate_for(&proof.offer)?;
             proof.check()?;
             tx.commit()?;
+            // From here no stop of this event asks for a retry; say so.
+            if lapsed {
+                tracing::warn!(demand_id = %proof.offer.demand_id, retry = n,
+                    "Shared demand retry prepared without reoffers: its event is no longer handed back");
+            }
             proof.check().map_err(|_| Error::OutcomeUnknown)?;
             Ok(SharedDemandRetry::Start(SharedDemandSubmission::new(
                 registry, proof, original, input,
