@@ -48,6 +48,20 @@ come to this:
    decided, not asked, or without an answer, and that is worked out in one
    place. Only a decided failure ends work. The other two wait and ask again,
    and a wait keeps no local session between attempts.
+
+   A refusal ends no more than its own message. The daemon saves each start
+   of an Agent's process before it asks for it, and a saved start holds the
+   place after the process it follows for the rest of the allowance period:
+   no second start follows the same process, so the server is never asked to
+   start one twice. When the server refused a start, the first one of a
+   message or one that runs it again, and the message then ended (it waited
+   out its time, it was stopped, or it was ended because the Agent had moved
+   on), the start gives that place back as soon as the daemon reads the end,
+   and the Agent's next message starts. It gives it back only when the
+   message's status names no start the server made from it and this computer
+   holds no command issued for it; the server starts nothing for a message
+   that ended. Until the message ends, a refused start keeps its place and is
+   sent again unchanged.
 4. **The end of a lease is the server's.** The daemon holds it two ways:
    counted from the moment it sent the request, with the time the server put
    in its answer, and read against its wall clock, which keeps running while
@@ -149,6 +163,9 @@ document states the case, and its option A is drafted (Desktop #249, server
 - The steps of a computer's worker pass run one after another, so a start
   that waits for its first report holds every later step for at most the
   command's start window (30 seconds).
+- A start the server refused for a message it still offers keeps its place,
+  and the Agent's later messages wait behind that message, until it ends: at
+  the latest when it has waited a day, or when the allowance period turns.
 - A reader who did not send a message that arrived while its Agent was
   stopped keeps reading that the Agent is paused after it runs again.
 - A message is offered while the room's status lists it. The status holds
@@ -197,6 +214,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and #251) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review (Desktop #242, #247). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
+| 3. A refused start gives its place back when its message ends | in review (Desktop #252) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
 | 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
 
