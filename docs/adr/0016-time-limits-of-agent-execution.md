@@ -70,10 +70,14 @@ come to this:
    that ended. Until the message ends, a refused start keeps its place and is
    sent again unchanged. An Agent with an applied budget gives the place back
    the same way, and a start that gave its place back before the budget was
-   applied holds none after that. Such an Agent's starts have no allowance
-   period, so on main a start the server refused keeps its place for as long
-   as the Agent's reservation lasts, also after its message ended, and so
-   does a start that gave its place back before the budget was applied.
+   applied holds none after that. The daemon reads a message's status in
+   both protocols, the budget one and the one before it, and each names only
+   the starts of its own protocol. It keeps the end each one shows, so a
+   start of either kind gives its place back whichever end it read first.
+   Such an Agent's starts have no allowance period, so on main a start the
+   server refused keeps its place for as long as the Agent's reservation
+   lasts, also after its message ended, and so does a start that gave its
+   place back before the budget was applied.
 
    In review (Desktop #246): an owned Agent's own steps and the session's
    renewal are read by the same rule. A refusal this computer makes itself
@@ -201,6 +205,14 @@ describes. "Send again" is what the sender has until it is decided.
 - A start the server refused for a message it still offers keeps its place,
   and the Agent's later messages wait behind that message, until it ends: at
   the latest when it has waited a day, or when the allowance period turns.
+- An Agent with an applied budget can also be started for no message, after
+  the process it follows. No message's end shows that the server will never
+  make such a start, and the server keeps no record of one it refused, so
+  it never gives its place back. The daemon makes no such start; only tests
+  ask for one. If one were made and refused, every later message after the
+  same process would wait for as long as the Agent's reservation lasts. Only
+  the end of the reservation, or the same start sent again and made, would
+  end the wait; there is no other way out.
 - A reader who did not send a message that arrived while its Agent was
   stopped keeps reading that the Agent is paused after it runs again.
 - A message is offered while the room's status lists it. The status holds
