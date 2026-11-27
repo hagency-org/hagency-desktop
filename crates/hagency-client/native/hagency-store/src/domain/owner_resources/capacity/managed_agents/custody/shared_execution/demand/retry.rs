@@ -3,9 +3,10 @@
 //! start intent, whose id derives from the demand and the retry number, that
 //! names the demand's never-started attempt. Proof is local and immutable:
 //! every earlier start of the event has an unclaimed fence and no claim, or
-//! (retry v2) a claimed process whose stop handed the event's unbegun work
-//! back (`release.rs`); such a retry names that stopped process.
-//! Nothing here starts a process, a call or a model turn.
+//! (retry v2) a claimed process whose stop asked for exactly this retry
+//! (`release.rs`), which the server shows only after it gave that process's
+//! work back; such a retry names that stopped process and releases its
+//! binding here. Nothing here starts a process, a call or a model turn.
 use super::*;
 
 /// Retries per event; the server enforces the same cap.
@@ -97,9 +98,9 @@ pub(in super::super) fn own_start(
 
 /// Every earlier start of the event provably never ran this event here: it
 /// was never claimed, or (retry v2) its claimed process stopped and its stop
-/// route handed this event's work back as exactly the next retry. The latest
-/// start is the head: the never-started head, or the newest process. Returns
-/// that head's command id.
+/// asked for exactly the next retry, which the server opens only for work
+/// whose turn it never recorded. The latest start is the head: the
+/// never-started head, or the newest process. Returns that head's command id.
 fn proven_unstarted(
     db: &Connection,
     profile: &str,
@@ -120,7 +121,7 @@ fn proven_unstarted(
         claimed_head = claimed;
         if claimed {
             // A claimed attempt may have run: another turn for this event only
-            // when its stop route, decided beside its stop, handed the work back.
+            // when its stop route, decided beside its stop, asked for it.
             previous = db
                 .query_row(
                     "SELECT a.id FROM owner_shared_successor_attempts a JOIN owner_shared_stop_routes s ON s.attempt_id=a.id WHERE a.start_intent_id=?1 AND a.child_id=?2 AND a.profile=?3 AND s.route='retry' AND s.demand_id=?4 AND s.retry=?5",
@@ -214,12 +215,12 @@ impl OwnerResourceRegistry {
                 return Err(Error::Conflict);
             }
             journal::control(&tx, &profile.digest, &child, proof.offer.control_revision)?;
-            let finished: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM owner_shared_demand_bindings WHERE demand_id=?1) OR EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals WHERE demand_id=?1)",
+            let (ended, bound): (bool, bool) = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals WHERE demand_id=?1),EXISTS(SELECT 1 FROM owner_shared_demand_bindings WHERE demand_id=?1)",
                 [&proof.offer.demand_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if finished {
+            if ended {
                 return Err(Error::LocalAuthority);
             }
             let exists: bool = tx.query_row(
@@ -228,6 +229,10 @@ impl OwnerResourceRegistry {
                 |r| r.get(0),
             )?;
             let start = if exists {
+                // The retry's own work is bound: the event is finished here.
+                if bound {
+                    return Err(Error::LocalAuthority);
+                }
                 // Replay of the same retry: its saved bytes, never a new start.
                 saved_start(&tx, &profile.digest, &child, &saved, n)?
             } else {
@@ -276,7 +281,13 @@ impl OwnerResourceRegistry {
                 if release::reoffering(&tx, &saved)? && !proof.reoffers {
                     release::lapse(&tx, &proof.offer.demand_id)?;
                 }
-                start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input
+                let start = start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input;
+                // Retry v2: the server showed this retry, so it gave the
+                // stopped head's work back; its binding here is released.
+                if bound {
+                    release::release(&tx, &proof.offer.demand_id, &head)?;
+                }
+                start
             };
             let input = SharedDemandStartInput {
                 demand_digest: proof.offer.digest()?,

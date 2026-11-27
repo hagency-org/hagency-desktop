@@ -1400,7 +1400,7 @@ impl DomainRepository {
                     "SELECT demand_id,disposition,start_intent_id,input_payload,input_digest,budget_payload,ledger_revision FROM owner_shared_demand_decisions LIMIT 0",
                     "SELECT demand_id,work_id,binding_payload,binding_digest,ledger_revision FROM owner_shared_demand_bindings LIMIT 0",
                     "SELECT work_id,demand_id,binding_payload,binding_digest,ledger_revision,released_revision,released_at_ms FROM owner_shared_demand_released_bindings LIMIT 0",
-                    "SELECT attempt_id,child_id,profile,observation_id,route,demand_id,retry,released_work_id,ledger_revision FROM owner_shared_stop_routes LIMIT 0",
+                    "SELECT attempt_id,child_id,profile,observation_id,route,demand_id,retry,ledger_revision FROM owner_shared_stop_routes LIMIT 0",
                     "SELECT demand_id,ledger_revision FROM owner_shared_demand_reoffer_lapses LIMIT 0",
                     "SELECT child_id,command_id,command_payload,command_digest,fence_revision FROM owner_managed_runtime_stops LIMIT 0",
                     "SELECT id,child_id,command_id,payload,digest,ledger_revision FROM owner_managed_runtime_observations LIMIT 0",

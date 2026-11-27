@@ -79,9 +79,10 @@ pub(super) async fn upload_end(
 /// only read, in one store call of its own (a stop saved without a route, by
 /// an earlier build, is decided then, once). What follows is the exchange
 /// alone, on that route on the first upload and on every resend: the demand
-/// retry request when the stop handed its event's unbegun work back, the
-/// plain result upload otherwise or once the server refused that request.
-/// Other evidence is uploaded plainly. `false` as for `upload_end`.
+/// retry request when the stop's event opted in, begun or not (the server
+/// decides by its record of the turn's start), the plain result upload
+/// otherwise or once the server refused that request. Other evidence is
+/// uploaded plainly. `false` as for `upload_end`.
 pub(super) async fn upload_stop(
     b: &Bound,
     r: &OwnerResourceRegistry,
@@ -172,7 +173,7 @@ async fn send_retry(
     retry: u64,
 ) -> Result<bool, NativeError> {
     receipt.validate_for(&d.command).map_err(store)?;
-    let reply: Timed<super::demand_io::RetryReply> = match b
+    let answer: Result<Timed<super::demand_io::RetryReply>, NativeError> = b
         .upload(
             super::demand_io::DemandAction::Retry {
                 id: offer.demand_id.clone(),
@@ -191,8 +192,24 @@ async fn send_retry(
             .into(),
             until,
         )
-        .await
-    {
+        .await;
+    retry_answer(answer.map(|reply| reply.value), receipt, offer)
+}
+/// What the server's answer to a retry request carrying `receipt` says of
+/// the stop. `true`: it recorded the stop on this route, whatever it then did
+/// with the event: a retry opened, the event left bound because its turn
+/// began, or the event ended because its wait for a retry was over. `false`:
+/// it refused the request and recorded nothing (a switched-off retry route
+/// answers 400 `invalid_shared_demand_retry`), so the stop is reported on
+/// the plain route. A failure that may not have reached its decision, a
+/// revoked authority, or a time-bound stop that the server's bound does not
+/// yet allow is an error: the same request is sent again later.
+fn retry_answer(
+    answer: Result<super::demand_io::RetryReply, NativeError>,
+    receipt: &SharedAttemptProcessReceipt,
+    offer: &SharedDemandOffer,
+) -> Result<bool, NativeError> {
+    let reply = match answer {
         Ok(v) => v,
         Err(e) if undecided(&e) => return Err(e),
         // Not yet past the server's time bound: the same request, later.
@@ -202,12 +219,12 @@ async fn send_retry(
         // Refused (gate off, demand moved on, stop): report the evidence alone.
         Err(_) => return Ok(false),
     };
-    let ack = &reply.value.acknowledgement;
-    reply.value.demand.validate()?;
+    let ack = &reply.acknowledgement;
+    reply.demand.validate()?;
     if ack.observation_id != receipt.observation_id
         || ack.receipt_digest != digest(receipt)?
         || ack.state != "stopped"
-        || reply.value.demand.offer.demand_id != offer.demand_id
+        || reply.demand.offer.demand_id != offer.demand_id
     {
         return Err(invalid());
     }
@@ -1326,3 +1343,7 @@ pub(super) async fn report_work(
     }
     Ok(ack.value.reply_state)
 }
+
+#[cfg(all(test, feature = "shared-intake"))]
+#[path = "retry_answer_tests.rs"]
+mod retry_answer_tests;

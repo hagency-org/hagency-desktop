@@ -82,9 +82,9 @@ pub(super) struct BindingReply {
     pub demand: Option<WorkBinding>,
 }
 /// The executor's not_started evidence for a demand's latest attempt, or
-/// (retry v2) the stop of its claimed attempt that never began the event's
-/// work, with its request to run the same event again in place (ADR-193
-/// amendment).
+/// (retry v2) the stop of its claimed attempt, with its request to run the
+/// same event again in place (ADR-193 amendment). For a stop the server
+/// decides, by its record of the turn's start, whether the event runs again.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RetryInput {
@@ -220,7 +220,7 @@ impl DemandAction {
                 hash(&input.result.command_digest)?;
                 hash(&input.result.token)?;
                 // not_started evidence (retry v1), or a claimed attempt's stop
-                // that handed the event's unbegun work back (retry v2).
+                // (retry v2), begun or not: the server decides.
                 if input.expected_control_revision == 0
                     || input.expected_control_revision > 9_007_199_254_740_991
                     || !(1..=MAX_DEMAND_RETRIES + 1).contains(&input.retry)
@@ -345,8 +345,9 @@ pub(super) async fn retries(b: &Bound) -> Result<bool, NativeError> {
     }
     Ok(d.capabilities.iter().any(|c| c == "shared-demand-retry-v1"))
 }
-/// Retry v2 in a bounded discovery answer: the server also takes back a
-/// stopped demand attempt's unbegun work and retries its event in place.
+/// Retry v2 in a bounded discovery answer: the server also takes back the
+/// work of a stopped demand attempt whose turn it never recorded as begun,
+/// and retries its event in place.
 pub(super) fn retry_v2_in(d: &Discovery) -> Option<bool> {
     if d.capabilities.len() > 64 || d.capabilities.iter().any(|c| c.len() > 128) {
         return None;

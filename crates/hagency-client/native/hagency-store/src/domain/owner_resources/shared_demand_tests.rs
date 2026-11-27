@@ -1399,8 +1399,20 @@ fn release_by_hand() -> String {
     "INSERT INTO owner_shared_demand_released_bindings SELECT work_id,demand_id,binding_payload,binding_digest,ledger_revision,999999,1 FROM owner_shared_demand_bindings".into()
 }
 
+/// Saves `kind` for `w`'s turn, as the turn's own steps save it (its inbox
+/// row was saved by `stop_claimed` with `begun`).
+async fn work_event(f: &Fixture, w: &SharedWorkItem, kind: &'static str) {
+    let id = w.id.clone();
+    f.registry.0.store.call(4096, move |db| {
+        let rev: u64 = db.db.query_row("SELECT revision+1 FROM owner_resource_identity WHERE singleton=1", [], |r| r.get(0))?;
+        db.db.execute("UPDATE owner_resource_identity SET revision=revision+1 WHERE singleton=1", [])?;
+        db.db.execute("INSERT INTO owner_shared_work_events VALUES(?1||'_'||?2,?1,?2,'{}',?3,?4)", rusqlite::params![id, kind, "a".repeat(64), rev]).unwrap();
+        Ok(())
+    }).await.unwrap();
+}
+
 #[tokio::test]
-async fn shared_demand_v2_stop_hands_unbegun_work_back_and_the_event_runs_once_more() {
+async fn shared_demand_v2_a_shown_retry_hands_the_work_back_and_the_event_runs_once_more() {
     let (f, c) = original(true).await;
     call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
     let lost = offer(&c, "handed_back", 1);
@@ -1411,24 +1423,39 @@ async fn shared_demand_v2_stop_hands_unbegun_work_back_and_the_event_runs_once_m
     assert_eq!(serde_json::to_value(&input).unwrap()["reoffers"], true);
     let (w, binding) = stop_claimed(&f, &c, &lost, &claimed, true, false).await;
     let child = c.agent_reservation_id.clone();
-    // Decided beside the stop, in its transaction: the binding moved, exactly.
-    assert_eq!((count(&f, "owner_shared_stop_routes").await, count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 0, 1));
+    // Decided beside the stop, in its transaction: the stop asks for retry
+    // 1, and nothing moves before the server answers.
+    assert_eq!((count(&f, "owner_shared_stop_routes").await, count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 1, 0));
     let Some(SharedAttemptStopRoute::Retry { offer: owner, retry: 1 }) = stop_route(&f, &c, &claimed).await else {
         panic!("retry 1 of the event");
     };
     assert_eq!(owner.demand_id, lost.demand_id);
-    let released = f.registry.0.store.call(4096, |db| {
-        Ok(db.db.query_row("SELECT r.work_id,r.binding_digest,s.released_work_id,s.retry FROM owner_shared_demand_released_bindings r JOIN owner_shared_stop_routes s ON s.released_work_id=r.work_id", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?, r.get::<_, String>(2)?, r.get::<_, u64>(3)?)))?)
-    }).await.unwrap();
-    assert_eq!(released, (w.id.clone(), digest(&binding), w.id.clone(), 1));
-    // Decided once: every resend reads the same route, and nothing more moves.
+    // Decided once: every resend reads the same route.
     assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Retry { retry: 1, .. })));
-    assert_eq!((count(&f, "owner_shared_stop_routes").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 1));
+    assert_eq!(count(&f, "owner_shared_stop_routes").await, 1);
+    // Until the server shows the retry, its binding stands, and nothing
+    // releases it but that retry.
+    f.registry.recover_shared_demand_binding(cleanup(&f, &c, 1).await, lost.clone(), binding.clone()).await.unwrap();
+    assert!(store_sql(&f, release_by_hand()).await.unwrap_err().contains("unbegun demand work required"));
+    // The retry names the stopped attempt, with its process digest; the
+    // server that shows it lists retry v2.
+    let target = f.registry.shared_successor_selection(f.profile.clone(), c.assignment_id.clone()).await.unwrap().unwrap();
+    assert_eq!(digest(target.predecessor().unwrap()), digest(&claimed));
+    let retry = |n: u64| f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), target.predecessor().cloned(), n);
+    assert!(retry(2).await.is_err(), "retries are numbered without gaps");
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 0));
+    let SharedDemandRetry::Start(first) = retry(1).await.unwrap() else {
+        panic!("a retry start");
+    };
+    // Beside the retry's intent the binding moved, exactly.
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (0, 1));
+    let released = f.registry.0.store.call(4096, |db| {
+        Ok(db.db.query_row("SELECT work_id,binding_digest FROM owner_shared_demand_released_bindings", [], |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)))?)
+    }).await.unwrap();
+    assert_eq!(released, (w.id.clone(), digest(&binding)));
     // The event waits again in its place; a later event waits behind it.
     let device = c.reserve_command.executor_device_id.clone();
     assert!(recovery_walk(&f, &device, true).await.contains(&lost.demand_id));
-    let target = f.registry.shared_successor_selection(f.profile.clone(), c.assignment_id.clone()).await.unwrap().unwrap();
-    assert_eq!(digest(target.predecessor().unwrap()), digest(&claimed));
     let waiting = f.registry.prepare_shared_demand(verified(&f, later.clone()), c.clone(), target.predecessor().cloned()).await.unwrap();
     assert_eq!(*waiting.disposition(), SharedDemandDisposition::Pending);
     // The old work is never admitted or bound again, even on a stale reply.
@@ -1436,13 +1463,6 @@ async fn shared_demand_v2_stop_hands_unbegun_work_back_and_the_event_runs_once_m
     f.registry.recover_shared_demand_binding(cleanup(&f, &c, 1).await, lost.clone(), binding.clone()).await.unwrap();
     assert_eq!(count(&f, "owner_shared_demand_bindings").await, 0);
     assert!(save_binding(&f, &binding).await.unwrap_err().contains("released demand work"));
-    // The retry names the stopped attempt, with its process digest; the
-    // server that shows it lists retry v2.
-    let retry = |n: u64| f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), target.predecessor().cloned(), n);
-    assert!(retry(2).await.is_err(), "retries are numbered without gaps");
-    let SharedDemandRetry::Start(first) = retry(1).await.unwrap() else {
-        panic!("a retry start");
-    };
     let start = first.input().clone();
     assert_eq!(start.retry, Some(1));
     assert!(start.reoffers, "a retry shown while v2 is listed keeps its event's opt-in");
@@ -1481,27 +1501,62 @@ async fn shared_demand_v2_stop_hands_unbegun_work_back_and_the_event_runs_once_m
 }
 
 #[tokio::test]
-async fn shared_demand_v2_release_needs_unbegun_work_and_its_exact_row() {
+async fn shared_demand_v2_a_requested_start_asks_too_and_the_server_decides() {
     let (f, c) = original(true).await;
     call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
     let lost = offer(&c, "begun_event", 1);
     let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
-    // The turn's start was requested before the stop: the work is not
-    // provably unbegun, so the plain route is saved beside the stop.
-    stop_claimed(&f, &c, &lost, &claimed, true, true).await;
+    // The turn's start was requested before the stop and no answer came:
+    // only the server knows whether it recorded that start, so the stop asks
+    // it, as every stop of an event that opted in does.
+    let (w, binding) = stop_claimed(&f, &c, &lost, &claimed, true, true).await;
     assert_eq!(count(&f, "owner_shared_stop_routes").await, 1);
-    assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Plain)));
-    assert!(store_sql(&f, release_by_hand()).await.unwrap_err().contains("unbegun demand work required"));
+    assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Retry { retry: 1, .. })));
     assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 0));
+    // While the server keeps the event bound (as it answers the stop of a
+    // turn it recorded), the binding stands and the event is finished here.
+    f.registry.recover_shared_demand_binding(cleanup(&f, &c, 1).await, lost.clone(), binding.clone()).await.unwrap();
+    let device = c.reserve_command.executor_device_id.clone();
+    assert!(!recovery_walk(&f, &device, true).await.contains(&lost.demand_id));
+    f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), w.clone()).await.unwrap();
     // A binding never changes in place and never leaves without its release.
+    assert!(store_sql(&f, release_by_hand()).await.unwrap_err().contains("unbegun demand work required"));
     assert!(store_sql(&f, "DELETE FROM owner_shared_demand_bindings".into()).await.unwrap_err().contains("retained demand work binding"));
     assert!(store_sql(&f, "UPDATE owner_shared_demand_bindings SET ledger_revision=ledger_revision".into()).await.unwrap_err().contains("immutable demand work binding"));
     assert!(store_sql(&f, "DELETE FROM owner_shared_stop_routes".into()).await.unwrap_err().contains("retained stop route"));
-    assert!(store_sql(&f, "UPDATE owner_shared_stop_routes SET route='retry'".into()).await.unwrap_err().contains("immutable stop route"));
-    // The event stays finished here; the plain route ends it centrally.
-    let device = c.reserve_command.executor_device_id.clone();
-    assert!(!recovery_walk(&f, &device, true).await.contains(&lost.demand_id));
-    assert!(f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()), c.clone(), Some(claimed), 1).await.is_err());
+    assert!(store_sql(&f, "UPDATE owner_shared_stop_routes SET route='plain'".into()).await.unwrap_err().contains("immutable stop route"));
+    // When it shows the retry instead, it never recorded the start (the
+    // request did not reach it): the work it gave back is released here,
+    // beside the retry, and never admitted again.
+    let SharedDemandRetry::Start(_) = f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed), 1).await.unwrap() else {
+        panic!("a retry start");
+    };
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (0, 1));
+    assert!(matches!(f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), w).await, Err(Error::LocalAuthority)));
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_start_the_server_confirmed_is_never_released_here() {
+    let (f, c) = original(true).await;
+    call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+    let lost = offer(&c, "confirmed_event", 1);
+    let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
+    let (w, _) = stop_claimed(&f, &c, &lost, &claimed, true, true).await;
+    // The answer that recorded the turn's start had come back.
+    work_event(&f, &w, "start_confirmed").await;
+    assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Retry { retry: 1, .. })));
+    // A retry shown for it contradicts what the server said here: refused,
+    // with nothing saved, and the work stays bound.
+    let intents = count(&f, "owner_shared_start_intents").await;
+    assert!(matches!(
+        f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed), 1).await,
+        Err(Error::Conflict)
+    ));
+    assert_eq!(count(&f, "owner_shared_start_intents").await, intents);
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 0));
+    assert!(store_sql(&f, release_by_hand()).await.unwrap_err().contains("unbegun demand work required"));
+    f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), w).await.unwrap();
     f.registry.shutdown().await.unwrap();
 }
 
@@ -1580,6 +1635,9 @@ async fn shared_demand_v2_a_retry_prepared_without_v2_ends_the_opt_in() {
     assert!(!start.reoffers);
     assert!(serde_json::to_value(&start).unwrap().get("reoffers").is_none());
     assert_eq!(count(&f, "owner_shared_demand_reoffer_lapses").await, 1);
+    // The retry shows that the server gave the work back while it still
+    // took messages back: that work is released here all the same.
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (0, 1));
     // Every resend has the same bytes, whatever the server lists by then.
     for listed in [true, false] {
         let SharedDemandRetry::Start(again) = retry(listed).await.unwrap() else {
@@ -1612,22 +1670,66 @@ async fn shared_demand_v2_a_retry_prepared_without_v2_ends_the_opt_in() {
 }
 
 #[tokio::test]
-async fn shared_demand_v2_handed_back_lost_binding_never_finishes_the_event() {
+async fn shared_demand_v2_a_lost_binding_the_server_still_holds_finishes_the_event() {
     let (f, c) = original(true).await;
     call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
     let lost = offer(&c, "lost_binding", 1);
     let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
     // The server bound the work but this installation never saved it.
-    let (_, binding) = stop_claimed(&f, &c, &lost, &claimed, false, false).await;
+    let (w, binding) = stop_claimed(&f, &c, &lost, &claimed, false, false).await;
     assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Retry { retry: 1, .. })));
+    // The server answers the stop with the event still bound (its turn
+    // began): that binding is saved, and the event is finished here.
+    f.registry.recover_shared_demand_binding(cleanup(&f, &c, 1).await, lost.clone(), binding.clone()).await.unwrap();
+    assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (1, 0));
+    let device = c.reserve_command.executor_device_id.clone();
+    assert!(!recovery_walk(&f, &device, true).await.contains(&lost.demand_id));
+    f.registry.shared_work_control_for_test(c.agent_reservation_id.clone(), w).await.unwrap();
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_bound_answer_read_before_the_shown_retry_is_history() {
+    let (f, c) = original(true).await;
+    call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+    let lost = offer(&c, "stale_binding", 1);
+    let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
+    // The server bound the work but this installation never saved it, and
+    // the server showed the retry: there is nothing here to release.
+    let (_, binding) = stop_claimed(&f, &c, &lost, &claimed, false, false).await;
+    assert!(matches!(f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed), 1).await.unwrap(), SharedDemandRetry::Start(_)));
     assert_eq!(count(&f, "owner_shared_demand_released_bindings").await, 0);
-    // A later `bound` reply is history: the event keeps waiting for its retry.
+    // A `bound` answer read before then is history: the event keeps waiting
+    // for its retry, and that work is never bound.
     f.registry.recover_shared_demand_binding(cleanup(&f, &c, 1).await, lost.clone(), binding.clone()).await.unwrap();
     assert_eq!(count(&f, "owner_shared_demand_bindings").await, 0);
     let device = c.reserve_command.executor_device_id.clone();
     assert!(recovery_walk(&f, &device, true).await.contains(&lost.demand_id));
     assert!(save_binding(&f, &binding).await.unwrap_err().contains("released demand work"));
-    assert!(matches!(f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()), c.clone(), Some(claimed), 1).await.unwrap(), SharedDemandRetry::Start(_)));
+    f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_retry_refused_after_its_wait_ends_the_event_for_good() {
+    let (f, c) = original(true).await;
+    call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+    let lost = offer(&c, "lapsed_retry", 1);
+    let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
+    stop_claimed(&f, &c, &lost, &claimed, true, false).await;
+    let retry = || f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed.clone()), 1);
+    let SharedDemandRetry::Start(_) = retry().await.unwrap() else {
+        panic!("a retry start");
+    };
+    // Its start went out after the wait for it was over. The server refused
+    // it (409 `shared_demand_not_current`), a decision that saves nothing
+    // here, and the next read of the demand ends the event (`head_changed`,
+    // block payload `retry_lapsed`).
+    f.registry.retain_shared_demand_terminal(cleanup(&f, &c, 1).await, lost.clone(), "head_changed".into(), Some(claimed.command_id.clone())).await.unwrap();
+    // Ended: the retry is never prepared or sent again, and the event no
+    // longer holds the queue.
+    assert!(matches!(retry().await, Err(Error::LocalAuthority)));
+    let device = c.reserve_command.executor_device_id.clone();
+    assert!(!recovery_walk(&f, &device, true).await.contains(&lost.demand_id));
     f.registry.shutdown().await.unwrap();
 }
 

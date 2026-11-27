@@ -1,9 +1,12 @@
 //! ADR-193 amendment (retry v2): how a claimed demand attempt's stop reaches
-//! the server, decided once beside its stop. A stop that provably never began
-//! its demand's work hands that work back: in the same transaction the binding
-//! moves into a retained release row, so the demand waits again in its FIFO
-//! place, and the stop is then sent as the demand's next retry request instead
-//! of the plain result upload. Nothing here starts a process, a call or a turn.
+//! the server, decided once beside its stop. The stop of an attempt whose
+//! event opted in is sent as the demand's next retry request instead of the
+//! plain result upload, whether or not its turn began: the server decides,
+//! by its record of the turn's start, the one line there is. Work whose turn
+//! it never recorded it gives back and retries in place; begun work stays
+//! bound. Only when the server shows that retry does the binding here move
+//! into a retained release row (`release`, beside the retry's intent), so
+//! the retry's work can bind. Nothing here starts a process, a call or a turn.
 use super::*;
 
 /// How a claimed attempt's stop reaches the server.
@@ -15,34 +18,39 @@ pub enum SharedAttemptStopRoute {
     Retry { offer: SharedDemandOffer, retry: u64 },
 }
 
-/// Work that is provably unbegun: no start, call, tool or reply event, no work
-/// observation, no reply delivery and no call row of any state. Migration 116
-/// checks the same facts before a binding may be released.
-fn unbegun(db: &Connection, work_id: &str) -> Result<bool, Error> {
+/// This installation holds the server's word that `work_id`'s turn began:
+/// the answer that recorded its start (`start_confirmed`), an issued call, an
+/// observed reply, a work observation or a reply delivery. The server's record
+/// of the start decides; this only refuses a release that contradicts what
+/// the server already said here. Migration 116 checks the same facts.
+fn started(db: &Connection, work_id: &str) -> Result<bool, Error> {
     Ok(db.query_row(
-        "SELECT NOT EXISTS(SELECT 1 FROM owner_shared_work_events WHERE work_id=?1) AND NOT EXISTS(SELECT 1 FROM owner_shared_work_observations WHERE work_id=?1) AND NOT EXISTS(SELECT 1 FROM owner_shared_reply_deliveries WHERE work_id=?1) AND NOT EXISTS(SELECT 1 FROM owner_shared_successor_call_pins WHERE work_id=?1) AND NOT EXISTS(SELECT 1 FROM owner_managed_calls c JOIN owner_shared_work_inbox w ON w.execution_id=c.execution_id AND w.child_id=c.child_id WHERE w.id=?1)",
+        "SELECT EXISTS(SELECT 1 FROM owner_shared_work_events WHERE work_id=?1 AND kind IN('start_confirmed','call_issued','reply_observed')) OR EXISTS(SELECT 1 FROM owner_shared_work_observations WHERE work_id=?1) OR EXISTS(SELECT 1 FROM owner_shared_reply_deliveries WHERE work_id=?1)",
         [work_id],
         |r| r.get(0),
     )?)
 }
 
-/// Work its stopped attempt handed back is never bound to its demand again.
+/// Work given back is never bound to its demand again: work released here,
+/// or work of a process that a retry of its demand names as its predecessor
+/// (the server shows a retry only after it gave that process's work back, so
+/// a `bound` answer read before then is history).
 pub(super) fn handed_back(
     db: &Connection,
     binding: &SharedDemandBinding,
 ) -> Result<bool, Error> {
     Ok(db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM owner_shared_demand_released_bindings WHERE work_id=?1) OR EXISTS(SELECT 1 FROM owner_shared_stop_routes WHERE attempt_id=?2 AND demand_id=?3 AND route='retry')",
-        params![binding.work_id, binding.runtime_command_id, binding.demand_id],
+        "SELECT EXISTS(SELECT 1 FROM owner_shared_demand_released_bindings WHERE work_id=?1) OR EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE id IN('sdr1_'||?2,'sdr2_'||?2,'sdr3_'||?2) AND predecessor_digest=?3)",
+        params![binding.work_id, binding.demand_id, binding.runtime_command_digest],
         |r| r.get(0),
     )?)
 }
 
 /// The event's opt-in stands: its original start was saved with `reoffers`
 /// and none of its retries was first prepared without it (`lapse`). Only
-/// then is a stop's work handed back here: the server gives back only the
-/// work of a start stored with `reoffers`, and after a lapse every start of
-/// the event goes out without it.
+/// then does a stop ask for a retry: the server gives back only the work of
+/// a start stored with `reoffers`, and after a lapse every start of the
+/// event goes out without it.
 pub(super) fn reoffering(db: &Connection, saved: &SharedDemandIntent) -> Result<bool, Error> {
     if !saved.input.as_ref().is_some_and(|i| i.reoffers) {
         return Ok(false);
@@ -84,8 +92,8 @@ pub(super) fn said_reoffers(db: &Connection, saved: &SharedDemandIntent, n: u64)
 /// Saved, before its intent and in the same transaction, when a retry of
 /// `demand_id` is first prepared without `reoffers` although its event opted
 /// in (the server that showed the retry no longer lists retry v2): from then
-/// on none of the event's work is handed back here, and that retry and every
-/// later start of the event go out without it.
+/// on no stop of the event asks for a retry, and that retry and every later
+/// start of the event go out without it.
 pub(super) fn lapse(tx: &Connection, demand_id: &str) -> Result<(), Error> {
     let saved: bool = tx.query_row(
         "SELECT EXISTS(SELECT 1 FROM owner_shared_demand_reoffer_lapses WHERE demand_id=?1)",
@@ -137,19 +145,17 @@ fn saved(
     }
 }
 
-/// A binding row, copied exactly.
-type BindingRow = (String, String, String, String, u64);
-
 /// The demand this stopped attempt was started for (`id`, by its original
-/// start or its retry `k`), the retry its stop asks for and the binding it
-/// hands back, when the stop may ask for a retry.
+/// start or its retry `k`) and the retry its stop asks for, when the stop
+/// may ask for one. Whether its turn began is not asked here: the server
+/// answers that by its record of the turn's start.
 fn retryable(
     db: &Connection,
     profile: &str,
     command: &SharedAttemptCommand,
     digest: &str,
     (id, k): (String, u64),
-) -> Result<Option<(SharedDemandOffer, u64, Option<BindingRow>)>, Error> {
+) -> Result<Option<(SharedDemandOffer, u64)>, Error> {
     let child = &command.agent_reservation_id;
     let n = k + 1;
     if n > MAX_DEMAND_RETRIES + 1 {
@@ -183,32 +189,32 @@ fn retryable(
     if terminal || competing {
         return Ok(None);
     }
-    // The demand's local work: none, or this attempt's own unbegun work.
-    let binding: Option<BindingRow> = db
+    // The demand's local work: none, or this attempt's own, begun or not.
+    let binding: Option<(String, String)> = db
         .query_row(
-            "SELECT demand_id,work_id,binding_payload,binding_digest,ledger_revision FROM owner_shared_demand_bindings WHERE demand_id=?1",
+            "SELECT work_id,binding_payload FROM owner_shared_demand_bindings WHERE demand_id=?1",
             [&id],
-            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
+            |r| Ok((r.get(0)?, r.get(1)?)),
         )
         .optional()?;
-    if let Some((_, work, payload, _, _)) = &binding {
+    if let Some((work, payload)) = &binding {
         let b: SharedDemandBinding = serde_json::from_str(payload)?;
         if b.runtime_command_id != command.command_id
             || b.runtime_command_digest != digest
             || &b.work_id != work
-            || !unbegun(db, work)?
         {
             return Ok(None);
         }
     }
-    Ok(Some((saved.offer, n, binding)))
+    Ok(Some((saved.offer, n)))
 }
 
 /// Decide once how `command`'s stop reaches the server, beside its stopped
 /// observation `observation_id`; a saved route is returned unchanged. Only
-/// what is saved here decides: the server gives back exactly the work of a
-/// start it stored with `reoffers`, so nothing is asked of it. An attempt
-/// that was not started for a demand has nothing to decide and saves nothing.
+/// what is saved here decides, and nothing moves: the server answers the
+/// retry request by its record of the turn's start, and the binding here
+/// moves only when it shows the retry (`release`). An attempt that was not
+/// started for a demand has nothing to decide and saves nothing.
 pub(in super::super) fn decide(
     tx: &Connection,
     profile: &str,
@@ -231,35 +237,60 @@ pub(in super::super) fn decide(
     let digest = canonical::digest(&serde_json::to_value(command)?)?;
     let eligible = retryable(tx, profile, command, &digest, found)?;
     bounded_row(tx, "owner_shared_stop_routes", "attempt_id", &command.command_id, 100_000)?;
-    let Some((offer, n, binding)) = eligible else {
+    let Some((offer, n)) = eligible else {
         let rev = revision(tx)?;
         tx.execute(
-            "INSERT INTO owner_shared_stop_routes VALUES(?1,?2,?3,?4,'plain',NULL,NULL,NULL,?5)",
+            "INSERT INTO owner_shared_stop_routes VALUES(?1,?2,?3,?4,'plain',NULL,NULL,?5)",
             params![command.command_id, child, profile, observation_id, rev],
         )?;
         return Ok(SharedAttemptStopRoute::Plain);
     };
-    let released = if let Some((demand, work, payload, binding_digest, ledger)) = binding {
-        bounded_row(tx, "owner_shared_demand_released_bindings", "work_id", &work, 100_000)?;
-        let rev = revision(tx)?;
-        tx.execute(
-            "INSERT INTO owner_shared_demand_released_bindings VALUES(?1,?2,?3,?4,?5,?6,?7)",
-            params![work, demand, payload, binding_digest, ledger, rev, graphs::now_ms()?],
-        )?;
-        tx.execute(
-            "DELETE FROM owner_shared_demand_bindings WHERE demand_id=?1 AND work_id=?2",
-            params![demand, work],
-        )?;
-        Some(work)
-    } else {
-        None
-    };
     let rev = revision(tx)?;
     tx.execute(
-        "INSERT INTO owner_shared_stop_routes VALUES(?1,?2,?3,?4,'retry',?5,?6,?7,?8)",
-        params![command.command_id, child, profile, observation_id, offer.demand_id, n, released, rev],
+        "INSERT INTO owner_shared_stop_routes VALUES(?1,?2,?3,?4,'retry',?5,?6,?7)",
+        params![command.command_id, child, profile, observation_id, offer.demand_id, n, rev],
     )?;
     Ok(SharedAttemptStopRoute::Retry { offer, retry: n })
+}
+
+/// The server showed a retry of `demand_id`'s event after `head`, the
+/// stopped process whose stop asked for it: it gave that process's work back
+/// (it opens such a retry only for work whose turn it never recorded). Beside
+/// the retry's intent, saved first in the same transaction, the binding here,
+/// if any, moves byte for byte into a retained release row, so that the
+/// retry's work can bind; the released work is never bound or admitted
+/// again. A binding of other work means the event is finished here. One this
+/// installation holds the server's word of a begun turn for (`started`)
+/// contradicts the server and is kept.
+pub(super) fn release(tx: &Connection, demand_id: &str, head: &str) -> Result<(), Error> {
+    let row: Option<(String, String, String, u64)> = tx
+        .query_row(
+            "SELECT work_id,binding_payload,binding_digest,ledger_revision FROM owner_shared_demand_bindings WHERE demand_id=?1",
+            [demand_id],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+        )
+        .optional()?;
+    let Some((work, payload, binding_digest, ledger)) = row else {
+        return Ok(());
+    };
+    let b: SharedDemandBinding = serde_json::from_str(&payload)?;
+    if b.runtime_command_id != head || b.work_id != work {
+        return Err(Error::LocalAuthority);
+    }
+    if started(tx, &work)? {
+        return Err(Error::Conflict);
+    }
+    bounded_row(tx, "owner_shared_demand_released_bindings", "work_id", &work, 100_000)?;
+    let rev = revision(tx)?;
+    tx.execute(
+        "INSERT INTO owner_shared_demand_released_bindings VALUES(?1,?2,?3,?4,?5,?6,?7)",
+        params![work, demand_id, payload, binding_digest, ledger, rev, graphs::now_ms()?],
+    )?;
+    tx.execute(
+        "DELETE FROM owner_shared_demand_bindings WHERE demand_id=?1 AND work_id=?2",
+        params![demand_id, work],
+    )?;
+    Ok(())
 }
 
 impl OwnerResourceRegistry {
