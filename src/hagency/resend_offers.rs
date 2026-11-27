@@ -157,20 +157,39 @@ pub fn merge_read(identity: &str, room: &str, thread: &str, value: &Value) -> bo
 }
 
 /// What "Send again" offers on `event` of `room`, unless this client has
-/// already sent it again.
+/// already sent it again, or has yet to read the copies of the timeline its
+/// copy would stand in.
 pub fn for_event(room: &str, event: &str) -> Option<Resend> {
     if sent_again(room, event) {
         return None;
     }
-    let state = STATE.lock().unwrap();
-    if state.refused.iter().any(|(r, e)| r == room && e == event) {
-        return None;
+    let offer = {
+        let state = STATE.lock().unwrap();
+        if state.refused.iter().any(|(r, e)| r == room && e == event) {
+            return None;
+        }
+        state.reads.iter()
+            .filter(|((r, _), _)| r == room)
+            .flat_map(|(_, offers)| offers)
+            .find(|offer| offer.event == event)
+            .cloned()?
+    };
+    copies_read(room, &offer).then_some(offer)
+}
+
+/// Whether the timeline that a copy of `offer` would stand in, the room's
+/// own or its thread's, runs on this client and has read the copies it
+/// started with. Until it has, `offer` is not shown: a copy read a moment
+/// later would withdraw it, and a press in between would send the message a
+/// second time.
+pub fn copies_read(room: &str, offer: &Resend) -> bool {
+    use matrix_sdk::ruma::{EventId, RoomId};
+    let Ok(room) = <&RoomId>::try_from(room) else { return false };
+    match offer.thread.as_deref().map(<&EventId>::try_from) {
+        None => crate::sliding_sync::copies_read(room, None),
+        Some(Ok(root)) => crate::sliding_sync::copies_read(room, Some(root)),
+        Some(Err(_)) => false,
     }
-    state.reads.iter()
-        .filter(|((r, _), _)| r == room)
-        .flat_map(|(_, offers)| offers)
-        .find(|offer| offer.event == event)
-        .cloned()
 }
 
 /// Whether this client has already sent `event` of `room` again, or found
@@ -300,6 +319,7 @@ mod tests {
     #[test]
     fn a_read_replaces_what_the_same_room_or_thread_offered() {
         let _turn = test_turn();
+        crate::sliding_sync::test_read_copies("!kept:x", None);
         assert!(merge_read(READER, "!kept:x", "", &offered("!kept:x", "$kept", "@first:x")));
         // The same read again changes nothing, and neither does a read of a
         // room that offers nothing.
@@ -319,6 +339,7 @@ mod tests {
     #[test]
     fn the_newest_read_that_lists_a_message_decides_its_offer() {
         let _turn = test_turn();
+        crate::sliding_sync::test_read_copies("!newest:x", Some("$newest_root"));
         let reply = |again: bool| json!({"executions":[
             {"roomId":"!newest:x","threadRoot":"$newest_root","eventId":"$newest_reply","agentMxid":"@first:x","canSendAgain":again},
         ]});
@@ -348,6 +369,7 @@ mod tests {
     #[test]
     fn an_offer_that_cannot_be_addressed_is_made_once() {
         let _turn = test_turn();
+        crate::sliding_sync::test_read_copies("!refused:x", None);
         // The server's row names an Agent that is no Matrix ID this client
         // can address.
         assert!(merge_read(READER, "!refused:x", "", &offered("!refused:x", "$refused", "@not an id")));
@@ -363,6 +385,7 @@ mod tests {
     #[test]
     fn a_message_sent_again_from_one_place_is_not_sent_from_the_other() {
         let _turn = test_turn();
+        crate::sliding_sync::test_read_copies("!twice:x", None);
         use matrix_sdk::ruma::{OwnedEventId, OwnedRoomId};
         assert!(merge_read(READER, "!twice:x", "", &offered("!twice:x", "$twice", "@first:x")));
         let offer = for_event("!twice:x", "$twice").unwrap();
@@ -371,5 +394,26 @@ mod tests {
         crate::sliding_sync::note_sent_again(&OwnedRoomId::try_from("!twice:x").unwrap(), &OwnedEventId::try_from("$twice").unwrap());
         assert!(for_event("!twice:x", "$twice").is_none());
         assert!(send("!twice:x", &offer));
+    }
+
+    #[test]
+    fn an_offer_waits_until_the_timeline_its_copy_would_stand_in_has_read_its_copies() {
+        let _turn = test_turn();
+        let read = json!({"executions":[
+            {"roomId":"!gated:x","threadRoot":"$gated_main","eventId":"$gated_main","agentMxid":"@first:x","canSendAgain":true},
+            {"roomId":"!gated:x","threadRoot":"$gated_root","eventId":"$gated_reply","agentMxid":"@first:x","canSendAgain":true},
+        ]});
+        assert!(merge_read(READER, "!gated:x", "", &read));
+        // No timeline of the room has read its copies yet: after a restart,
+        // or before the room is opened, nothing is offered.
+        assert!(for_event("!gated:x", "$gated_main").is_none());
+        assert!(for_event("!gated:x", "$gated_reply").is_none());
+        // Its thread has: the reply is offered, and the message of the room's
+        // own timeline is not, whose copy stands in a timeline not read.
+        crate::sliding_sync::test_read_copies("!gated:x", Some("$gated_root"));
+        assert!(for_event("!gated:x", "$gated_reply").is_some());
+        assert!(for_event("!gated:x", "$gated_main").is_none());
+        crate::sliding_sync::test_read_copies("!gated:x", None);
+        assert!(for_event("!gated:x", "$gated_main").is_some());
     }
 }

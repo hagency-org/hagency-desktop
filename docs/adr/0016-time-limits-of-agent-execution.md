@@ -22,9 +22,12 @@ nothing to press.
 The daemon follows the rules of the server's document. For the daemon they
 come to this:
 
-1. **A lease ends when the server's lease ends.** What the daemon holds (the
-   session, an Agent's execution lease, the activity lease of a working
-   process) follows the session's authorization window, up to two minutes.
+1. **A lease ends when the server's lease ends.** What the daemon holds
+   follows the session's authorization window, up to two minutes: on main,
+   the session and an Agent's execution lease. The activity lease of a
+   working process is 30 seconds on main, whatever the window, and never
+   past the session's end; that it follows the window too is in review
+   (Desktop #243 and #251, server #97).
    What it is offered (a start, a ticket, a command from a poll) has 30
    seconds and is offered again when missed. The daemon's local session bounds
    one request, never the run it belongs to.
@@ -132,9 +135,12 @@ For the room:
 5. **A message that ended without a turn says for which Agent.** When a
    message went to several Agents, the notice has a line for each one that
    has something to say, with its name. An Agent that did not process the
-   message is named even when it was the only one. A message that arrived
-   while its Agent was stopped says that the Agent is paused; once the Agent
-   runs again, its sender reads that the Agent did not process it.
+   message is named even when it was the only one, when the status gives
+   its Matrix ID. A row without one has a line without a name, and nothing
+   is offered for its Agent, which no new message could mention. A message
+   that arrived while its Agent was stopped says that the Agent is paused;
+   once the Agent runs again, its sender reads that the Agent did not
+   process it.
 6. **Its sender can send it again.** "Send again" sends the same message as a
    new one that mentions only the Agents that did not process it, in the same
    thread. An Agent that already answered is not asked twice. The first
@@ -149,11 +155,22 @@ For the room:
    only to the message's sender, and only while the Agent is in the room and
    has not been stopped. A message that waits for the Agent's allowance is
    not offered while it waits: its notice says so, and shows the Agent's
-   owner or manager the pool request that would let it go on. When the
-   allowance period turns before that, the message has ended without a turn
-   and is offered like the others. Nor is it offered for a run whose outcome
-   is unknown, which may have acted or cost something and has its review
-   instead, nor for a message that is still waiting.
+   owner or manager the pool request that would let it go on. When it has
+   waited a day, or when the allowance period turns first, the message has
+   ended without a turn and is offered like the others. Nor is it offered
+   for a run whose outcome is unknown, which may have acted or cost
+   something and has its review instead, nor for a message that is still
+   waiting.
+
+   When the status says why a message that ended without a turn is not
+   offered to its sender (`notOfferedBecause`), the notice says so. For an
+   Agent that is stopped (`agent_stopped`), or that cannot take a new
+   message now for another reason (`agent_unavailable`), the line says that
+   the Agent did not process the message, that it is stopped or not
+   available now, and that the message can be sent again once the Agent
+   runs again; it names the Agent when the status gives its Matrix ID. For
+   an Agent the status does not name (`agent_unnamed`), and from a server
+   that does not say why, the line stays as rule 5 has it.
 
    A message that the computer blocked because it could not count the
    Agent's earlier usage cannot run in that period, whatever anyone does.
@@ -196,11 +213,25 @@ For the room:
    the room's timeline, or a thread's, holds when it is opened, from each
    one that arrives later, and, for a new message that has not left the
    device yet, from the device's send queue, which keeps it across a
-   restart. A device that has not loaded the new message, or one whose new
-   message was removed, offers the first one again; the new message stands
-   in the room for its sender to see. A new message whose sending is
-   cancelled on its device before it left keeps the first one from being
-   offered by that window until the app starts again.
+   restart. A device that has not read the new message (it did not load
+   it, or it read the room only after the new message was removed) offers
+   the first one again; the new message stands in the room for its sender
+   to see. A new message whose sending is cancelled on its device before it
+   left keeps the first one from being offered by that window until the app
+   starts again.
+
+   The device keeps what it read apart from what was pressed on it. A press
+   whose new message could not be sent now ("try again in a moment") is
+   forgotten, and the first message is offered again, unless the device has
+   read a new message for it, from another device or an earlier press: a
+   new message it read is never forgotten that way. A timeline offers
+   nothing until it has read the new messages it starts with and those in
+   the send queue, so neither a restart nor opening a room or a thread
+   shows an offer that its new message would withdraw a moment later. A
+   message is offered only while the timeline its new message would stand
+   in is read: one of the room's own timeline only while that timeline is,
+   also where its thread is open, and a reply in a thread only while its
+   thread is.
 
    The server does not read that name: its status keeps offering the first
    message, and only the sender's devices stop. In an encrypted room it
@@ -249,14 +280,31 @@ describes. "Send again" is what the sender has until it is decided.
   there is no other way out.
 - A reader who did not send a message that arrived while its Agent was
   stopped keeps reading that the Agent is paused after it runs again.
-- A message is offered while the room's status lists it. The status holds
-  the 16 newest rows its reader is shown in the room, one for each Agent of
-  a message: rows of the reader's own messages and of every message to an
-  Agent whose computer is the reader's. In an encrypted room, rows of such
-  messages that wait for an outdated or absent daemon to read them count
-  too. A message that ended without a turn is no longer offered once 16
-  newer such rows stand above it, which for the owner of a busy Agent can
-  be soon.
+- A message is offered while a read of the room's status lists it. Each
+  read has a scope, the room or one of its threads, and holds the 16
+  newest rows its reader is shown there, one for each Agent of a message:
+  rows of the reader's own messages and of every message to an Agent whose
+  computer is the reader's. In an encrypted room, rows of such messages
+  that wait for an outdated or absent daemon to read them count too. The
+  cut counts rows, not messages, so a message at the cut can be offered
+  for only some of its Agents. A message that ended without a turn is no
+  longer offered by a read of its scope once 16 newer rows stand above it
+  there, which for the owner of a busy Agent can be soon. A read that does
+  not list a message says nothing of it, so an offer that a read of
+  another scope made (a thread's read lists the message its thread starts
+  from) stays until a read lists the message again.
+- What a device knows of messages sent again is kept for 1024 messages.
+  Past that, the oldest entries of rooms of which no timeline is read on
+  the device are dropped; a room with a timeline that is read keeps all of
+  its entries, so the record grows past 1024 only by the entries of the
+  rooms whose timelines the device keeps (16 timelines at most, a room's
+  own and its threads' together). A room offers nothing
+  until a timeline of it has read its new messages again, so a dropped
+  entry comes back from the timeline or the send queue before its first
+  message can be offered. What does not come back is a new message that
+  the timeline does not load, as on a device that never loaded it, and a
+  message that could no longer be sent: it is offered again, and says so
+  again when pressed.
 - In review (Desktop #243 and #251): a computer whose clock is ahead holds
   what its clock leaves of each lease, and renews it by rule 2 before that
   runs out. Only a clock ahead by the whole lease loses it, and every
@@ -271,6 +319,19 @@ describes. "Send again" is what the sender has until it is decided.
   computer slept: 20 to 30 seconds with main's 30-second leases, and 110
   to 120 seconds with #243's two-minute leases if #251 did not land with
   it.
+- A lapsed activity lease is not revived. A process whose activity lease
+  ran out is ended, and a renewal that gets no answer, or that the server
+  cannot check against Matrix, is asked again until the lease ends (rule
+  3). So a stall of the server, of its view of Matrix or of the path to it
+  that outlasts the lead the lease had when the stall began ends the
+  pooled processes it covers. On main that lead is about 20 seconds under
+  every window, 15 for the Claude driver: the lease is 30 seconds long and
+  is renewed when 20 (15) of them are left, and a renewal that hangs uses
+  up to 17 of them (below). Once the lease follows the window and is
+  renewed when it has lost 10 seconds (in review, Desktop #243 and #251,
+  server #97), the lead is the window less about 10 seconds: about 110
+  seconds under a 120-second window. The server's document has the same
+  bound ("A lapsed lease is not revived").
 - On main, the answer that grants an Agent's execution lease is read without
   its time, so for that lease the wall clock is the only witness, and a
   computer whose clock is behind by more than a second is refused a
