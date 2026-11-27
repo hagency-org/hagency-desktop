@@ -214,7 +214,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and #251) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
 | 3. Three classes of failure | in review (Desktop #242, #247). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
-| 3. A refused start gives its place back when its message ends | in review |
+| 3. A refused start gives its place back when its message ends | in review (Desktop #252) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
 | 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
 
