@@ -138,8 +138,9 @@ For the room:
    Agent's earlier usage cannot run in that period, whatever anyone does.
    When the server ends it at once (`endReason`), its notice says so, and it
    is offered only once the Agent's next period has begun, never for an
-   Agent without periods. When the server lets it wait out its time, its
-   notice says that it cannot start and when it ends.
+   Agent without periods; until then its notice says that a copy would end
+   the same way. When the server lets it wait out its time, its notice says
+   that it cannot start and that it ends within a day.
 
    It is offered on the message itself, on every message the room's status
    lists that can be sent again, and the notice at the end of the timeline
