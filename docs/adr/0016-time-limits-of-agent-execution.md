@@ -49,6 +49,13 @@ come to this:
    place. Only a decided failure ends work. The other two wait and ask again,
    and a wait keeps no local session between attempts.
 
+   The Matrix sign-in is a protocol of its own, and the daemon's custody of
+   it sorts its failures where they happen. A decided one ends the session:
+   the homeserver refusing the token as unknown or missing, the sign-in
+   server refusing the refresh (an invalid grant or client), a sign-in of
+   another account or device, or a sign-in server that is not this server's.
+   A timeout, or any other failure, is without an answer and waits.
+
    A refusal ends no more than its own message. The daemon saves each start
    of an Agent's process before it asks for it, and a saved start holds the
    place after the process it follows for the rest of the allowance period:
@@ -67,7 +74,9 @@ come to this:
    renewal are read by the same rule. A refusal this computer makes itself
    is decided and says why: an answer with no time, on a computer whose
    clock is behind, ends the run as `execution_clock_behind` instead of being
-   asked again until the lease is gone. An answer that does not carry the
+   asked again until the lease is gone, and the Agent's panel then says that
+   this computer's clock is wrong and what to change (#255). An answer that
+   does not carry the
    server's code is not a decision, so a 401 or 403 without one no longer
    signs the owner out; the proof in hand is kept and the renewal asked
    again.
