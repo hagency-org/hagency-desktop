@@ -198,7 +198,7 @@ pub fn remove_upload_schema(db: &rusqlite::Connection) {
         .unwrap();
 }
 
-/// Remove schema99–115 additions before older fixtures alter their parent tables.
+/// Remove schema99–116 additions before older fixtures alter their parent tables.
 pub fn remove_owner_resource_additions_after_schema98(db: &rusqlite::Connection) {
     // These triggers belong to older tables, and the views read older tables,
     // so dropping only their newer referenced tables would leave invalid
@@ -212,6 +212,7 @@ pub fn remove_owner_resource_additions_after_schema98(db: &rusqlite::Connection)
          DROP TRIGGER IF EXISTS owner_shared_start_intent_place;
          DROP VIEW IF EXISTS owner_shared_start_releasable;
          DROP TABLE IF EXISTS owner_shared_demand_second_terminals;
+         DROP TABLE IF EXISTS owner_shared_start_refusals;
          DROP TABLE IF EXISTS owner_shared_start_releases;
          DROP TABLE IF EXISTS owner_octos_model_resources;
          DROP TABLE IF EXISTS owner_octos_enrollments;

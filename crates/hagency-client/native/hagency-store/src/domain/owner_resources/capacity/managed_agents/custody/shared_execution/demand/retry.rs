@@ -195,6 +195,12 @@ impl OwnerResourceRegistry {
                 |r| r.get(0),
             )?;
             let start = if exists {
+                // A retry the server refused for the Agent's budget is never
+                // sent again (schema 116); it waits, as when another start
+                // holds the place below.
+                if refused(&tx, &id)? {
+                    return Err(Error::Conflict);
+                }
                 // Replay of the same retry: its saved bytes, never a new start.
                 saved_start(&tx, &profile.digest, &child, &saved, n)?
             } else {
@@ -238,7 +244,12 @@ impl OwnerResourceRegistry {
                     proof.check()?;
                     return Ok(SharedDemandRetry::Blocked(description));
                 }
-                start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input
+                // This computer has applied a budget to the Agent: its place
+                // is the budget lane's, and the retry waits as when another
+                // start holds the place above.
+                start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?
+                    .ok_or(Error::Conflict)?
+                    .input
             };
             let input = SharedDemandStartInput {
                 demand_digest: proof.offer.digest()?,

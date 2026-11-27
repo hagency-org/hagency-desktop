@@ -235,6 +235,13 @@ impl OwnerResourceRegistry {
             let old=load(&tx,&profile.digest,child,&proof.offer.demand_id)?;
             if let Some(old)=&old {
                 if old.offer.digest()?!=proof.offer.digest()?{return Err(Error::Conflict)}
+                // A first start the server refused for the Agent's budget gave
+                // its place back (schema 116): the budget lane takes the
+                // message up, and this lane never sends that start again.
+                if let Some(i)=&old.input && refused(&tx,&i.start.start_intent_id)? {
+                    proof.check()?;
+                    return Ok(SharedDemandIntent{offer:old.offer.clone(),disposition:SharedDemandDisposition::Pending,input:None,budget:None});
+                }
                 if old.disposition!=SharedDemandDisposition::Pending {proof.check()?;return Ok(old.clone())}
             }
             observe_control(&tx,&profile.digest,child,proof.offer.control_revision)?;
@@ -269,11 +276,15 @@ impl OwnerResourceRegistry {
                     let competing:Option<String>=tx.query_row("SELECT id FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id)",params![child,head_digest,periods::current_id(&tx,child)?],|r|r.get(0)).optional()?;
                     if competing.as_ref().is_some_and(|old|old!=&id){
                         (SharedDemandDisposition::Pending,None,None,pending_revision()?)
-                    }else{
-                        let saved=start_intent::prepare_in_transaction(&tx,e,original.clone(),predecessor.clone(),id)?;
+                    }else if let Some(saved)=start_intent::prepare_in_transaction(&tx,e,original.clone(),predecessor.clone(),id)?{
                         let input=SharedDemandStartInput{demand_digest:proof.offer.digest()?,expected_control_revision:proof.offer.control_revision,start:saved.input,retry:None};
                         input.validate_for(&proof.offer)?;let rev=input.start.budget_observation.observed_ledger_revision;
                         (SharedDemandDisposition::StartPrepared,Some(input),None,rev)
+                    }else{
+                        // This computer has applied a budget to the Agent: the
+                        // budget lane takes the message up. A start saved before
+                        // that still replays above.
+                        (SharedDemandDisposition::Pending,None,None,pending_revision()?)
                     }
                 }
             };
