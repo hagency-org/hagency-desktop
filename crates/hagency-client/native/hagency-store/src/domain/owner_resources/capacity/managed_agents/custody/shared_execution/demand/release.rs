@@ -180,9 +180,11 @@ fn retryable(
         [&id],
         |r| r.get(0),
     )?;
-    // No other start holds this attempt's place as predecessor.
+    // No other start holds this attempt's place as predecessor. A start the
+    // server never made, of an event it ended, holds none (schema 114), also
+    // for a route decided at the stop's first upload, after such a start.
     let competing: bool = db.query_row(
-        "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2) OR EXISTS(SELECT 1 FROM owner_shared_budget_start_intents WHERE child_id=?1 AND predecessor_digest=?2)",
+        "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id)) OR EXISTS(SELECT 1 FROM owner_shared_budget_start_intents WHERE child_id=?1 AND predecessor_digest=?2)",
         params![child, digest],
         |r| r.get(0),
     )?;

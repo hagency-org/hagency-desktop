@@ -1918,9 +1918,10 @@ async fn shared_demand_v2_a_retry_refused_after_its_wait_ends_the_event_for_good
     let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
     stop_claimed(&f, &c, &lost, &claimed, true, false).await;
     let retry = || f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed.clone()), 1);
-    let SharedDemandRetry::Start(_) = retry().await.unwrap() else {
+    let SharedDemandRetry::Start(start) = retry().await.unwrap() else {
         panic!("a retry start");
     };
+    let held = start.input().start.start_intent_id.clone();
     // Its start went out after the wait for it was over. The server refused
     // it (409 `shared_demand_not_current`), a decision that saves nothing
     // here, and the next read of the demand ends the event (`head_changed`,
@@ -1931,7 +1932,63 @@ async fn shared_demand_v2_a_retry_refused_after_its_wait_ends_the_event_for_good
     assert!(matches!(retry().await, Err(Error::LocalAuthority)));
     let device = c.reserve_command.executor_device_id.clone();
     assert!(!recovery_walk(&f, &device, true).await.contains(&lost.demand_id));
+    // The end names the start that began the stopped process, the one the
+    // retry follows, so the server never made the retry: it gives its place
+    // back (schema 114), and the next message after that process starts.
+    assert_eq!(released(&f).await, vec![held.clone()]);
+    let mut next = offer(&c, "next_message", 1);
+    next.received_at_ms = lost.received_at_ms + 1;
+    next.predecessor_command_id = claimed.command_id.clone();
+    next.predecessor_command_digest = digest(&claimed);
+    let saved = f.registry.prepare_shared_demand(verified(&f, next), c.clone(), Some(claimed.clone())).await.unwrap();
+    assert_eq!(*saved.disposition(), SharedDemandDisposition::StartPrepared);
+    assert_ne!(saved.input().unwrap().start.start_intent_id, held);
     f.registry.shutdown().await.unwrap();
+}
+
+#[tokio::test]
+async fn shared_demand_v2_a_route_decided_late_skips_a_start_that_gave_its_place_back() {
+    for given_back in [false, true] {
+        let (f, c) = original(true).await;
+        call(&f, &c, "retained_unknown", "unknown", 40, 7, false, false).await;
+        let lost = offer(&c, "decided_late", 1);
+        let (claimed, _) = claimed_demand_attempt(&f, &c, &lost, true).await;
+        // Deciding failed beside the stop: the stop is kept without a route,
+        // and its first upload decides.
+        store_sql(&f, "CREATE TRIGGER deciding_fails BEFORE INSERT ON owner_shared_stop_routes BEGIN SELECT RAISE(ABORT,'deciding failed'); END".into()).await.unwrap();
+        stop_claimed(&f, &c, &lost, &claimed, true, false).await;
+        store_sql(&f, "DROP TRIGGER deciding_fails".into()).await.unwrap();
+        assert_eq!(count(&f, "owner_shared_stop_routes").await, 0);
+        // Before that upload, the next message's start after the stopped
+        // process was saved, and the server refused it.
+        let mut next = offer(&c, "next_message", 1);
+        next.received_at_ms = lost.received_at_ms + 1;
+        next.predecessor_command_id = claimed.command_id.clone();
+        next.predecessor_command_digest = digest(&claimed);
+        let saved = f.registry.prepare_shared_demand(verified(&f, next.clone()), c.clone(), Some(claimed.clone())).await.unwrap();
+        assert_eq!(*saved.disposition(), SharedDemandDisposition::StartPrepared);
+        let refused = saved.input().unwrap().start.start_intent_id.clone();
+        if !given_back {
+            // While its message is offered, that start holds the place after
+            // the process: the stop goes on the plain route, and no retry of
+            // the event follows the process.
+            assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Plain)));
+            assert!(f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed.clone()), 1).await.is_err());
+            f.registry.shutdown().await.unwrap();
+            continue;
+        }
+        // Its message ended with no start of it: the place is free, and the
+        // stop asks for the event's retry, which may take it.
+        f.registry.retain_shared_demand_terminal(cleanup(&f, &c, 1).await, next.clone(), "expired".into(), None).await.unwrap();
+        assert_eq!(released(&f).await, vec![refused]);
+        assert!(matches!(stop_route(&f, &c, &claimed).await, Some(SharedAttemptStopRoute::Retry { retry: 1, .. })));
+        let SharedDemandRetry::Start(start) = f.registry.prepare_shared_demand_retry(verified(&f, lost.clone()).with_reoffers(true), c.clone(), Some(claimed.clone()), 1).await.unwrap() else {
+            panic!("a retry start");
+        };
+        assert_eq!(start.input().start.predecessor.command_id, claimed.command_id);
+        assert_eq!((count(&f, "owner_shared_demand_bindings").await, count(&f, "owner_shared_demand_released_bindings").await), (0, 1));
+        f.registry.shutdown().await.unwrap();
+    }
 }
 
 #[tokio::test]
