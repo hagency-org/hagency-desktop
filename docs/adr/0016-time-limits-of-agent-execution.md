@@ -49,6 +49,13 @@ come to this:
    place. Only a decided failure ends work. The other two wait and ask again,
    and a wait keeps no local session between attempts.
 
+   The Matrix sign-in is a protocol of its own, and the daemon's custody of
+   it sorts its failures where they happen. A decided one ends the session:
+   the homeserver refusing the token as unknown or missing, the sign-in
+   server refusing the refresh (an invalid grant or client), a sign-in of
+   another account or device, or a sign-in server that is not this server's.
+   A timeout, or any other failure, is without an answer and waits.
+
    A refusal ends no more than its own message. The daemon saves each start
    of an Agent's process before it asks for it, and a saved start holds the
    place after the process it follows for the rest of the allowance period:
@@ -61,13 +68,43 @@ come to this:
    message's status names no start the server made from it and this computer
    holds no command issued for it; the server starts nothing for a message
    that ended. Until the message ends, a refused start keeps its place and is
-   sent again unchanged.
+   sent again unchanged. An Agent with an applied budget gives the place back
+   the same way, and a start that gave its place back before the budget was
+   applied holds none after that. The daemon reads a message's status in
+   both protocols, the budget one and the one before it, and each names only
+   the starts of its own protocol. It keeps the end each one shows, so a
+   start of either kind gives its place back whichever end it read first.
+   Such an Agent's starts have no allowance period, so on main a start the
+   server refused keeps its place for as long as the Agent's reservation
+   lasts, also after its message ended, and so does a start that gave its
+   place back before the budget was applied.
+
+   In review (Desktop #246): an owned Agent's own steps and the session's
+   renewal are read by the same rule. A refusal this computer makes itself
+   is decided and says why: an answer with no time, on a computer whose
+   clock is behind, ends the run as `execution_clock_behind` instead of being
+   asked again until the lease is gone, and the Agent's panel then says that
+   this computer's clock is wrong and what to change (#255). An answer that
+   does not carry the
+   server's code is not a decision, so a 401 or 403 without one no longer
+   signs the owner out; the proof in hand is kept and the renewal asked
+   again.
 4. **The end of a lease is the server's.** The daemon holds it two ways:
    counted from the moment it sent the request, with the time the server put
    in its answer, and read against its wall clock, which keeps running while
    the computer sleeps (the counted time does not). The earlier of the two
    ends the lease. The wall clock may only end a lease early: it extends none
    and refuses none.
+
+   In review (Desktop #246): an Agent's execution lease and the
+   authorization of each reply of an owned Agent are counted from their
+   request with the answer's date, and the session's proof is held against
+   both ends, so a proof slept through is not used for its last awake
+   seconds. Whether the token needs refreshing is decided on the end the
+   server counted, not on what the wall clock left of it. Counting takes the
+   time in the answer's `Date` header, which the server process or a proxy
+   in front of it writes, against the end the server wrote from its database
+   clock: it assumes the two clocks agree to within a second.
 
 For the room:
 
@@ -96,6 +133,13 @@ For the room:
    and is offered like the others. Nor is it offered for a run whose outcome
    is unknown, which may have acted or cost something and has its review
    instead, nor for a message that is still waiting.
+
+   A message that the computer blocked because it could not count the
+   Agent's earlier usage cannot run in that period, whatever anyone does.
+   When the server ends it at once (`endReason`), its notice says so, and it
+   is offered only once the Agent's next period has begun, never for an
+   Agent without periods. When the server lets it wait out its time, its
+   notice says that it cannot start and when it ends.
 
    It is offered on the message itself, on every message the room's status
    lists that can be sent again, and the notice at the end of the timeline
@@ -132,7 +176,9 @@ For the room:
    device yet, from the device's send queue, which keeps it across a
    restart. A device that has not loaded the new message, or one whose new
    message was removed, offers the first one again; the new message stands
-   in the room for its sender to see.
+   in the room for its sender to see. A new message whose sending is
+   cancelled on its device before it left keeps the first one from being
+   offered by that window until the app starts again.
 
    The server does not read that name: its status keeps offering the first
    message, and only the sender's devices stop. In an encrypted room it
@@ -149,14 +195,16 @@ always had, and no "Send again".
 Whether accepted work that never began should be given to the next process
 without anyone asking. The owner's policy says that what is confirmed not to
 have run is run again. For a start that never happened it is: a message has
-its first attempt and at most three more. Three kinds of start are not tried
-again and end the message, as the server's document says: one whose process
-reported and then ended before it was given the message, any start of an
-Agent with an applied budget, and any start on a computer whose daemon does
-not ask for retries; their sender can send the message again. For accepted
-work it needs a second binding of one message on both sides. The server's
-document states the case, and its option A is drafted (Desktop #249, server
-#102); "Send again" is what the sender has until it is decided.
+its first attempt and at most three more. On main, three kinds of start are
+not tried again and end the message, as the server's document says: one
+whose process reported and then ended before it was given the message, any
+start of an Agent with an applied budget, and any start on a computer whose
+daemon does not ask for retries; their sender can send the message again.
+Option A, drafted as Desktop #249 and server #102, hands the first kind back
+and runs it again, when the server's switch is on and the start asked for it
+(`reoffers`); the other two stay as they are. For accepted work that needs a
+second binding of one message on both sides, which the server's document
+describes. "Send again" is what the sender has until it is decided.
 
 ## Known bounds
 
@@ -166,6 +214,14 @@ document states the case, and its option A is drafted (Desktop #249, server
 - A start the server refused for a message it still offers keeps its place,
   and the Agent's later messages wait behind that message, until it ends: at
   the latest when it has waited a day, or when the allowance period turns.
+- An Agent with an applied budget can also be started for no message, after
+  the process it follows. No message's end shows that the server will never
+  make such a start, and the server keeps no record of one it refused, so
+  it never gives its place back. The daemon makes no such start; only tests
+  ask for one. If one were made and refused, every later message after the
+  same process would wait for as long as the Agent's reservation lasts. Only
+  the end of the reservation, or the same start sent again and made, would
+  end the wait; there is no other way out.
 - A reader who did not send a message that arrived while its Agent was
   stopped keeps reading that the Agent is paused after it runs again.
 - A message is offered while the room's status lists it. The status holds
@@ -190,9 +246,21 @@ document states the case, and its option A is drafted (Desktop #249, server
   computer slept: 20 to 30 seconds with main's 30-second leases, and 110
   to 120 seconds with #243's two-minute leases if #251 did not land with
   it.
-- The answer that grants an Agent's execution lease carries no server time,
-  so for that lease the wall clock is the only witness, and a computer whose
-  clock is behind by more than a second is refused a full-length lease.
+- On main, the answer that grants an Agent's execution lease is read without
+  its time, so for that lease the wall clock is the only witness, and a
+  computer whose clock is behind by more than a second is refused a
+  full-length lease. In review (Desktop #246) the lease is counted from its
+  request with the answer's date. Only an answer without a date, behind a
+  proxy that drops it, still leaves the wall clock as the only witness; on a
+  computer whose clock is behind, the run then ends as
+  `execution_clock_behind` and says that the clock is behind.
+- An Agent's execution lease that its daemon did not release stays with
+  that daemon for up to 120 seconds from its last renewal. The same device
+  under the same sign-in takes it back at once. Another device, or this one
+  after a new sign-in, has to wait for it: on main a room's restore gives up
+  after 35 seconds and the service tries again later; in review (Desktop
+  #246) it waits up to 125 seconds, and a daemon that stops sends its
+  release up to four times within 15 seconds while it gets no answer.
 - A request to the server is given up after 15 seconds, 10 of them for
   connecting, whatever the window. A renewal that hangs that long, and the
   2 seconds before it is asked again, use 17 seconds of its lease: a
@@ -202,6 +270,13 @@ document states the case, and its option A is drafted (Desktop #249, server
   the timeouts are not scaled to it.
 - The daemon keeps at most 16 local sessions, each used again while 30 of its
   60 seconds are left, and its bridge serves at most 64 managers.
+- The daemon's store only moves forward. Every store migration raises the
+  store's schema version, and a build that finds a newer store than it knows
+  refuses to open it ("state format is corrupt or newer than this
+  binary"): no Agent on that computer runs again until a build at least as
+  new is installed. A host is rolled back by a newer build that undoes the
+  change, never by installing an older one. #252's place records (schema
+  114) are such a step, and so is every store migration in review here.
 
 ## State
 
@@ -213,10 +288,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 2. Token refresh ahead of the expiry; one local session shared between calls | implemented |
 | 2. One renewal moment for the activity lease, in all four drivers | in review (Desktop #243 and #251) |
 | 5, 6. The notice names the Agent and offers "Send again", and so does each message that can be sent again | implemented (Desktop #244, #245, #248; server #99); the name and the button need a server whose status names the Agent of each row and says whether the message can be sent again |
-| 3. Three classes of failure | in review (Desktop #242, #247). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
-| 3. A refused start gives its place back when its message ends | in review (Desktop #252) |
+| 3. Three classes of failure | in review (Desktop #242, #247; an owned Agent's steps and the session's renewal: #246). The server's list of the 503 answers that are decisions is pinned by tests (server #101) |
+| 3. A refused start gives its place back when its message ends | implemented (Desktop #252); for an Agent with an applied budget, in review (Desktop #256) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
-| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. Open: the Agent execution lease (see the known bounds) |
-
-Also in review: Desktop #246 counts an Agent execution lease from its
-request with the server's date (point 4, and the known bound on that lease).
+| 4. The wall clock only ends a lease early | holds for a proof, a ticket and a start window. For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
