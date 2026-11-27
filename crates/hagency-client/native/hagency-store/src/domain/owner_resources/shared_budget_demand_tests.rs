@@ -523,17 +523,44 @@ async fn budget_execution_v3_schema116_keeps_every_place_given_back(){
     db.execute_batch("DROP TRIGGER owner_shared_start_intent_place;DROP TRIGGER owner_shared_start_releases_proof;DROP VIEW owner_shared_start_releasable;DROP TABLE owner_shared_start_refusals;
         CREATE TABLE releases_115(start_intent_id TEXT PRIMARY KEY REFERENCES owner_shared_start_intents(id),demand_id TEXT NOT NULL REFERENCES owner_shared_budget_demand_terminals(demand_id)) STRICT;
         INSERT INTO releases_115 SELECT start_intent_id,demand_id FROM owner_shared_start_releases;DROP TABLE owner_shared_start_releases;
-        ALTER TABLE releases_115 RENAME TO owner_shared_start_releases;PRAGMA user_version=115;").unwrap();
+        ALTER TABLE releases_115 RENAME TO owner_shared_start_releases;DELETE FROM hagency_store_migrations WHERE version=116;PRAGMA user_version=115;").unwrap();
     drop(db);
     let mut f=f;f.registry=OwnerResourceRegistry::open_root(&f._temp.path().join("owner")).unwrap();
     let db=Connection::open(&path).unwrap();
     assert_eq!(db.pragma_query_value::<u64,_>(None,"user_version",|r|r.get(0)).unwrap(),116);
     let parent:String=db.query_row("SELECT \"table\" FROM pragma_foreign_key_list('owner_shared_start_releases') WHERE \"from\"='demand_id'",[],|r|r.get(0)).unwrap();
     assert_eq!(parent,"owner_shared_demands","a release names its message");
+    assert_eq!(schema116_record(&db),schema116_expected(),"the upgrade records this build's step");
     drop(db);
     assert_eq!(released_in(&f,"owner_shared_start_releases").await,vec![held]);
     assert_eq!(count(&f,"owner_shared_start_refusals").await,0);
     f.registry.shutdown().await.unwrap();
+}
+
+/// The name and SQL digest a store records for schema 116.
+fn schema116_record(db:&Connection)->(String,String) {
+    db.query_row("SELECT name,sql_sha256 FROM hagency_store_migrations WHERE version=116",[],|r|Ok((r.get(0)?,r.get(1)?))).unwrap()
+}
+fn schema116_expected()->(String,String) {
+    use sha2::{Digest,Sha256};
+    let sql=include_str!("../../migrations/118-owner-shared-start-refusals.sql");
+    ("118-owner-shared-start-refusals.sql".into(),format!("{:x}",Sha256::digest(sql.as_bytes())))
+}
+
+#[test]
+fn budget_execution_v3_schema116_is_recorded_by_name_and_digest(){
+    // A fresh store records schema 116 as this build's file and SQL, and an
+    // up-to-date store is only read when it is opened again.
+    let root=tempfile::tempdir().unwrap();let state=root.path().join("domain");
+    drop(crate::DomainRepository::open(&state).unwrap());
+    for _ in 0..2 {
+        let repo=crate::DomainRepository::open(&state).unwrap();
+        assert_eq!(repo.db.total_changes(),0,"reopening writes nothing");
+        assert_eq!(repo.db.pragma_query_value::<i32,_>(None,"user_version",|r|r.get(0)).unwrap(),116);
+        assert_eq!(schema116_record(&repo.db),schema116_expected());
+        let count:i64=repo.db.query_row("SELECT count(*) FROM hagency_store_migrations",[],|r|r.get(0)).unwrap();
+        assert_eq!(count,115,"one record for each of versions 2 to 116");
+    }
 }
 
 /// The budget start table as schema 114 left it: one start for each child
