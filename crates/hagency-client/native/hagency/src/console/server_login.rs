@@ -229,6 +229,17 @@ impl RemoteSession {
 /// server's by the whole window is not asked again, unless the wall clock is
 /// set meanwhile.
 const CLOCK_AHEAD_SPACING: Duration = Duration::from_secs(30);
+#[cfg(test)]
+impl ServerLogin {
+    /// As after a renewal that found this computer's clock ahead of the
+    /// server's by the whole window: every session is not asked again for a
+    /// while, and reads `Error::ClockAhead`.
+    pub(in crate::console) async fn find_clock_ahead(&self) {
+        for session in self.sessions.lock().await.values_mut() {
+            session.server_clock = ServerClock::Ahead { at: Instant::now(), wall_ms: wall_now_ms() };
+        }
+    }
+}
 /// How far apart the two ends of a proof may lie before the wall clock cuts
 /// it: less is the rounding of the two readings to the millisecond, or a
 /// clock that is slewed, not a sleep or a clock that was set.
@@ -3227,11 +3238,13 @@ mod clock_ahead_reading_tests {
             }
         }
         // Each of them names a clock ahead (see its test).
-        const READERS: &[&str] =
-            &["proof_refused(", "without_proof(", "device_error", "without_device"];
-        // The management steps read the device's proof with `device_failure`,
-        // which does not name a clock ahead yet.
-        const NOT_YET: &str = "device_failure";
+        const READERS: &[&str] = &[
+            "proof_refused(",
+            "without_proof(",
+            "device_error",
+            "without_device",
+            "device_failure",
+        ];
         let (mut read, mut unread) = (0, Vec::new());
         for file in files {
             let text = chained(&std::fs::read_to_string(&file).unwrap());
@@ -3245,7 +3258,7 @@ mod clock_ahead_reading_tests {
                     let mapped = &chain[mapped..];
                     if READERS.iter().any(|reader| mapped.contains(reader)) {
                         read += 1;
-                    } else if !mapped.contains(NOT_YET) {
+                    } else {
                         let name = file.strip_prefix(&src).unwrap().display().to_string();
                         unread.push(format!("{name}: {}", &mapped[..mapped.len().min(80)]));
                     }
