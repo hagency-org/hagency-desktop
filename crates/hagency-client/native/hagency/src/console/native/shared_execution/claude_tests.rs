@@ -462,6 +462,58 @@ async fn native_shared_claude_full_host_asks_again_when_an_exchange_before_the_t
 #[tokio::test]
 #[ignore = "requires explicit HAGENCY_TEST_CLAUDE_RUNTIME_PROBE offline supervised process"]
 async fn native_shared_claude_ends_a_turn_whose_lease_ended_by_the_wall_clock() {
+    let (f, _transport) = two_minute_claude_turn().await;
+    let after = sleep_through_the_lease(&f).await;
+    assert!(
+        after < Duration::from_secs(30),
+        "the run ended {} s after the sleep",
+        after.as_secs()
+    );
+    stopped(&f).await;
+    {
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.shared.starts, 1);
+        assert!(
+            !state.shared.receipts.values().any(|r| r.state == "completed"),
+            "the turn was not answered"
+        );
+    }
+    f.stop().await;
+}
+
+/// The same sleep under the Claude driver, and on waking the server answers
+/// no enrollment, which each proof asks for. The turn is stopped at its next
+/// renewal all the same: the proof reads the lease on the wall clock before it
+/// asks the server anything. Read by the store alone, after the server's
+/// answers, the wall clock was never reached, and the driver kept reading the
+/// turn while the proof was asked again, until the end the other clock
+/// counted. The end is told from this host's own record, since the report of
+/// the stop asks for the enrollment too.
+#[cfg(feature = "shared-intake")]
+#[tokio::test]
+#[ignore = "requires explicit HAGENCY_TEST_CLAUDE_RUNTIME_PROBE offline supervised process"]
+async fn native_shared_claude_ends_a_turn_whose_lease_ended_by_the_wall_clock_without_an_answer() {
+    let (f, _transport) = two_minute_claude_turn().await;
+    f.state.lock().unwrap().unavailable_contribution = true;
+    let after = sleep_through_the_lease_until(|| stopped_here(&f)).await;
+    assert!(
+        after < Duration::from_secs(30),
+        "the run ended {} s after the sleep",
+        after.as_secs()
+    );
+    {
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.shared.starts, 1);
+        assert!(
+            !state.shared.receipts.values().any(|r| r.state == "completed"),
+            "the turn was not answered"
+        );
+    }
+    f.stop().await;
+}
+
+/// A Claude turn under a two-minute lease, which begins and is never answered.
+async fn two_minute_claude_turn() -> (Fixture, SharedExecutionTransport) {
     let binding = AccountBinding::from_authenticated_profile(
         "01234567-89ab-cdef-0123-456789abcdef",
         "89abcdef-0123-4567-89ab-cdef01234567",
@@ -507,22 +559,7 @@ async fn native_shared_claude_ends_a_turn_whose_lease_ended_by_the_wall_clock() 
     })
     .await
     .expect("the turn begins");
-    let after = sleep_through_the_lease(&f).await;
-    assert!(
-        after < Duration::from_secs(30),
-        "the run ended {} s after the sleep",
-        after.as_secs()
-    );
-    stopped(&f).await;
-    {
-        let state = f.state.lock().unwrap();
-        assert_eq!(state.shared.starts, 1);
-        assert!(
-            !state.shared.receipts.values().any(|r| r.state == "completed"),
-            "the turn was not answered"
-        );
-    }
-    f.stop().await;
+    (f, transport)
 }
 
 #[tokio::test]

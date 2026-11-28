@@ -78,17 +78,8 @@ async fn proof(
     sink: &Arc<SharedProcessSink>,
     a: &Activity,
 ) -> Result<(Bound, VerifiedSharedActivity), NativeError> {
-    // Read-only until it answers: a scope, the enrollment under it and a local
-    // comparison. Around a credential refresh the boundary refuses for a
-    // moment; that is waited out while the lease lasts instead of ending the
-    // turn, as the Claude driver does. A real revocation is not retried.
-    io.settled(a.until, || async {
-        let b = io.bound().await?;
-        let e = b.enrollment(r, sink.command(), true).await?;
-        let verified = sink
-            .authorize_activity(e, &a.lease, a.until.min(b.scope.deadline))
-            .map_err(store)?;
-        Ok((b, verified))
+    io.lease_proof(r, sink.command(), &a.lease, a.until, |e, expires| {
+        sink.authorize_activity(e, &a.lease, expires)
     })
     .await
 }

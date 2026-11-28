@@ -547,10 +547,9 @@ async fn stopped(f: &Fixture) {
 /// seconds: past the next renewal of any lease these fixtures issue, which
 /// comes no later than ten seconds after its grant. Then the two clocks agree
 /// again, and a run that only waited the refusal out goes on. Returns how
-/// long after the sleep the process stopped.
+/// long after the sleep the server heard that the process stopped.
 async fn sleep_through_the_lease(f: &Fixture) -> Duration {
-    let slept = Instant::now();
-    let ended = || {
+    sleep_through_the_lease_until(|| {
         f.state
             .lock()
             .unwrap()
@@ -558,7 +557,12 @@ async fn sleep_through_the_lease(f: &Fixture) -> Duration {
             .processes
             .values()
             .any(|r| r.state == "stopped")
-    };
+    })
+    .await
+}
+/// `sleep_through_the_lease`, for a run whose end `ended` tells.
+async fn sleep_through_the_lease_until(ended: impl Fn() -> bool) -> Duration {
+    let slept = Instant::now();
     {
         let _ahead = hagency_store::owner_resources::WallClockAhead::by(Duration::from_secs(300));
         while !ended() && slept.elapsed() < Duration::from_secs(15) {
@@ -573,6 +577,34 @@ async fn sleep_through_the_lease(f: &Fixture) -> Duration {
     .await
     .expect("the run ends once the wall clock has ended its lease");
     slept.elapsed()
+}
+/// Whether this host has recorded its process as stopped, whatever the server
+/// has heard of it.
+#[cfg(feature = "shared-intake")]
+fn stopped_here(f: &Fixture) -> bool {
+    let db = rusqlite::Connection::open(f._root.path().join("registry/domain.sqlite3")).unwrap();
+    db.query_row(
+        "SELECT COUNT(*) FROM owner_shared_process_observations WHERE json_extract(payload,'$.state')='stopped'",
+        [],
+        |r| r.get::<_, u64>(0),
+    )
+    .unwrap()
+        > 0
+}
+/// A turn under a two-minute lease, which works until it is interrupted.
+async fn two_minute_turn() -> (Fixture, SharedExecutionTransport) {
+    let (f, t, _) = fixture_lifetime(600_000).await;
+    {
+        let mut state = f.state.lock().unwrap();
+        state.proof_stretch_ms = 90_000;
+        state.shared.lease_stretch_ms = 95_000;
+    }
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    t.poll_fixture(&f.registry, launch(&f, "text-interrupt-usage"))
+        .await
+        .unwrap();
+    method_seen(&f, "turn/start").await;
+    (f, t)
 }
 #[tokio::test]
 async fn native_shared_execution_history_tamper_and_expiry_never_issue() {
@@ -1046,18 +1078,7 @@ async fn native_shared_execution_sends_a_renewal_again_when_it_gets_no_answer() 
 #[tokio::test]
 #[ignore = "requires explicitly built offline supervised probe"]
 async fn native_shared_execution_ends_a_turn_whose_lease_ended_by_the_wall_clock() {
-    let (f, t, _) = fixture_lifetime(600_000).await;
-    {
-        let mut state = f.state.lock().unwrap();
-        state.proof_stretch_ms = 90_000;
-        state.shared.lease_stretch_ms = 95_000;
-    }
-    f.owner.test_console().0.server_login.forget_recent_check().await;
-    // The turn works until it is interrupted.
-    t.poll_fixture(&f.registry, launch(&f, "text-interrupt-usage"))
-        .await
-        .unwrap();
-    method_seen(&f, "turn/start").await;
+    let (f, _t) = two_minute_turn().await;
     let after = sleep_through_the_lease(&f).await;
     assert!(
         after < Duration::from_secs(30),
@@ -1065,6 +1086,37 @@ async fn native_shared_execution_ends_a_turn_whose_lease_ended_by_the_wall_clock
         after.as_secs()
     );
     stopped(&f).await;
+    {
+        let s = f.state.lock().unwrap();
+        assert_eq!(s.shared.starts, 1);
+        assert!(
+            !s.shared.receipts.values().any(|r| r.state == "completed"),
+            "the turn did not finish"
+        );
+    }
+    f.stop().await;
+}
+
+/// The same sleep, and on waking the server answers no enrollment, which each
+/// proof asks for. The run ends at its next renewal all the same: the proof
+/// reads the lease on the wall clock before it asks the server anything. Read
+/// by the store alone, after the server's answers, the wall clock was never
+/// reached, and the proof was asked again until the end the other clock
+/// counted: the turn worked on for up to almost two minutes. The end is told
+/// from this host's own record, since the report of the stop asks for the
+/// enrollment too.
+#[cfg(feature = "shared-intake")]
+#[tokio::test]
+#[ignore = "requires explicitly built offline supervised probe"]
+async fn native_shared_execution_ends_a_turn_whose_lease_ended_by_the_wall_clock_without_an_answer() {
+    let (f, _t) = two_minute_turn().await;
+    f.state.lock().unwrap().unavailable_contribution = true;
+    let after = sleep_through_the_lease_until(|| stopped_here(&f)).await;
+    assert!(
+        after < Duration::from_secs(30),
+        "the run ended {} s after the sleep",
+        after.as_secs()
+    );
     {
         let s = f.state.lock().unwrap();
         assert_eq!(s.shared.starts, 1);
@@ -1084,18 +1136,7 @@ async fn native_shared_execution_ends_a_turn_whose_lease_ended_by_the_wall_clock
 #[tokio::test]
 #[ignore = "requires explicitly built offline supervised probe"]
 async fn native_shared_execution_stops_a_renewal_sent_again_whose_lease_ended_by_the_wall_clock() {
-    let (f, t, _) = fixture_lifetime(600_000).await;
-    {
-        let mut state = f.state.lock().unwrap();
-        state.proof_stretch_ms = 90_000;
-        state.shared.lease_stretch_ms = 95_000;
-    }
-    f.owner.test_console().0.server_login.forget_recent_check().await;
-    // The turn works until it is interrupted.
-    t.poll_fixture(&f.registry, launch(&f, "text-interrupt-usage"))
-        .await
-        .unwrap();
-    method_seen(&f, "turn/start").await;
+    let (f, _t) = two_minute_turn().await;
     f.state.lock().unwrap().shared.unanswered_renewals = u32::MAX;
     tokio::time::timeout(Duration::from_secs(20), async {
         while f.state.lock().unwrap().shared.unanswered_renewals == u32::MAX {
