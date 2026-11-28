@@ -346,7 +346,7 @@ async fn require_execution_device(
         .map_err(|_| error(503, "local_state_unavailable"))?
         .authorized_device()
         .await
-        .map_err(|_| error(401, "owner_authorization_required"))?;
+        .map_err(crate::console::proof_refused(error, 401, "owner_authorization_required"))?;
     if reply.owner != device.owner_mxid()
         || reply.origin != device.origin()
         || reply.issuer != device.issuer()
@@ -658,7 +658,7 @@ async fn call(req: &mut Request, depot: &Depot) -> Result<Value, OwnerError> {
         let device = host
             .authorized_device()
             .await
-            .map_err(|_| error(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(error, 401, "owner_authorization_required"))?;
         if reply.owner != device.owner_mxid()
             || reply.origin != device.origin()
             || reply.subject != device.subject()
@@ -712,7 +712,11 @@ async fn call(req: &mut Request, depot: &Depot) -> Result<Value, OwnerError> {
                 .map_err(|_| error(503, "local_state_unavailable"))?
                 .authorized_device()
                 .await
-                .map_err(|_| error(401, "owner_authorization_required"))?;
+                .map_err(crate::console::proof_refused(
+                    error,
+                    401,
+                    "owner_authorization_required",
+                ))?;
             for reply in [&agents, &projects, &devices] {
                 if reply.owner != device.owner_mxid()
                     || reply.origin != device.origin()
@@ -1165,7 +1169,11 @@ async fn call(req: &mut Request, depot: &Depot) -> Result<Value, OwnerError> {
                 let device = host
                     .authorized_device()
                     .await
-                    .map_err(|_| error(401, "owner_authorization_required"))?;
+                    .map_err(crate::console::proof_refused(
+                        error,
+                        401,
+                        "owner_authorization_required",
+                    ))?;
                 let selected = Selection {
                     binding_id: input.binding_id.clone(),
                     requester: device.owner_mxid().into(),

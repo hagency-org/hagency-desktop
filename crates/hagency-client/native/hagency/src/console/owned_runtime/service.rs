@@ -174,21 +174,31 @@ fn save_options(
     hagency_store::private::replace(path, &bytes).map_err(|_| RuntimeError::Profile)
 }
 
+/// An owner request's failure, read by `said()` as every failure of this host
+/// is: what it decides is a refusal, the rest is tried again.
 pub(super) fn owner_error(error: super::super::server_login::OwnerError) -> RuntimeError {
-    if matches!(error.status, 401 | 403 | 404 | 409) {
+    if said(&error) == crate::console::native::Said::Decided {
         RuntimeError::Authorization
     } else {
         RuntimeError::Transport
     }
+}
+fn said(error: &super::super::server_login::OwnerError) -> crate::console::native::Said {
+    crate::console::native::NativeError {
+        status: error.status,
+        code: error.code.clone(),
+    }
+    .said()
 }
 
 /// A running service asking about its Agent. The server answers 404 when the
 /// Agent is no longer this owner's personal Agent, and that is final: the
 /// Agent does not run on this device any more. Its 401 (the device's
 /// authorization lapsed, as it does in a sleep) and every other refusal can
-/// pass, so the service tries those again.
+/// pass, so the service tries those again. A 404 with no code of the server's
+/// in it, from something on the way, decides nothing.
 fn assignment_error(error: super::super::server_login::OwnerError) -> RuntimeError {
-    if error.status == 404 {
+    if error.status == 404 && said(&error) == crate::console::native::Said::Decided {
         RuntimeError::ExecutionDevice
     } else {
         owner_error(error)
@@ -1003,18 +1013,24 @@ mod tests {
     #[test]
     fn agent_lookup_ends_on_not_found_and_retries_lapsed_authorization() {
         use crate::console::server_login::OwnerError;
-        let answer = |status| {
+        let coded = |status, code: &str| {
             assignment_error(OwnerError {
                 status,
-                code: "server_request_failed".into(),
+                code: code.into(),
             })
         };
+        let answer = |status| coded(status, "a_code_of_the_server");
         assert!(matches!(answer(404), RuntimeError::ExecutionDevice));
-        for status in [401, 403, 409] {
+        for status in [400, 401, 403, 409] {
             assert!(matches!(answer(status), RuntimeError::Authorization));
         }
         for status in [500, 502, 503] {
             assert!(matches!(answer(status), RuntimeError::Transport));
+        }
+        // An answer with no code of the server's in it decides nothing,
+        // whatever its status, as `said()` reads it: not even a 404.
+        for status in [401, 403, 404, 409] {
+            assert!(matches!(coded(status, "server_request_failed"), RuntimeError::Transport));
         }
         let mut failures = 0;
         assert_eq!(next_pass(&Err(answer(404)), &mut failures), NextPass::End);

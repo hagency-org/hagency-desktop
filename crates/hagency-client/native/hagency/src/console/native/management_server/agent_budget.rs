@@ -455,14 +455,14 @@ impl NativeManagement {
         // authorized() above has already refreshed and checked that authority.
         let console = &self.owner.0.host.console;
         let device = console.authorized_device().await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let pin = super::DeviceIdentity::from(&device);
         let metadata = crate::server_admission::discover(&pin.origin)
             .await
             .map_err(|e| failure(503, e.code()))?;
         let (current, session) = self.authorized().await?;
         let current_device = console.authorized_device().await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let current_pin = super::DeviceIdentity::from(&current_device);
         if current != scope || current_pin != pin {
             return Err(failure(401, "management_scope_changed"));

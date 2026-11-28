@@ -195,6 +195,12 @@ impl OwnerResourceRegistry {
                 |r| r.get(0),
             )?;
             let start = if exists {
+                // A retry the server refused for the Agent's budget is never
+                // sent again (schema 116); it waits, as when another start
+                // holds the place below.
+                if refused(&tx, &id)? {
+                    return Err(Error::Conflict);
+                }
                 // Replay of the same retry: its saved bytes, never a new start.
                 saved_start(&tx, &profile.digest, &child, &saved, n)?
             } else {
@@ -203,9 +209,10 @@ impl OwnerResourceRegistry {
                     return Err(Error::Conflict);
                 };
                 // No other start (manual or another event) holds this head's
-                // slot in the current period (owner_shared_start_intent_period).
+                // place in the current period (owner_shared_start_intent_place);
+                // a start the server never made, of an event it ended, holds none.
                 let competing: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND id<>?4)",
+                    "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND id<>?4 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id))",
                     params![child, canonical::digest(&serde_json::to_value(c)?)?, periods::current_id(&tx, &child)?, id],
                     |r| r.get(0),
                 )?;
@@ -237,7 +244,12 @@ impl OwnerResourceRegistry {
                     proof.check()?;
                     return Ok(SharedDemandRetry::Blocked(description));
                 }
-                start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input
+                // This computer has applied a budget to the Agent: its place
+                // is the budget lane's, and the retry waits as when another
+                // start holds the place above.
+                start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?
+                    .ok_or(Error::Conflict)?
+                    .input
             };
             let input = SharedDemandStartInput {
                 demand_digest: proof.offer.digest()?,

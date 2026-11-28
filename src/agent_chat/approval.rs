@@ -468,6 +468,10 @@ pub enum ApprovalDecisionState {
     OutcomeUnknown(ApprovalAction),
     Confirmed(String),
     Unavailable,
+    /// Something the reader may do that is not an approval, such as sending
+    /// a message again: the badge says what happened, the buttons are live,
+    /// and the approval hint is not shown.
+    Offered(String),
 }
 
 /// Per-timeline UI state for approval cards: which requests have been

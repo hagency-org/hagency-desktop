@@ -100,3 +100,28 @@ async fn native_management_context_change_and_package_drop_fence_original_proofs
     );
     f.stop().await;
 }
+
+/// A clock ahead of the server's by the whole window is decided and named by
+/// the management steps too, as by every step that needs the session's proof.
+#[tokio::test]
+async fn native_management_reads_a_clock_ahead_as_decided_and_named() {
+    let f = Fixture::new().await;
+    // Without an SDK account to sync first, the management session's own
+    // check of the device is the one that reads the session.
+    *f.owner.0.matrix_source.lock().unwrap() = None;
+    f.owner.test_console().0.server_login.find_clock_ahead().await;
+    let Err(error) = f.transport.manager.authorized().await else {
+        panic!("a management session was granted with the clock ahead");
+    };
+    assert_eq!((error.status, error.code.as_str()), (409, "execution_clock_ahead"));
+    assert_eq!(error.said(), crate::console::native::Said::Decided);
+    // So does the allocation transport's scope, which checks the device too.
+    let Err(error) = f.transport.scope(Permission::ExecuteAllocations).await else {
+        panic!("an allocation scope was granted with the clock ahead");
+    };
+    assert_eq!((error.status, error.code.as_str()), (409, "execution_clock_ahead"));
+    let read =
+        crate::console::native::management::device_failure(crate::console::Error::ClockAhead);
+    assert_eq!((read.status, read.code.as_str()), (409, "execution_clock_ahead"));
+    f.stop().await;
+}

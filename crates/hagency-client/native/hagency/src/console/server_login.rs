@@ -1,6 +1,7 @@
 //! Pasion login and user-owned device authorization. All OAuth credentials stay
 //! in the Rust host. The browser receives navigation URLs and a local cookie.
 use super::{COOKIE, Error, console, current, same_origin};
+use super::native::{NativeError, Said};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use reqwest::{Client, Url};
 use salvo::prelude::*;
@@ -12,7 +13,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
@@ -20,6 +20,7 @@ pub(super) mod matrix_creations;
 mod profiles;
 mod proof_clock;
 use proof_clock::ProofClock;
+pub(super) use proof_clock::server_date_ms;
 mod sdk_resume;
 mod shared_matrix;
 mod room_binding;
@@ -58,6 +59,11 @@ struct RemoteSession {
     refresh_token: Option<String>,
     oauth_expires: Instant,
     authorized_until: Instant,
+    /// The end of the proof in hand as the server stated it, by the wall
+    /// clock. `authorized_until` is read on the monotonic clock, which stands
+    /// still while the computer sleeps; after a sleep past the end it still
+    /// lay ahead. The proof is held to both (see `follow_wall_clock`).
+    authorized_until_ms: u64,
     /// How far the end of the window, as the local clock reads it, lies beyond
     /// `authorized_until`: what the proof clock left out. Each renewal sets it;
     /// it is zero before the first one, which keeps the lease comparison the
@@ -69,10 +75,27 @@ struct RemoteSession {
     full_window: Duration,
     /// When this session last had the SDK refresh its token.
     sdk_refreshed: Option<Instant>,
+    /// What the answers to its renewals said of the server's clock.
+    server_clock: ServerClock,
     invalidated: bool,
     binding: Binding,
     checked: Instant,
     expires: Instant,
+}
+/// What the answers to a session's renewals said of the server's clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ServerClock {
+    /// The last one carried the server's date, or none came yet: a renewal
+    /// asks for the longer window.
+    Dated,
+    /// The last one came without it: a renewal asks for the default window
+    /// (see `proof_clock::requested_window_ms`).
+    Undated,
+    /// By its date this computer's clock is ahead of the server's by the whole
+    /// window, as found at `at`, when the wall clock read `wall_ms`. Asked
+    /// again the server answers the same until the clock is set, so the
+    /// session is not asked again at once (see `clock_ahead_now`).
+    Ahead { at: Instant, wall_ms: u64 },
 }
 /// A host-only credential; never serialized into a browser response.
 #[derive(Clone)]
@@ -86,6 +109,8 @@ pub struct AuthorizedDevice {
     subject: String,
     user_id: String,
     valid_until: Instant,
+    /// The proof's end by the wall clock, as on the session it came from.
+    valid_until_ms: u64,
     clock_allowance: Duration,
     revoked: std::sync::Arc<AtomicBool>,
     stopped: std::sync::Arc<AtomicBool>,
@@ -108,6 +133,7 @@ pub(super) fn fixture_device(
             generation: 1,
             token: "e".repeat(64),
             valid_until: Instant::now() + Duration::from_secs(30),
+            valid_until_ms: u64::MAX,
             clock_allowance: Duration::ZERO,
             revoked: revoked.clone(),
             stopped: std::sync::Arc::new(AtomicBool::new(false)),
@@ -132,10 +158,14 @@ impl AuthorizedDevice {
         self.generation
     }
     /// Check immediately before sending; callers must not persist snapshots.
+    /// The proof ends at the earlier of its two ends: the monotonic one, and
+    /// the one the server stated, read with the wall clock, which runs on
+    /// while the computer sleeps.
     pub fn bearer(&self) -> Result<&str, Error> {
         if self.stopped.load(Ordering::Acquire)
             || self.revoked.load(Ordering::Acquire)
             || self.valid_until <= Instant::now()
+            || wall_now_ms() >= self.valid_until_ms
         {
             Err(Error::Unauthorized)
         } else {
@@ -166,6 +196,68 @@ impl AuthorizedDevice {
         self.clock_allowance = taken;
         self
     }
+}
+impl RemoteSession {
+    /// Holds the proof in hand to the end the server stated for it, read with
+    /// the wall clock, as well as to its monotonic end: the earlier one ends
+    /// it. After a sleep past that end the proof is over and is renewed at
+    /// once, where on the monotonic clock alone it still lay ahead. It only
+    /// ever shortens the proof, and leaves it as it is while the two ends lie
+    /// within `WALL_CLOCK_SLACK` of each other.
+    fn follow_wall_clock(&mut self) {
+        let left = Duration::from_millis(self.authorized_until_ms.saturating_sub(wall_now_ms()));
+        if let Some(by_wall) = Instant::now().checked_add(left)
+            && by_wall + WALL_CLOCK_SLACK < self.authorized_until
+        {
+            self.authorized_until = by_wall;
+        }
+    }
+    /// Whether the last renewal found this computer's clock ahead of the
+    /// server's by the whole window, and nothing since says that changed: the
+    /// wall clock has not been set, and `CLOCK_AHEAD_SPACING` has not passed.
+    fn clock_ahead_now(&self) -> bool {
+        let ServerClock::Ahead { at, wall_ms } = self.server_clock else {
+            return false;
+        };
+        let since = at.elapsed();
+        let expected = wall_ms.saturating_add(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        since < CLOCK_AHEAD_SPACING
+            && wall_now_ms().abs_diff(expected) <= WALL_CLOCK_SLACK.as_millis() as u64
+    }
+}
+/// How long a session whose renewal found this computer's clock ahead of the
+/// server's by the whole window is not asked again, unless the wall clock is
+/// set meanwhile.
+const CLOCK_AHEAD_SPACING: Duration = Duration::from_secs(30);
+#[cfg(test)]
+impl ServerLogin {
+    /// As after a renewal that found this computer's clock ahead of the
+    /// server's by the whole window: every session is not asked again for a
+    /// while, and reads `Error::ClockAhead`.
+    pub(in crate::console) async fn find_clock_ahead(&self) {
+        for session in self.sessions.lock().await.values_mut() {
+            session.server_clock = ServerClock::Ahead { at: Instant::now(), wall_ms: wall_now_ms() };
+        }
+    }
+}
+/// How far apart the two ends of a proof may lie before the wall clock cuts
+/// it: less is the rounding of the two readings to the millisecond, or a
+/// clock that is slewed, not a sleep or a clock that was set.
+const WALL_CLOCK_SLACK: Duration = Duration::from_secs(1);
+/// This computer's wall clock, in milliseconds since 1970; zero before then.
+fn wall_now_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |since| u64::try_from(since.as_millis()).unwrap_or(u64::MAX))
+}
+/// The earliest end the server stated for the proofs in `bodies`, by its
+/// clock. A body that states none sets no end.
+fn stated_end(bodies: &[&Value]) -> u64 {
+    bodies
+        .iter()
+        .filter_map(|body| body["validUntilMs"].as_u64())
+        .min()
+        .unwrap_or(u64::MAX)
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -327,17 +419,20 @@ impl ServerLogin {
                 if login.stopped.load(Ordering::Acquire) {
                     break;
                 }
+                // Read against the wall clock as well, a proof that a sleep
+                // ran out is renewed on the first tick after it.
                 let keys: Vec<_> = login
                     .sessions
                     .lock()
                     .await
-                    .iter()
-                    .filter(|(_, s)| {
-                        !s.invalidated
+                    .iter_mut()
+                    .filter_map(|(key, s)| {
+                        s.follow_wall_clock();
+                        (!s.invalidated
                             && (s.checked.elapsed() >= Duration::from_secs(10)
-                                || s.authorized_until <= Instant::now())
+                                || s.authorized_until <= Instant::now()))
+                        .then(|| key.clone())
                     })
-                    .map(|(key, _)| key.clone())
                     .collect();
                 for key in keys {
                     let _ = login.renew_session(&key).await;
@@ -382,6 +477,10 @@ impl ServerLogin {
             .cloned()
             .filter(|s| !s.invalidated)
             .ok_or(Error::Unauthorized)?;
+        // Neither a caller nor the worker asks the server again at once.
+        if snapshot.clock_ahead_now() {
+            return Err(Error::ClockAhead);
+        }
         let started = Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(8), renew(&mut snapshot))
             .await
@@ -399,7 +498,9 @@ impl ServerLogin {
                 *session = snapshot;
                 self.note_renewal(key, true);
                 let mut status = self.status.lock().await;
-                if status["code"] == "matrix_authorization_unavailable" {
+                if status["code"] == "matrix_authorization_unavailable"
+                    || status["code"] == proof_clock::CLOCK_AHEAD
+                {
                     *status = json!({"state":"device_authorized","deviceAuthorized":true,"transportOnline":false});
                     tracing::info!(stage = "owner_renewal", "Owner authorization recovered");
                 }
@@ -432,6 +533,25 @@ impl ServerLogin {
                 );
                 *self.status.lock().await = json!({"state":"failed","code":"matrix_authorization_unavailable","deviceAuthorized":false,"transportOnline":false});
                 Err(Error::Unavailable)
+            }
+            Err(Error::ClockAhead) => {
+                // The server answered, and by its date this computer's clock
+                // is ahead of it by the whole window: asked again, it answers
+                // the same until the clock is set. Nothing was refused, so the
+                // session is kept, with the proof that answer ended.
+                *session = snapshot;
+                session.server_clock = ServerClock::Ahead {
+                    at: Instant::now(),
+                    wall_ms: wall_now_ms(),
+                };
+                self.note_renewal(key, true);
+                tracing::warn!(
+                    stage = "owner_renewal",
+                    code = proof_clock::CLOCK_AHEAD,
+                    "This computer's clock is ahead of the server's by the whole authorization window; it has to be set"
+                );
+                *self.status.lock().await = json!({"state":"failed","code":proof_clock::CLOCK_AHEAD,"deviceAuthorized":false,"transportOnline":false});
+                Err(Error::ClockAhead)
             }
             Err(error) => {
                 self.note_renewal(key, true);
@@ -512,11 +632,16 @@ impl ServerLogin {
             .sessions
             .lock()
             .await
-            .iter()
+            .iter_mut()
             // An expired finite proof can still be refreshed. Selecting the
             // grant never authorizes execution; renewal must succeed below.
+            // The proof is first held to its end by the wall clock, so that
+            // one a sleep ran out is not kept as if it were still in hand.
             .find(|(_, s)| !s.invalidated)
-            .map(|(key, _)| key.clone())
+            .map(|(key, s)| {
+                s.follow_wall_clock();
+                key.clone()
+            })
             .ok_or(Error::Unauthorized)?;
         let kept = self.renew_or_keep(&key).await?;
         let sessions = self.sessions.lock().await;
@@ -538,6 +663,7 @@ impl ServerLogin {
         }
         let mut device = session.device.clone().ok_or(Error::Unauthorized)?;
         device.valid_until = session.authorized_until;
+        device.valid_until_ms = session.authorized_until_ms;
         device.clock_allowance = session.clock_allowance;
         device.stopped = self.stopped.clone();
         Ok(device)
@@ -771,6 +897,66 @@ fn renewal_error(code: &str) -> Error {
         Error::Unavailable
     }
 }
+/// How the session renewal reads a step that failed: by `said()`, as every
+/// failure of this host is read, with the status and code the server gave.
+/// Of what is decided, a refusal of the credential (401, 403) and the codes
+/// of `renewal_error` say that the session is gone, and end it. Any other
+/// decision is about the request: the server still trusts the proof in hand
+/// to its end, so it is kept, as it is after a request that got no answer;
+/// a session is never cut by a refusal that is not about it. Such a refusal
+/// (a request the server cannot read or route, a fault of its configuration)
+/// reads the same each time it is asked, so once that proof has ended
+/// (`proof_ended`) it ends the session too: one shared with the Matrix
+/// sign-in is resumed, and any other asks for a sign-in, where it was asked
+/// again every second without end. What was not decided keeps the session,
+/// so an answer with no code of the server's in it, such as a 401 from
+/// something on the way, signs no one out.
+fn renewal_refused(refusal: NativeError, proof_ended: bool) -> Error {
+    match refusal.said() {
+        Said::Decided if matches!(refusal.status, 401 | 403) => Error::Unauthorized,
+        Said::Decided => {
+            let read = renewal_error(&refusal.code);
+            if !matches!(read, Error::Unavailable) {
+                read
+            } else if proof_ended {
+                tracing::warn!(
+                    stage = "owner_renewal",
+                    status = refusal.status,
+                    code = %refusal.code,
+                    "The server refused a renewal for a reason of the request and the proof in hand has ended; the session ends"
+                );
+                Error::Unauthorized
+            } else {
+                tracing::warn!(
+                    stage = "owner_renewal",
+                    status = refusal.status,
+                    code = %refusal.code,
+                    "The server refused a renewal for a reason of the request; the proof in hand is kept to its end"
+                );
+                read
+            }
+        }
+        Said::NotAsked | Said::ScopeReplaced | Said::NoAnswer => Error::Unavailable,
+    }
+}
+impl RemoteSession {
+    /// Whether the proof this session held has ended, by either of its two
+    /// ends. A session being restored holds none yet, which its stated end of
+    /// zero says (see `sdk_resume`): a refusal of its first renewal fails the
+    /// restore, which keeps its record, as before.
+    fn proof_ended(&self) -> bool {
+        self.authorized_until_ms != 0
+            && (self.authorized_until <= Instant::now()
+                || wall_now_ms() >= self.authorized_until_ms)
+    }
+}
+/// A failure of a renewal step that this host makes itself.
+fn renewal_failure(status: u16, code: &str) -> NativeError {
+    NativeError {
+        status,
+        code: code.into(),
+    }
+}
 /// Asks the server to trust a renewed proof for longer than its default
 /// thirty seconds, so that a host that stalls for a while keeps its
 /// authorization and the leases that end with it. A server that grants no more
@@ -788,6 +974,8 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     if session.invalidated {
         return Err(Error::Unauthorized);
     }
+    // A proof a sleep ran out is not taken as still in hand below.
+    session.follow_wall_clock();
     // Every execution RPC still reaches the server's current lease/membership
     // gates. A finite SDK proof need not be re-requested before AND after each
     // poll: refresh it at most five seconds apart, or before its deadline.
@@ -858,7 +1046,8 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 .unwrap(),
         )
         .bearer_auth(&session.token)
-        .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
+        .header(AUTHORIZATION_WINDOW_V2_HEADER, requested_window_ms(session))
+        .header(AUTHORIZATION_WINDOW_HEADER, requested_window_ms(session))
         .header(ACTIVITY_WINDOW_HEADER, ACTIVITY_WINDOW_FOLLOWS_SESSION)
         .json(&json!({"accessToken":shared_token.as_ref().unwrap_or(&session.oauth_token)}))
         .send()
@@ -873,21 +1062,33 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             renewal_response.status().as_u16()
         );
     }
-    let (renewed, clock) = proof_response(request_started, renewal_response).await.map_err(renewal_error)?;
+    let (renewed, clock) = proof_answer(request_started, renewal_response)
+        .await
+        .map_err(|refusal| renewal_refused(refusal, session.proof_ended()))?;
+    // The next renewal asks for the window this answer could show.
+    session.server_clock = if clock.dated() {
+        ServerClock::Dated
+    } else {
+        ServerClock::Undated
+    };
+    // The server's session now ends with this proof, by its clock too.
+    let mut stated = stated_end(&[&renewed]);
+    session.authorized_until_ms = session.authorized_until_ms.min(stated);
     let (mut until, mut taken) = match clock.bounds(&renewed) {
         Ok(bounds) => bounds,
-        Err(_) => {
+        Err(refusal) => {
             // The server answered with a proof this host cannot use, one that
             // has no time left for instance. Its session ends with that proof
             // all the same, so the one in hand is cut to it before the
-            // renewal is reported as not made.
+            // renewal is reported as not made, or, for a clock ahead of the
+            // server's, as decided.
             if let Some(end) = proof_clock::local_end(&renewed)
                 && end < session.authorized_until
             {
                 session.authorized_until = end;
                 session.clock_allowance = Duration::ZERO;
             }
-            return Err(Error::Unavailable);
+            return Err(unusable_proof(refusal));
         }
     };
     // The server has answered, and its session now ends with this proof. If
@@ -904,7 +1105,11 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
         // grants. Refresh it once: when the proof is about to end, and already
         // when it has lost a good part of that window, so that a host that
         // then stalls still has most of the window ahead of it.
-        let expiring = until <= Instant::now() + EXPIRING_PROOF;
+        // Decided on the end the server counted, not on the one this
+        // computer's clock cut short: a clock that is ahead shortens every
+        // proof alike, and a fresh token gives none of that time back.
+        let expiring =
+            clock.counted_end(&renewed).unwrap_or(until) <= Instant::now() + EXPIRING_PROOF;
         if expiring
             || proof_shortened(
                 proof_window,
@@ -919,11 +1124,14 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 &session.token,
                 &session.binding.client_id,
                 source.as_ref(),
+                requested_window_ms(session),
+                session.proof_ended(),
             )
             .await
             {
-                Ok(bounds) => {
-                    (until, taken) = bounds;
+                Ok((refreshed_until, refreshed_taken, refreshed_end)) => {
+                    (until, taken) = (refreshed_until, refreshed_taken);
+                    stated = refreshed_end;
                     proof_window = window_left(until, taken);
                     // The window a fresh token gets, also when the server now
                     // grants a shorter one than before.
@@ -937,21 +1145,26 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             }
         }
     }
-    let (identity, clock) = get_identity(
+    let (identity, clock) = identity_answer(
         &client,
         &server,
         &session.token,
     )
     .await
-    .map_err(|code| {
-        tracing::warn!(stage = "server_identity", code, "Owner renewal failed");
-        renewal_error(code)
+    .map_err(|refusal| {
+        tracing::warn!(
+            stage = "server_identity",
+            status = refusal.status,
+            code = %refusal.code,
+            "Owner renewal failed"
+        );
+        renewal_refused(refusal, session.proof_ended())
     })?;
     if !identity_matches(&identity, &session.binding) || identity["userId"] != session.user_id {
         return Err(Error::Unauthorized);
     }
     let (identity_until, identity_taken) =
-        clock.bounds(&identity).map_err(|_| Error::Unavailable)?;
+        clock.bounds(&identity).map_err(unusable_proof)?;
     // The same window as the local clock alone reads it. A lease the server
     // cuts to this window is read that way too.
     let mut window = (until + taken).min(identity_until + identity_taken);
@@ -973,6 +1186,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
         window = window.min(session.oauth_expires);
     }
     session.authorized_until = until.min(identity_until).min(session.oauth_expires);
+    session.authorized_until_ms = stated.min(stated_end(&[&identity]));
     session.clock_allowance = window.saturating_duration_since(session.authorized_until);
     session.full_window = session.full_window.max(proof_window);
     session.checked = Instant::now();
@@ -992,6 +1206,13 @@ const SHORTENED_PROOF: Duration = Duration::from_secs(10);
 /// that lives shorter than the window cannot be refreshed into a full proof,
 /// and is refreshed when it runs out, as before.
 const SHORTENED_PROOF_REFRESH_SPACING: Duration = Duration::from_secs(60);
+/// Asks for the window of `AUTHORIZATION_WINDOW_HEADER`, with the same value,
+/// and says that this host keeps one local session for each server session.
+/// Under a longer window a host that made one local session per call would
+/// reach its limit and refuse its own calls, so a server that knows this
+/// header grants more than thirty seconds only to a request that carries it.
+/// A server from before it reads the other header, which is sent as well.
+const AUTHORIZATION_WINDOW_V2_HEADER: &str = "x-hagency-authorization-window-v2-ms";
 /// What is left of a proof's window as the local clock reads it: the time to
 /// its deadline plus what the proof clock left out of the window.
 fn window_left(until: Instant, taken: Duration) -> Duration {
@@ -1003,14 +1224,67 @@ fn proof_shortened(window: Duration, full: Duration, refreshed: Option<Duration>
     window + SHORTENED_PROOF <= full
         && refreshed.is_none_or(|ago| ago >= SHORTENED_PROOF_REFRESH_SPACING)
 }
-/// Has the SDK refresh its token and renews the proof with the new one.
+/// The window a renewal of `session` asks for. While the server's answers come
+/// without its date, a longer window could not be held, and is not asked for.
+fn requested_window_ms(session: &RemoteSession) -> u64 {
+    proof_clock::requested_window_ms(session.server_clock != ServerClock::Undated)
+}
+/// What a renewal reports for an answer whose proof this host cannot use: a
+/// clock ahead of the server's by the whole window is decided, and named;
+/// any other such answer, with no time left for instance, is not.
+fn unusable_proof(refusal: &'static str) -> Error {
+    if refusal == proof_clock::CLOCK_AHEAD {
+        Error::ClockAhead
+    } else {
+        Error::Unavailable
+    }
+}
+/// How every step reads a clock ahead of the server's by the whole window
+/// (`Error::ClockAhead`): decided, and named. Asked again, every answer of the
+/// server reads the same until the clock is set, and a new sign-in changes
+/// nothing.
+pub(crate) const CLOCK_AHEAD_FAILURE: (u16, &str) = (409, "execution_clock_ahead");
+/// The status and code a step reports when it could not have the session's
+/// proof: `unavailable` for one that got no answer, `refused` for any other
+/// failure, and for a clock ahead of the server's what every step reports for
+/// it (`CLOCK_AHEAD_FAILURE`).
+pub(crate) fn without_proof(
+    failure: &Error,
+    unavailable: (u16, &'static str),
+    refused: (u16, &'static str),
+) -> (u16, &'static str) {
+    match failure {
+        Error::ClockAhead => CLOCK_AHEAD_FAILURE,
+        Error::Unavailable => unavailable,
+        _ => refused,
+    }
+}
+/// For a step that reports every failure to have the session's proof as
+/// `status` and `code`: `make` of that, or of what every step reports for a
+/// clock ahead of the server's (`without_proof`).
+pub(crate) fn proof_refused<E>(
+    make: impl Fn(u16, &'static str) -> E,
+    status: u16,
+    code: &'static str,
+) -> impl Fn(Error) -> E {
+    move |failure| {
+        let (status, code) = without_proof(&failure, (status, code), (status, code));
+        make(status, code)
+    }
+}
+/// Has the SDK refresh its token and renews the proof with the new one, asking
+/// for `window_ms`: its bounds, and the end the server stated for it. A
+/// refusal is read with `proof_ended`, whether the proof in hand has ended
+/// (see `renewal_refused`).
 async fn renew_with_refreshed_token(
     client: &Client,
     server: &Url,
     session_token: &str,
     client_id: &str,
     source: &dyn super::native::MatrixTokenSource,
-) -> Result<(Instant, Duration), Error> {
+    window_ms: u64,
+    proof_ended: bool,
+) -> Result<(Instant, Duration, u64), Error> {
     let refreshed = source.refresh_access_token().await.map_err(|error| {
         let code = super::native::sdk_source_failure(error);
         eprintln!("hagency owner renewal failure: stage=sdk_refresh code={code}");
@@ -1031,7 +1305,8 @@ async fn renew_with_refreshed_token(
                 .unwrap(),
         )
         .bearer_auth(session_token)
-        .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
+        .header(AUTHORIZATION_WINDOW_V2_HEADER, window_ms)
+        .header(AUTHORIZATION_WINDOW_HEADER, window_ms)
         .header(ACTIVITY_WINDOW_HEADER, ACTIVITY_WINDOW_FOLLOWS_SESSION)
         .json(&json!({"accessToken":refreshed.access_token}))
         .send()
@@ -1043,8 +1318,11 @@ async fn renew_with_refreshed_token(
             response.status().as_u16()
         );
     }
-    let (refreshed, clock) = proof_response(request_started, response).await.map_err(renewal_error)?;
-    clock.bounds(&refreshed).map_err(|_| Error::Unavailable)
+    let (refreshed, clock) = proof_answer(request_started, response)
+        .await
+        .map_err(|refusal| renewal_refused(refusal, proof_ended))?;
+    let (until, taken) = clock.bounds(&refreshed).map_err(unusable_proof)?;
+    Ok((until, taken, stated_end(&[&refreshed])))
 }
 fn random() -> Result<String, &'static str> {
     let mut bytes = [0; 32];
@@ -1122,6 +1400,54 @@ async fn get_identity(client: &Client, server: &Url, token: &str) -> Result<(Val
     let reply = client.get(server.join("/hagency/api/v1/identity").unwrap())
         .bearer_auth(token).send().await.map_err(|_| "server_unavailable")?;
     proof_response(started, reply).await
+}
+/// The server's answer to a step of the session renewal, or its refusal with
+/// the status and code it gave, which `renewal_refused` reads by `said()`. The
+/// sign-in steps read `response` instead, which keeps only the codes they
+/// show. An answer with no code of the server's in it is
+/// `server_request_failed`, which decides nothing.
+async fn answer(reply: reqwest::Response) -> Result<Value, NativeError> {
+    let status = reply.status().as_u16();
+    let value = read_response(reply).await.map_err(|code| {
+        if code == "server_unavailable" {
+            renewal_failure(503, "server_unavailable")
+        } else {
+            renewal_failure(502, "invalid_server_response")
+        }
+    })?;
+    if (200..300).contains(&status) {
+        return Ok(value);
+    }
+    let code = value["code"]
+        .as_str()
+        .filter(|code| {
+            !code.is_empty()
+                && code.len() <= 80
+                && code.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+        })
+        .unwrap_or("server_request_failed");
+    Err(renewal_failure(status, code))
+}
+async fn proof_answer(
+    started: Instant,
+    reply: reqwest::Response,
+) -> Result<(Value, ProofClock), NativeError> {
+    let clock = ProofClock::new(started, reply.headers());
+    Ok((answer(reply).await?, clock))
+}
+async fn identity_answer(
+    client: &Client,
+    server: &Url,
+    token: &str,
+) -> Result<(Value, ProofClock), NativeError> {
+    let started = Instant::now();
+    let reply = client
+        .get(server.join("/hagency/api/v1/identity").unwrap())
+        .bearer_auth(token)
+        .send()
+        .await
+        .map_err(|_| renewal_failure(503, "server_unavailable"))?;
+    proof_answer(started, reply).await
 }
 fn cookie(req: &Request, name: &str) -> Option<String> {
     req.headers()
@@ -1600,9 +1926,11 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
                 refresh_token: refresh_token.clone(),
                 oauth_expires: Instant::now() + oauth_lifetime,
                 authorized_until: authorized_until.min(Instant::now() + oauth_lifetime),
+                authorized_until_ms: stated_end(&[&grant, &identity]),
                 clock_allowance: std::time::Duration::ZERO,
                 full_window: std::time::Duration::ZERO,
                 sdk_refreshed: None,
+                server_clock: ServerClock::Dated,
                 invalidated: false,
                 binding: pending.binding.clone(),
                 checked: Instant::now(),
@@ -1690,6 +2018,7 @@ async fn register_device(
             subject: binding.subject.clone().ok_or("invalid_server_response")?,
             user_id: user_id.into(),
             valid_until: clock.deadline(&value)?,
+            valid_until_ms: stated_end(&[&value]),
             clock_allowance: Duration::ZERO,
             revoked: std::sync::Arc::new(AtomicBool::new(false)),
             stopped: std::sync::Arc::new(AtomicBool::new(false)),
@@ -2098,8 +2427,8 @@ impl ServerLogin {
         }
         let renewal = self.renewal.lock().await;
         let key = {
-            let sessions = self.sessions.lock().await;
-            if let Some(cookie) = cookie {
+            let mut sessions = self.sessions.lock().await;
+            let key = if let Some(cookie) = cookie {
                 session_key(cookie)
             } else {
                 sessions
@@ -2112,21 +2441,18 @@ impl ServerLogin {
                     })
                     .map(|(key, _)| key.clone())
                     .ok_or_else(|| OwnerError::new(401, "sign_in_required"))?
+            };
+            // Held to its end by the wall clock first, a proof a sleep ran
+            // out is renewed below, not kept and then refused here.
+            if let Some(session) = sessions.get_mut(&key) {
+                session.follow_wall_clock();
             }
+            key
         };
         self.renew_or_keep(&key).await.map_err(|e| {
-            OwnerError::new(
-                if matches!(e, Error::Unavailable) {
-                    503
-                } else {
-                    401
-                },
-                if matches!(e, Error::Unavailable) {
-                    "server_unavailable"
-                } else {
-                    "sign_in_required"
-                },
-            )
+            let (status, code) =
+                without_proof(&e, (503, "server_unavailable"), (401, "sign_in_required"));
+            OwnerError::new(status, code)
         })?;
         let session = self
             .sessions
@@ -2158,6 +2484,7 @@ impl ServerLogin {
                 .as_mut()
                 .ok_or_else(|| OwnerError::new(401, "device_authorization_required"))?;
             device.valid_until = session.authorized_until;
+            device.valid_until_ms = session.authorized_until_ms;
             device.clock_allowance = session.clock_allowance;
             device
                 .bearer()
@@ -2255,18 +2582,12 @@ impl super::Console {
         operation: OwnerOperation,
     ) -> Result<OwnerReply, OwnerError> {
         let current = self.authorized_device().await.map_err(|e| {
-            OwnerError::new(
-                if matches!(e, Error::Unavailable) {
-                    503
-                } else {
-                    401
-                },
-                if matches!(e, Error::Unavailable) {
-                    "server_unavailable"
-                } else {
-                    "device_authorization_required"
-                },
-            )
+            let (status, code) = without_proof(
+                &e,
+                (503, "server_unavailable"),
+                (401, "device_authorization_required"),
+            );
+            OwnerError::new(status, code)
         })?;
         current
             .bearer()
@@ -2402,6 +2723,9 @@ mod scope_policy_request_tests {
 mod shared_protocol_tests;
 
 #[cfg(test)]
+mod authorization_window_tests;
+
+#[cfg(test)]
 mod shortened_proof_tests {
     use super::*;
     #[test]
@@ -2441,9 +2765,11 @@ mod oauth_refresh_tests {
             refresh_token: Some("retained-refresh".into()),
             oauth_expires: now,
             authorized_until: now,
+            authorized_until_ms: u64::MAX,
             clock_allowance: std::time::Duration::ZERO,
             full_window: std::time::Duration::ZERO,
             sdk_refreshed: None,
+            server_clock: ServerClock::Dated,
             invalidated: false,
             binding: Binding {
                 origin: origin.clone(),
@@ -2547,5 +2873,479 @@ mod oauth_refresh_tests {
         assert_eq!(session.refresh_token.as_deref(), Some("new-refresh"));
         assert!(session.authorized_until > now);
         server.await.unwrap();
+    }
+}
+
+#[cfg(test)]
+mod renewal_reading_tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    fn session_at(origin: &str, until: Instant, until_ms: u64) -> RemoteSession {
+        let now = Instant::now();
+        RemoteSession {
+            matrix_source: None,
+            token: "owner-session".into(),
+            oauth_token: "access".into(),
+            user_id: "owner".into(),
+            device: None,
+            refresh_token: None,
+            oauth_expires: now + Duration::from_secs(900),
+            authorized_until: until,
+            authorized_until_ms: until_ms,
+            clock_allowance: Duration::ZERO,
+            full_window: Duration::ZERO,
+            sdk_refreshed: None,
+            server_clock: ServerClock::Dated,
+            invalidated: false,
+            binding: Binding {
+                origin: origin.into(),
+                client_id: "client".into(),
+                installation_id: "installation".into(),
+                name: "fixture".into(),
+                owner: Some("@owner:test".into()),
+                subject: Some("subject".into()),
+            },
+            checked: now,
+            expires: now + Duration::from_secs(900),
+        }
+    }
+    async fn bind() -> (tokio::net::TcpListener, String) {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let origin = format!("http://{}/", listener.local_addr().unwrap());
+        (listener, origin)
+    }
+    /// Answers each request with the next of `replies`, and gives back the
+    /// request lines.
+    fn serve(
+        listener: tokio::net::TcpListener,
+        replies: Vec<(u16, Value)>,
+    ) -> tokio::task::JoinHandle<Vec<String>> {
+        let served = serve_dated(
+            listener,
+            replies.into_iter().map(|(status, body)| (status, body, None)).collect(),
+        );
+        tokio::spawn(async move { served.await.unwrap().into_iter().map(|(line, _)| line).collect() })
+    }
+    /// As `serve`, with the server's date on each reply that gives one, as a
+    /// fresh answer carries it; gives back each request line with the window
+    /// the request asked for.
+    fn serve_dated(
+        listener: tokio::net::TcpListener,
+        replies: Vec<(u16, Value, Option<u64>)>,
+    ) -> tokio::task::JoinHandle<Vec<(String, Option<String>)>> {
+        tokio::spawn(async move {
+            let mut lines = Vec::new();
+            for (status, body, date_ms) in replies {
+                let (mut socket, _) = listener.accept().await.unwrap();
+                let mut raw = Vec::new();
+                loop {
+                    let mut chunk = [0u8; 4096];
+                    let size = socket.read(&mut chunk).await.unwrap();
+                    assert!(size > 0);
+                    raw.extend_from_slice(&chunk[..size]);
+                    let request = String::from_utf8_lossy(&raw);
+                    if let Some((headers, body)) = request.split_once("\r\n\r\n") {
+                        let length = headers
+                            .lines()
+                            .find_map(|line| {
+                                let (name, value) = line.split_once(':')?;
+                                name.eq_ignore_ascii_case("content-length")
+                                    .then(|| value.trim().parse::<usize>().unwrap())
+                            })
+                            .unwrap_or(0);
+                        if body.len() >= length {
+                            break;
+                        }
+                    }
+                }
+                let request = String::from_utf8(raw).unwrap();
+                let window = request.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case(AUTHORIZATION_WINDOW_HEADER)
+                        .then(|| value.trim().to_owned())
+                });
+                lines.push((request.lines().next().unwrap().to_owned(), window));
+                let date = date_ms.map_or(String::new(), |ms| {
+                    let date = httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_millis(ms));
+                    format!("Date: {date}\r\nCache-Control: no-store\r\n")
+                });
+                let body = body.to_string();
+                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{date}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+            }
+            lines
+        })
+    }
+    const RENEW: &str = "POST /hagency/api/v1/sessions/current/renew HTTP/1.1";
+    const IDENTITY: &str = "GET /hagency/api/v1/identity HTTP/1.1";
+
+    #[test]
+    fn a_renewal_failure_is_read_by_said_and_only_a_revocation_ends_the_session() {
+        let read_with = |status: u16, code: &str, ended: bool| {
+            renewal_refused(renewal_failure(status, code), ended)
+        };
+        let read = |status: u16, code: &str| read_with(status, code, false);
+        // A refusal of the credential, and the codes that say the session is
+        // gone, whatever their status.
+        for (status, code) in [
+            (401, "authorization_expired"),
+            (401, "authentication_required"),
+            (403, "a_code_of_the_server"),
+            (409, "identity_mapping_mismatch"),
+            (400, "sign_in_required"),
+        ] {
+            assert!(matches!(read(status, code), Error::Unauthorized), "{status} {code}");
+        }
+        // Decided, and about the request: the proof in hand is kept to its
+        // end. Asked again, the server answers the same, so once that proof
+        // has ended the session ends too.
+        for (status, code) in [
+            (400, "invalid_arguments"),
+            (400, "invalid_identity_configuration"),
+            (400, "unsupported_operation"),
+            (404, "not_found"),
+            (409, "a_code_of_the_server"),
+        ] {
+            assert!(matches!(read(status, code), Error::Unavailable), "{status} {code}");
+            let ended = read_with(status, code, true);
+            assert!(matches!(ended, Error::Unauthorized), "{status} {code}");
+        }
+        // Not decided: no answer, the server not serving it, or an answer
+        // with no code of the server's in it, whatever its status. It is
+        // asked again, also after the proof in hand has ended.
+        for (status, code) in [
+            (401, "server_request_failed"),
+            (403, "server_request_failed"),
+            (502, "invalid_server_response"),
+            (503, "server_unavailable"),
+            (503, "pasion_unavailable"),
+            (503, "management_capacity"),
+        ] {
+            assert!(matches!(read(status, code), Error::Unavailable), "{status} {code}");
+            let ended = read_with(status, code, true);
+            assert!(matches!(ended, Error::Unavailable), "{status} {code}");
+        }
+    }
+
+    #[tokio::test]
+    async fn a_renewal_refused_for_the_request_ends_the_session_once_its_proof_has_ended() {
+        let refused = || json!({"code":"invalid_arguments"});
+        // While the proof in hand lasts, it is kept.
+        let (listener, origin) = bind().await;
+        let server = serve(listener, vec![(400, refused())]);
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut session = session_at(&origin, end, wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        assert_eq!(session.authorized_until, end);
+        assert_eq!(server.await.unwrap(), [RENEW]);
+        // Once it has ended, by either clock, the same refusal ends the
+        // session, where it was asked again every second without end.
+        for (until, until_ms) in [
+            (Instant::now(), wall_now_ms() + 20_000),
+            (Instant::now() + Duration::from_secs(20), wall_now_ms() - 1),
+        ] {
+            let (listener, origin) = bind().await;
+            let server = serve(listener, vec![(400, refused())]);
+            let mut session = session_at(&origin, until, until_ms);
+            assert!(session.proof_ended());
+            assert!(matches!(renew(&mut session).await, Err(Error::Unauthorized)));
+            assert_eq!(server.await.unwrap(), [RENEW]);
+        }
+        // A session being restored holds no proof yet: its first renewal,
+        // refused so, fails the restore as before.
+        let restoring = session_at(&origin, Instant::now(), 0);
+        assert!(!restoring.proof_ended());
+        // An answer that is not a decision is asked again all the same.
+        let (listener, origin) = bind().await;
+        let server = serve(listener, vec![(503, json!({"code":"storage_unavailable"}))]);
+        let mut session = session_at(&origin, Instant::now(), wall_now_ms() - 1);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        assert_eq!(server.await.unwrap(), [RENEW]);
+    }
+
+    #[tokio::test]
+    async fn a_renewal_refused_with_no_code_of_the_server_signs_no_one_out() {
+        let (listener, origin) = bind().await;
+        let server = serve(listener, vec![(401, json!({}))]);
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut session = session_at(&origin, end, wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        assert_eq!(session.authorized_until, end);
+        assert!(!session.invalidated);
+        assert_eq!(server.await.unwrap(), [RENEW]);
+        // The server's own refusal of the credential still ends it.
+        let (listener, origin) = bind().await;
+        let server = serve(listener, vec![(401, json!({"code":"authorization_expired"}))]);
+        let mut session = session_at(&origin, end, wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unauthorized)));
+        assert_eq!(server.await.unwrap(), [RENEW]);
+    }
+
+    #[test]
+    fn a_proof_ends_at_the_earlier_of_its_monotonic_end_and_its_end_by_the_wall_clock() {
+        let now_ms = wall_now_ms();
+        let (device, _) = fixture_device("https://example.test/", "subject", "@owner:example.test");
+        assert!(device.bearer().is_ok());
+        // After a sleep past the end the server stated, the monotonic end
+        // still lies ahead: the wall clock ends the proof.
+        let mut slept = device.clone();
+        slept.valid_until_ms = now_ms - 1;
+        assert!(slept.valid_until() > Instant::now());
+        assert!(slept.bearer().is_err());
+        let mut awake = device;
+        awake.valid_until_ms = now_ms + 60_000;
+        assert!(awake.bearer().is_ok());
+        // The session is held to it the same way.
+        let mut session = session_at("https://example.test/", Instant::now() + Duration::from_secs(60), now_ms - 1);
+        session.follow_wall_clock();
+        assert!(session.authorized_until <= Instant::now());
+        let mut session = session_at("https://example.test/", Instant::now() + Duration::from_secs(60), now_ms + 10_000);
+        session.follow_wall_clock();
+        assert!(session.authorized_until <= Instant::now() + Duration::from_secs(10));
+        assert!(session.authorized_until > Instant::now() + Duration::from_secs(8));
+        // Within a second of each other, the two ends are one reading rounded
+        // two ways: the proof is left as it is.
+        let end = Instant::now() + Duration::from_secs(10);
+        let mut session = session_at("https://example.test/", end, wall_now_ms() + 9_500);
+        session.follow_wall_clock();
+        assert_eq!(session.authorized_until, end);
+        // It only ever shortens a proof; one with no stated end keeps its own.
+        for wall in [now_ms + 600_000, u64::MAX] {
+            let end = Instant::now() + Duration::from_secs(60);
+            let mut session = session_at("https://example.test/", end, wall);
+            session.follow_wall_clock();
+            assert_eq!(session.authorized_until, end);
+        }
+    }
+
+    #[tokio::test]
+    async fn a_proof_a_sleep_ran_out_is_renewed_at_once_and_held_to_the_new_end() {
+        let (listener, origin) = bind().await;
+        let until = wall_now_ms() + 30_000;
+        let server = serve(listener, vec![
+            (200, json!({"validUntilMs": until})),
+            (200, json!({"mxid":"@owner:test","subject":"subject","clientId":"client","issuer":format!("{origin}auth/"),"userId":"owner","validUntilMs": until - 5_000})),
+        ]);
+        // Checked just now and a minute ahead on the monotonic clock, as
+        // after a sleep: read on that clock alone it is used as it is.
+        let mut session = session_at(&origin, Instant::now() + Duration::from_secs(60), wall_now_ms() - 1);
+        renew(&mut session).await.unwrap();
+        assert_eq!(server.await.unwrap(), [RENEW, IDENTITY]);
+        assert_eq!(session.authorized_until_ms, until - 5_000);
+        assert!(session.authorized_until > Instant::now() + Duration::from_secs(20));
+        assert!(session.authorized_until <= Instant::now() + Duration::from_secs(25));
+    }
+
+    #[tokio::test]
+    async fn a_renewal_answered_with_a_shorter_proof_holds_the_wall_end_to_it() {
+        let (listener, origin) = bind().await;
+        let shorter = wall_now_ms() + 10_000;
+        let server = serve(listener, vec![
+            (200, json!({"validUntilMs": shorter})),
+            (503, json!({"code":"storage_unavailable"})),
+        ]);
+        let mut session = session_at(&origin, Instant::now() + Duration::from_secs(20), wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        assert_eq!(server.await.unwrap(), [RENEW, IDENTITY]);
+        // The server's session now ends with the shorter proof, on both clocks.
+        assert_eq!(session.authorized_until_ms, shorter);
+        assert!(session.authorized_until <= Instant::now() + Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn an_undated_proof_is_held_to_the_default_window_and_no_more_is_asked_for_until_a_dated_answer() {
+        let (listener, origin) = bind().await;
+        let identity = |until: u64| json!({"mxid":"@owner:test","subject":"subject","clientId":"client","issuer":format!("{origin}auth/"),"userId":"owner","validUntilMs": until});
+        // An answer that lost the server's date on the way grants the 120 s
+        // asked for; the next ones carry the date, with the default window.
+        let long = wall_now_ms() + 120_000;
+        let date = wall_now_ms();
+        let server = serve_dated(listener, vec![
+            (200, json!({"validUntilMs": long}), None),
+            (200, identity(long), None),
+            (200, json!({"validUntilMs": date + 30_000}), Some(date)),
+            (200, identity(date + 30_000), Some(date)),
+            (503, json!({"code":"server_unavailable"}), None),
+        ]);
+        let mut session = session_at(&origin, Instant::now() + Duration::from_secs(20), wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        let sent = Instant::now();
+        renew(&mut session).await.unwrap();
+        // Used, and held to the default window from the moment its request
+        // went out, rather than refused and asked for again every second.
+        assert!(session.authorized_until >= sent + Duration::from_secs(30));
+        assert!(session.authorized_until <= Instant::now() + Duration::from_millis(30_001));
+        assert_eq!(session.server_clock, ServerClock::Undated);
+        // The next renewal asks for the default window only; after a dated
+        // answer the one after it asks for the longer window again.
+        session.checked = Instant::now() - Duration::from_secs(30);
+        renew(&mut session).await.unwrap();
+        assert_eq!(session.server_clock, ServerClock::Dated);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        let asked = |window: &str| Some(window.to_owned());
+        assert_eq!(server.await.unwrap(), [
+            (RENEW.to_owned(), asked("120000")),
+            (IDENTITY.to_owned(), None),
+            (RENEW.to_owned(), asked("30000")),
+            (IDENTITY.to_owned(), None),
+            (RENEW.to_owned(), asked("120000")),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn a_clock_ahead_of_the_server_by_the_whole_window_is_decided_named_and_not_asked_again_at_once() {
+        let (listener, origin) = bind().await;
+        // By the server's date this computer's clock is forty seconds ahead,
+        // and the server gives its default window of thirty seconds.
+        let server_ms = wall_now_ms() - 40_000;
+        let server = serve_dated(listener, vec![
+            (200, json!({"validUntilMs": server_ms + 30_000}), Some(server_ms)),
+        ]);
+        let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+        let login = ServerLogin::new(Some(root.path())).unwrap();
+        let mut session = session_at(&origin, Instant::now() + Duration::from_secs(20), wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        login.sessions.lock().await.insert("ahead".into(), session);
+        assert!(matches!(login.renew_session("ahead").await, Err(Error::ClockAhead)));
+        assert_eq!(server.await.unwrap(), [(RENEW.to_owned(), Some("120000".to_owned()))]);
+        // Named, and decided: the session is not signed out, and the proof
+        // that answer ended is over here as well.
+        assert_eq!(login.status.lock().await["code"], proof_clock::CLOCK_AHEAD);
+        {
+            let sessions = login.sessions.lock().await;
+            let session = &sessions["ahead"];
+            assert!(!session.invalidated);
+            assert!(session.authorized_until <= Instant::now());
+            assert!(session.clock_ahead_now());
+        }
+        // Not asked again at once, by a caller or by the worker: the server
+        // is gone, and asking it would read no answer instead.
+        assert!(matches!(login.authorized_device().await, Err(Error::ClockAhead)));
+        assert!(matches!(login.renew_session("ahead").await, Err(Error::ClockAhead)));
+    }
+
+    #[test]
+    fn a_clock_found_ahead_is_asked_about_again_once_it_was_set_or_after_a_while() {
+        let mut session = session_at("https://example.test/", Instant::now(), wall_now_ms());
+        session.server_clock = ServerClock::Ahead { at: Instant::now(), wall_ms: wall_now_ms() };
+        assert!(session.clock_ahead_now());
+        // The wall clock was set since, either way: asked again at once.
+        for set_by in [-60_000i64, 60_000] {
+            session.server_clock = ServerClock::Ahead {
+                at: Instant::now(),
+                wall_ms: wall_now_ms().saturating_add_signed(set_by),
+            };
+            assert!(!session.clock_ahead_now(), "{set_by}");
+        }
+        // Or once the spacing has passed.
+        let at = Instant::now()
+            .checked_sub(CLOCK_AHEAD_SPACING)
+            .expect("monotonic clock older than the spacing");
+        session.server_clock = ServerClock::Ahead {
+            at,
+            wall_ms: wall_now_ms() - CLOCK_AHEAD_SPACING.as_millis() as u64,
+        };
+        assert!(!session.clock_ahead_now());
+        for clock in [ServerClock::Dated, ServerClock::Undated] {
+            session.server_clock = clock;
+            assert!(!session.clock_ahead_now());
+        }
+    }
+}
+
+#[cfg(test)]
+mod clock_ahead_reading_tests {
+    use super::*;
+
+    #[test]
+    fn a_clock_ahead_reads_the_same_at_every_step_that_needs_the_proof() {
+        let (unavailable, refused) = ((503, "server_unavailable"), (401, "sign_in_required"));
+        assert_eq!(without_proof(&Error::ClockAhead, unavailable, refused), CLOCK_AHEAD_FAILURE);
+        assert_eq!(CLOCK_AHEAD_FAILURE, (409, proof_clock::CLOCK_AHEAD));
+        assert_eq!(without_proof(&Error::Unavailable, unavailable, refused), unavailable);
+        for other in [Error::Unauthorized, Error::Forbidden, Error::Invalid] {
+            assert_eq!(without_proof(&other, unavailable, refused), refused);
+        }
+        // A step that reports every failure alike still names this one.
+        let read =
+            proof_refused(|status, code| (status, code), 401, "owner_authorization_required");
+        assert_eq!(read(Error::ClockAhead), CLOCK_AHEAD_FAILURE);
+        for other in [Error::Unavailable, Error::Unauthorized] {
+            assert_eq!(read(other), (401, "owner_authorization_required"));
+        }
+    }
+
+    /// `text` without the whitespace before each `.`, so that a chain of
+    /// calls reads as one line.
+    fn chained(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut space = String::new();
+        for c in text.chars() {
+            if c.is_whitespace() {
+                space.push(c);
+                continue;
+            }
+            if c != '.' {
+                out.push_str(&space);
+            }
+            space.clear();
+            out.push(c);
+        }
+        out
+    }
+
+    /// Every step that maps a failure to have the session's proof maps it with
+    /// a reader that names a clock ahead, so that no step reads it as a
+    /// sign-in lost or as no answer.
+    #[test]
+    fn every_step_that_needs_the_session_proof_reads_its_failure_with_one_reader() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![src.join("console.rs")];
+        let mut directories = vec![src.join("console")];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        // Each of them names a clock ahead (see its test).
+        const READERS: &[&str] = &[
+            "proof_refused(",
+            "without_proof(",
+            "device_error",
+            "without_device",
+            "device_failure",
+        ];
+        let (mut read, mut unread) = (0, Vec::new());
+        for file in files {
+            let text = chained(&std::fs::read_to_string(&file).unwrap());
+            for call in [".authorized_device()", ".renew_or_keep(", "server_login.validate("] {
+                for (at, _) in text.match_indices(call) {
+                    let rest = &text[at + call.len()..];
+                    let chain = &rest[..rest.find([';', '?']).unwrap_or(rest.len())];
+                    let Some(mapped) = chain.find(".map_err(") else {
+                        continue;
+                    };
+                    let mapped = &chain[mapped..];
+                    if READERS.iter().any(|reader| mapped.contains(reader)) {
+                        read += 1;
+                    } else {
+                        let name = file.strip_prefix(&src).unwrap().display().to_string();
+                        unread.push(format!("{name}: {}", &mapped[..mapped.len().min(80)]));
+                    }
+                }
+            }
+        }
+        assert!(read > 30, "the scan found the steps: {read}");
+        assert!(unread.is_empty(), "read without naming a clock ahead: {unread:#?}");
     }
 }

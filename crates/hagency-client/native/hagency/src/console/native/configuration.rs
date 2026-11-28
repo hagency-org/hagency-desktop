@@ -184,7 +184,7 @@ pub(super) async fn pin(native: &NativeOwner) -> Result<DeviceIdentity, NativeEr
         .authorized_device()
         .await
         .map(|d| DeviceIdentity::from(&d))
-        .map_err(|_| failure(401, "configuration_authority_changed"))
+        .map_err(crate::console::proof_refused(failure, 401, "configuration_authority_changed"))
 }
 async fn api(
     native: &NativeOwner,
@@ -199,7 +199,7 @@ async fn api(
         .console
         .authorized_device()
         .await
-        .map_err(|_| failure(401, "configuration_authority_changed"))?;
+        .map_err(crate::console::proof_refused(failure, 401, "configuration_authority_changed"))?;
     if DeviceIdentity::from(&device) != *pin {
         return Err(failure(401, "configuration_authority_changed"));
     }
@@ -759,7 +759,11 @@ async fn apply(
                 .console
                 .authorized_device()
                 .await
-                .map_err(|_| failure(401, "configuration_authority_changed"))?;
+                .map_err(crate::console::proof_refused(
+                    failure,
+                    401,
+                    "configuration_authority_changed",
+                ))?;
             if native
                 .0
                 .host
@@ -832,7 +836,11 @@ async fn apply(
                     .console
                     .authorized_device()
                     .await
-                    .map_err(|_| failure(401, "configuration_authority_changed"))?;
+                    .map_err(crate::console::proof_refused(
+                        failure,
+                        401,
+                        "configuration_authority_changed",
+                    ))?;
                 if native
                     .0
                     .host

@@ -76,13 +76,17 @@ jobs:
       # These two existing qualification selectors require a live qualified
       # host; their evidence cannot be supplied by a disposable CI runner.
       #
-      # tools/parallel-tests.py builds both selections as cargo test does and
+      # tools/parallel-tests.py builds each selection as cargo test does and
       # then starts every test program once, as cargo test does, several
       # programs at a time. The tests of one program still share one process
       # and run one after another (RUST_TEST_THREADS above). Only the unit
       # tests of hagency-matrix, the longest program, run as several
       # processes: none of them chooses the process's writer root, so none
       # depends on which of them ran first.
+      #
+      # The workspace selection builds each package with its default
+      # features, so the tests of shared work that hagency and hagency-store
+      # keep behind features run only in the last two selections.
       - name: Library tests, several test programs at a time
         run: >-
           python3 ../../tools/parallel-tests.py --split hagency_matrix,hagency
@@ -91,6 +95,8 @@ jobs:
           --skip native_codex_real_app_server --skip native_two_agent_qualification_records_its_evidence
           ---
           --locked -p hagency --features shared-budget-execution,resource-adoption --lib
+          ---
+          --locked -p hagency-store --features shared-budget-execution,resource-adoption --lib
       - name: Check current-profile initialization in isolation
         run: bash ../../tools/check-current-profile.sh
   native:

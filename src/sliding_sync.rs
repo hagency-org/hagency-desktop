@@ -955,6 +955,17 @@ pub enum MatrixRequest {
         destination: MediaCacheEntryRef,
         update_sender: Option<crate::timeline_updates::Sender>,
     },
+    /// Send the user's own message `event_id` again as a new message that
+    /// addresses the given Agents only. For a message that ended without a
+    /// turn for them: a new message is taken in like any other, and the first
+    /// one stays as it ended.
+    SendAgainToAgents {
+        room_id: OwnedRoomId,
+        event_id: OwnedEventId,
+        /// The thread the message was sent in, when it was.
+        thread_root: Option<OwnedEventId>,
+        agents: Vec<OwnedUserId>,
+    },
     /// Request to send a message to the given room.
     SendMessage {
         /// Composer handoff ends when the SDK accepts the message or reports a failure.
@@ -2752,6 +2763,18 @@ async fn matrix_worker_task(
                 });
             }
 
+            MatrixRequest::SendAgainToAgents { room_id, event_id, thread_root, agents } => {
+                let _send_again_task = crate::account_session::spawn(async move {
+                    if let Err(again) = send_again_to_agents(&room_id, &event_id, thread_root, agents).await {
+                        error!("Could not send a message again in {room_id}: {again:?}.");
+                        let text = send_again_failed(&room_id, &event_id, &again);
+                        enqueue_popup_notification(crate::i18n::tr(text).to_string(), PopupKind::Error, Some(5.0));
+                        Cx::post_action(SendAgainFailed { room_id, event_id });
+                    }
+                    SignalToUI::set_ui_signal();
+                });
+            }
+
             MatrixRequest::SendMessage {
                 completion,
                 routing,
@@ -3660,6 +3683,324 @@ async fn get_timeline(kind: &TimelineKind) -> Option<Arc<Timeline>> {
         .map(|details| details.timeline.clone());
     if !has_timeline_interest(kind) { retire_hidden_timeline(kind); }
     result
+}
+
+/// A message could not be sent again: nothing went out for `event_id`.
+///
+/// This is *NOT* a widget action.
+#[derive(Debug)]
+pub struct SendAgainFailed {
+    pub room_id: OwnedRoomId,
+    pub event_id: OwnedEventId,
+}
+
+/// Why a message was not sent again.
+#[derive(Debug, PartialEq)]
+enum SendAgain {
+    /// Nothing went out now; another try may work.
+    Later,
+    /// The message itself cannot be sent again: it is gone, or not the user's.
+    Never,
+}
+
+/// A message that this client knows to have been sent again. Two things keep
+/// it from being offered: a press of "Send again" here, which a failure that
+/// another try can fix takes back, and a new message sent for it (a copy)
+/// that this client has read, in a timeline or in the send queue, which
+/// nothing takes back.
+struct SentAgainEntry {
+    room: OwnedRoomId,
+    event: OwnedEventId,
+    pressed: bool,
+    copy_read: bool,
+}
+
+/// A timeline of this client that reads the copies it holds, by its room and
+/// its thread's root. It is `ready` once it has read those it started with.
+struct CopyReading {
+    id: u64,
+    room: OwnedRoomId,
+    thread: Option<OwnedEventId>,
+    ready: bool,
+}
+
+/// What this client knows of messages sent again, oldest first, and which of
+/// its timelines read copies. A message stays here so that leaving its room
+/// and coming back does not offer it a second time while its copy has no
+/// status yet.
+struct SentAgainRecord {
+    entries: Vec<SentAgainEntry>,
+    readings: Vec<CopyReading>,
+}
+
+/// How many messages the record keeps. Past that, the oldest entries of
+/// rooms that no timeline reads are dropped. Such a room offers nothing
+/// until one of its timelines has read its copies again, so an entry is
+/// never dropped while its message could be offered (ADR 0016, "Known
+/// bounds").
+const SENT_AGAIN_KEPT: usize = 1024;
+
+impl SentAgainRecord {
+    const fn new() -> Self {
+        Self { entries: Vec::new(), readings: Vec::new() }
+    }
+
+    fn has(&self, room_id: &RoomId, event_id: &EventId) -> bool {
+        self.entries.iter().any(|entry| *entry.room == *room_id && *entry.event == *event_id)
+    }
+
+    /// Notes that `event_id` was pressed here, or that a copy of it was read.
+    /// True when it is new to the record: it was offered until now.
+    fn note(&mut self, room_id: &RoomId, event_id: &EventId, pressed: bool) -> bool {
+        if let Some(entry) = self.entries.iter_mut().find(|entry| *entry.room == *room_id && *entry.event == *event_id) {
+            if pressed { entry.pressed = true } else { entry.copy_read = true }
+            return false;
+        }
+        self.entries.push(SentAgainEntry { room: room_id.to_owned(), event: event_id.to_owned(), pressed, copy_read: !pressed });
+        let mut excess = self.entries.len().saturating_sub(SENT_AGAIN_KEPT);
+        let readings = &self.readings;
+        self.entries.retain(|entry| {
+            let dropped = excess > 0 && !readings.iter().any(|reading| reading.room == entry.room);
+            if dropped { excess -= 1; }
+            !dropped
+        });
+        true
+    }
+
+    /// A press whose copy did not go out. A copy read here stays.
+    fn unpress(&mut self, room_id: &RoomId, event_id: &EventId) {
+        self.entries.retain_mut(|entry| {
+            if *entry.room != *room_id || *entry.event != *event_id { return true; }
+            entry.pressed = false;
+            entry.copy_read
+        });
+    }
+
+    fn copies_read(&self, room_id: &RoomId, thread: Option<&EventId>) -> bool {
+        self.readings.iter().any(|reading| reading.ready && *reading.room == *room_id && reading.thread.as_deref() == thread)
+    }
+}
+
+static SENT_AGAIN: Mutex<SentAgainRecord> = Mutex::new(SentAgainRecord::new());
+
+/// Whether this client has sent `event_id` again, or read a copy of it.
+pub fn sent_again(room_id: &RoomId, event_id: &EventId) -> bool {
+    SENT_AGAIN.lock().unwrap().has(room_id, event_id)
+}
+
+/// Records that `event_id` is being sent again. Called where the user asks
+/// for it, before the request is handled, so the offer is gone at once.
+pub fn note_sent_again(room_id: &RoomId, event_id: &EventId) {
+    SENT_AGAIN.lock().unwrap().note(room_id, event_id, true);
+}
+
+/// Whether the timeline that a copy of a message of `room_id` stands in, the
+/// room's own or that of the thread `thread`, runs on this client and has
+/// read the copies it started with. Until then no message it could hold a
+/// copy of is offered: the copy would withdraw the offer a moment later.
+pub fn copies_read(room_id: &RoomId, thread: Option<&EventId>) -> bool {
+    SENT_AGAIN.lock().unwrap().copies_read(room_id, thread)
+}
+
+/// A timeline that reads copies, for as long as its subscriber runs. While
+/// it does, the record keeps every entry of its room.
+struct CopyReader(u64);
+
+impl CopyReader {
+    fn start(room_id: &RoomId, thread: Option<OwnedEventId>) -> Self {
+        static NEXT: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = NEXT.fetch_add(1, Ordering::Relaxed);
+        SENT_AGAIN.lock().unwrap().readings.push(CopyReading { id, room: room_id.to_owned(), thread, ready: false });
+        Self(id)
+    }
+
+    /// It has read the copies it started with: its messages can be offered.
+    fn ready(&self) {
+        if let Some(reading) = SENT_AGAIN.lock().unwrap().readings.iter_mut().find(|reading| reading.id == self.0) {
+            reading.ready = true;
+        }
+    }
+}
+
+impl Drop for CopyReader {
+    fn drop(&mut self) {
+        SENT_AGAIN.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).readings.retain(|reading| reading.id != self.0);
+        // A notice that offered a message of this timeline drops the offer.
+        Cx::post_action(crate::hagency::resend_offers::ResendOffersChanged);
+    }
+}
+
+/// As if a timeline of `room_id` (of its thread `thread`) ran and had read
+/// its copies, for the rest of the process. The record is one for the
+/// process: each test keeps to rooms of its own.
+#[cfg(test)]
+pub(crate) fn test_read_copies(room_id: &str, thread: Option<&str>) {
+    let reader = CopyReader::start(<&RoomId>::try_from(room_id).unwrap(), thread.map(|root| OwnedEventId::try_from(root).unwrap()));
+    reader.ready();
+    std::mem::forget(reader);
+}
+
+/// One event of a timeline as the check for copies reads it: whether the
+/// user sent it, and its JSON as the server returned it, which a local echo
+/// does not have.
+type SeenEvent<'a> = (bool, Option<&'a ruma::serde::Raw<AnySyncTimelineEvent>>);
+
+/// The events of `items` from index `first` on.
+fn seen_events(items: &Vector<Arc<TimelineItem>>, first: usize) -> impl Iterator<Item = SeenEvent<'_>> {
+    items.iter().skip(first).filter_map(|item| item.as_event()).map(|event| (event.is_own(), event.original_json()))
+}
+
+/// Messages of the user's own that were sent again for an earlier one: the
+/// earlier one is not offered again. Each names it in its content as the
+/// server returned it, so this reads the same on every device of the sender
+/// and after a restart. Only the user's own messages are looked at, and only
+/// those that carry the name are parsed. A local echo has no JSON: a copy
+/// that has not gone out yet is read from the send queue instead
+/// (`note_queued_copies`). True when an earlier message was offered until
+/// now.
+fn note_sent_again_by<'a>(room_id: &RoomId, events: impl IntoIterator<Item = SeenEvent<'a>>) -> bool {
+    let mut noted = false;
+    for (own, json) in events {
+        let Some(json) = json.filter(|json| own && crate::hagency::resend_offers::may_name_original(json.json().get())) else { continue };
+        let Some(content) = json.get_field::<serde_json::Value>("content").ok().flatten() else { continue };
+        noted |= note_original_of(room_id, &content);
+    }
+    noted
+}
+
+/// Copies waiting in the room's send queue, which keeps them across a
+/// restart and sends them when it drains. The timeline shows each as a local
+/// echo without the extra fields of its content, so the content is read as
+/// it will go out. True when an earlier message was offered until now.
+fn note_queued_copies<'a>(room_id: &RoomId, contents: impl IntoIterator<Item = &'a ruma::serde::Raw<AnyMessageLikeEventContent>>) -> bool {
+    let mut noted = false;
+    for content in contents {
+        if !crate::hagency::resend_offers::may_name_original(content.json().get()) { continue; }
+        let Ok(content) = serde_json::from_str::<serde_json::Value>(content.json().get()) else { continue };
+        noted |= note_original_of(room_id, &content);
+    }
+    noted
+}
+
+/// The contents of the messages waiting in a send queue.
+fn queued_contents(echoes: &[LocalEcho]) -> impl Iterator<Item = &ruma::serde::Raw<AnyMessageLikeEventContent>> {
+    echoes.iter().filter_map(|echo| match &echo.content {
+        LocalEchoContent::Event { serialized_event, .. } => Some(serialized_event.raw().0),
+        _ => None,
+    })
+}
+
+/// Notes the message that `content` names as the one it was sent again for.
+/// True when that one was offered until now.
+/// It is noted as read also when it was pressed here: a failure of this
+/// client's own copy does not take it back.
+fn note_original_of(room_id: &RoomId, content: &serde_json::Value) -> bool {
+    let Some(original) = crate::hagency::resend_offers::original_of(content).and_then(|id| <&EventId>::try_from(id).ok()) else { return false };
+    SENT_AGAIN.lock().unwrap().note(room_id, original, false)
+}
+
+/// Reads the copies a timeline starts with, from its first items and from
+/// the room's send queue, which keeps those that have not gone out across a
+/// restart. The timeline offers nothing before this is done, so no card or
+/// notice offers a message whose copy is read a moment later. The reader it
+/// returns keeps the room's record while the timeline runs.
+async fn note_first_copies(timeline: &Timeline, thread: Option<OwnedEventId>, items: &Vector<Arc<TimelineItem>>) -> CopyReader {
+    let room_id = timeline.room().room_id();
+    let reader = CopyReader::start(room_id, thread);
+    let queued = match timeline.room().send_queue().subscribe().await {
+        Ok((echoes, _updates)) => echoes,
+        Err(error) => { warning!("Could not read the send queue of room {room_id}: {error}"); Vec::new() }
+    };
+    note_sent_again_by(room_id, seen_events(items, 0));
+    note_queued_copies(room_id, queued_contents(&queued));
+    reader.ready();
+    // The cards and the notice offer what this timeline's messages offer now.
+    Cx::post_action(crate::hagency::resend_offers::ResendOffersChanged);
+    reader
+}
+
+fn forget_sent_again(room_id: &RoomId, event_id: &EventId) {
+    SENT_AGAIN.lock().unwrap().unpress(room_id, event_id);
+}
+
+/// Nothing went out for `event_id`. A failure that another try can fix
+/// offers the message again; one that no try can fix does not, while this
+/// client runs. Returns what its sender reads.
+fn send_again_failed(room_id: &RoomId, event_id: &EventId, again: &SendAgain) -> &'static str {
+    match again {
+        SendAgain::Later => {
+            forget_sent_again(room_id, event_id);
+            "Could not send the message again. Try again in a moment."
+        }
+        SendAgain::Never => "This message can no longer be sent again.",
+    }
+}
+
+/// Sends the user's own message `event_id` again as a new message that
+/// mentions `agents` only, in its thread when it has one. It makes the checks
+/// of an ordinary send (the room's encryption is confirmed, the Agents'
+/// devices are ready) and reports a failure to its caller instead of putting
+/// the text back into the composer: typed again from there, the message would
+/// mention every Agent it first did, also one that already answered.
+async fn send_again_to_agents(
+    room_id: &OwnedRoomId,
+    event_id: &OwnedEventId,
+    thread_root: Option<OwnedEventId>,
+    agents: Vec<OwnedUserId>,
+) -> Result<(), SendAgain> {
+    // A reply in a thread is read and sent through its thread's timeline,
+    // which exists while the thread is open: the room's timeline does not
+    // show the reply. It is offered only where its thread is open.
+    let timeline_kind = match &thread_root {
+        Some(root) => TimelineKind::Thread { room_id: room_id.clone(), thread_root_event_id: root.clone() },
+        None => TimelineKind::MainRoom { room_id: room_id.clone() },
+    };
+    let (timeline, _sender) = get_timeline_and_sender(&timeline_kind).await.ok_or(SendAgain::Later)?;
+    let message = addressed_again(message_to_send_again(&timeline, event_id).await?, agents);
+    crate::room_encryption::confirmed_state(timeline.room()).await.map_err(|_| SendAgain::Later)?;
+    #[cfg(feature = "agent_chat")]
+    crate::agent_chat::encrypted_send::ensure_ready(timeline.room(), &message).await.map_err(|_| SendAgain::Later)?;
+    let mut extra = crate::agent_access::routing::room_only(&crate::agent_access::current(), current_user_id().as_deref(), room_id, &message).unwrap_or_default();
+    // The new message names the one it is sent for, so that no device of the
+    // sender offers that one again once it has the new one.
+    extra.extend(crate::hagency::resend_offers::marker(event_id.as_str()));
+    let content: AnyMessageLikeEventContent = match thread_root {
+        Some(root) => {
+            let reply = Reply {
+                event_id: root,
+                enforce_thread: matrix_sdk::room::reply::EnforceThread::Threaded(ruma::events::room::message::ReplyWithinThread::No),
+                add_mentions: ruma::events::room::message::AddMentions::No,
+            };
+            timeline.room().make_reply_event(message.into(), reply).await.map_err(|_| SendAgain::Later)?.into()
+        }
+        None => message.into(),
+    };
+    timeline.send_with_extra_content(content, Some(extra)).await.map_err(|_| SendAgain::Later)?;
+    log!("Queued a message sent again for {timeline_kind}.");
+    Ok(())
+}
+
+/// What the user's own message `event_id` says now: as the timeline shows it,
+/// with the sender's last edit. A message the timeline has not loaded is not
+/// sent from the room's stored event, which would be the text before any
+/// edit; the offer stays, and works once the message is on screen.
+async fn message_to_send_again(timeline: &Timeline, event_id: &EventId) -> Result<MessageType, SendAgain> {
+    let item = timeline.item_by_event_id(event_id).await.ok_or(SendAgain::Later)?;
+    if !item.is_own() { return Err(SendAgain::Never); }
+    // Not decrypted yet: its key may still arrive.
+    if item.content().is_unable_to_decrypt() { return Err(SendAgain::Later); }
+    // A message that was removed, or is not a message, has no content to send.
+    item.content().as_message().map(|message| message.msgtype().clone()).ok_or(SendAgain::Never)
+}
+
+/// The same message body as a new message that mentions `agents` only. The
+/// first message's relation (a reply, an edit, its thread) is not carried
+/// over, and neither are the people and Agents it mentioned: an Agent that
+/// already answered must not be asked twice.
+fn addressed_again(msgtype: MessageType, agents: Vec<OwnedUserId>) -> RoomMessageEventContent {
+    let mut message = RoomMessageEventContent::new(msgtype);
+    message.mentions = Some(ruma::events::Mentions::with_user_ids(agents));
+    message
 }
 
 /// Obtains the lock on `ALL_JOINED_ROOMS` and returns the timeline and timeline update sender for the given timeline kind.
@@ -6115,6 +6456,11 @@ async fn timeline_subscriber_handler(
 
     #[cfg(feature = "agent_chat")]
     for event in timeline_items.iter().filter_map(|item| item.as_event()) {crate::agent_chat::approval_runtime::ingest(&timeline.room().client(), &room_id, event);}
+    // Copies of messages sent again that the timeline already holds (sent
+    // from another device, or before a restart) and that still wait in the
+    // room's send queue: their first messages are not offered again. Read
+    // before the first update; until then this timeline offers nothing.
+    let _copies = note_first_copies(&timeline, thread_root_event_id.clone(), &timeline_items).await;
     if timeline_update_sender.send(TimelineUpdate::FirstUpdate {
         initial_items: timeline_items.clone(),
     }).is_err() {
@@ -6392,6 +6738,15 @@ async fn timeline_subscriber_handler(
             if num_updates > 0 {
                 #[cfg(feature = "agent_chat")]
                 if !is_progress_only {for event in timeline_items.iter().filter_map(|item| item.as_event()) {crate::agent_chat::approval_runtime::ingest(&timeline.room().client(), &room_id, event);}}
+                // The messages that arrived or changed, and every one when the
+                // whole timeline may have changed.
+                if !is_progress_only {
+                    let first = if clear_cache { 0 } else { index_of_first_change };
+                    // The card on that message and the notice drop the offer.
+                    if note_sent_again_by(&room_id, seen_events(&timeline_items, first)) {
+                        Cx::post_action(crate::hagency::resend_offers::ResendOffersChanged);
+                    }
+                }
                 // Handle the case where back pagination inserts items at the beginning of the timeline
                 // (meaning the entire timeline needs to be re-drawn),
                 // but there is a virtual event at index 0 (e.g., a day divider).
@@ -7119,3 +7474,6 @@ mod composer_send_tests;
 
 #[cfg(test)]
 mod room_restore_tests;
+
+#[cfg(test)]
+mod send_again_tests;

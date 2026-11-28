@@ -346,7 +346,7 @@ impl NativeOwner {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         device
             .bearer()
             .map_err(|_| failure(401, "owner_authorization_required"))?;
@@ -866,7 +866,7 @@ impl NativeManagement {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let profile = hagency_store::owner_resources::ProfileAuthority::new(
             self.profile.clone(),
             device.owner_mxid().into(),
@@ -917,7 +917,7 @@ impl NativeManagement {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let profile = hagency_store::owner_resources::ProfileAuthority::new(
             self.profile.clone(),
             device.owner_mxid().into(),
@@ -986,13 +986,16 @@ mod package_deadline_tests {
     }
 }
 
-/// Which authorization step failed, for diagnosis: several steps share one
-/// returned code. Stage names and codes only; never identifiers.
 /// A device proof that could not be had. One the server could not be asked
-/// for is temporary and says nothing about the sign-in; any other is a refusal.
+/// for is temporary and says nothing about the sign-in; a clock ahead of the
+/// server's is decided and named, as at every step that needs the proof
+/// (`crate::console::without_proof`); any other is a refusal.
 pub(super) fn device_failure(error: crate::console::Error) -> NativeError {
     if matches!(error, crate::console::Error::Unavailable) {
         failure(503, "matrix_authorization_unavailable")
+    } else if matches!(error, crate::console::Error::ClockAhead) {
+        let (status, code) = crate::console::CLOCK_AHEAD_FAILURE;
+        failure(status, code)
     } else {
         failure(401, "owner_authorization_required")
     }
@@ -1042,6 +1045,8 @@ where
         }
     }
 }
+/// Which authorization step failed, for diagnosis: several steps share one
+/// returned code. Stage names and codes only; never identifiers.
 fn authorization_failed(stage: &'static str, error: NativeError) -> NativeError {
     tracing::info!(stage, code = %error.code, "Management authorization failed");
     error

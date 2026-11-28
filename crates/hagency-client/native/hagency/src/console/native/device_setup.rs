@@ -135,7 +135,7 @@ pub(super) async fn source(
         .console
         .authorized_device()
         .await
-        .map_err(|_| error("owner_authorization_required"))?;
+        .map_err(crate::console::proof_refused(failure, 409, "owner_authorization_required"))?;
     if device.bearer().is_err()
         || device.origin() != owner.0.expected_origin
         || device.owner_mxid() != owner.0.expected_owner

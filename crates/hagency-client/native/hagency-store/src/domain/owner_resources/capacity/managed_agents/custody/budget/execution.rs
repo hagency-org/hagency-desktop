@@ -45,6 +45,11 @@ pub(in super::super) fn resolve(
     }
     Ok((value, revision))
 }
+/// Whether this computer has applied a budget to the Agent: the precondition
+/// of `resolve`. Such an Agent is started in the budget protocol only.
+pub(in super::super) fn applied(db: &Connection, child: &str) -> Result<bool, Error> {
+    Ok(journal::head(db, child)?.revision >= 2)
+}
 impl OwnerResourceRegistry {
     /// A current native-derived description only. Fresh execution separately
     /// requires exact stopped predecessor, current Run and full conserved usage.

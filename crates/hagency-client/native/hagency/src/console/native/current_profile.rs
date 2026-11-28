@@ -236,7 +236,7 @@ impl CurrentProfileSelection {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         if device.bearer().is_err()
             || crate::console::owned_agents::profile_identity(
                 device.origin(),
@@ -297,7 +297,7 @@ impl CurrentProfileSelection {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         if device.device_id() != self.device {
             return Err(failure(
                 409,

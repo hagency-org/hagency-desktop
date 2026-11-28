@@ -296,15 +296,12 @@ impl ServerLogin {
         let renewal = self.renewal.lock().await;
         let key = session_key(cookie);
         self.renew_or_keep(&key).await.map_err(|failure| {
-            let unavailable = matches!(failure, super::Error::Unavailable);
-            error(
-                if unavailable { 503 } else { 401 },
-                if unavailable {
-                    "matrix_authorization_unavailable"
-                } else {
-                    "sign_in_required"
-                },
-            )
+            let (status, code) = super::without_proof(
+                &failure,
+                (503, "matrix_authorization_unavailable"),
+                (401, "sign_in_required"),
+            );
+            error(status, code)
         })?;
         let session = self
             .sessions

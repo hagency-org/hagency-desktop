@@ -312,7 +312,7 @@ pub(crate) async fn call(
     let device = console
         .authorized_device()
         .await
-        .map_err(|_| failure(401, "owner_authorization_required"))?;
+        .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
     if device.origin() != reply.origin
         || device.issuer() != reply.issuer
         || device.subject() != reply.subject

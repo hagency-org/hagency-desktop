@@ -742,7 +742,7 @@ impl OwnerProvider {
         let device = console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         if device.origin() != reply.origin
             || device.issuer() != reply.issuer
             || device.subject() != reply.subject
@@ -1024,11 +1024,12 @@ pub(super) async fn invoke(
         .validate(cookie)
         .await
         .map_err(|error| {
-            if matches!(error, super::Error::Unavailable) {
-                failure(503, "server_unavailable")
-            } else {
-                failure(401, "owner_authorization_required")
-            }
+            let (status, code) = super::without_proof(
+                &error,
+                (503, "server_unavailable"),
+                (401, "owner_authorization_required"),
+            );
+            failure(status, code)
         })?;
     let result = if let Some(runtime) = runtime {
         external::call(console, cookie, runtime, operation).await

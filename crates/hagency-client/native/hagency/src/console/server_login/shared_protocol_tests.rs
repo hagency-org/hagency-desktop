@@ -20,9 +20,11 @@ async fn fixture(
             refresh_token: None,
             oauth_expires: now + Duration::from_secs(900),
             authorized_until: now + Duration::from_secs(900),
+            authorized_until_ms: u64::MAX,
             clock_allowance: std::time::Duration::ZERO,
             full_window: std::time::Duration::ZERO,
             sdk_refreshed: None,
+            server_clock: ServerClock::Dated,
             invalidated: false,
             binding: Binding {
                 origin,

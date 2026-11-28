@@ -366,7 +366,7 @@ impl ProjectSetupTransport {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let cookie = self.manager.owner.0.cookie.lock().await.clone();
         let cookie = cookie
             .strip_prefix("hagency_console=")

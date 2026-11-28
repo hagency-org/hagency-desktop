@@ -157,10 +157,16 @@ fn runtime_diagnostic(code: &str) -> String {
         "agent_lease_busy" => "The previous runtime lease is still active. Wait briefly and retry.",
         "authorization_or_lease_lost" => "Runtime authorization or its lease was lost. Stop the service, check your account and device assignment, then start again.",
         "device_transport_unavailable" => "The runtime could not reach the server. Check the connection; the service will retry automatically.",
+        // The wall clock ended the lease ahead of its count: the computer slept, or its clock was set.
+        "execution_lease_elapsed" => "The Agent's lease ran out while this computer was asleep or its clock was changed. The service will retry automatically.",
         "agent_process_closing" => "The previous runtime is still stopping. The service will retry automatically.",
         "agent_execution_device_required" => "Assign this Agent to this device before starting it here.",
+        // The server's date shows it; asking again cannot help until the clock is set.
+        "execution_clock_ahead" => "This computer's clock is ahead of the server's. Turn on setting the date and time automatically, then start the Agent again.",
         "ledger_recovery_required" => "Restore this owner's complete ledger before new requests. Only known original replies may be recovered.",
         "room_worker_stopped" | "runtime_start_failed" => "A Room worker stopped before becoming ready. The service will retry automatically.",
+        // Asking again cannot help while this computer's clock is wrong.
+        "execution_clock_behind" | "invalid_local_clock" => "This computer's clock does not match the server's. Turn on setting the date and time automatically, then start the Agent again.",
         // The engine reports a failed run of any local tool (Codex, Claude Code, Octos) under one code family.
         // An Agent's own run must not be told to check Codex when it runs another tool.
         "codex_provider_timeout" | "codex_provider_unavailable" => "The Agent's coding tool did not respond. Check that it can run on this computer, then retry.",
@@ -4856,12 +4862,23 @@ mod tests {
         assert!(description.contains("agent_lease_busy"));
         assert!(description.contains("provider_authorization_lost"));
         assert!(description.contains("8s"));
+        // A clock the server's date shows to be ahead is named, with what to change.
+        let ahead = runtime_diagnostic("execution_clock_ahead");
+        assert!(ahead.contains("execution_clock_ahead") && ahead.contains("ahead") && ahead.contains("date and time"), "{ahead}");
         assert!(!runtime_diagnostic("secret /private/provider-stderr token=123").contains("secret"));
         // A Claude or Octos Agent's failed run is not worded as a Codex fault.
         for code in ["codex_protocol_mismatch", "codex_provider_timeout", "codex_provider_unavailable"] {
             let message = runtime_diagnostic(code);
             assert!(message.contains(code) && !message.replace(code, "").contains("Codex"), "{message}");
         }
+        // A clock the server's answers show to be wrong is named, with what to change.
+        for code in ["execution_clock_behind", "invalid_local_clock"] {
+            let message = runtime_diagnostic(code);
+            assert!(message.contains(code) && message.contains("clock") && message.contains("date and time"), "{message}");
+        }
+        // A lease a sleep ran past is not worded as a connection fault.
+        let elapsed = runtime_diagnostic("execution_lease_elapsed");
+        assert!(elapsed.contains("execution_lease_elapsed") && elapsed.contains("asleep") && !elapsed.contains("connection"), "{elapsed}");
     }
     #[test]
     fn service_detail_does_not_claim_readiness_and_preserves_action_failure() {

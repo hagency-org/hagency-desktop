@@ -62,8 +62,14 @@ pub enum Error {
     Busy,
     #[error("native console is unavailable")]
     Unavailable,
+    /// By the server's date this computer's clock is ahead of the server's by
+    /// the whole authorization window. It is decided: the session is kept,
+    /// and every renewal reads the same until the clock is set.
+    #[error("this computer's clock is ahead of the server's")]
+    ClockAhead,
 }
 pub use server_login::AuthorizedDevice;
+pub(crate) use server_login::{CLOCK_AHEAD_FAILURE, proof_refused, without_proof};
 
 struct Inner {
     authority: Authority,
@@ -241,6 +247,7 @@ fn failed(res: &mut Response, error: Error) {
         Error::AccountForbidden => (StatusCode::FORBIDDEN, "account_scope_required"),
         Error::LifecycleForbidden => (StatusCode::FORBIDDEN, "agent_lifecycle_scope_required"),
         Error::Busy => (StatusCode::TOO_MANY_REQUESTS, "console_busy"),
+        Error::ClockAhead => (StatusCode::CONFLICT, CLOCK_AHEAD_FAILURE.1),
     };
     refusal(res, status, code);
 }

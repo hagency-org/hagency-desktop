@@ -303,9 +303,11 @@ mod sdk_resume_tests {
 
     #[tokio::test]
     async fn sdk_resume_unavailable_preserves_exact_credentials_and_never_rotates() {
-        // 12: the device proof lies outside the local clock window. The clocks
-        // disagree; the owner did not sign out.
-        for mode_value in [2, 6, 7, 12] {
+        // A device proof without the server's date that the local clock reads
+        // as longer than the default window (12) is not among them: a restore
+        // reads it as a renewal does (see
+        // `sdk_resume_holds_an_undated_long_device_proof_to_the_default_window`).
+        for mode_value in [2, 6, 7] {
             let mode = Arc::new(std::sync::atomic::AtomicU16::new(0));
             let (origin, records, task) =
                 fixture_controlled("@owner:test", None, mode.clone()).await;
@@ -352,6 +354,47 @@ mod sdk_resume_tests {
             resumed.shutdown().await;
             task.abort();
         }
+    }
+
+    /// Behind a proxy that drops the server's date, a computer whose clock is
+    /// behind reads the device proof of a restore as longer than the default
+    /// window. It is held to that window from its request, as a renewal's
+    /// proof is, and the same device resumes; it used to be refused, and a
+    /// computer more than a second behind could not restore at all.
+    #[tokio::test]
+    async fn sdk_resume_holds_an_undated_long_device_proof_to_the_default_window() {
+        let mode = Arc::new(std::sync::atomic::AtomicU16::new(0));
+        let (origin, records, task) = fixture_controlled("@owner:test", None, mode.clone()).await;
+        let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+        let state = root.path().join("state");
+        let native = NativeOwner::open_with_matrix(&state, &origin, "@owner:test", source())
+            .await
+            .unwrap();
+        native.suspend().await.unwrap();
+        drop(native);
+        let original = std::fs::read(state.join("server-login-sdk-resume.json")).unwrap();
+        // The device proof reads 120 s, without the server's date.
+        mode.store(12, Ordering::Release);
+        let resumed = NativeOwner::open_with_matrix(&state, &origin, "@owner:test", source())
+            .await
+            .unwrap();
+        let device = resumed
+            .test_console()
+            .0
+            .server_login
+            .authorized_device()
+            .await
+            .unwrap();
+        assert_eq!(device.generation(), 1);
+        assert!(device.valid_until() <= Instant::now() + Duration::from_secs(31));
+        assert_eq!(
+            std::fs::read(state.join("server-login-sdk-resume.json")).unwrap(),
+            original
+        );
+        assert_eq!(count(&records, "/devices"), 1);
+        assert_eq!(count(&records, "/sessions/pasion"), 1);
+        resumed.shutdown().await;
+        task.abort();
     }
 
     #[tokio::test]

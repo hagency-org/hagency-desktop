@@ -101,8 +101,11 @@ impl OwnerResourceRegistry {
                     .db
                     .transaction_with_behavior(TransactionBehavior::Immediate)?;
                 demand::require_explicit_start(&tx, &start_id)?;
+                // An Agent with an applied budget: its place is the budget
+                // lane's, as when a budget start holds it.
                 let value =
-                    prepare_in_transaction(&tx, &enrollment, original, predecessor, start_id)?;
+                    prepare_in_transaction(&tx, &enrollment, original, predecessor, start_id)?
+                        .ok_or(Error::Conflict)?;
                 tx.commit()?;
                 enrollment.check().map_err(|_| Error::OutcomeUnknown)?;
                 Ok(value)
@@ -174,14 +177,16 @@ impl OwnerResourceRegistry {
 
 // Same transaction helper used by the explicit-start API and the isolated
 // demand journal. The caller owns commit; no second revision follows this
-// snapshot before its original start bytes are saved.
+// snapshot before its original start bytes are saved. `None`: this computer
+// has applied a budget to the Agent, so no new start is made here, first or
+// retry, and nothing is written; a start saved before that is returned.
 pub(super) fn prepare_in_transaction(
     tx: &Connection,
     enrollment: &VerifiedManagementEnrollment,
     original: SharedRuntimeCommand,
     predecessor: Option<SharedAttemptCommand>,
     start_id: String,
-) -> Result<SharedAttemptStartIntent, Error> {
+) -> Result<Option<SharedAttemptStartIntent>, Error> {
     let original_digest = canonical::digest(&serde_json::to_value(&original)?)?;
     let predecessor_digest = predecessor
         .as_ref()
@@ -214,7 +219,14 @@ pub(super) fn prepare_in_transaction(
             return Err(Error::Conflict);
         }
         enrollment.check()?;
-        return Ok(SharedAttemptStartIntent { input, original });
+        return Ok(Some(SharedAttemptStartIntent { input, original }));
+    }
+    // An Agent this computer has applied a budget to starts in the budget
+    // lane only: the server refuses its plain starts, and the budget lane
+    // cannot take up a message this lane started.
+    #[cfg(feature = "shared-budget-execution")]
+    if super::super::budget::execution::applied(tx, &original.agent_reservation_id)? {
+        return Ok(None);
     }
     // A new v3 journal for this predecessor cannot be bypassed by downgrading
     // to a v2 caller, including builds with v3 issuance disabled.
@@ -287,5 +299,5 @@ pub(super) fn prepare_in_transaction(
         ],
     )?;
     enrollment.check()?;
-    Ok(SharedAttemptStartIntent { input, original })
+    Ok(Some(SharedAttemptStartIntent { input, original }))
 }

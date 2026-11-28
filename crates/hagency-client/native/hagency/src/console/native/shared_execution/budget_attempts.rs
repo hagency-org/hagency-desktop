@@ -1,6 +1,10 @@
 //! Explicit v3 startup and exact evidence recovery.
 use super::*;
 impl SharedExecutionTransport {
+    /// A start of an Agent with an applied budget for no message. Only tests
+    /// ask for one: the server keeps no record of one it refused, so such a
+    /// start could hold its place for as long as the reservation lasts.
+    #[cfg(test)]
     pub async fn start_budget_successor(
         &self,
         r: &OwnerResourceRegistry,

@@ -5,6 +5,9 @@
 //! on it for every message: with `None` for ordinary messages, which hides it,
 //! or with the parsed request plus its current decision state.
 //!
+//! The same card offers "Send again" on a message that ended without a turn
+//! (see `crate::hagency::resend_offers`).
+//!
 //! Button clicks surface through [`AgentApprovalCardRef::clicked_action`],
 //! which the enclosing `Message` turns into a `MessageAction` for the
 //! `RoomScreen` to act on. The card itself holds no protocol state beyond the
@@ -251,9 +254,11 @@ impl ApprovalCardState {
 
 /// The button slots, in the order hagency lists them. A shared-execution
 /// request offers `approve_session` instead of `approve_task`; both share the
-/// second slot because no request ever offers both.
-const BUTTON_SLOTS: [(&str, &[LiveId]); 5] = [
+/// second slot because no request ever offers both. A message that can be
+/// sent again offers `send_again` alone, in the first slot.
+const BUTTON_SLOTS: [(&str, &[LiveId]); 6] = [
     ("approve_once", ids!(button_row.approve_once_button)),
+    ("send_again", ids!(button_row.approve_once_button)),
     ("approve_task", ids!(button_row.approve_task_button)),
     ("approve_session", ids!(button_row.approve_task_button)),
     ("approve_always", ids!(button_row.approve_always_button)),
@@ -310,14 +315,22 @@ impl AgentApprovalCard {
             ApprovalDecisionState::OutcomeUnknown(action) => ("Delivery unknown · awaiting bridge", false, Some(action)),
             ApprovalDecisionState::Confirmed(status) => (status, false, None),
             ApprovalDecisionState::Unavailable => ("Approval unavailable", false, None),
+            ApprovalDecisionState::Offered(status) => (status, true, None),
         };
         self.view.label(cx, ids!(header.status_badge.status_label)).set_text(cx, crate::i18n::tr(status_text));
 
         self.actions = if live_buttons { state.actions.clone() } else { Vec::new() };
         let mut any_button_visible = false;
         for (id, path) in BUTTON_SLOTS {
-            let button = self.view.button(cx, path);
             let offered = state.actions.iter().find(|action| action.id == id);
+            // A slot that another offered action shares is that action's.
+            let shared = BUTTON_SLOTS.iter().any(|(other, other_path)| {
+                *other != id && *other_path == path && state.actions.iter().any(|action| action.id == *other)
+            });
+            if offered.is_none() && shared {
+                continue;
+            }
+            let button = self.view.button(cx, path);
             let (visible, text, enabled) = match (offered, chosen) {
                 // After a decision, keep only the chosen button as a disabled receipt.
                 (Some(action), Some(chosen_action)) if chosen_action.id == id => {
@@ -339,7 +352,8 @@ impl AgentApprovalCard {
             }
         }
         self.view.view(cx, ids!(button_row)).set_visible(cx, any_button_visible);
-        self.view.label(cx, ids!(hint_label)).set_visible(cx, live_buttons);
+        let approval = !matches!(state.decision, ApprovalDecisionState::Offered(_));
+        self.view.label(cx, ids!(hint_label)).set_visible(cx, live_buttons && approval);
         self.view.redraw(cx);
     }
 
@@ -348,9 +362,12 @@ impl AgentApprovalCard {
         if self.actions.is_empty() {
             return None;
         }
+        // Two actions may share a slot: the click is the one offered there.
         for (id, path) in BUTTON_SLOTS {
-            if self.view.button(cx, path).clicked(actions) {
-                return self.actions.iter().find(|action| action.id == id).cloned();
+            if self.view.button(cx, path).clicked(actions)
+                && let Some(action) = self.actions.iter().find(|action| action.id == id)
+            {
+                return Some(action.clone());
             }
         }
         None
@@ -382,5 +399,78 @@ impl AgentApprovalCardRef {
     /// Returns the action whose button was clicked in `actions`, if any.
     pub fn clicked_action(&self, cx: &mut Cx, actions: &Actions) -> Option<ApprovalAction> {
         self.borrow().and_then(|inner| inner.clicked_action(cx, actions))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::agent_chat::approval::ActionStyle;
+
+    fn card(cx: &mut Cx) -> AgentApprovalCardRef {
+        cx.with_vm(|vm| {
+            makepad_widgets::script_mod(vm);
+            crate::app::register_widgets(vm);
+            vm.bx.captured_errors = Some(Vec::new());
+            let value = script_eval!(vm, {mod.widgets.AgentApprovalCard {}});
+            let widget = WidgetRef::script_from_value(vm, value);
+            widget.register_as_ui_root(vm);
+            assert!(vm.take_errors().is_empty());
+            widget.as_agent_approval_card()
+        })
+    }
+
+    fn action(id: &str) -> ApprovalAction {
+        ApprovalAction { id: id.into(), label: format!("{id} label"), style: ActionStyle::Primary }
+    }
+
+    /// Whether a button is shown, and with which text.
+    fn shown(cx: &mut Cx, card: &AgentApprovalCardRef, path: &[LiveId]) -> Option<String> {
+        let inner = card.borrow().unwrap();
+        let button = inner.view.button(cx, path);
+        button.visible().then(|| button.text())
+    }
+
+    /// The action a click on the button at `path` reports.
+    fn click(cx: &mut Cx, card: &AgentApprovalCardRef, path: &[LiveId]) -> Option<ApprovalAction> {
+        let uid = card.borrow().unwrap().view.button(cx, path).widget_uid();
+        let actions = cx.capture_actions(|cx| cx.widget_action(uid, ButtonAction::Clicked(KeyModifiers::default())));
+        card.clicked_action(cx, &actions)
+    }
+
+    #[test]
+    fn a_slot_that_two_actions_share_shows_the_offered_one() {
+        let mut cx = Cx::new(Box::new(|_, _| {}));
+        let card = card(&mut cx);
+        // A shared-execution request: the second slot is "approve_session",
+        // and the first slot stays "approve_once" though "send_again" shares it.
+        card.set_state(&mut cx, Some(&ApprovalCardState {
+            title: "Run a command".into(),
+            summary: String::new(),
+            decision: ApprovalDecisionState::Pending,
+            actions: vec![action("approve_once"), action("approve_session"), action("deny")],
+        }));
+        assert_eq!(shown(&mut cx, &card, ids!(button_row.approve_once_button)).as_deref(), Some("approve_once label"));
+        assert_eq!(shown(&mut cx, &card, ids!(button_row.approve_task_button)).as_deref(), Some("approve_session label"));
+        assert_eq!(shown(&mut cx, &card, ids!(button_row.deny_button)).as_deref(), Some("deny label"));
+        assert!(card.borrow().unwrap().view.label(&mut cx, ids!(hint_label)).visible());
+        // A click on a slot that two actions share is the offered action's.
+        assert_eq!(click(&mut cx, &card, ids!(button_row.approve_task_button)), Some(action("approve_session")));
+        assert_eq!(click(&mut cx, &card, ids!(button_row.approve_once_button)), Some(action("approve_once")));
+        // A message that can be sent again: one live button and no approval hint.
+        card.set_state(&mut cx, Some(&ApprovalCardState {
+            title: "Not processed".into(),
+            summary: String::new(),
+            decision: ApprovalDecisionState::Offered("Can be sent again".into()),
+            actions: vec![action("send_again")],
+        }));
+        assert_eq!(shown(&mut cx, &card, ids!(button_row.approve_once_button)).as_deref(), Some("send_again label"));
+        assert!(shown(&mut cx, &card, ids!(button_row.approve_task_button)).is_none());
+        assert!(shown(&mut cx, &card, ids!(button_row.deny_button)).is_none());
+        assert!(!card.borrow().unwrap().view.label(&mut cx, ids!(hint_label)).visible());
+        assert_eq!(click(&mut cx, &card, ids!(button_row.approve_once_button)), Some(action("send_again")));
+        // A card that shows no live button reports no click.
+        card.set_state(&mut cx, None);
+        assert_eq!(click(&mut cx, &card, ids!(button_row.approve_once_button)), None);
     }
 }

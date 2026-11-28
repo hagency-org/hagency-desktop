@@ -196,7 +196,7 @@ impl NativeManagement {
         let device = console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let reply = console
             .owner_api_pinned(&DeviceIdentity::from(&device), operation)
             .await;
@@ -221,7 +221,7 @@ impl NativeManagement {
         let device = console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let cookie = self.owner.0.cookie.lock().await.clone();
         let cookie = cookie
             .strip_prefix("hagency_console=")
@@ -327,7 +327,11 @@ impl NativeManagement {
                     .console
                     .authorized_device()
                     .await
-                    .map_err(|_| failure(401, "owner_authorization_required"))?;
+                    .map_err(crate::console::proof_refused(
+                        failure,
+                        401,
+                        "owner_authorization_required",
+                    ))?;
                 personal_identity(
                     device.user_id(),
                     agent_id,

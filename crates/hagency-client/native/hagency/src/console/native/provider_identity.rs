@@ -184,7 +184,7 @@ impl NativeManagement {
         &self, context:&hagency_store::management::HostContext,
     )->Result<super::super::owner_provider::ProviderPaths,NativeError> {
         let device=self.owner.0.host.console.authorized_device().await
-            .map_err(|_|failure(401,"owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         device.bearer().map_err(|_|failure(401,"owner_authorization_required"))?;
         self.check_observation_device(context,&device)?;
         // Same authenticated original profile and saved provider selection as

@@ -510,6 +510,28 @@ impl NativeError {
             // The time this request was given ran out before an answer came:
             // a ticket, like every offer, is asked for again.
             "allocation_ticket_expired" => Said::NoAnswer,
+            // The same on the execution routes of this host's own Agents: an
+            // answer with no code of the server's in it, whatever its status,
+            // and one this host could not read or hold to the scope it asked
+            // for. Whether the step took effect is not known. A lease is
+            // granted afresh to the same device when it is asked again, and
+            // every other step is read again before it is acted on.
+            "execution_request_failed" => Said::NoAnswer,
+            "execution_response_too_large"
+            | "execution_scope_mismatch"
+            | "invalid_execution_response" => Said::NoAnswer,
+            "invalid_execution_history" if self.status >= 500 => Said::NoAnswer,
+            // What this host makes itself on that path with a status of 500
+            // or more: a computer clock before 1970, a server address it
+            // cannot read, and a room history a room tool cannot read. As in
+            // the list below, each is the failure of a step of its own,
+            // handled where it is made, and named so that the rule for such
+            // a status is about the server only.
+            // `every_failure_made_on_the_owned_path_is_read` fails when one
+            // is made there and not named.
+            "invalid_local_clock" | "invalid_server_binding" | "room_history_unavailable" => {
+                Said::Decided
+            }
             // What this host makes itself with a status of 500 or more. Each
             // is the failure of a step of its own and is handled where it is
             // made. They are named so that the rule below is about the
@@ -802,6 +824,138 @@ mod said_tests {
         // A listed code that is no longer made is taken off the list.
         for code in DECIDED {
             assert!(made.iter().any(|(_, made)| made == code), "{code} is not made any more");
+        }
+    }
+}
+#[cfg(test)]
+mod owned_said_tests {
+    //! The same reading for the path of this host's own Agents and for the
+    //! renewal of its session.
+    use super::{Said, failure};
+
+    /// Every `<status>, "<code>"` in `text`.
+    fn made_in(text: &str, made: &mut std::collections::BTreeSet<(u16, String)>) {
+        let bytes = text.as_bytes();
+        for at in 0..bytes.len().saturating_sub(3) {
+            let digits = &bytes[at..at + 3];
+            if !digits.iter().all(u8::is_ascii_digit)
+                || (at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_'))
+            {
+                continue;
+            }
+            let rest = text[at + 3..].trim_start();
+            let Some(rest) = rest.strip_prefix(',') else { continue };
+            let Some(rest) = rest.trim_start().strip_prefix('"') else { continue };
+            let Some((code, _)) = rest.split_once('"') else { continue };
+            if !code.is_empty()
+                && code.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+            {
+                made.insert((text[at..at + 3].parse().unwrap(), code.to_owned()));
+            }
+        }
+    }
+
+    /// What a failure says, as this host makes it on the path of its own
+    /// Agents (the execution routes, the runtime and its room tools) and in
+    /// the renewal of its session, by code and status where that is not
+    /// simply decided.
+    const OWNED_READ: &[(&str, u16, Said)] = &[
+        ("execution_response_too_large", 502, Said::NoAnswer),
+        ("execution_scope_mismatch", 502, Said::NoAnswer),
+        ("invalid_execution_history", 400, Said::Decided),
+        ("invalid_execution_history", 502, Said::NoAnswer),
+        ("invalid_execution_response", 502, Said::NoAnswer),
+        ("invalid_server_response", 502, Said::NoAnswer),
+        ("server_unavailable", 503, Said::NoAnswer),
+    ];
+    /// Codes made on that path that decide their step, with whatever status.
+    const OWNED_DECIDED: &[&str] = &[
+        "device_authorization_required", "execution_clock_ahead", "execution_clock_behind",
+        "execution_wire_body_too_large", "invalid_arguments", "invalid_execution_arguments",
+        "invalid_lease_epoch", "invalid_lease_ttl", "invalid_local_clock", "invalid_poll_limit",
+        "invalid_project_folder", "invalid_room_id", "invalid_server_binding", "reply_too_large",
+        "room_anchor_changed", "room_history_unavailable", "sign_in_required",
+    ];
+    /// `text` without the test module that follows a file's code.
+    fn without_tests(text: &str) -> &str {
+        let marker = "\n#[cfg(test)]\nmod ";
+        let mut from = 0;
+        while let Some(found) = text[from..].find(marker) {
+            let at = from + found;
+            let rest = &text[at + marker.len()..];
+            if rest.split('\n').next().is_some_and(|line| line.trim_end().ends_with('{')) {
+                return &text[..at];
+            }
+            from = at + marker.len();
+        }
+        text
+    }
+    /// Every `<status>, "<code>"` in the code of the path of this host's own
+    /// Agents and of its session renewal.
+    fn made_on_the_owned_path() -> std::collections::BTreeSet<(u16, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/console");
+        let mut files = vec![
+            root.join("device_execution.rs"),
+            root.join("owned_runtime.rs"),
+            root.join("server_login.rs"),
+        ];
+        let mut directories = vec![root.join("owned_runtime")];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        let mut made = std::collections::BTreeSet::new();
+        for file in files {
+            let name = file.file_name().unwrap().to_str().unwrap();
+            if !name.ends_with(".rs")
+                || name.ends_with("tests.rs")
+                || file.components().any(|part| part.as_os_str() == "tests")
+            {
+                continue;
+            }
+            made_in(without_tests(&std::fs::read_to_string(&file).unwrap()), &mut made);
+        }
+        made
+    }
+
+    /// Every failure made on the path of this host's own Agents and in its
+    /// session renewal is read here, as on the pooled path, so that the owned
+    /// runtime, the session and the pooled runs read a failure alike.
+    #[test]
+    fn every_failure_made_on_the_owned_path_is_read() {
+        let made = made_on_the_owned_path();
+        assert!(made.len() > 20, "the scan found the owned path: {}", made.len());
+        let mut unread = Vec::new();
+        for (status, code) in &made {
+            let listed = OWNED_READ
+                .iter()
+                .find(|(read, at, _)| read == code && at == status)
+                .map(|(_, _, said)| *said)
+                .or_else(|| OWNED_DECIDED.contains(&code.as_str()).then_some(Said::Decided));
+            match listed {
+                Some(said) => assert_eq!(failure(*status, code).said(), said, "{status} {code}"),
+                None => unread.push((status, code)),
+            }
+        }
+        assert!(unread.is_empty(), "made on the owned path and not read: {unread:?}");
+        for (code, status, said) in OWNED_READ {
+            assert_eq!(failure(*status, code).said(), *said, "{status} {code}");
+            assert!(!OWNED_DECIDED.contains(code), "{code} is listed twice");
+        }
+        for code in OWNED_DECIDED {
+            assert!(made.iter().any(|(_, made)| made == code), "{code} is not made any more");
+        }
+        // Made without a status of its own: an answer of the execution routes
+        // with no code of the server's in it decides nothing, whatever its
+        // status, as `server_request_failed` does.
+        for status in [401, 404, 409, 500] {
+            assert_eq!(failure(status, "execution_request_failed").said(), Said::NoAnswer);
         }
     }
 }
@@ -1539,6 +1693,11 @@ impl NativeOwner {
                 Err(super::Error::Unavailable) => {
                     return Err(failure(503, "matrix_authorization_unavailable"));
                 }
+                // The session stands; a new sign-in would read the same.
+                Err(super::Error::ClockAhead) => {
+                    let (status, code) = super::CLOCK_AHEAD_FAILURE;
+                    return Err(failure(status, code));
+                }
                 Err(_) => Some(
                     self.0
                         .host
@@ -1578,7 +1737,7 @@ impl NativeOwner {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         if d.origin() != self.0.expected_origin || d.owner_mxid() != self.0.expected_owner {
             return Err(failure(401, "matrix_account_mismatch"));
         }
