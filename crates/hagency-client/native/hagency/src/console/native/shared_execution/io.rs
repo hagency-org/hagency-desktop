@@ -419,6 +419,17 @@ impl Io {
     ) -> Result<(), NativeError> {
         self.check_settled(c, || wall_held("check", until, wall_end_ms)).await
     }
+    /// `check_held` for a step beside a Codex turn, under the lease in force
+    /// at each attempt (`Held`). The lease is renewed beside such a step, so
+    /// it ends by the next renewal moment without this check; with it, the
+    /// step is not taken under a lease the wall clock has ended.
+    pub(super) async fn check_under(
+        &self,
+        c: &SharedRuntimeCommand,
+        held: &Held,
+    ) -> Result<(), NativeError> {
+        self.check_settled(c, || held.check("check")).await
+    }
     async fn check_settled(
         &self,
         c: &SharedRuntimeCommand,
@@ -648,6 +659,28 @@ pub(super) fn wall_held(step: &'static str, until: Instant, wall_end_ms: u64) ->
         "An activity lease has ended on the wall clock; the step under it is not taken"
     );
     Err(failure(409, "shared_execution_expired"))
+}
+/// The lease a Codex turn holds now, by its ends on both clocks, for the
+/// steps that run while the driver renews that lease beside them: the run
+/// controls, the delivery of the turn's messages, and the opening of its
+/// provider thread. The driver replaces its lease at each renewal and updates
+/// this with it, as the Claude driver's watch channel does, so such a step
+/// reads the lease in force, not the one it began under.
+#[derive(Clone)]
+pub(super) struct Held(Arc<std::sync::Mutex<(Instant, u64)>>);
+impl Held {
+    pub fn new(until: Instant, wall_end_ms: u64) -> Self {
+        Self(Arc::new(std::sync::Mutex::new((until, wall_end_ms))))
+    }
+    /// The ends of the lease a renewal granted.
+    pub fn renewed(&self, until: Instant, wall_end_ms: u64) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = (until, wall_end_ms);
+    }
+    /// `wall_held` under the lease in force now.
+    pub fn check(&self, step: &'static str) -> Result<(), NativeError> {
+        let (until, wall_end_ms) = *self.0.lock().unwrap_or_else(|e| e.into_inner());
+        wall_held(step, until, wall_end_ms)
+    }
 }
 /// What the wall clock leaves of a lease that ends at `wall_end_ms`, for the
 /// log; nothing when that clock cannot be read.
@@ -1267,6 +1300,21 @@ mod settle_tests {
         assert_eq!((ended.status, ended.code.as_str()), (409, "shared_execution_expired"));
         let asked = io.bound_held(until, now + 3_600_000).await.err().unwrap();
         assert_eq!((asked.status, asked.code.as_str()), (409, "shared_execution_closed"));
+    }
+
+    /// A step beside a Codex turn reads the lease in force when it is taken.
+    /// The copy that the run controls keep was taken before the renewal, and
+    /// reads the end that renewal granted, not the one it began under.
+    #[test]
+    fn a_step_beside_a_turn_reads_the_lease_a_renewal_granted() {
+        let now = hagency_store::owner_resources::wall_clock_ms().unwrap();
+        let until = Instant::now() + Duration::from_secs(100);
+        let held = Held::new(until, now - 1);
+        let beside = held.clone();
+        let ended = beside.check("control").unwrap_err();
+        assert_eq!((ended.status, ended.code.as_str()), (409, "shared_execution_expired"));
+        held.renewed(until, now + 3_600_000);
+        assert!(beside.check("control").is_ok());
     }
 
     /// A request that left and got no answer was not refused. The step is
