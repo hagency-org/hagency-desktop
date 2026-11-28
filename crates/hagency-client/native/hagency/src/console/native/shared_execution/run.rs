@@ -789,17 +789,17 @@ async fn work_loop(
         if let Some(call)=file_call && process.room_file_admissible(&call) {
             let reader=history.as_ref().ok_or_else(invalid)?;
             let files=files.as_mut().ok_or_else(invalid)?;
-            guarded(cancel,a.until,|| io.check_running(sink.command())).await?;
+            guarded(cancel,a.until,|| io.check_held(sink.command(),a.until,a.lease.expires_at_ms)).await?;
             let content=room_wait!(|process: &OwnedSession| process.room_file_admissible(&call), files.handle(&call.operation,reader));
-            guarded(cancel,a.until,|| io.check_running(sink.command())).await?;
+            guarded(cancel,a.until,|| io.check_held(sink.command(),a.until,a.lease.expires_at_ms)).await?;
             guarded(cancel,a.until,||async { process.respond_shared_room_file(&call,content).await.map_err(|_|failure(409,"shared_file_response_failed")) }).await?;
         }
         if let Some(call)=history_call && process.room_history_admissible(&call) {
             let reader=history.as_mut().ok_or_else(invalid)?;
-            guarded(cancel,a.until,|| io.check_running(sink.command())).await?;
+            guarded(cancel,a.until,|| io.check_held(sink.command(),a.until,a.lease.expires_at_ms)).await?;
             let content=room_wait!(|process: &OwnedSession| process.room_history_admissible(&call),reader.read_call(&call))
                 .unwrap_or_else(|error| serde_json::json!({"complete":false,"error":error.code}).to_string());
-            guarded(cancel,a.until,|| io.check_running(sink.command())).await?;
+            guarded(cancel,a.until,|| io.check_held(sink.command(),a.until,a.lease.expires_at_ms)).await?;
             guarded(cancel,a.until,||async{ process.respond_shared_room_history(&call,content).await.map_err(|_|failure(409,"shared_history_response_failed")) }).await?;
         }
         if let Some(id)=withdrawn { questions.withdrawn(&id); }

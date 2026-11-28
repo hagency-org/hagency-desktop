@@ -403,8 +403,30 @@ impl Io {
     /// the run once they persist. Callers keep the run's cancellation and
     /// activity deadline around this.
     pub async fn check_running(&self, c: &SharedRuntimeCommand) -> Result<(), NativeError> {
+        self.check_settled(c, || Ok(())).await
+    }
+    /// `check_running` for a step of a turn under its activity lease, such as
+    /// a room call: each attempt first reads the lease on the wall clock
+    /// (`wall_held`), as a proof's does. The turn waits on such a step without
+    /// renewing its lease meanwhile. Without the wall-clock check, after a
+    /// sleep of the computer a server that did not answer was asked again for
+    /// `RUNNING_CHECK_SETTLE`, past the lease's next renewal moment.
+    pub(super) async fn check_held(
+        &self,
+        c: &SharedRuntimeCommand,
+        until: Instant,
+        wall_end_ms: u64,
+    ) -> Result<(), NativeError> {
+        self.check_settled(c, || wall_held("check", until, wall_end_ms)).await
+    }
+    async fn check_settled(
+        &self,
+        c: &SharedRuntimeCommand,
+        held: impl Fn() -> Result<(), NativeError>,
+    ) -> Result<(), NativeError> {
         let settle = std::time::Instant::now() + RUNNING_CHECK_SETTLE;
         loop {
+            held()?;
             match self.check(c).await {
                 Err(error) if self.transient(&error) && std::time::Instant::now() < settle => {
                     tracing::info!(code = %error.code, "Shared run authority check retrying");
@@ -420,6 +442,20 @@ impl Io {
     pub async fn bound_running(&self) -> Result<Bound, NativeError> {
         let settle = Instant::now() + RUNNING_CHECK_SETTLE;
         self.settled(settle, || self.bound()).await
+    }
+    /// `bound_running` for a step of a turn under its activity lease, as
+    /// `check_held`: the idle pass of a turn with owner approvals.
+    pub(super) async fn bound_held(
+        &self,
+        until: Instant,
+        wall_end_ms: u64,
+    ) -> Result<Bound, NativeError> {
+        let settle = Instant::now() + RUNNING_CHECK_SETTLE;
+        self.settled(settle, || async {
+            wall_held("scope", until, wall_end_ms)?;
+            self.bound().await
+        })
+        .await
     }
     /// Runs one authority step of a running process and asks it again, until
     /// `until` (the activity lease, at the latest), while its failure is not a
@@ -1201,6 +1237,36 @@ mod settle_tests {
         assert!(!transient_boundary(&ended));
         // An hour ahead: beyond any clock a test sets ahead.
         assert!(wall_held("proof", until, now + 3_600_000).is_ok());
+    }
+
+    /// An `Io` whose management has closed: a step that reaches it is
+    /// refused with `shared_execution_closed` and asks no server.
+    fn closed_io() -> Io {
+        Io {
+            permission: Permission::ExecuteManagedAgents,
+            manager: std::sync::Weak::new(),
+            host_gate: None,
+            namespace: None,
+            provider_gate: None,
+            claude_discovery: Arc::default(),
+            project_folders: Default::default(),
+            crypto_fixture: None,
+            project_root: None,
+        }
+    }
+
+    /// A turn's own scope under a lease the wall clock has ended is refused
+    /// before anything is asked: the refusal is the lease's end, not the
+    /// closed management behind it.
+    #[tokio::test]
+    async fn a_turn_s_own_scope_under_a_lease_the_wall_clock_ended_is_not_asked_for() {
+        let io = closed_io();
+        let now = hagency_store::owner_resources::wall_clock_ms().unwrap();
+        let until = Instant::now() + Duration::from_secs(100);
+        let ended = io.bound_held(until, now - 1).await.err().unwrap();
+        assert_eq!((ended.status, ended.code.as_str()), (409, "shared_execution_expired"));
+        let asked = io.bound_held(until, now + 3_600_000).await.err().unwrap();
+        assert_eq!((asked.status, asked.code.as_str()), (409, "shared_execution_closed"));
     }
 
     /// A request that left and got no answer was not refused. The step is
