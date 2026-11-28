@@ -109,10 +109,20 @@ come to this:
    clock is behind, ends the run as `execution_clock_behind` instead of being
    asked again until the lease is gone, and the Agent's panel then says that
    this computer's clock is wrong and what to change (#255). An answer that
-   does not carry the
-   server's code is not a decision, so a 401 or 403 without one no longer
-   signs the owner out; the proof in hand is kept and the renewal asked
-   again.
+   does not carry the server's code is not a decision, so a 401 or 403
+   without one no longer signs the owner out; the proof in hand is kept and
+   the renewal asked again.
+
+   In review (Desktop #246), a renewal of the session whose answer, by the
+   server's date, shows this computer's clock ahead of the server's by the
+   whole window, which no wait puts right, is decided too, as
+   `execution_clock_ahead`; on main it is refused as unavailable and asked
+   again every second. In review (Desktop #246), every step that needs the
+   session's proof reports it so, with status 409, where most of them
+   reported a sign-in lost. In review (Desktop #246), the session is kept
+   and not asked again for 30 seconds unless the clock is set meanwhile, an
+   Agent's run ends with that code, and its panel says that the clock is
+   ahead and what to change.
 4. **The end of a lease is the server's.** The daemon holds it two ways:
    counted from the moment it sent the request, with the time the server put
    in its answer, and read against its wall clock, which keeps running while
@@ -129,6 +139,19 @@ come to this:
    time in the answer's `Date` header, which the server process or a proxy
    in front of it writes, against the end the server wrote from its database
    clock: it assumes the two clocks agree to within a second.
+
+   An answer to a renewal of the session that comes without the date,
+   behind a proxy that drops it, cannot show a window longer than the
+   default one, nor tell it from a clock that is behind. On main its proof
+   is refused once it reads longer than the default window, and the renewal
+   asked again every second. In review (Desktop #246), it is not refused but
+   held to 30 seconds from the moment its request went out: the server
+   counts the window it gave from when it handled the request, which is
+   later, so the proof ends here before it ends there. In review (Desktop
+   #246), until an answer carries the date again, every renewal asks for 30
+   seconds only, under both headers, which a server that grants what is
+   asked gives, and the next dated answer asks for the longer window again.
+   A sign-in asks for no longer window, and refuses such a proof as on main.
 
 For the room:
 
@@ -343,7 +366,11 @@ describes. "Send again" is what the sender has until it is decided.
   request with the answer's date. Only an answer without a date, behind a
   proxy that drops it, still leaves the wall clock as the only witness; on a
   computer whose clock is behind, the run then ends as
-  `execution_clock_behind` and says that the clock is behind.
+  `execution_clock_behind` and says that the clock is behind. Behind such a
+  proxy the session's renewal is refused on main once the server grants
+  more than 30 seconds, and asked again every second; in review (Desktop
+  #246) the session runs at the default window of 30 seconds instead,
+  whatever window the server would grant (rule 4).
 - An Agent's execution lease that its daemon did not release stays with
   that daemon for up to 120 seconds from its last renewal. The same device
   under the same sign-in takes it back at once. Another device, or this one
@@ -433,5 +460,6 @@ point is in the release notes. Pull requests named "in review" are open.
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
 | 4. The wall clock only ends a lease early | holds for a ticket and a start window; not yet for the session's proof, whose wall-clock end is in review (Desktop #246). For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
 | 1. The window is asked for under the header that a server granting more than 30 seconds reads (`x-hagency-authorization-window-v2-ms`), and under the older one | implemented (Desktop #262, server #110); that server grants builds that send only the older header 30 seconds |
-| 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112, in review) |
-| 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | in review (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112, in review) |
+| 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112) |
+| 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | implemented (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112) |
+| 3, 4. A session's proof renewed without the server's date is held to 30 seconds from its request, and renewals ask for 30 seconds under both headers until a dated answer comes; a clock ahead of the server's by the whole window is decided and named (`execution_clock_ahead`) at every step that needs the session's proof | in review (Desktop #246) |
