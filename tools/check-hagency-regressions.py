@@ -496,6 +496,8 @@ def main():
         ("native-demand-cold-account", "hagency", "cold_account_lookup_completes_the_first_demand"),
         ("native-demand-slow-binding", "hagency", "slow_demand_binding_renews_before_the_first_work_ack"),
         ("native-unanswered-exchange", "hagency", "again_when"),
+        ("native-wall-clock-lease", "hagency", "by_the_wall_clock"),
+        ("native-wall-clock-store-lease", "hagency-store", "clamps_shorter_wall_bound"),
         ("native-two-minute-lease", "hagency", "holds_a_two_minute_lease"),
         ("native-demand-late-stop-recovery", "hagency", "native_demand_late_stop_and_logout_keep_unknown_state_and_deny_stale_offer"),
     ]:

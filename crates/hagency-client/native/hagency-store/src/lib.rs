@@ -72,6 +72,13 @@ pub use worker::Store;
 pub enum Error {
     #[error("local management session is expired or retired")]
     LocalAuthority,
+    /// This computer's wall clock says that an activity lease has ended,
+    /// whatever the time counted from its request still gives it. It is a
+    /// decision: asked again, it says the same. Kept apart from
+    /// `LocalAuthority`, which also says that a scope was replaced, as around
+    /// a credential refresh, and which a host waits out.
+    #[error("the activity lease has ended")]
+    ActivityLeaseEnded,
     #[error("local resources require device setup")]
     ResourceSetupRequired,
     #[error("runner capability is missing, stale or outside the task scope")]

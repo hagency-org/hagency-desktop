@@ -13,6 +13,9 @@ struct Activity {
     until: Instant,
     /// See `io::renewal_moment`.
     renew_at: Instant,
+    /// This lease for the steps beside the turn (`io::Held`). A renewal
+    /// keeps the handle and moves its ends.
+    held: io::Held,
 }
 pub(super) async fn upload_process(
     b: &Bound,
@@ -139,9 +142,18 @@ pub(super) async fn upload_retry(
 /// failure (503 storage_unavailable, which includes trigger exceptions) is
 /// also undecided: falling back would end the message instead of retrying it.
 fn undecided(e: &NativeError) -> bool {
-    // Not a refusal (`NativeError::said`): the retry could not be asked, or
-    // got no answer. Before, a session that was not free for a moment counted
-    // as the server refusing the retry, and the message ended there.
+    // Whether the server left the retry undecided, so that the work keeps
+    // it: the retry could not be asked, or got no answer
+    // (`NativeError::said`). Two codes more say that the request had no
+    // session or device proof that holds. This host makes them when it has
+    // none for the request, before it leaves or after its answer; the
+    // server answers `device_authorization_required` to a device proof it
+    // does not accept. For a step they are decided, and nothing waits them
+    // out: asking again with the same proof gets the same answer. But
+    // neither refuses the retry itself, and without such a proof the
+    // evidence alone could not be reported either. Before, a session that
+    // was not free for a moment counted as the server refusing the retry,
+    // and the message ended there.
     e.passes() || matches!(e.code.as_str(), "sign_in_required" | "device_authorization_required")
 }
 fn activity(
@@ -169,6 +181,7 @@ fn activity(
         return Err(failure(409, "shared_execution_expired"));
     }
     Ok(Activity {
+        held: io::Held::new(until, lease.expires_at_ms),
         lease,
         until,
         renew_at: io::renewal_moment(started, until),
@@ -180,19 +193,9 @@ async fn proof(
     sink: &Arc<SharedAttemptProcessSink>,
     a: &Activity,
 ) -> Result<(Bound, VerifiedSharedActivity), NativeError> {
-    // Read-only until it answers: a scope, the enrollment under it and a local
-    // comparison. Around a credential refresh the boundary refuses for a
-    // moment; that is waited out while the lease lasts instead of ending the
-    // turn, as the Claude driver does. A real revocation is not retried.
-    io.settled(a.until, || async {
-        let b = io.bound().await?;
-        let e = b
-            .enrollment(r, &sink.command().original_runtime_command, true)
-            .await?;
-        let verified = sink
-            .authorize_activity(e, &a.lease, a.until.min(b.scope.deadline))
-            .map_err(store)?;
-        Ok((b, verified))
+    let command = &sink.command().original_runtime_command;
+    io.lease_proof(r, command, &a.lease, a.until, |e, expires| {
+        sink.authorize_activity(e, &a.lease, expires)
     })
     .await
 }
@@ -232,7 +235,12 @@ async fn renew(
         renewal_id: id,
     };
     let (b, reply): (Bound, Timed<ActivityReply>) = io
-        .upload_renewal(b, || Action::Renew(renewal.clone()), a.until)
+        .upload_renewal(
+            b,
+            || Action::Renew(renewal.clone()),
+            a.until,
+            a.lease.expires_at_ms,
+        )
         .await?;
     let next = activity(
         sink,
@@ -247,7 +255,8 @@ async fn renew(
     control
         .renew_lease(next.lease.authority.epoch, next.until)
         .map_err(|_| failure(409, "shared_execution_expired"))?;
-    *a = next;
+    a.held.renewed(next.until, next.lease.expires_at_ms);
+    *a = Activity { held: a.held.clone(), ..next };
     Ok(b)
 }
 impl Activity {
@@ -685,8 +694,9 @@ async fn work_loop(
     .await?;
     // Opening a provider thread does not run the model. Finish it before
     // recording call admission, so startup failure cannot reserve the budget.
+    let held = a.held.clone();
     prepare_while_active(io, r, sink, control, a, cancel, async {
-        io.check_running(&sink.command().original_runtime_command)
+        io.check_under(&sink.command().original_runtime_command, &held)
             .await?;
         if history.is_some() {
             process
@@ -715,7 +725,7 @@ async fn work_loop(
                 );
                 failure(409, "shared_execution_thread_unknown")
             })?;
-        io.check_running(&sink.command().original_runtime_command)
+        io.check_under(&sink.command().original_runtime_command, &held)
             .await
     })
     .await?;
@@ -763,7 +773,7 @@ async fn work_loop(
         .await.map_err(store)?;
     let call_id = call.call_id.clone();
     let message_root = super::e2ee::message_root(io, &b, &work.assignment_id)?;
-    let mut run_controls = Some(super::run_controls::Controls::new(&work, &call_id, &message_root)?);
+    let mut run_controls = Some(super::run_controls::Controls::new(&work, &call_id, &message_root, a.held.clone())?);
     let (b, p) = guarded(cancel, a.until, || proof(io, r, sink, a)).await?;
     let attempt = r.begin_shared_input_start(p, work.clone(), call.call_id, input.clone())
         .await.map_err(store)?;
@@ -895,7 +905,7 @@ async fn work_loop(
                 let ready=room_wait!(questions.collect(io))?;
                 for response in ready {
                     let id = response.request_id().clone();
-                    let delivered = guarded(cancel,a.until,||async{ super::questions::answer(process,response).await }).await;
+                    let delivered = guarded(cancel,a.until,||async{ io::wall_held("question",a.until,a.lease.expires_at_ms)?; super::questions::answer(process,response).await }).await;
                     questions.delivered(&id, delivered.as_ref().is_ok_and(|accepted| *accepted));
                     delivered?;
                 }
@@ -903,15 +913,15 @@ async fn work_loop(
             }
             if !approvals_enabled { continue; }
             guarded(cancel,a.until,|| maybe_renew(io,r,sink,control,a)).await?;
-            let b=guarded(cancel,a.until,|| io.bound_running()).await?;
-            let receipt=guarded(cancel,a.until,|| approvals.poll(io,&b,&work,&a.lease.authority,a.until,process,&mut capture,&mut usage,history.as_mut())).await?;
+            let b=guarded(cancel,a.until,|| io.bound_held(a.until,a.lease.expires_at_ms)).await?;
+            let receipt=guarded(cancel,a.until,|| approvals.poll(io,&b,&work,&a.lease.authority,a.until,a.lease.expires_at_ms,process,&mut capture,&mut usage,history.as_mut())).await?;
             // Question updates that arrived while a decision was being sent.
             let updates=approvals.take_questions();
             if let Some(receipt)=receipt {break receipt;}
             // A callback can arrive while an approval response is being written.
             // It was already observed by the sink, but still needs its tool result.
             for call in approvals.take_room_calls() {
-                guarded(cancel,a.until,|| io.check_running(&sink.command().original_runtime_command)).await?;
+                guarded(cancel,a.until,|| io.check_held(&sink.command().original_runtime_command,a.until,a.lease.expires_at_ms)).await?;
                 match call {
                     super::approvals::RoomCall::History(call) => {
                         if !process.room_history_admissible(&call) { continue; }
@@ -936,8 +946,9 @@ async fn work_loop(
                     super::questions::QuestionUpdate::Withdrawn(id) => questions.withdrawn(&id),
                     super::questions::QuestionUpdate::Asked(request) => {
                         let question_scope = request.clone();
+            io::wall_held("question",a.until,a.lease.expires_at_ms)?;
             if let Some(response)=room_wait!(|process: &OwnedSession| process.user_input_waiting(&question_scope), questions.ask(io,&work,request))? {
-                            guarded(cancel,a.until,||async{ super::questions::answer(process,response).await }).await?;
+                            guarded(cancel,a.until,||async{ io::wall_held("question",a.until,a.lease.expires_at_ms)?; super::questions::answer(process,response).await }).await?;
                         }
                     }
                 }
@@ -975,29 +986,30 @@ async fn work_loop(
         if let Some(call)=file_call && process.room_file_admissible(&call) {
             let reader=history.as_ref().ok_or_else(invalid)?;
             let files=files.as_mut().ok_or_else(invalid)?;
-            guarded(cancel,a.until,|| io.check_running(&sink.command().original_runtime_command)).await?;
+            guarded(cancel,a.until,|| io.check_held(&sink.command().original_runtime_command,a.until,a.lease.expires_at_ms)).await?;
             let content=room_wait!(|process: &OwnedSession| process.room_file_admissible(&call), files.handle(&call.operation,reader));
-            guarded(cancel,a.until,|| io.check_running(&sink.command().original_runtime_command)).await?;
+            guarded(cancel,a.until,|| io.check_held(&sink.command().original_runtime_command,a.until,a.lease.expires_at_ms)).await?;
             guarded(cancel,a.until,||async { process.respond_shared_room_file(&call,content).await.map_err(|_|failure(409,"shared_file_response_failed")) }).await?;
         }
         if let Some(call)=history_call && process.room_history_admissible(&call) {
             let reader=history.as_mut().ok_or_else(invalid)?;
-            guarded(cancel,a.until,|| io.check_running(&sink.command().original_runtime_command)).await?;
+            guarded(cancel,a.until,|| io.check_held(&sink.command().original_runtime_command,a.until,a.lease.expires_at_ms)).await?;
             let content=room_wait!(|process: &OwnedSession| process.room_history_admissible(&call),reader.read_call(&call))
                 .unwrap_or_else(|error| serde_json::json!({"complete":false,"error":error.code}).to_string());
-            guarded(cancel,a.until,|| io.check_running(&sink.command().original_runtime_command)).await?;
+            guarded(cancel,a.until,|| io.check_held(&sink.command().original_runtime_command,a.until,a.lease.expires_at_ms)).await?;
             guarded(cancel,a.until,||async{ process.respond_shared_room_history(&call,content).await.map_err(|_|failure(409,"shared_history_response_failed")) }).await?;
         }
         if let Some(request)=approval {
-            let b=guarded(cancel,a.until,|| io.bound_running()).await?;
-            guarded(cancel,a.until,|| approvals.register(io,&b,&work,&a.lease.authority,a.until,process,request)).await?;
+            let b=guarded(cancel,a.until,|| io.bound_held(a.until,a.lease.expires_at_ms)).await?;
+            guarded(cancel,a.until,|| approvals.register(io,&b,&work,&a.lease.authority,a.until,a.lease.expires_at_ms,process,request)).await?;
         }
         if let Some(id)=withdrawn { questions.withdrawn(&id); }
         if let Some(request)=question {
             // The card goes to the room; the model waits for its answer.
             let question_scope = request.clone();
+            io::wall_held("question",a.until,a.lease.expires_at_ms)?;
             if let Some(response)=room_wait!(|process: &OwnedSession| process.user_input_waiting(&question_scope), questions.ask(io,&work,request))? {
-                guarded(cancel,a.until,||async{ super::questions::answer(process,response).await }).await?;
+                guarded(cancel,a.until,||async{ io::wall_held("question",a.until,a.lease.expires_at_ms)?; super::questions::answer(process,response).await }).await?;
             }
         }
       };

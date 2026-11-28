@@ -74,6 +74,33 @@ fn ledger_name(id: &str) -> String {
     hash.finalize().iter().map(|b| format!("{b:02x}")).collect()
 }
 
+/// The wall clock by which this store judges an activity lease, in
+/// milliseconds since the Unix epoch. A host that counts the end of a lease
+/// reads the same clock, so that both see a sleep of the computer alike.
+pub fn wall_clock_ms() -> Result<u64, Error> {
+    graphs::now_ms()
+}
+/// For tests of the host: sets this computer's wall clock ahead of its
+/// monotonic clock, as a sleep of the computer does, until it is dropped.
+/// Process-wide, on every thread, so only for tests that run one at a time.
+#[cfg(feature = "test-support")]
+#[must_use = "the wall clock is set back when this is dropped"]
+pub struct WallClockAhead(u64);
+#[cfg(feature = "test-support")]
+impl WallClockAhead {
+    pub fn by(ahead: Duration) -> Self {
+        let ms = u64::try_from(ahead.as_millis()).unwrap_or(u64::MAX / 4);
+        graphs::TEST_WALL_CLOCK_AHEAD_MS.fetch_add(ms, Ordering::SeqCst);
+        Self(ms)
+    }
+}
+#[cfg(feature = "test-support")]
+impl Drop for WallClockAhead {
+    fn drop(&mut self) {
+        graphs::TEST_WALL_CLOCK_AHEAD_MS.fetch_sub(self.0, Ordering::SeqCst);
+    }
+}
+
 struct Inner {
     store: DomainStore,
     id: String,

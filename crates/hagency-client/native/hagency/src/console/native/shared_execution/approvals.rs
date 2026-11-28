@@ -54,6 +54,10 @@ impl Approvals {
     pub(super) fn take_questions(&mut self) -> Vec<super::questions::QuestionUpdate> {
         std::mem::take(&mut self.questions)
     }
+    /// `until` and `wall_end_ms` are the activity lease's ends on each clock,
+    /// as `Io::upload_renewal` takes them: the registration is sent again
+    /// while the lease lasts, and the wall clock is read before each send and
+    /// before each fresh scope (`io::wall_held`).
     pub async fn register(
         &mut self,
         io: &Io,
@@ -61,6 +65,7 @@ impl Approvals {
         work: &SharedWorkItem,
         a: &SharedActivityRef,
         until: Instant,
+        wall_end_ms: u64,
         process: &OwnedSession,
         request: ApprovalRequest,
     ) -> Result<(), NativeError> {
@@ -120,6 +125,7 @@ impl Approvals {
         // sent again under a fresh scope instead of failing the turn.
         let mut rebound: Option<Bound> = None;
         let reply: Timed<Value> = loop {
+            io::wall_held("approval", until, wall_end_ms)?;
             let error = match rebound
                 .as_ref()
                 .unwrap_or(b)
@@ -143,7 +149,13 @@ impl Approvals {
             }
             tracing::info!(code = %error.code, "Shared approval registration resubmitting");
             tokio::time::sleep(io::RETRY_GAP).await;
-            rebound = Some(io.settled(until, || io.bound()).await?);
+            rebound = Some(
+                io.settled(until, || async {
+                    io::wall_held("approval", until, wall_end_ms)?;
+                    io.bound().await
+                })
+                .await?,
+            );
         };
         if reply.value["approval"]["id"] != id
             || reply.value["approval"]["workId"] != work.id
@@ -192,6 +204,8 @@ impl Approvals {
         });
         Ok(())
     }
+    /// Each pending request is read under the lease, whose wall clock is read
+    /// first, as `register` reads it (`io::wall_held`).
     pub async fn poll(
         &mut self,
         io: &Io,
@@ -199,6 +213,7 @@ impl Approvals {
         work: &SharedWorkItem,
         a: &SharedActivityRef,
         until: Instant,
+        wall_end_ms: u64,
         process: &mut OwnedSession,
         capture: &mut SharedCallSink,
         usage: &mut crate::console::native::telemetry::TurnTelemetry,
@@ -213,6 +228,7 @@ impl Approvals {
                 self.pending.remove(i);
                 continue;
             }
+            io::wall_held("approval", until, wall_end_ms)?;
             let p = &mut self.pending[i];
             let mut expired = false;
             let decision = if p.refused {
@@ -368,7 +384,8 @@ impl Approvals {
                         self.room_calls.extend(history.map(RoomCall::History));
                         self.room_calls.extend(file.map(RoomCall::File));
                         if let Some(next) = next {
-                            self.register(io, b, work, a, until, process, next).await?;
+                            self.register(io, b, work, a, until, wall_end_ms, process, next)
+                                .await?;
                         }
                         // One event is a question or a withdrawal, never both.
                         self.questions

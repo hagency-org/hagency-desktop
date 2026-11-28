@@ -453,6 +453,115 @@ async fn native_shared_claude_full_host_asks_again_when_an_exchange_before_the_t
     f.stop().await;
 }
 
+/// The Claude driver, and a computer that sleeps through the end of the
+/// two-minute lease its turn works under. The next renewal is refused on the
+/// wall clock, as a decision, and the turn is stopped then. While that refusal
+/// was waited out, the driver kept reading the turn, and the turn worked on
+/// past the end that the server keeps, for as long as its lease had been left
+/// before the sleep: up to almost two minutes.
+#[tokio::test]
+#[ignore = "requires explicit HAGENCY_TEST_CLAUDE_RUNTIME_PROBE offline supervised process"]
+async fn native_shared_claude_ends_a_turn_whose_lease_ended_by_the_wall_clock() {
+    let (f, _transport) = two_minute_claude_turn().await;
+    let after = sleep_through_the_lease(&f).await;
+    assert!(
+        after < Duration::from_secs(30),
+        "the run ended {} s after the sleep",
+        after.as_secs()
+    );
+    stopped(&f).await;
+    {
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.shared.starts, 1);
+        assert!(
+            !state.shared.receipts.values().any(|r| r.state == "completed"),
+            "the turn was not answered"
+        );
+    }
+    f.stop().await;
+}
+
+/// The same sleep under the Claude driver, and on waking the server answers
+/// no enrollment, which each proof asks for. The turn is stopped at its next
+/// renewal all the same: the proof reads the lease on the wall clock before it
+/// asks the server anything. Read by the store alone, after the server's
+/// answers, the wall clock was never reached, and the driver kept reading the
+/// turn while the proof was asked again, until the end the other clock
+/// counted. The end is told from this host's own record, since the report of
+/// the stop asks for the enrollment too.
+#[cfg(feature = "shared-intake")]
+#[tokio::test]
+#[ignore = "requires explicit HAGENCY_TEST_CLAUDE_RUNTIME_PROBE offline supervised process"]
+async fn native_shared_claude_ends_a_turn_whose_lease_ended_by_the_wall_clock_without_an_answer() {
+    let (f, _transport) = two_minute_claude_turn().await;
+    f.state.lock().unwrap().unavailable_contribution = true;
+    let after = sleep_through_the_lease_until(|| stopped_here(&f)).await;
+    assert!(
+        after < Duration::from_secs(30),
+        "the run ended {} s after the sleep",
+        after.as_secs()
+    );
+    {
+        let state = f.state.lock().unwrap();
+        assert_eq!(state.shared.starts, 1);
+        assert!(
+            !state.shared.receipts.values().any(|r| r.state == "completed"),
+            "the turn was not answered"
+        );
+    }
+    f.stop().await;
+}
+
+/// A Claude turn under a two-minute lease, which begins and is never answered.
+async fn two_minute_claude_turn() -> (Fixture, SharedExecutionTransport) {
+    let binding = AccountBinding::from_authenticated_profile(
+        "01234567-89ab-cdef-0123-456789abcdef",
+        "89abcdef-0123-4567-89ab-cdef01234567",
+        "owner@example.test",
+        Instant::now() + Duration::from_secs(45),
+    )
+    .unwrap();
+    let f = Fixture::with_provider_budget_lifetime(PROVIDER, binding.subject(), 1000, 700, 600_000).await;
+    let (f, transport, reserve) = prepared_with_budget_lifetime(f, 300, 100, 600_000).await;
+    let (f, transport, mut command) = runtime_fixture(f, transport, reserve).await;
+    command.version = 4;
+    command.capability = SHARED_CLAUDE_CAPABILITY.into();
+    command.policy = SHARED_CLAUDE_POLICY.into();
+    {
+        let mut state = f.state.lock().unwrap();
+        state.proof_stretch_ms = 90_000;
+        state.shared.lease_stretch_ms = 95_000;
+        state.shared.command = Some(command.clone());
+        state.shared.work.as_mut().unwrap().runtime_command_digest = digest(&command).unwrap();
+    }
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    let root = f._root.path().join("shared-claude-probe");
+    hagency_store::private::directory(&root).unwrap();
+    let root = root.canonicalize().unwrap();
+    assert!(matches!(
+        transport
+            .poll_claude_fixture(
+                &f.registry,
+                command.reserve_command.resource_id.clone(),
+                root,
+                binding,
+                "shared-wait"
+            )
+            .await
+            .unwrap(),
+        SharedExecutionProgress::Running { .. }
+    ));
+    // The turn begins, and is never answered.
+    tokio::time::timeout(Duration::from_secs(20), async {
+        while f.state.lock().unwrap().shared.starts == 0 {
+            tokio::time::sleep(Duration::from_millis(25)).await;
+        }
+    })
+    .await
+    .expect("the turn begins");
+    (f, transport)
+}
+
 #[tokio::test]
 #[ignore = "requires explicit HAGENCY_TEST_CLAUDE_RUNTIME_PROBE offline supervised process"]
 async fn native_shared_claude_full_host_preserves_usage_recovery_and_missing_idle() {

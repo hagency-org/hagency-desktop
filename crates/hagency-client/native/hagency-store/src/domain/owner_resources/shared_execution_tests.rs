@@ -380,22 +380,45 @@ async fn run_actual_capture_bound(mode: &str, mismatch: bool, shorter_wall: bool
     if shorter_wall {
         let mut expired = lease.clone();
         expired.expires_at_ms = graphs::now_ms().unwrap().saturating_sub(1);
-        assert!(
+        // The wall clock says that the lease has ended, while the clock
+        // counted from its request gives it nine seconds more. That is
+        // decided, in words of its own: taken for a replaced scope, it was
+        // waited out while the other clock still counted.
+        assert!(matches!(
             sink.authorize_activity(
                 enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
                 &expired,
                 expires,
-            )
-            .is_err()
-        );
-        assert!(
+            ),
+            Err(Error::ActivityLeaseEnded)
+        ));
+        // The end that the other clock counts is the scope's as much as the
+        // lease's, and keeps its code.
+        assert!(matches!(
             sink.authorize_activity(
                 enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
                 &lease,
                 Instant::now(),
+            ),
+            Err(Error::LocalAuthority)
+        ));
+        // A proof, and then a sleep of the computer: its wall clock passes
+        // the lease's end while the other clock stands still. What the proof
+        // admits is refused from then on, in the same words.
+        let proof = sink
+            .authorize_activity(
+                enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+                &lease,
+                expires,
             )
-            .is_err()
-        );
+            .unwrap();
+        let slept = Arc::new(std::sync::atomic::AtomicU64::new(lease.expires_at_ms));
+        graphs::install_test_clock(&slept);
+        assert!(matches!(
+            f.registry.prepare_shared_renewal(proof, "sar_after_a_sleep".into()).await,
+            Err(Error::ActivityLeaseEnded)
+        ));
+        drop(slept);
         // A computer whose clock is slow reads a fresh lease as longer than
         // any lease is. The end counted from the send instant holds it; the
         // wall clock is not asked to refuse it.

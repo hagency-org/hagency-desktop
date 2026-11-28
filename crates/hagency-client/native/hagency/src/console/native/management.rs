@@ -816,6 +816,9 @@ pub(super) fn store_error(error: hagency_store::Error) -> NativeError {
     use hagency_store::Error;
     let (status, code) = match error {
         Error::LocalAuthority => (401, "management_access_required"),
+        // The code of every other end of an activity lease: a decision, and
+        // the run ends as it ends at the lease's counted end.
+        Error::ActivityLeaseEnded => (409, "shared_execution_expired"),
         Error::ResourceSetupRequired => (409, "device_setup_required"),
         Error::Invalid(_) => (400, "invalid_management_arguments"),
         Error::NotFound => (404, "management_not_found"),

@@ -309,6 +309,12 @@ thread_local! {
 pub(crate) fn install_test_clock(clock: &std::sync::Arc<std::sync::atomic::AtomicU64>) {
     TEST_CLOCK.with(|slot| *slot.borrow_mut()=Some(std::sync::Arc::downgrade(clock)));
 }
+/// How far tests of the host have set this computer's wall clock ahead of
+/// the monotonic one, as a sleep does (`owner_resources::WallClockAhead`).
+/// Process-wide, on every thread.
+#[cfg(feature = "test-support")]
+pub(super) static TEST_WALL_CLOCK_AHEAD_MS: std::sync::atomic::AtomicU64 =
+    std::sync::atomic::AtomicU64::new(0);
 pub(super) fn now_ms() -> Result<u64, Error> {
     #[cfg(test)]
     if let Some(now)=TEST_CLOCK.with(|slot| slot.borrow().as_ref().and_then(std::sync::Weak::upgrade).map(|clock|clock.load(std::sync::atomic::Ordering::SeqCst))) {
@@ -319,6 +325,8 @@ pub(super) fn now_ms() -> Result<u64, Error> {
         .ok()
         .and_then(|d| u64::try_from(d.as_millis()).ok())
         .ok_or(Error::Unavailable)?;
+    #[cfg(feature = "test-support")]
+    let now = now.saturating_add(TEST_WALL_CLOCK_AHEAD_MS.load(std::sync::atomic::Ordering::SeqCst));
     clock(now)?;
     Ok(now)
 }

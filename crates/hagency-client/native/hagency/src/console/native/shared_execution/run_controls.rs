@@ -47,9 +47,17 @@ pub(super) struct Controls {
     steer: mpsc::Receiver<Request>,
     task: Option<tokio::task::JoinHandle<()>>,
     active: bool,
+    /// The run's lease, as its driver renews it. Every step here that acts
+    /// under that lease reads it on the wall clock first.
+    held: io::Held,
 }
 impl Controls {
-    pub fn new(work: &SharedWorkItem, call: &str, root: &std::path::Path) -> Result<Self, NativeError> {
+    pub fn new(
+        work: &SharedWorkItem,
+        call: &str,
+        root: &std::path::Path,
+        held: io::Held,
+    ) -> Result<Self, NativeError> {
         let card = Card::for_shared(work, call).map_err(|_| invalid())?;
         let (stop_tx, stop) = mpsc::channel(1);
         let (steer_tx, steer) = mpsc::channel(16);
@@ -63,6 +71,7 @@ impl Controls {
             steer,
             task: None,
             active: false,
+            held,
         })
     }
     pub fn activate(&mut self, process: &mut OwnedSession) {
@@ -76,6 +85,11 @@ impl Controls {
             }
         }
     }
+    /// Writes the controls received since the last pass to the process. Each
+    /// is written only while the wall clock holds the run's lease: once that
+    /// clock has ended it, the pass ends the run as the lease's counted end
+    /// does, and the control, not written, settles as unavailable, as a
+    /// queued one does when the run ends.
     pub async fn poll(
         &mut self,
         io: &Io,
@@ -90,8 +104,9 @@ impl Controls {
             let command = command.clone();
             let card = self.card.clone();
             let work = self.work.clone();
+            let held = self.held.clone();
             self.task = Some(tokio::spawn(async move {
-                serve(io, command, work, card, stop, steer).await;
+                serve(io, command, work, card, stop, steer, held).await;
             }));
         }
         self.receipts(process);
@@ -109,6 +124,7 @@ impl Controls {
             {
                 continue;
             }
+            self.held.check("control")?;
             request.begun = true;
             let action = request.action.take().ok_or_else(invalid)?;
             let outcome = process
@@ -169,9 +185,9 @@ impl Controls {
     pub async fn flush_messages(&self, io: &Io, command: &SharedRuntimeCommand) -> Result<(), NativeError> {
         let Some(messages) = self.card.messages() else { return Ok(()); };
         if messages.next().map_err(|_| invalid())?.is_none() { return Ok(()); }
-        io.check_running(command).await?;
+        io.check_under(command, &self.held).await?;
         while messages.next().map_err(|_| invalid())?.is_some() {
-            io.check_running(command).await?;
+            io.check_under(command, &self.held).await?;
             let b = io.bound().await?;
             super::e2ee::send_message(io, &b, &self.work, &messages).await?;
         }
@@ -194,6 +210,7 @@ async fn serve(
     card: Arc<CardHost>,
     stop_tx: mpsc::Sender<Request>,
     steer_tx: mpsc::Sender<Request>,
+    held: io::Held,
 ) {
     // Optional presentation must not delay admission, native start or reads.
     // Resolve the original assignment's device only in this background task.
@@ -203,12 +220,12 @@ async fn serve(
     let Some(device) = crate::console::owned_runtime::run_controls::open_while_running(
         Duration::from_secs(10),
         || {
-            let (io, command) = (&io, &command);
+            let (io, command, held) = (&io, &command, &held);
             async move {
-                io.check_running(command).await?;
+                io.check_under(command, held).await?;
                 let bound = io.bound().await?;
                 let device = super::e2ee::device(io, &bound, &command.assignment_id).await?;
-                io.check_running(command).await?;
+                io.check_under(command, held).await?;
                 Ok::<_, NativeError>(device)
             }
         },
@@ -230,15 +247,16 @@ async fn serve(
         let _ = card.publish().await;
         if let Some(messages) = card.messages()
             && messages.next().ok().flatten().is_some()
-            && io.check_running(&command).await.is_ok()
+            && io.check_under(&command, &held).await.is_ok()
             && super::files::authorize(&io, &work.id).await.is_ok()
         {
             let _ = messages.send_next(&device, work.encrypted, None, None).await;
         }
         for (received, action) in card.actions().await.unwrap_or_default() {
-            // Current server identity, assignment and command; native submission
-            // additionally checks the same process's unexpired activity lease.
-            if io.check_running(&command).await.is_err() {
+            // Current server identity, assignment and command, under the
+            // run's lease on the wall clock; native submission additionally
+            // checks the same process's unexpired activity lease.
+            if io.check_under(&command, &held).await.is_err() {
                 let _ = card.receipt(&received.event_id, &received.sender, "unavailable", false);
                 continue;
             }

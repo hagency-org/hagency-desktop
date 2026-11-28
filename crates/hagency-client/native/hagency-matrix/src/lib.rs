@@ -114,6 +114,7 @@ pub fn store_error_label(error: &hagency_store::Error) -> &'static str {
     use hagency_store::Error::*;
     match error {
         LocalAuthority => "local_authority",
+        ActivityLeaseEnded => "activity_lease_ended",
         ResourceSetupRequired => "resource_setup_required",
         RunnerAuthority => "runner_authority",
         AlreadyConsumed => "already_consumed",

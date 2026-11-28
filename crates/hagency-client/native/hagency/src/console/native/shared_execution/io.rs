@@ -403,8 +403,41 @@ impl Io {
     /// the run once they persist. Callers keep the run's cancellation and
     /// activity deadline around this.
     pub async fn check_running(&self, c: &SharedRuntimeCommand) -> Result<(), NativeError> {
+        self.check_settled(c, || Ok(())).await
+    }
+    /// `check_running` for a step of a turn under its activity lease, such as
+    /// a room call: each attempt first reads the lease on the wall clock
+    /// (`wall_held`), as a proof's does. The turn waits on such a step without
+    /// renewing its lease meanwhile. Without the wall-clock check, after a
+    /// sleep of the computer a server that did not answer was asked again for
+    /// `RUNNING_CHECK_SETTLE`, past the lease's next renewal moment.
+    pub(super) async fn check_held(
+        &self,
+        c: &SharedRuntimeCommand,
+        until: Instant,
+        wall_end_ms: u64,
+    ) -> Result<(), NativeError> {
+        self.check_settled(c, || wall_held("check", until, wall_end_ms)).await
+    }
+    /// `check_held` for a step beside a Codex turn, under the lease in force
+    /// at each attempt (`Held`). The lease is renewed beside such a step, so
+    /// it ends by the next renewal moment without this check; with it, the
+    /// step is not taken under a lease the wall clock has ended.
+    pub(super) async fn check_under(
+        &self,
+        c: &SharedRuntimeCommand,
+        held: &Held,
+    ) -> Result<(), NativeError> {
+        self.check_settled(c, || held.check("check")).await
+    }
+    async fn check_settled(
+        &self,
+        c: &SharedRuntimeCommand,
+        held: impl Fn() -> Result<(), NativeError>,
+    ) -> Result<(), NativeError> {
         let settle = std::time::Instant::now() + RUNNING_CHECK_SETTLE;
         loop {
+            held()?;
             match self.check(c).await {
                 Err(error) if self.transient(&error) && std::time::Instant::now() < settle => {
                     tracing::info!(code = %error.code, "Shared run authority check retrying");
@@ -421,6 +454,20 @@ impl Io {
         let settle = Instant::now() + RUNNING_CHECK_SETTLE;
         self.settled(settle, || self.bound()).await
     }
+    /// `bound_running` for a step of a turn under its activity lease, as
+    /// `check_held`: the idle pass of a turn with owner approvals.
+    pub(super) async fn bound_held(
+        &self,
+        until: Instant,
+        wall_end_ms: u64,
+    ) -> Result<Bound, NativeError> {
+        let settle = Instant::now() + RUNNING_CHECK_SETTLE;
+        self.settled(settle, || async {
+            wall_held("scope", until, wall_end_ms)?;
+            self.bound().await
+        })
+        .await
+    }
     /// Runs one authority step of a running process and asks it again, until
     /// `until` (the activity lease, at the latest), while its failure is not a
     /// refusal. The step is run again from its start and may already have
@@ -436,6 +483,40 @@ impl Io {
         F: std::future::Future<Output = Result<T, NativeError>>,
     {
         settle(until, |error| self.transient(error), step).await
+    }
+    /// The proof for a step under an activity lease: a scope, the enrollment
+    /// under it, and the store's comparison of both with the lease
+    /// (`authorize`, given the end the proof may keep). It is read-only until
+    /// it answers. Around a credential refresh the boundary refuses for a
+    /// moment; that is waited out while the lease lasts (`settled`) instead of
+    /// ending the turn. A real revocation is not retried.
+    ///
+    /// Each attempt first reads the lease on the wall clock (`wall_held`),
+    /// before it asks the server anything. After a sleep of the computer the
+    /// lease's counted end `until` still lies ahead, by what was left of the
+    /// lease before the sleep. The store reads the wall clock as well, but only
+    /// once the server has answered for the scope and the enrollment: a server
+    /// that did not answer was asked again until that counted end, and the
+    /// turn worked on meanwhile.
+    pub(super) async fn lease_proof(
+        &self,
+        r: &OwnerResourceRegistry,
+        command: &SharedRuntimeCommand,
+        lease: &SharedActivityLease,
+        until: Instant,
+        authorize: impl Fn(
+            VerifiedManagementEnrollment,
+            Instant,
+        ) -> Result<VerifiedSharedActivity, hagency_store::Error>,
+    ) -> Result<(Bound, VerifiedSharedActivity), NativeError> {
+        self.settled(until, || async {
+            wall_held("proof", until, lease.expires_at_ms)?;
+            let b = self.bound().await?;
+            let e = b.enrollment(r, command, true).await?;
+            let verified = authorize(e, until.min(b.scope.deadline)).map_err(store)?;
+            Ok((b, verified))
+        })
+        .await
     }
     /// `settled` for a step that no lease bounds: it is asked again for as
     /// long as a running process waits out a check.
@@ -510,13 +591,27 @@ impl Io {
     /// fails, the SAME renewal (id and authority) is resubmitted under a fresh
     /// scope until the lease ends: the server returns an already applied
     /// renewal again instead of renewing twice, so the run keeps its lease.
+    ///
+    /// The lease ends on either clock, as in `lease_end`: at `until`, counted
+    /// from its request, or at `wall_end_ms`, its end on the wall clock. The
+    /// wall clock is read before each send and before each fresh scope
+    /// (`wall_held`). Only it counts a sleep of the computer that falls
+    /// between two of these; read on the other clock alone, the renewal was
+    /// sent again, and the turn worked on, for as long as the lease had been
+    /// left before the sleep.
     pub(super) async fn upload_renewal<T: DeserializeOwned>(
         &self,
         mut b: Bound,
         action: impl Fn() -> Action,
         until: Instant,
+        wall_end_ms: u64,
     ) -> Result<(Bound, Timed<T>), NativeError> {
+        let fresh_scope = || async {
+            wall_held("renewal", until, wall_end_ms)?;
+            self.bound().await
+        };
         loop {
+            wall_held("renewal", until, wall_end_ms)?;
             let error = match b.upload(action(), until).await {
                 Ok(reply) => return Ok((b, reply)),
                 Err(error) => error,
@@ -529,11 +624,11 @@ impl Io {
             // holds no management session.
             drop(b);
             tokio::time::sleep(RETRY_GAP).await;
-            b = match self.bound().await {
+            b = match fresh_scope().await {
                 Ok(fresh) => fresh,
                 Err(error) if self.transient(&error) && Instant::now() + RETRY_GAP < until => {
                     tokio::time::sleep(RETRY_GAP).await;
-                    self.bound().await?
+                    fresh_scope().await?
                 }
                 Err(error) => return Err(error),
             };
@@ -542,6 +637,58 @@ impl Io {
 }
 
 pub(super) const RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// Whether the wall clock says that a lease ending at `wall_end_ms` has
+/// ended. It is the clock the store judges the lease by
+/// (`authorize_activity`), so that both see a sleep of the computer alike.
+fn wall_ended(wall_end_ms: u64) -> bool {
+    hagency_store::owner_resources::wall_clock_ms().is_ok_and(|now| now >= wall_end_ms)
+}
+/// Refuses a step under an activity lease that the wall clock has ended,
+/// before the step asks the server anything: as at the lease's counted end,
+/// with `shared_execution_expired`, a decision that ends the run. What that
+/// counted end still leaves (`counted_left_ms`) tells a sleep of the computer
+/// from a lease that ran out awake: only the wall clock counts a sleep.
+pub(super) fn wall_held(step: &'static str, until: Instant, wall_end_ms: u64) -> Result<(), NativeError> {
+    if !wall_ended(wall_end_ms) {
+        return Ok(());
+    }
+    tracing::warn!(
+        step,
+        counted_left_ms = until.saturating_duration_since(Instant::now()).as_millis() as u64,
+        "An activity lease has ended on the wall clock; the step under it is not taken"
+    );
+    Err(failure(409, "shared_execution_expired"))
+}
+/// The lease a Codex turn holds now, by its ends on both clocks, for the
+/// steps that run while the driver renews that lease beside them: the run
+/// controls, the delivery of the turn's messages, and the opening of its
+/// provider thread. The driver replaces its lease at each renewal and updates
+/// this with it, as the Claude driver's watch channel does, so such a step
+/// reads the lease in force, not the one it began under.
+#[derive(Clone)]
+pub(super) struct Held(Arc<std::sync::Mutex<(Instant, u64)>>);
+impl Held {
+    pub fn new(until: Instant, wall_end_ms: u64) -> Self {
+        Self(Arc::new(std::sync::Mutex::new((until, wall_end_ms))))
+    }
+    /// The ends of the lease a renewal granted.
+    pub fn renewed(&self, until: Instant, wall_end_ms: u64) {
+        *self.0.lock().unwrap_or_else(|e| e.into_inner()) = (until, wall_end_ms);
+    }
+    /// `wall_held` under the lease in force now.
+    pub fn check(&self, step: &'static str) -> Result<(), NativeError> {
+        let (until, wall_end_ms) = *self.0.lock().unwrap_or_else(|e| e.into_inner());
+        wall_held(step, until, wall_end_ms)
+    }
+}
+/// What the wall clock leaves of a lease that ends at `wall_end_ms`, for the
+/// log; nothing when that clock cannot be read.
+pub(super) fn wall_left_ms(wall_end_ms: u64) -> Option<u64> {
+    hagency_store::owner_resources::wall_clock_ms()
+        .ok()
+        .map(|now| wall_end_ms.saturating_sub(now))
+}
 
 /// The one line for work that ends before its turn began: the step it ended
 /// at and what the failure said (`NativeError::said`). Step names and codes
@@ -880,16 +1027,23 @@ pub(super) struct TicketReply {
     pub ticket: SharedWorkResultTicket,
 }
 /// When an activity lease is renewed: ten seconds after it was granted, and
-/// no later than twenty seconds before its end. A thirty-second lease is
-/// renewed when it always was. One that follows a longer authorization
-/// window is renewed as often, so a renewal that gets no answer has the rest
-/// of the lease to be asked again. A lease that is shorter than twenty
-/// seconds, because its authority ends, is renewed half-way through it and
-/// not at once: at once, each renewal would be due the moment it is answered.
+/// no later than twenty seconds before its end, but not sooner than five
+/// seconds after the grant. A thirty-second lease is renewed when it always
+/// was. One that follows a longer authorization window is renewed as often,
+/// so a renewal that gets no answer has the rest of the lease to be asked
+/// again. A lease that is shorter than twenty seconds, because its authority
+/// ends or because this computer's clock is ahead (`lease_end`), is renewed
+/// half-way through it and not at once: at once, each renewal would be due
+/// the moment it is answered. The five seconds are for the same reason. A
+/// clock that is ahead cuts every lease to the same length, and one a little
+/// longer than twenty seconds was renewed each time the moment it was
+/// granted.
 pub(super) fn renewal_moment(granted: Instant, until: Instant) -> Instant {
     let length = until.saturating_duration_since(granted);
     match length.checked_sub(Duration::from_secs(20)) {
-        Some(early) if !early.is_zero() => granted + early.min(Duration::from_secs(10)),
+        Some(early) if !early.is_zero() => {
+            granted + early.clamp(Duration::from_secs(5), Duration::from_secs(10))
+        }
         _ => granted + length / 2,
     }
 }
@@ -901,6 +1055,14 @@ pub(super) fn renewal_moment(granted: Instant, until: Instant) -> Instant {
 /// of the request that brought it, as a ticket is (`window`): each step takes
 /// a scope of its own, and that scope ends within a minute. Cut to it, a
 /// lease that follows a two-minute window would end after one.
+///
+/// It also ends no later than the wall clock says, which may only end it
+/// earlier. The store reads the same clock (`authorize_activity`). Taken
+/// into the end, that clock brings the renewal before it
+/// (`renewal_moment`): a computer whose clock is ahead by most of a lease
+/// keeps the lease, renewed sooner. Counted from the request alone, the lease
+/// was renewed after the wall clock had ended it, and the process ended at
+/// its first renewal.
 pub(super) fn lease_end(
     token: &str,
     until: u64,
@@ -908,14 +1070,32 @@ pub(super) fn lease_end(
     started: Instant,
     authority_end: Instant,
 ) -> Result<Instant, NativeError> {
+    let wall_now_ms = hagency_store::owner_resources::wall_clock_ms().map_err(store)?;
+    lease_end_at(token, until, observed, started, authority_end, wall_now_ms)
+}
+/// `lease_end`, with the wall clock read at `wall_now_ms`.
+fn lease_end_at(
+    token: &str,
+    until: u64,
+    observed: u64,
+    started: Instant,
+    authority_end: Instant,
+    wall_now_ms: u64,
+) -> Result<Instant, NativeError> {
     hash(token)?;
     let longest = hagency_runtime::owned::LONGEST_ACTIVITY_LEASE.as_millis() as u64;
     let remaining = until
         .checked_sub(observed)
         .filter(|v| *v > 0 && *v <= longest)
         .ok_or_else(invalid)?;
-    let end = (started + Duration::from_millis(remaining)).min(authority_end);
-    if Instant::now() >= end {
+    let now = Instant::now();
+    // No more than the lease: a clock that is slow gives it more.
+    let wall_left = until.saturating_sub(wall_now_ms).min(remaining);
+    let wall_end = now + Duration::from_millis(wall_left);
+    let end = (started + Duration::from_millis(remaining))
+        .min(authority_end)
+        .min(wall_end);
+    if now >= end {
         return Err(failure(409, "shared_execution_expired"));
     }
     Ok(end)
@@ -945,12 +1125,26 @@ mod lease_tests {
 
     fn end(lease_ms: u64, authority_in: u64) -> Result<Instant, NativeError> {
         let started = Instant::now();
-        lease_end(
+        lease_end_at(
             &"c".repeat(64),
             1_000_000 + lease_ms,
             1_000_000,
             started,
             started + Duration::from_secs(authority_in),
+            1_000_000,
+        )
+    }
+    /// A lease issued with `lease_ms`, on a computer whose wall clock is
+    /// `ahead_ms` ahead of the server's (behind, if negative).
+    fn end_ahead(lease_ms: u64, ahead_ms: i64) -> Result<Instant, NativeError> {
+        let started = Instant::now();
+        lease_end_at(
+            &"c".repeat(64),
+            1_000_000 + lease_ms,
+            1_000_000,
+            started,
+            started + Duration::from_secs(300),
+            1_000_000u64.saturating_add_signed(ahead_ms),
         )
     }
     fn secs(until: Instant) -> u64 {
@@ -975,10 +1169,32 @@ mod lease_tests {
         assert!(end(120_001, 300).is_err());
         assert!(end(0, 300).is_err());
         let started = Instant::now();
-        let passed = lease_end(&"c".repeat(64), 999_999, 1_000_000, started, started);
+        let passed = lease_end_at(&"c".repeat(64), 999_999, 1_000_000, started, started, 1_000_000);
         assert!(passed.is_err());
         // An authority that has ended leaves nothing of the lease.
         assert_eq!(end(30_000, 0).unwrap_err().code, "shared_execution_expired");
+    }
+
+    /// The wall clock may only end a lease earlier. A computer whose clock is
+    /// behind holds the whole lease. One whose clock is ahead holds what its
+    /// clock leaves of it, and renews before that runs out: counted from the
+    /// request alone, its renewal came after the store had refused the lease
+    /// on the wall clock, and the process ended at its first renewal.
+    #[test]
+    fn the_wall_clock_only_ends_a_lease_earlier() {
+        assert!((28..=30).contains(&secs(end_ahead(30_000, -10_000).unwrap())));
+        assert!((118..=120).contains(&secs(end_ahead(120_000, -60_000).unwrap())));
+        let started = Instant::now();
+        let until = end_ahead(30_000, 20_000).unwrap();
+        assert!((8..=10).contains(&secs(until)));
+        let renewal = renewal_moment(started, until);
+        assert!(renewal < until);
+        assert!(renewal <= started + Duration::from_millis(5_500));
+        let until = end_ahead(120_000, 100_000).unwrap();
+        assert!((18..=20).contains(&secs(until)));
+        assert!(renewal_moment(started, until) <= started + Duration::from_secs(10));
+        // Ahead by the whole lease: nothing is left of it.
+        assert_eq!(end_ahead(30_000, 30_000).unwrap_err().code, "shared_execution_expired");
     }
 
     #[test]
@@ -992,6 +1208,10 @@ mod lease_tests {
         assert_eq!(renewal_moment(granted, after(60_000)), after(10_000));
         // One a little shorter is renewed twenty seconds before its end, as before.
         assert_eq!(renewal_moment(granted, after(25_000)), after(5_000));
+        // One shorter still is not renewed sooner than five seconds after
+        // its grant: twenty seconds before its end, that was at once.
+        assert_eq!(renewal_moment(granted, after(24_000)), after(5_000));
+        assert_eq!(renewal_moment(granted, after(20_001)), after(5_000));
         // One that leaves less than that is renewed half-way through, never
         // at once.
         assert_eq!(renewal_moment(granted, after(20_000)), after(10_000));
@@ -1019,6 +1239,82 @@ mod settle_tests {
         assert!(transient_boundary(&failure(503, "domain_writer_busy")));
         assert!(!transient_boundary(&failure(403, "domain_writer_busy")));
         assert!(!transient_boundary(&failure(503, "shared_room_send_authority_changed")));
+    }
+
+    /// The store's word that the wall clock has ended a lease is a decision,
+    /// and its run ends as at the lease's counted end. Read as a replaced
+    /// scope, the code the store gave it before, it was waited out while the
+    /// other clock still counted: after a sleep of the computer, a turn worked
+    /// on for as long as its lease had been left before the sleep.
+    #[test]
+    fn a_lease_the_wall_clock_ended_is_not_waited_out() {
+        let ended = store(hagency_store::Error::ActivityLeaseEnded);
+        assert_eq!((ended.status, ended.code.as_str()), (409, "shared_execution_expired"));
+        assert_eq!(ended.said(), crate::console::native::Said::Decided);
+        assert!(!transient_boundary(&ended));
+        // What a replaced scope refuses is still waited out.
+        assert!(transient_boundary(&store(hagency_store::Error::LocalAuthority)));
+    }
+
+    /// A step under a lease that the wall clock has ended is refused before it
+    /// asks the server anything, as a decision: it is not asked again, though
+    /// the end the other clock counted is still far ahead. A lease the wall
+    /// clock holds lets the step go on.
+    #[test]
+    fn a_step_under_a_lease_the_wall_clock_ended_is_not_taken() {
+        let now = hagency_store::owner_resources::wall_clock_ms().unwrap();
+        let until = Instant::now() + Duration::from_secs(100);
+        let ended = wall_held("proof", until, now - 1).unwrap_err();
+        assert_eq!((ended.status, ended.code.as_str()), (409, "shared_execution_expired"));
+        assert_eq!(ended.said(), crate::console::native::Said::Decided);
+        assert!(!transient_boundary(&ended));
+        // An hour ahead: beyond any clock a test sets ahead.
+        assert!(wall_held("proof", until, now + 3_600_000).is_ok());
+    }
+
+    /// An `Io` whose management has closed: a step that reaches it is
+    /// refused with `shared_execution_closed` and asks no server.
+    fn closed_io() -> Io {
+        Io {
+            permission: Permission::ExecuteManagedAgents,
+            manager: std::sync::Weak::new(),
+            host_gate: None,
+            namespace: None,
+            provider_gate: None,
+            claude_discovery: Arc::default(),
+            project_folders: Default::default(),
+            crypto_fixture: None,
+            project_root: None,
+        }
+    }
+
+    /// A turn's own scope under a lease the wall clock has ended is refused
+    /// before anything is asked: the refusal is the lease's end, not the
+    /// closed management behind it.
+    #[tokio::test]
+    async fn a_turn_s_own_scope_under_a_lease_the_wall_clock_ended_is_not_asked_for() {
+        let io = closed_io();
+        let now = hagency_store::owner_resources::wall_clock_ms().unwrap();
+        let until = Instant::now() + Duration::from_secs(100);
+        let ended = io.bound_held(until, now - 1).await.err().unwrap();
+        assert_eq!((ended.status, ended.code.as_str()), (409, "shared_execution_expired"));
+        let asked = io.bound_held(until, now + 3_600_000).await.err().unwrap();
+        assert_eq!((asked.status, asked.code.as_str()), (409, "shared_execution_closed"));
+    }
+
+    /// A step beside a Codex turn reads the lease in force when it is taken.
+    /// The copy that the run controls keep was taken before the renewal, and
+    /// reads the end that renewal granted, not the one it began under.
+    #[test]
+    fn a_step_beside_a_turn_reads_the_lease_a_renewal_granted() {
+        let now = hagency_store::owner_resources::wall_clock_ms().unwrap();
+        let until = Instant::now() + Duration::from_secs(100);
+        let held = Held::new(until, now - 1);
+        let beside = held.clone();
+        let ended = beside.check("control").unwrap_err();
+        assert_eq!((ended.status, ended.code.as_str()), (409, "shared_execution_expired"));
+        held.renewed(until, now + 3_600_000);
+        assert!(beside.check("control").is_ok());
     }
 
     /// A request that left and got no answer was not refused. The step is
