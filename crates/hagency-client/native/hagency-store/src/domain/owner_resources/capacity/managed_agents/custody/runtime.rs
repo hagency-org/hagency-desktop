@@ -60,8 +60,9 @@ impl VerifiedManagedRuntimeDelivery {
         let original = self.command.original();
         if matches!(self.command, ManagedRuntimeCommand::Provision(_)) {
             let now = graphs::now_ms()?;
-            if now < original.issued_at_ms
-                || now >= original.expires_at_ms
+            // Only the command's end is read on this clock: its issue time is
+            // the server's, and a clock behind refuses none (ADR 0016, rule 4).
+            if now >= original.expires_at_ms
                 || self.enrollment.executor_generation
                     != original.reserve_command.executor_generation
             {

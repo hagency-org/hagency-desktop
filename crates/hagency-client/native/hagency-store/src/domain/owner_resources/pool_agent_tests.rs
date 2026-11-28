@@ -724,3 +724,13 @@ fn split_pool_limits_wire_rejects_invalid_caps_and_preserves_legacy_bytes() {
         assert!(!grant.supported_shape());
     }
 }
+#[tokio::test]
+async fn pool_agent_reservation_issued_ahead_of_this_clock_is_taken() {
+    let f = pool_fixture().await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let c = pool_command(&f, "behind", 100);
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let saved = pool_reserve(&f, c).await;
+    assert_eq!((saved.state.as_str(), saved.reason), ("reserved", None));
+    f.registry.shutdown().await.unwrap();
+}

@@ -524,3 +524,30 @@ async fn budget_execution_v3_uncertain_claim_blocks_only_until_grace_then_chain_
     assert!(matches!(f.registry.claim_shared_budget_successor(delivery(&f, following)).await.unwrap(), SharedBudgetAttemptClaim::Issued(_)));
     f.registry.shutdown().await.unwrap();
 }
+
+#[tokio::test]
+async fn budget_execution_v3_takes_a_start_issued_ahead_of_this_clock_for_its_delivery() {
+    let (f, c) = synthetic().await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let next = next(&f, &c, "from_a_clock_behind").await;
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let lease = Instant::now() + Duration::from_secs(15);
+    let p = VerifiedSharedBudgetAttemptDelivery::new(
+        enrollment(&f),
+        next.clone(),
+        digest(&next),
+        true,
+        lease,
+    )
+    .unwrap();
+    assert_eq!(p.deadline(), lease);
+    let SharedBudgetAttemptClaim::Issued(custody) =
+        f.registry.claim_shared_budget_successor(p).await.unwrap()
+    else {
+        panic!("a fresh start is issued");
+    };
+    custody.check().unwrap();
+    assert_eq!(custody.command().command_id, next.command_id);
+    drop(custody);
+    f.registry.shutdown().await.unwrap();
+}

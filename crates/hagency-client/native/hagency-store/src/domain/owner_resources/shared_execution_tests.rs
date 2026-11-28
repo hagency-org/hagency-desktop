@@ -595,3 +595,65 @@ fn shared_execution_long_reply_migration_preserves_referenced_history_and_constr
     assert!(db.execute("UPDATE owner_shared_work_observations SET payload=payload",[]).is_err());
     assert!(db.execute("DELETE FROM owner_shared_work_observations WHERE id='large'",[]).is_err());
 }
+#[tokio::test]
+async fn shared_execution_takes_a_start_issued_ahead_of_this_clock_for_its_delivery() {
+    let f = fixture().await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let c = command(&f).await;
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let lease = Instant::now() + Duration::from_secs(20);
+    let p = VerifiedSharedRuntimeDelivery::new(
+        enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+        c.clone(),
+        digest(&c),
+        true,
+        lease,
+    )
+    .unwrap();
+    assert_eq!(p.deadline(), lease);
+    let p = f
+        .registry
+        .prepare_shared_runtime_delivery(p)
+        .await
+        .unwrap()
+        .expect("a fresh start");
+    let SharedRuntimeClaim::Issued(custody) = f.registry.claim_shared_runtime(p).await.unwrap()
+    else {
+        panic!("a fresh start is issued");
+    };
+    assert_eq!(custody.deadline(), lease);
+    custody.check().unwrap();
+    drop(custody);
+    f.registry.shutdown().await.unwrap();
+}
+#[tokio::test]
+async fn shared_execution_wall_clock_only_shortens_a_start() {
+    let f = fixture().await;
+    let c = command(&f).await;
+    let deliver = |lease: Instant| {
+        VerifiedSharedRuntimeDelivery::new(
+            enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+            c.clone(),
+            digest(&c),
+            true,
+            lease,
+        )
+    };
+    // Far behind: the command's end on this clock is 90 seconds away, and
+    // the delivery's 25 seconds still end it.
+    let behind = f.registry.skew_clock(-60_000).await;
+    let lease = Instant::now() + Duration::from_secs(25);
+    assert_eq!(deliver(lease).unwrap().deadline(), lease);
+    drop(behind);
+    // Ahead: the command's end on this clock is 10 seconds away and ends it
+    // before the delivery does.
+    let _ahead = f.registry.skew_clock(20_000).await;
+    let lease = Instant::now() + Duration::from_secs(25);
+    let early = deliver(lease).unwrap().deadline();
+    assert!(early < lease);
+    assert!(early <= Instant::now() + Duration::from_secs(10));
+    // Ahead past the command's end: refused.
+    let _past = f.registry.skew_clock(30_000).await;
+    assert!(deliver(Instant::now() + Duration::from_secs(25)).is_err());
+    f.registry.shutdown().await.unwrap();
+}

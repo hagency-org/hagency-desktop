@@ -254,3 +254,30 @@ fn managed_matrix_canonical_fixture_is_closed_and_matches_central() {
     bad["runtimeReady"] = json!(true);
     assert!(serde_json::from_value::<ManagedAgentMatrixChallenge>(bad).is_err());
 }
+#[tokio::test]
+async fn managed_matrix_takes_a_challenge_issued_ahead_of_this_clock_for_its_delivery() {
+    let f = fixture().await;
+    let c = agent(&f, "matrix_behind", 100);
+    let r = reserve(&f, c.clone()).await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let q = challenge(c, &r);
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let lease = Instant::now() + Duration::from_secs(20);
+    let p = VerifiedManagedMatrixCheck::new(
+        enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+        q.clone(),
+        canonical::digest(&serde_json::to_value(&q).unwrap()).unwrap(),
+        true,
+        lease,
+    )
+    .unwrap();
+    assert_eq!(p.deadline(), lease);
+    let value = f
+        .registry
+        .check_managed_matrix_reservation(p)
+        .await
+        .unwrap();
+    value.validate_for(&q).unwrap();
+    assert!(value.eligible);
+    f.registry.shutdown().await.unwrap();
+}

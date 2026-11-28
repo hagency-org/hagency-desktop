@@ -41,8 +41,9 @@ impl VerifiedSharedRuntimeDelivery {
     fn check(&self) -> Result<(), Error> {
         self.enrollment.check()?;
         let now = graphs::now_ms()?;
+        // Only the command's end is read on this clock: its issue time is the
+        // server's, and a clock behind refuses none (ADR 0016, rule 4).
         if Instant::now() >= self.expires
-            || now < self.command.issued_at_ms
             || now >= self.command.expires_at_ms
             || self.enrollment.executor_generation
                 != self.command.reserve_command.executor_generation

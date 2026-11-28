@@ -687,3 +687,18 @@ async fn managed_settlement_uses_applied_topup_head_and_keeps_unknown_usage_held
     assert_eq!(done.budget_digest, first.budget_digest);
     assert_eq!(hash_value(&reserve(&f, c).await), hash_value(&r));
 }
+#[tokio::test]
+async fn managed_budget_takes_a_raise_issued_ahead_of_this_clock() {
+    let f = fixture().await;
+    let (c, r) = reserve_qualified(&f, "budget_behind", 150).await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let raise = delta(&f, &c, &r, "behind", 50);
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let applied = f
+        .registry
+        .apply_managed_budget(proof(&f, raise, false, 1))
+        .await
+        .unwrap();
+    assert_eq!((applied.state.as_str(), applied.reason), ("applied", None));
+    f.registry.shutdown().await.unwrap();
+}

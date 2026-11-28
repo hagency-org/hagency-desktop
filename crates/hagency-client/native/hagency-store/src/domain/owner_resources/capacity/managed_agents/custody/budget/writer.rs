@@ -87,8 +87,9 @@ fn live(db: &Connection, d: &VerifiedAgentBudgetDelivery) -> Result<Binding, Err
     // cannot refill an exhausted period or change future credits implicitly.
     if periods::recurring(&binding.command) { return Err(Error::LocalAuthority); }
     let now = graphs::now_ms()?;
-    if now < c.issued_at_ms
-        || now >= c.expires_at_ms
+    // Only the command's end is read on this clock: its issue time is the
+    // server's, and a clock behind refuses none (ADR 0016, rule 4).
+    if now >= c.expires_at_ms
         || now >= authority::lifetime(db, &binding, now)?
         || c.expires_at_ms > authority::lifetime(db, &binding, now)?
     {

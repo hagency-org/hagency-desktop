@@ -1196,3 +1196,40 @@ async fn symlink_and_copied_owner_directory_cannot_claim_the_same_authority() {
         Ok(_) => panic!("copied ledger accepted"),
     }
 }
+impl OwnerResourceRegistry {
+    /// Holds this computer's wall clock `offset_ms` away from the real time of
+    /// the call, behind it when negative, on the calling thread and on the
+    /// store's worker, until the returned clock is dropped. A command stamped
+    /// with the real time then comes from a server whose clock is that far off.
+    pub(crate) async fn skew_clock(&self, offset_ms: i64) -> Arc<std::sync::atomic::AtomicU64> {
+        let now = graphs::now_ms().unwrap().checked_add_signed(offset_ms).unwrap();
+        let clock = Arc::new(std::sync::atomic::AtomicU64::new(now));
+        graphs::install_test_clock(&clock);
+        let worker = clock.clone();
+        self.0
+            .store
+            .call(1024, move |_| {
+                graphs::install_test_clock(&worker);
+                Ok(())
+            })
+            .await
+            .unwrap();
+        clock
+    }
+}
+#[tokio::test]
+async fn a_project_reservation_issued_ahead_of_this_clock_is_taken() {
+    let temp = tempfile::tempdir().unwrap();
+    let registry = OwnerResourceRegistry::open_root(&temp.path().join("owner")).unwrap();
+    let a = authority('a');
+    let resource = enroll(&registry, &a, "enroll").await;
+    let g = grant(&registry, &a, &resource.resource_id, "parent", 700)
+        .await
+        .unwrap();
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let c = command(&g, "behind", 300);
+    let _behind = registry.skew_clock(-20_000).await;
+    let receipt = apply(&registry, &a, c).await;
+    assert_eq!((receipt.state.as_str(), receipt.reason), ("reserved", None));
+    registry.shutdown().await.unwrap();
+}

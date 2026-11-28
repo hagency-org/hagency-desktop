@@ -974,3 +974,21 @@ async fn recurring_native_claimed_runtime_with_process_evidence_is_not_timed_out
     clock.store(runtime.expires_at_ms+30_000+UNCERTAIN_GRACE_MS,SeqCst);
     assert!(f.registry.record_shared_runtime_timeout(ManagedCleanupAuthority::fixture(enrollment(&f),f.child.clone(),Instant::now()+Duration::from_secs(20)),runtime).await.unwrap().is_none());
 }
+#[tokio::test]
+async fn recurring_native_renewal_issued_ahead_of_this_clock_is_taken() {
+    let f = fixture(RenewalMode::Automatic).await;
+    let next = next_grant(&f, f.grant.clone(), f.grant.period_end_ms + 1, "period_behind").await;
+    // The period itself starts on this computer's clock.
+    let early = renewal(&f, next.clone(), "renew_behind");
+    assert!(matches!(
+        apply_at(&f, early, next.period_start_ms - 1).await,
+        Err(Error::LocalAuthority)
+    ));
+    // Issued by the server 30 seconds into the new period; this computer's
+    // clock reads 20 seconds less, inside the period too.
+    let mut c = renewal(&f, next.clone(), "renew_behind");
+    c.issued_at_ms = next.period_start_ms + 30_000;
+    let saved = apply_at(&f, c.clone(), next.period_start_ms + 10_000).await.unwrap();
+    saved.validate_for(&c).unwrap();
+    assert_eq!((saved.state.as_str(), saved.reason), ("authorized", None));
+}

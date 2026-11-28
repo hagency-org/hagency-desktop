@@ -776,3 +776,28 @@ async fn managed_runtime_preflight_is_read_only_and_never_reissues_history() {
     );
     f.registry.shutdown().await.unwrap();
 }
+#[tokio::test]
+async fn managed_runtime_takes_a_start_issued_ahead_of_this_clock_for_its_delivery() {
+    let f = fixture().await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let c = setup(&f).await;
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let lease = Instant::now() + Duration::from_secs(20);
+    let p = ManagedRuntimeCommand::Provision(c.clone());
+    let p = VerifiedManagedRuntimeDelivery::new(
+        enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+        p.clone(),
+        digest(&p),
+        true,
+        lease,
+    )
+    .unwrap();
+    let ManagedRuntimeClaim::Issued(custody) = f.registry.claim_managed_runtime(p).await.unwrap()
+    else {
+        panic!("a fresh start is issued");
+    };
+    assert_eq!(custody.deadline(), lease);
+    assert_eq!(custody.command().command_id, c.command_id);
+    drop(custody);
+    f.registry.shutdown().await.unwrap();
+}
