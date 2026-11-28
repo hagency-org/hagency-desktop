@@ -108,16 +108,22 @@ come to this:
    is decided and says why: an answer with no time, on a computer whose
    clock is behind, ends the run as `execution_clock_behind` instead of being
    asked again until the lease is gone, and the Agent's panel then says that
-   this computer's clock is wrong and what to change (#255). So is a renewal
-   of the session whose answer, by the server's date, shows this computer's
-   clock ahead of the server's by the whole window, which no wait puts
-   right: it ends as `execution_clock_ahead`. The session is kept, and is
-   not asked again for 30 seconds unless the clock is set meanwhile; an
-   Agent's run ends with that code, and its panel says that the clock is
-   ahead and what to change. An answer that does not carry the
-   server's code is not a decision, so a 401 or 403 without one no longer
-   signs the owner out; the proof in hand is kept and the renewal asked
-   again.
+   this computer's clock is wrong and what to change (#255). An answer that
+   does not carry the server's code is not a decision, so a 401 or 403
+   without one no longer signs the owner out; the proof in hand is kept and
+   the renewal asked again.
+
+   In review (Desktop #246), a renewal of the session whose answer, by the
+   server's date, shows this computer's clock ahead of the server's by the
+   whole window, which no wait puts right, is decided too, as
+   `execution_clock_ahead`; on main it is refused as unavailable and asked
+   again every second. In review (Desktop #246), every step that needs the
+   session's proof reports it so, with status 409, where most of them
+   reported a sign-in lost; the management steps, which read the device's
+   proof their own way, still report `owner_authorization_required`. In
+   review (Desktop #246), the session is kept and not asked again for 30
+   seconds unless the clock is set meanwhile, an Agent's run ends with that
+   code, and its panel says that the clock is ahead and what to change.
 4. **The end of a lease is the server's.** The daemon holds it two ways:
    counted from the moment it sent the request, with the time the server put
    in its answer, and read against its wall clock, which keeps running while
@@ -137,14 +143,16 @@ come to this:
 
    An answer to a renewal of the session that comes without the date,
    behind a proxy that drops it, cannot show a window longer than the
-   default one, nor tell it from a clock that is behind. Its proof is not
-   refused: it is held to 30 seconds from the moment its request went out.
-   The server counts the window it gave from when it handled the request,
-   which is later, so the proof ends here before it ends there. Until an
-   answer carries the date again, every renewal asks for 30 seconds only,
-   which a server that grants what is asked gives; the next dated answer
-   asks for the longer window again. A sign-in asks for no longer window and
-   still refuses an undated proof that reads longer than the default one.
+   default one, nor tell it from a clock that is behind. On main its proof
+   is refused once it reads longer than the default window, and the renewal
+   asked again every second. In review (Desktop #246), it is not refused but
+   held to 30 seconds from the moment its request went out: the server
+   counts the window it gave from when it handled the request, which is
+   later, so the proof ends here before it ends there. In review (Desktop
+   #246), until an answer carries the date again, every renewal asks for 30
+   seconds only, under both headers, which a server that grants what is
+   asked gives, and the next dated answer asks for the longer window again.
+   A sign-in asks for no longer window, and refuses such a proof as on main.
 
 For the room:
 
@@ -360,8 +368,10 @@ describes. "Send again" is what the sender has until it is decided.
   proxy that drops it, still leaves the wall clock as the only witness; on a
   computer whose clock is behind, the run then ends as
   `execution_clock_behind` and says that the clock is behind. Behind such a
-  proxy the session runs at the default window of 30 seconds, whatever
-  window the server grants (rule 4).
+  proxy the session's renewal is refused on main once the server grants
+  more than 30 seconds, and asked again every second; in review (Desktop
+  #246) the session runs at the default window of 30 seconds instead,
+  whatever window the server would grant (rule 4).
 - An Agent's execution lease that its daemon did not release stays with
   that daemon for up to 120 seconds from its last renewal. The same device
   under the same sign-in takes it back at once. Another device, or this one
@@ -453,4 +463,4 @@ point is in the release notes. Pull requests named "in review" are open.
 | 1. The window is asked for under the header that a server granting more than 30 seconds reads (`x-hagency-authorization-window-v2-ms`), and under the older one | implemented (Desktop #262, server #110); that server grants builds that send only the older header 30 seconds |
 | 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112) |
 | 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | implemented (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112) |
-| 3, 4. A session's proof renewed without the server's date is held to 30 seconds from its request, and renewals ask for 30 seconds until a dated answer comes; a clock ahead of the server's by the whole window is decided and named (`execution_clock_ahead`) | in review (Desktop #246) |
+| 3, 4. A session's proof renewed without the server's date is held to 30 seconds from its request, and renewals ask for 30 seconds under both headers until a dated answer comes; a clock ahead of the server's by the whole window is decided and named (`execution_clock_ahead`) at every step that needs the session's proof but the management steps | in review (Desktop #246) |
