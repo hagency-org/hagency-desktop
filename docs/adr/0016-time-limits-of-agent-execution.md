@@ -119,11 +119,10 @@ come to this:
    `execution_clock_ahead`; on main it is refused as unavailable and asked
    again every second. In review (Desktop #246), every step that needs the
    session's proof reports it so, with status 409, where most of them
-   reported a sign-in lost; the management steps, which read the device's
-   proof their own way, still report `owner_authorization_required`. In
-   review (Desktop #246), the session is kept and not asked again for 30
-   seconds unless the clock is set meanwhile, an Agent's run ends with that
-   code, and its panel says that the clock is ahead and what to change.
+   reported a sign-in lost. In review (Desktop #246), the session is kept
+   and not asked again for 30 seconds unless the clock is set meanwhile, an
+   Agent's run ends with that code, and its panel says that the clock is
+   ahead and what to change.
 4. **The end of a lease is the server's.** The daemon holds it two ways:
    counted from the moment it sent the request, with the time the server put
    in its answer, and read against its wall clock, which keeps running while
@@ -463,4 +462,4 @@ point is in the release notes. Pull requests named "in review" are open.
 | 1. The window is asked for under the header that a server granting more than 30 seconds reads (`x-hagency-authorization-window-v2-ms`), and under the older one | implemented (Desktop #262, server #110); that server grants builds that send only the older header 30 seconds |
 | 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112) |
 | 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | implemented (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112) |
-| 3, 4. A session's proof renewed without the server's date is held to 30 seconds from its request, and renewals ask for 30 seconds under both headers until a dated answer comes; a clock ahead of the server's by the whole window is decided and named (`execution_clock_ahead`) at every step that needs the session's proof but the management steps | in review (Desktop #246) |
+| 3, 4. A session's proof renewed without the server's date is held to 30 seconds from its request, and renewals ask for 30 seconds under both headers until a dated answer comes; a clock ahead of the server's by the whole window is decided and named (`execution_clock_ahead`) at every step that needs the session's proof | in review (Desktop #246) |
