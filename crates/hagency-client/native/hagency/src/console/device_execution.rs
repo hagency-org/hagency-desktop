@@ -83,6 +83,16 @@ fn error(status: u16, code: &str) -> DeviceError {
         code: code.into(),
     }
 }
+/// The failure of an execution step that could not get the device's proof:
+/// not made while the server gives no answer, decided and named while this
+/// computer's clock is ahead of the server's, and refused otherwise.
+fn without_device(failure: super::Error) -> DeviceError {
+    match failure {
+        super::Error::Unavailable => error(503, "server_unavailable"),
+        super::Error::ClockAhead => error(409, "execution_clock_ahead"),
+        _ => error(401, "device_authorization_required"),
+    }
+}
 fn id(value: &str) -> Result<(), DeviceError> {
     if value.is_empty()
         || value.len() > 128
@@ -1178,13 +1188,7 @@ impl Console {
         expected: Option<&DeviceIdentity>,
     ) -> Result<DeviceResponse, DeviceError> {
         let (path, body) = operation.request()?;
-        let device = self.authorized_device().await.map_err(|e| {
-            if matches!(e, super::Error::Unavailable) {
-                error(503, "server_unavailable")
-            } else {
-                error(401, "device_authorization_required")
-            }
-        })?;
+        let device = self.authorized_device().await.map_err(without_device)?;
         if expected.is_some_and(|pin| pin != &DeviceIdentity::from(&device)) {
             return Err(error(401, "device_authorization_required"));
         }
@@ -1243,13 +1247,7 @@ impl Console {
         device
             .bearer()
             .map_err(|_| error(401, "device_authorization_required"))?;
-        let current = self.authorized_device().await.map_err(|e| {
-            if matches!(e, super::Error::Unavailable) {
-                error(503, "server_unavailable")
-            } else {
-                error(401, "device_authorization_required")
-            }
-        })?;
+        let current = self.authorized_device().await.map_err(without_device)?;
         current
             .bearer()
             .map_err(|_| error(401, "device_authorization_required"))?;
@@ -1644,5 +1642,20 @@ mod processing_tests {
         assert!(receipt.validate("dispatch-a", "execution-a").is_err());
         receipt.state = "arbitrary".into();
         assert!(receipt.validate("dispatch-a", "execution-a").is_err());
+    }
+
+    #[test]
+    fn a_step_without_the_device_names_a_clock_ahead_and_decides_it() {
+        use super::super::native::Said;
+        let ahead = without_device(super::super::Error::ClockAhead);
+        assert_eq!(ahead, error(409, "execution_clock_ahead"));
+        assert_eq!(ahead.said(), Said::Decided);
+        let unanswered = without_device(super::super::Error::Unavailable);
+        assert_eq!(unanswered, error(503, "server_unavailable"));
+        assert_ne!(unanswered.said(), Said::Decided);
+        assert_eq!(
+            without_device(super::super::Error::Unauthorized),
+            error(401, "device_authorization_required")
+        );
     }
 }

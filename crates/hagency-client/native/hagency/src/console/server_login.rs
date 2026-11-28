@@ -75,10 +75,27 @@ struct RemoteSession {
     full_window: Duration,
     /// When this session last had the SDK refresh its token.
     sdk_refreshed: Option<Instant>,
+    /// What the answers to its renewals said of the server's clock.
+    server_clock: ServerClock,
     invalidated: bool,
     binding: Binding,
     checked: Instant,
     expires: Instant,
+}
+/// What the answers to a session's renewals said of the server's clock.
+#[derive(Clone, Copy, Debug, PartialEq)]
+enum ServerClock {
+    /// The last one carried the server's date, or none came yet: a renewal
+    /// asks for the longer window.
+    Dated,
+    /// The last one came without it: a renewal asks for the default window
+    /// (see `proof_clock::requested_window_ms`).
+    Undated,
+    /// By its date this computer's clock is ahead of the server's by the whole
+    /// window, as found at `at`, when the wall clock read `wall_ms`. Asked
+    /// again the server answers the same until the clock is set, so the
+    /// session is not asked again at once (see `clock_ahead_now`).
+    Ahead { at: Instant, wall_ms: u64 },
 }
 /// A host-only credential; never serialized into a browser response.
 #[derive(Clone)]
@@ -195,7 +212,23 @@ impl RemoteSession {
             self.authorized_until = by_wall;
         }
     }
+    /// Whether the last renewal found this computer's clock ahead of the
+    /// server's by the whole window, and nothing since says that changed: the
+    /// wall clock has not been set, and `CLOCK_AHEAD_SPACING` has not passed.
+    fn clock_ahead_now(&self) -> bool {
+        let ServerClock::Ahead { at, wall_ms } = self.server_clock else {
+            return false;
+        };
+        let since = at.elapsed();
+        let expected = wall_ms.saturating_add(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
+        since < CLOCK_AHEAD_SPACING
+            && wall_now_ms().abs_diff(expected) <= WALL_CLOCK_SLACK.as_millis() as u64
+    }
 }
+/// How long a session whose renewal found this computer's clock ahead of the
+/// server's by the whole window is not asked again, unless the wall clock is
+/// set meanwhile.
+const CLOCK_AHEAD_SPACING: Duration = Duration::from_secs(30);
 /// How far apart the two ends of a proof may lie before the wall clock cuts
 /// it: less is the rounding of the two readings to the millisecond, or a
 /// clock that is slewed, not a sleep or a clock that was set.
@@ -433,6 +466,10 @@ impl ServerLogin {
             .cloned()
             .filter(|s| !s.invalidated)
             .ok_or(Error::Unauthorized)?;
+        // Neither a caller nor the worker asks the server again at once.
+        if snapshot.clock_ahead_now() {
+            return Err(Error::ClockAhead);
+        }
         let started = Instant::now();
         let result = tokio::time::timeout(Duration::from_secs(8), renew(&mut snapshot))
             .await
@@ -450,7 +487,9 @@ impl ServerLogin {
                 *session = snapshot;
                 self.note_renewal(key, true);
                 let mut status = self.status.lock().await;
-                if status["code"] == "matrix_authorization_unavailable" {
+                if status["code"] == "matrix_authorization_unavailable"
+                    || status["code"] == proof_clock::CLOCK_AHEAD
+                {
                     *status = json!({"state":"device_authorized","deviceAuthorized":true,"transportOnline":false});
                     tracing::info!(stage = "owner_renewal", "Owner authorization recovered");
                 }
@@ -483,6 +522,25 @@ impl ServerLogin {
                 );
                 *self.status.lock().await = json!({"state":"failed","code":"matrix_authorization_unavailable","deviceAuthorized":false,"transportOnline":false});
                 Err(Error::Unavailable)
+            }
+            Err(Error::ClockAhead) => {
+                // The server answered, and by its date this computer's clock
+                // is ahead of it by the whole window: asked again, it answers
+                // the same until the clock is set. Nothing was refused, so the
+                // session is kept, with the proof that answer ended.
+                *session = snapshot;
+                session.server_clock = ServerClock::Ahead {
+                    at: Instant::now(),
+                    wall_ms: wall_now_ms(),
+                };
+                self.note_renewal(key, true);
+                tracing::warn!(
+                    stage = "owner_renewal",
+                    code = proof_clock::CLOCK_AHEAD,
+                    "This computer's clock is ahead of the server's by the whole authorization window; it has to be set"
+                );
+                *self.status.lock().await = json!({"state":"failed","code":proof_clock::CLOCK_AHEAD,"deviceAuthorized":false,"transportOnline":false});
+                Err(Error::ClockAhead)
             }
             Err(error) => {
                 self.note_renewal(key, true);
@@ -951,7 +1009,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 .unwrap(),
         )
         .bearer_auth(&session.token)
-        .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
+        .header(AUTHORIZATION_WINDOW_HEADER, requested_window_ms(session))
         .header(ACTIVITY_WINDOW_HEADER, ACTIVITY_WINDOW_FOLLOWS_SESSION)
         .json(&json!({"accessToken":shared_token.as_ref().unwrap_or(&session.oauth_token)}))
         .send()
@@ -968,23 +1026,30 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
     }
     let (renewed, clock) =
         proof_answer(request_started, renewal_response).await.map_err(renewal_refused)?;
+    // The next renewal asks for the window this answer could show.
+    session.server_clock = if clock.dated() {
+        ServerClock::Dated
+    } else {
+        ServerClock::Undated
+    };
     // The server's session now ends with this proof, by its clock too.
     let mut stated = stated_end(&[&renewed]);
     session.authorized_until_ms = session.authorized_until_ms.min(stated);
     let (mut until, mut taken) = match clock.bounds(&renewed) {
         Ok(bounds) => bounds,
-        Err(_) => {
+        Err(refusal) => {
             // The server answered with a proof this host cannot use, one that
             // has no time left for instance. Its session ends with that proof
             // all the same, so the one in hand is cut to it before the
-            // renewal is reported as not made.
+            // renewal is reported as not made, or, for a clock ahead of the
+            // server's, as decided.
             if let Some(end) = proof_clock::local_end(&renewed)
                 && end < session.authorized_until
             {
                 session.authorized_until = end;
                 session.clock_allowance = Duration::ZERO;
             }
-            return Err(Error::Unavailable);
+            return Err(unusable_proof(refusal));
         }
     };
     // The server has answered, and its session now ends with this proof. If
@@ -1020,6 +1085,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 &session.token,
                 &session.binding.client_id,
                 source.as_ref(),
+                requested_window_ms(session),
             )
             .await
             {
@@ -1058,7 +1124,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
         return Err(Error::Unauthorized);
     }
     let (identity_until, identity_taken) =
-        clock.bounds(&identity).map_err(|_| Error::Unavailable)?;
+        clock.bounds(&identity).map_err(unusable_proof)?;
     // The same window as the local clock alone reads it. A lease the server
     // cuts to this window is read that way too.
     let mut window = (until + taken).min(identity_until + identity_taken);
@@ -1111,14 +1177,30 @@ fn proof_shortened(window: Duration, full: Duration, refreshed: Option<Duration>
     window + SHORTENED_PROOF <= full
         && refreshed.is_none_or(|ago| ago >= SHORTENED_PROOF_REFRESH_SPACING)
 }
-/// Has the SDK refresh its token and renews the proof with the new one: its
-/// bounds, and the end the server stated for it.
+/// The window a renewal of `session` asks for. While the server's answers come
+/// without its date, a longer window could not be held, and is not asked for.
+fn requested_window_ms(session: &RemoteSession) -> u64 {
+    proof_clock::requested_window_ms(session.server_clock != ServerClock::Undated)
+}
+/// What a renewal reports for an answer whose proof this host cannot use: a
+/// clock ahead of the server's by the whole window is decided, and named;
+/// any other such answer, with no time left for instance, is not.
+fn unusable_proof(refusal: &'static str) -> Error {
+    if refusal == proof_clock::CLOCK_AHEAD {
+        Error::ClockAhead
+    } else {
+        Error::Unavailable
+    }
+}
+/// Has the SDK refresh its token and renews the proof with the new one, asking
+/// for `window_ms`: its bounds, and the end the server stated for it.
 async fn renew_with_refreshed_token(
     client: &Client,
     server: &Url,
     session_token: &str,
     client_id: &str,
     source: &dyn super::native::MatrixTokenSource,
+    window_ms: u64,
 ) -> Result<(Instant, Duration, u64), Error> {
     let refreshed = source.refresh_access_token().await.map_err(|error| {
         let code = super::native::sdk_source_failure(error);
@@ -1140,7 +1222,7 @@ async fn renew_with_refreshed_token(
                 .unwrap(),
         )
         .bearer_auth(session_token)
-        .header(AUTHORIZATION_WINDOW_HEADER, proof_clock::REQUESTED_WINDOW_MS)
+        .header(AUTHORIZATION_WINDOW_HEADER, window_ms)
         .header(ACTIVITY_WINDOW_HEADER, ACTIVITY_WINDOW_FOLLOWS_SESSION)
         .json(&json!({"accessToken":refreshed.access_token}))
         .send()
@@ -1154,7 +1236,7 @@ async fn renew_with_refreshed_token(
     }
     let (refreshed, clock) =
         proof_answer(request_started, response).await.map_err(renewal_refused)?;
-    let (until, taken) = clock.bounds(&refreshed).map_err(|_| Error::Unavailable)?;
+    let (until, taken) = clock.bounds(&refreshed).map_err(unusable_proof)?;
     Ok((until, taken, stated_end(&[&refreshed])))
 }
 fn random() -> Result<String, &'static str> {
@@ -1763,6 +1845,7 @@ async fn finish(req: &mut Request, depot: &Depot) -> Result<(String, Value), &'s
                 clock_allowance: std::time::Duration::ZERO,
                 full_window: std::time::Duration::ZERO,
                 sdk_refreshed: None,
+                server_clock: ServerClock::Dated,
                 invalidated: false,
                 binding: pending.binding.clone(),
                 checked: Instant::now(),
@@ -2613,6 +2696,7 @@ mod oauth_refresh_tests {
             clock_allowance: std::time::Duration::ZERO,
             full_window: std::time::Duration::ZERO,
             sdk_refreshed: None,
+            server_clock: ServerClock::Dated,
             invalidated: false,
             binding: Binding {
                 origin: origin.clone(),
@@ -2739,6 +2823,7 @@ mod renewal_reading_tests {
             clock_allowance: Duration::ZERO,
             full_window: Duration::ZERO,
             sdk_refreshed: None,
+            server_clock: ServerClock::Dated,
             invalidated: false,
             binding: Binding {
                 origin: origin.into(),
@@ -2763,9 +2848,22 @@ mod renewal_reading_tests {
         listener: tokio::net::TcpListener,
         replies: Vec<(u16, Value)>,
     ) -> tokio::task::JoinHandle<Vec<String>> {
+        let served = serve_dated(
+            listener,
+            replies.into_iter().map(|(status, body)| (status, body, None)).collect(),
+        );
+        tokio::spawn(async move { served.await.unwrap().into_iter().map(|(line, _)| line).collect() })
+    }
+    /// As `serve`, with the server's date on each reply that gives one, as a
+    /// fresh answer carries it; gives back each request line with the window
+    /// the request asked for.
+    fn serve_dated(
+        listener: tokio::net::TcpListener,
+        replies: Vec<(u16, Value, Option<u64>)>,
+    ) -> tokio::task::JoinHandle<Vec<(String, Option<String>)>> {
         tokio::spawn(async move {
             let mut lines = Vec::new();
-            for (status, body) in replies {
+            for (status, body, date_ms) in replies {
                 let (mut socket, _) = listener.accept().await.unwrap();
                 let mut raw = Vec::new();
                 loop {
@@ -2789,9 +2887,18 @@ mod renewal_reading_tests {
                     }
                 }
                 let request = String::from_utf8(raw).unwrap();
-                lines.push(request.lines().next().unwrap().to_owned());
+                let window = request.lines().find_map(|line| {
+                    let (name, value) = line.split_once(':')?;
+                    name.eq_ignore_ascii_case(AUTHORIZATION_WINDOW_HEADER)
+                        .then(|| value.trim().to_owned())
+                });
+                lines.push((request.lines().next().unwrap().to_owned(), window));
+                let date = date_ms.map_or(String::new(), |ms| {
+                    let date = httpdate::fmt_http_date(UNIX_EPOCH + Duration::from_millis(ms));
+                    format!("Date: {date}\r\nCache-Control: no-store\r\n")
+                });
                 let body = body.to_string();
-                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
+                socket.write_all(format!("HTTP/1.1 {status} Fixture\r\nContent-Type: application/json\r\n{date}Content-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).as_bytes()).await.unwrap();
             }
             lines
         })
@@ -2926,5 +3033,106 @@ mod renewal_reading_tests {
         // The server's session now ends with the shorter proof, on both clocks.
         assert_eq!(session.authorized_until_ms, shorter);
         assert!(session.authorized_until <= Instant::now() + Duration::from_secs(10));
+    }
+
+    #[tokio::test]
+    async fn an_undated_proof_is_held_to_the_default_window_and_no_more_is_asked_for_until_a_dated_answer() {
+        let (listener, origin) = bind().await;
+        let identity = |until: u64| json!({"mxid":"@owner:test","subject":"subject","clientId":"client","issuer":format!("{origin}auth/"),"userId":"owner","validUntilMs": until});
+        // An answer that lost the server's date on the way grants the 120 s
+        // asked for; the next ones carry the date, with the default window.
+        let long = wall_now_ms() + 120_000;
+        let date = wall_now_ms();
+        let server = serve_dated(listener, vec![
+            (200, json!({"validUntilMs": long}), None),
+            (200, identity(long), None),
+            (200, json!({"validUntilMs": date + 30_000}), Some(date)),
+            (200, identity(date + 30_000), Some(date)),
+            (503, json!({"code":"server_unavailable"}), None),
+        ]);
+        let mut session = session_at(&origin, Instant::now() + Duration::from_secs(20), wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        let sent = Instant::now();
+        renew(&mut session).await.unwrap();
+        // Used, and held to the default window from the moment its request
+        // went out, rather than refused and asked for again every second.
+        assert!(session.authorized_until >= sent + Duration::from_secs(30));
+        assert!(session.authorized_until <= Instant::now() + Duration::from_millis(30_001));
+        assert_eq!(session.server_clock, ServerClock::Undated);
+        // The next renewal asks for the default window only; after a dated
+        // answer the one after it asks for the longer window again.
+        session.checked = Instant::now() - Duration::from_secs(30);
+        renew(&mut session).await.unwrap();
+        assert_eq!(session.server_clock, ServerClock::Dated);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        let asked = |window: &str| Some(window.to_owned());
+        assert_eq!(server.await.unwrap(), [
+            (RENEW.to_owned(), asked("120000")),
+            (IDENTITY.to_owned(), None),
+            (RENEW.to_owned(), asked("30000")),
+            (IDENTITY.to_owned(), None),
+            (RENEW.to_owned(), asked("120000")),
+        ]);
+    }
+
+    #[tokio::test]
+    async fn a_clock_ahead_of_the_server_by_the_whole_window_is_decided_named_and_not_asked_again_at_once() {
+        let (listener, origin) = bind().await;
+        // By the server's date this computer's clock is forty seconds ahead,
+        // and the server gives its default window of thirty seconds.
+        let server_ms = wall_now_ms() - 40_000;
+        let server = serve_dated(listener, vec![
+            (200, json!({"validUntilMs": server_ms + 30_000}), Some(server_ms)),
+        ]);
+        let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+        let login = ServerLogin::new(Some(root.path())).unwrap();
+        let mut session = session_at(&origin, Instant::now() + Duration::from_secs(20), wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        login.sessions.lock().await.insert("ahead".into(), session);
+        assert!(matches!(login.renew_session("ahead").await, Err(Error::ClockAhead)));
+        assert_eq!(server.await.unwrap(), [(RENEW.to_owned(), Some("120000".to_owned()))]);
+        // Named, and decided: the session is not signed out, and the proof
+        // that answer ended is over here as well.
+        assert_eq!(login.status.lock().await["code"], proof_clock::CLOCK_AHEAD);
+        {
+            let sessions = login.sessions.lock().await;
+            let session = &sessions["ahead"];
+            assert!(!session.invalidated);
+            assert!(session.authorized_until <= Instant::now());
+            assert!(session.clock_ahead_now());
+        }
+        // Not asked again at once, by a caller or by the worker: the server
+        // is gone, and asking it would read no answer instead.
+        assert!(matches!(login.authorized_device().await, Err(Error::ClockAhead)));
+        assert!(matches!(login.renew_session("ahead").await, Err(Error::ClockAhead)));
+    }
+
+    #[test]
+    fn a_clock_found_ahead_is_asked_about_again_once_it_was_set_or_after_a_while() {
+        let mut session = session_at("https://example.test/", Instant::now(), wall_now_ms());
+        session.server_clock = ServerClock::Ahead { at: Instant::now(), wall_ms: wall_now_ms() };
+        assert!(session.clock_ahead_now());
+        // The wall clock was set since, either way: asked again at once.
+        for set_by in [-60_000i64, 60_000] {
+            session.server_clock = ServerClock::Ahead {
+                at: Instant::now(),
+                wall_ms: wall_now_ms().saturating_add_signed(set_by),
+            };
+            assert!(!session.clock_ahead_now(), "{set_by}");
+        }
+        // Or once the spacing has passed.
+        let at = Instant::now()
+            .checked_sub(CLOCK_AHEAD_SPACING)
+            .expect("monotonic clock older than the spacing");
+        session.server_clock = ServerClock::Ahead {
+            at,
+            wall_ms: wall_now_ms() - CLOCK_AHEAD_SPACING.as_millis() as u64,
+        };
+        assert!(!session.clock_ahead_now());
+        for clock in [ServerClock::Dated, ServerClock::Undated] {
+            session.server_clock = clock;
+            assert!(!session.clock_ahead_now());
+        }
     }
 }

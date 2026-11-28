@@ -24,6 +24,7 @@ async fn fixture(
             clock_allowance: std::time::Duration::ZERO,
             full_window: std::time::Duration::ZERO,
             sdk_refreshed: None,
+            server_clock: ServerClock::Dated,
             invalidated: false,
             binding: Binding {
                 origin,

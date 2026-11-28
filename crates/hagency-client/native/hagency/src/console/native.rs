@@ -870,7 +870,7 @@ mod owned_said_tests {
     ];
     /// Codes made on that path that decide their step, with whatever status.
     const OWNED_DECIDED: &[&str] = &[
-        "device_authorization_required", "execution_clock_behind",
+        "device_authorization_required", "execution_clock_ahead", "execution_clock_behind",
         "execution_wire_body_too_large", "invalid_arguments", "invalid_execution_arguments",
         "invalid_lease_epoch", "invalid_lease_ttl", "invalid_local_clock", "invalid_poll_limit",
         "invalid_project_folder", "invalid_room_id", "invalid_server_binding", "reply_too_large",
@@ -1692,6 +1692,10 @@ impl NativeOwner {
                 Ok(next) => next,
                 Err(super::Error::Unavailable) => {
                     return Err(failure(503, "matrix_authorization_unavailable"));
+                }
+                // The session stands; a new sign-in would read the same.
+                Err(super::Error::ClockAhead) => {
+                    return Err(failure(409, "execution_clock_ahead"));
                 }
                 Err(_) => Some(
                     self.0

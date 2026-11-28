@@ -1338,6 +1338,7 @@
   "Codex did not respond. Check that it can run locally, then retry.": "Codex 没有响应。请确认它能够在本机运行，再重试。",
   "This Codex version returned an unsupported response. Check the installed Codex version and retry.": "此 Codex 版本返回了不支持的响应。请检查安装版本后重试。",
   "The Agent's coding tool did not respond. Check that it can run on this computer, then retry.": "Agent 的编码工具没有响应。请确认它能在这台电脑上运行，然后重试。",
+  "This computer's clock is ahead of the server's. Turn on setting the date and time automatically, then start the Agent again.": "这台电脑的时钟比服务器快。请开启自动设置日期与时间，然后重新启动 Agent。",
   "The Agent's coding tool returned a response Hagency could not use. Check its installed version and retry.": "Agent 的编码工具返回了 Hagency 无法处理的响应。请检查它的安装版本后重试。",
   "Codex rejected this request. Check the local account and configuration before retrying.": "Codex 拒绝了此请求。请检查本地账号和配置后重试。",
   "The separate Codex sign-in could not be started safely. Retry or connect your signed-in local Codex account.": "无法安全启动独立 Codex 登录。请重试，或连接已登录的本机 Codex 账号。",

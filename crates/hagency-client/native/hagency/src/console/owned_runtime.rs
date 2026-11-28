@@ -1286,6 +1286,8 @@ fn transport_error(status: u16, code: &str, acquiring: bool, request: bool) -> R
         RuntimeError::LeaseBusy
     } else if code == CLOCK_BEHIND {
         RuntimeError::Execution(CLOCK_BEHIND)
+    } else if code == CLOCK_AHEAD {
+        RuntimeError::Execution(CLOCK_AHEAD)
     } else if matches!(
         code,
         "execution_history_changed" | "ledger_recovery_required"
@@ -1325,6 +1327,10 @@ fn transport_error(status: u16, code: &str, acquiring: bool, request: bool) -> R
 /// runtime stops with this code, as asked again it reads the same; the
 /// service tries again later, when the clock may have been set.
 const CLOCK_BEHIND: &str = "execution_clock_behind";
+/// A renewal of the session whose answer, by the server's date, found this
+/// computer's clock ahead by the whole authorization window. It is decided as
+/// a clock behind is, and the runtime stops with this code.
+const CLOCK_AHEAD: &str = "execution_clock_ahead";
 async fn operation<T: Transport>(
     console: &T,
     receiver: &mut watch::Receiver<bool>,
@@ -1403,6 +1409,7 @@ async fn heartbeat(
                 // Asked again, the same answer reads the same: the runtime
                 // stops now and says why, rather than once the lease is gone.
                 Err(error) if error.code == CLOCK_BEHIND => break CLOCK_BEHIND,
+                Err(error) if error.code == CLOCK_AHEAD => break CLOCK_AHEAD,
                 _ => break "lease_renewal_rejected",
             };
             lease = value;
@@ -1434,6 +1441,7 @@ async fn heartbeat(
                     tokio::select! { biased; _=canceled(&mut receiver)=>return, _=tokio::time::sleep_until(next.min(fresh_expiry).into())=>{} }
                     continue;
                 }
+                Err(super::Error::ClockAhead) => break CLOCK_AHEAD,
                 _ => break "device_authorization_required",
             };
             refresh_unanswered = None;
@@ -1459,6 +1467,8 @@ async fn heartbeat(
     );
     let failure = if reason == CLOCK_BEHIND {
         3
+    } else if reason == CLOCK_AHEAD {
+        4
     } else if terminal {
         1
     } else {
@@ -1473,10 +1483,10 @@ fn device_refresh_given_up(since: Instant, now: Instant) -> bool {
     now.saturating_duration_since(since) >= RUNNING_CHECK_GRACE
 }
 fn device_error(error: super::Error) -> RuntimeError {
-    if matches!(error, super::Error::Unavailable) {
-        RuntimeError::Transport
-    } else {
-        RuntimeError::Authorization
+    match error {
+        super::Error::Unavailable => RuntimeError::Transport,
+        super::Error::ClockAhead => RuntimeError::Execution(CLOCK_AHEAD),
+        _ => RuntimeError::Authorization,
     }
 }
 /// Sets the profile's program to the coding tool as it is found now, and
@@ -1865,12 +1875,14 @@ async fn run_host(
     heartbeat_result(heartbeat_failed.load(std::sync::atomic::Ordering::Acquire), result)
 }
 /// What a runtime ends with, given how its heartbeat stopped (see
-/// `heartbeat`): a refusal, no answer, or this computer's clock behind.
+/// `heartbeat`): a refusal, no answer, or this computer's clock behind or
+/// ahead.
 fn heartbeat_result(failed: u8, result: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
     match failed {
         1 => Err(RuntimeError::Authorization),
         2 => Err(RuntimeError::Transport),
         3 => Err(RuntimeError::Execution(CLOCK_BEHIND)),
+        4 => Err(RuntimeError::Execution(CLOCK_AHEAD)),
         _ => result,
     }
 }
@@ -6590,6 +6602,26 @@ for raw in sys.stdin:
             heartbeat_result(0, Err(RuntimeError::Stopped)),
             Err(RuntimeError::Stopped)
         ));
+    }
+    #[test]
+    fn a_clock_ahead_of_the_server_stops_the_runtime_with_its_name() {
+        use crate::console::Error;
+        // Found by the session's renewal, on the way to any step: decided,
+        // and named, where any other refusal is an authorization lost.
+        let ahead = device_error(Error::ClockAhead);
+        assert!(matches!(ahead, RuntimeError::Execution("execution_clock_ahead")));
+        assert_eq!(failure_code(&Err(ahead)), Some("execution_clock_ahead"));
+        assert!(matches!(device_error(Error::Unavailable), RuntimeError::Transport));
+        assert!(matches!(device_error(Error::Unauthorized), RuntimeError::Authorization));
+        // Read from an execution route, and as the heartbeat stops.
+        for acquiring in [true, false] {
+            let ahead = transport_error(409, CLOCK_AHEAD, acquiring, false);
+            assert!(matches!(ahead, RuntimeError::Execution("execution_clock_ahead")));
+        }
+        assert_eq!(
+            failure_code(&heartbeat_result(4, Ok(()))),
+            Some("execution_clock_ahead")
+        );
     }
     #[tokio::test]
     async fn fresh_history_acquire_sends_snapshot_and_post_check_keeps_models_allowed() {
