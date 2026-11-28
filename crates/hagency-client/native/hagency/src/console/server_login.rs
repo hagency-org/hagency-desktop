@@ -13,7 +13,6 @@ use std::{
     sync::atomic::{AtomicBool, Ordering},
     time::{Duration, Instant},
 };
-#[cfg(test)]
 use std::time::{SystemTime, UNIX_EPOCH};
 use tokio::sync::Mutex;
 
