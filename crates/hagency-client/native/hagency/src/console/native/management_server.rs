@@ -839,7 +839,7 @@ impl NativeManagement {
         let device = console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let pin = DeviceIdentity::from(&device);
         if matches!(
             &command,

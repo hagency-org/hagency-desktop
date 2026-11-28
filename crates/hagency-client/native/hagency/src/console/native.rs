@@ -1695,7 +1695,8 @@ impl NativeOwner {
                 }
                 // The session stands; a new sign-in would read the same.
                 Err(super::Error::ClockAhead) => {
-                    return Err(failure(409, "execution_clock_ahead"));
+                    let (status, code) = super::CLOCK_AHEAD_FAILURE;
+                    return Err(failure(status, code));
                 }
                 Err(_) => Some(
                     self.0
@@ -1736,7 +1737,7 @@ impl NativeOwner {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         if d.origin() != self.0.expected_origin || d.owner_mxid() != self.0.expected_owner {
             return Err(failure(401, "matrix_account_mismatch"));
         }

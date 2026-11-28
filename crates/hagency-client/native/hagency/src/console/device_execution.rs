@@ -87,11 +87,12 @@ fn error(status: u16, code: &str) -> DeviceError {
 /// not made while the server gives no answer, decided and named while this
 /// computer's clock is ahead of the server's, and refused otherwise.
 fn without_device(failure: super::Error) -> DeviceError {
-    match failure {
-        super::Error::Unavailable => error(503, "server_unavailable"),
-        super::Error::ClockAhead => error(409, "execution_clock_ahead"),
-        _ => error(401, "device_authorization_required"),
-    }
+    let (status, code) = super::without_proof(
+        &failure,
+        (503, "server_unavailable"),
+        (401, "device_authorization_required"),
+    );
+    error(status, code)
 }
 fn id(value: &str) -> Result<(), DeviceError> {
     if value.is_empty()
@@ -1294,7 +1295,7 @@ impl Console {
         let device = self
             .authorized_device()
             .await
-            .map_err(|_| error(401, "device_authorization_required"))?;
+            .map_err(crate::console::proof_refused(error, 401, "device_authorization_required"))?;
         if expected != &DeviceIdentity::from(&device) {
             return Err(error(401, "device_authorization_required"));
         }

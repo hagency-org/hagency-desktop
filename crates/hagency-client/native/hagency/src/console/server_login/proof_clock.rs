@@ -30,7 +30,7 @@ pub(super) fn requested_window_ms(dated: bool) -> u64 {
 /// over: the clock is ahead of the server's by the whole window. It is decided,
 /// unlike a proof with no time left: asked again, every proof the server gives
 /// reads the same until the clock is set.
-pub(in crate::console) const CLOCK_AHEAD: &str = "execution_clock_ahead";
+pub(in crate::console) const CLOCK_AHEAD: &str = super::CLOCK_AHEAD_FAILURE.1;
 
 pub(super) struct ProofClock {
     started: Instant,

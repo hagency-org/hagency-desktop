@@ -1330,7 +1330,7 @@ const CLOCK_BEHIND: &str = "execution_clock_behind";
 /// A renewal of the session whose answer, by the server's date, found this
 /// computer's clock ahead by the whole authorization window. It is decided as
 /// a clock behind is, and the runtime stops with this code.
-const CLOCK_AHEAD: &str = "execution_clock_ahead";
+const CLOCK_AHEAD: &str = super::CLOCK_AHEAD_FAILURE.1;
 async fn operation<T: Transport>(
     console: &T,
     receiver: &mut watch::Receiver<bool>,

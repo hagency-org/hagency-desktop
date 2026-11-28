@@ -71,7 +71,11 @@ async fn has_backing(owner: &NativeOwner) -> Result<bool, NativeError> {
         .console
         .authorized_device()
         .await
-        .map_err(|_| super::failure(401, "owner_authorization_required"))?;
+        .map_err(crate::console::proof_refused(
+            super::failure,
+            401,
+            "owner_authorization_required",
+        ))?;
     let profile = crate::console::owned_agents::profile_identity(
         device.origin(),
         device.issuer(),

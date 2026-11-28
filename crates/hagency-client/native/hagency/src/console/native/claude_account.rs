@@ -147,7 +147,11 @@ impl NativeManagement {
             let device = console
                 .authorized_device()
                 .await
-                .map_err(|_| failure(401, "owner_authorization_required"))?;
+                .map_err(crate::console::proof_refused(
+                    failure,
+                    401,
+                    "owner_authorization_required",
+                ))?;
             device
                 .bearer()
                 .map_err(|_| failure(401, "owner_authorization_required"))?;

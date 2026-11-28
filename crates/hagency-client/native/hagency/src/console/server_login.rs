@@ -1200,6 +1200,39 @@ fn unusable_proof(refusal: &'static str) -> Error {
         Error::Unavailable
     }
 }
+/// How every step reads a clock ahead of the server's by the whole window
+/// (`Error::ClockAhead`): decided, and named. Asked again, every answer of the
+/// server reads the same until the clock is set, and a new sign-in changes
+/// nothing.
+pub(crate) const CLOCK_AHEAD_FAILURE: (u16, &str) = (409, "execution_clock_ahead");
+/// The status and code a step reports when it could not have the session's
+/// proof: `unavailable` for one that got no answer, `refused` for any other
+/// failure, and for a clock ahead of the server's what every step reports for
+/// it (`CLOCK_AHEAD_FAILURE`).
+pub(crate) fn without_proof(
+    failure: &Error,
+    unavailable: (u16, &'static str),
+    refused: (u16, &'static str),
+) -> (u16, &'static str) {
+    match failure {
+        Error::ClockAhead => CLOCK_AHEAD_FAILURE,
+        Error::Unavailable => unavailable,
+        _ => refused,
+    }
+}
+/// For a step that reports every failure to have the session's proof as
+/// `status` and `code`: `make` of that, or of what every step reports for a
+/// clock ahead of the server's (`without_proof`).
+pub(crate) fn proof_refused<E>(
+    make: impl Fn(u16, &'static str) -> E,
+    status: u16,
+    code: &'static str,
+) -> impl Fn(Error) -> E {
+    move |failure| {
+        let (status, code) = without_proof(&failure, (status, code), (status, code));
+        make(status, code)
+    }
+}
 /// Has the SDK refresh its token and renews the proof with the new one, asking
 /// for `window_ms`: its bounds, and the end the server stated for it.
 async fn renew_with_refreshed_token(
@@ -2374,18 +2407,9 @@ impl ServerLogin {
             key
         };
         self.renew_or_keep(&key).await.map_err(|e| {
-            OwnerError::new(
-                if matches!(e, Error::Unavailable) {
-                    503
-                } else {
-                    401
-                },
-                if matches!(e, Error::Unavailable) {
-                    "server_unavailable"
-                } else {
-                    "sign_in_required"
-                },
-            )
+            let (status, code) =
+                without_proof(&e, (503, "server_unavailable"), (401, "sign_in_required"));
+            OwnerError::new(status, code)
         })?;
         let session = self
             .sessions
@@ -2515,18 +2539,12 @@ impl super::Console {
         operation: OwnerOperation,
     ) -> Result<OwnerReply, OwnerError> {
         let current = self.authorized_device().await.map_err(|e| {
-            OwnerError::new(
-                if matches!(e, Error::Unavailable) {
-                    503
-                } else {
-                    401
-                },
-                if matches!(e, Error::Unavailable) {
-                    "server_unavailable"
-                } else {
-                    "device_authorization_required"
-                },
-            )
+            let (status, code) = without_proof(
+                &e,
+                (503, "server_unavailable"),
+                (401, "device_authorization_required"),
+            );
+            OwnerError::new(status, code)
         })?;
         current
             .bearer()
@@ -3146,5 +3164,95 @@ mod renewal_reading_tests {
             session.server_clock = clock;
             assert!(!session.clock_ahead_now());
         }
+    }
+}
+
+#[cfg(test)]
+mod clock_ahead_reading_tests {
+    use super::*;
+
+    #[test]
+    fn a_clock_ahead_reads_the_same_at_every_step_that_needs_the_proof() {
+        let (unavailable, refused) = ((503, "server_unavailable"), (401, "sign_in_required"));
+        assert_eq!(without_proof(&Error::ClockAhead, unavailable, refused), CLOCK_AHEAD_FAILURE);
+        assert_eq!(CLOCK_AHEAD_FAILURE, (409, proof_clock::CLOCK_AHEAD));
+        assert_eq!(without_proof(&Error::Unavailable, unavailable, refused), unavailable);
+        for other in [Error::Unauthorized, Error::Forbidden, Error::Invalid] {
+            assert_eq!(without_proof(&other, unavailable, refused), refused);
+        }
+        // A step that reports every failure alike still names this one.
+        let read =
+            proof_refused(|status, code| (status, code), 401, "owner_authorization_required");
+        assert_eq!(read(Error::ClockAhead), CLOCK_AHEAD_FAILURE);
+        for other in [Error::Unavailable, Error::Unauthorized] {
+            assert_eq!(read(other), (401, "owner_authorization_required"));
+        }
+    }
+
+    /// `text` without the whitespace before each `.`, so that a chain of
+    /// calls reads as one line.
+    fn chained(text: &str) -> String {
+        let mut out = String::with_capacity(text.len());
+        let mut space = String::new();
+        for c in text.chars() {
+            if c.is_whitespace() {
+                space.push(c);
+                continue;
+            }
+            if c != '.' {
+                out.push_str(&space);
+            }
+            space.clear();
+            out.push(c);
+        }
+        out
+    }
+
+    /// Every step that maps a failure to have the session's proof maps it with
+    /// a reader that names a clock ahead, so that no step reads it as a
+    /// sign-in lost or as no answer.
+    #[test]
+    fn every_step_that_needs_the_session_proof_reads_its_failure_with_one_reader() {
+        let src = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = vec![src.join("console.rs")];
+        let mut directories = vec![src.join("console")];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else if path.extension().is_some_and(|extension| extension == "rs") {
+                    files.push(path);
+                }
+            }
+        }
+        // Each of them names a clock ahead (see its test).
+        const READERS: &[&str] =
+            &["proof_refused(", "without_proof(", "device_error", "without_device"];
+        // The management steps read the device's proof with `device_failure`,
+        // which does not name a clock ahead yet.
+        const NOT_YET: &str = "device_failure";
+        let (mut read, mut unread) = (0, Vec::new());
+        for file in files {
+            let text = chained(&std::fs::read_to_string(&file).unwrap());
+            for call in [".authorized_device()", ".renew_or_keep(", "server_login.validate("] {
+                for (at, _) in text.match_indices(call) {
+                    let rest = &text[at + call.len()..];
+                    let chain = &rest[..rest.find([';', '?']).unwrap_or(rest.len())];
+                    let Some(mapped) = chain.find(".map_err(") else {
+                        continue;
+                    };
+                    let mapped = &chain[mapped..];
+                    if READERS.iter().any(|reader| mapped.contains(reader)) {
+                        read += 1;
+                    } else if !mapped.contains(NOT_YET) {
+                        let name = file.strip_prefix(&src).unwrap().display().to_string();
+                        unread.push(format!("{name}: {}", &mapped[..mapped.len().min(80)]));
+                    }
+                }
+            }
+        }
+        assert!(read > 30, "the scan found the steps: {read}");
+        assert!(unread.is_empty(), "read without naming a clock ahead: {unread:#?}");
     }
 }

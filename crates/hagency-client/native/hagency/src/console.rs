@@ -69,6 +69,7 @@ pub enum Error {
     ClockAhead,
 }
 pub use server_login::AuthorizedDevice;
+pub(crate) use server_login::{CLOCK_AHEAD_FAILURE, proof_refused, without_proof};
 
 struct Inner {
     authority: Authority,
@@ -246,7 +247,7 @@ fn failed(res: &mut Response, error: Error) {
         Error::AccountForbidden => (StatusCode::FORBIDDEN, "account_scope_required"),
         Error::LifecycleForbidden => (StatusCode::FORBIDDEN, "agent_lifecycle_scope_required"),
         Error::Busy => (StatusCode::TOO_MANY_REQUESTS, "console_busy"),
-        Error::ClockAhead => (StatusCode::CONFLICT, "execution_clock_ahead"),
+        Error::ClockAhead => (StatusCode::CONFLICT, CLOCK_AHEAD_FAILURE.1),
     };
     refusal(res, status, code);
 }

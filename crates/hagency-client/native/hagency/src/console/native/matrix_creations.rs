@@ -119,7 +119,7 @@ impl super::NativeManagement {
         session.authorize(&context,Permission::RequestAgents).map_err(|_|failure(403,"management_permission_required"))?;
         let cookie=self.owner.0.cookie.lock().await.clone();
         let raw=cookie.strip_prefix("hagency_console=").ok_or_else(||failure(401,"owner_authorization_required"))?;
-        let device=self.owner.0.host.console.authorized_device().await.map_err(|_|failure(401,"owner_authorization_required"))?;
+        let device=self.owner.0.host.console.authorized_device().await.map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let gate=Box::new(move || !self.is_retired() && session.authorize(&context,Permission::RequestAgents).is_ok());
         service::invoke_pool(&self.owner.0.host.console,raw,&device,gate,MatrixCreationInput {
             command_id,kind:MatrixCreationKind::AgentRoom,name,project_id:None,space_id:None,

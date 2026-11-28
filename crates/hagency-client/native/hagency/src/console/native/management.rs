@@ -346,7 +346,7 @@ impl NativeOwner {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         device
             .bearer()
             .map_err(|_| failure(401, "owner_authorization_required"))?;
@@ -866,7 +866,7 @@ impl NativeManagement {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let profile = hagency_store::owner_resources::ProfileAuthority::new(
             self.profile.clone(),
             device.owner_mxid().into(),
@@ -917,7 +917,7 @@ impl NativeManagement {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(crate::console::proof_refused(failure, 401, "owner_authorization_required"))?;
         let profile = hagency_store::owner_resources::ProfileAuthority::new(
             self.profile.clone(),
             device.owner_mxid().into(),
