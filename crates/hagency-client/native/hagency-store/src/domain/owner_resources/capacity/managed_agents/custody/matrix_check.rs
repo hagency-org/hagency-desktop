@@ -129,8 +129,9 @@ impl VerifiedManagedMatrixCheck {
     fn check(&self) -> Result<(), Error> {
         self.enrollment.check()?;
         let now = graphs::now_ms()?;
+        // Only the challenge's end is read on this clock: its issue time is
+        // the server's, and a clock behind refuses none (ADR 0016, rule 4).
         if Instant::now() >= self.expires
-            || now < self.command.issued_at_ms
             || now >= self.command.expires_at_ms
             || self.enrollment.executor_generation
                 != self.command.reserve_command.executor_generation
@@ -138,6 +139,10 @@ impl VerifiedManagedMatrixCheck {
             return Err(Error::LocalAuthority);
         }
         Ok(())
+    }
+    /// The end of the window in which this proof can still be answered.
+    pub fn deadline(&self) -> Instant {
+        self.expires.min(self.enrollment.expires)
     }
 }
 impl OwnerResourceRegistry {
@@ -147,7 +152,7 @@ impl OwnerResourceRegistry {
     ) -> Result<ManagedAgentMatrixObservation, Error> {
         p.check()?;
         let profile = p.enrollment.profile.clone();
-        let deadline = p.expires.min(p.enrollment.expires);
+        let deadline = p.deadline();
         let registry = self.0.clone();
         let result = self
             .0

@@ -982,3 +982,35 @@ mod demand_tests;
 #[cfg(not(feature = "shared-intake"))]
 #[path = "shared_demand_disabled_tests.rs"]
 mod demand_disabled_tests;
+
+#[tokio::test]
+async fn shared_successor_takes_a_start_issued_ahead_of_this_clock_for_its_delivery() {
+    let f = fixture().await;
+    let c = command(&f).await;
+    f.registry
+        .claim_shared_runtime(proof(&f, c.clone()))
+        .await
+        .unwrap();
+    stopped(&f, &c, "stopped").await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let next = attempt(&f, &c).await;
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let lease = Instant::now() + Duration::from_secs(15);
+    let p = VerifiedSharedAttemptDelivery::new(
+        enrollment_from(&f.profile, &f.resource, &f.grant.resource_revision, 1),
+        next.clone(),
+        digest(&next),
+        true,
+        lease,
+    )
+    .unwrap();
+    assert_eq!(p.deadline(), lease);
+    let SharedAttemptClaim::Issued(custody) = f.registry.claim_shared_successor(p).await.unwrap()
+    else {
+        panic!("a fresh start is issued");
+    };
+    custody.check().unwrap();
+    assert_eq!(custody.command().command_id, next.command_id);
+    drop(custody);
+    f.registry.shutdown().await.unwrap();
+}

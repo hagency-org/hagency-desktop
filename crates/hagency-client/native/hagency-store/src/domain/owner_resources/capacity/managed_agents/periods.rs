@@ -496,7 +496,8 @@ fn apply(
         ))
         && pin.as_ref().is_none_or(|(id,generation)|id==&c.assignment_id&&*generation==c.assignment_generation)
         && e.matches(g)
-        && now >= c.issued_at_ms
+        // The issue time is the server's: a clock behind refuses none. The
+        // period's own start below is the owner's calendar on this clock.
         && now < c.expires_at_ms
         && now >= c.period.start_ms
         && now < c.period.end_ms

@@ -108,7 +108,7 @@ fn authority(
         || c.project_revision != original.project_revision
         || c.allocation_id != original.allocation_id
         || c.period_key != grant.period_key
-        || now < c.issued_at_ms
+        // The issue time is the server's: a clock behind refuses none.
         || now >= c.expires_at_ms
     {
         return Ok(Some("authority_changed"));
@@ -222,7 +222,8 @@ fn pool_authority(db: &Connection, d: &VerifiedManagedAgentDelivery, now: u64) -
         return Ok(Some("invalid_request"));
     }
     let grant = c.pool_grant.as_ref().ok_or(Error::LocalAuthority)?;
-    if !e.matches(grant) || now < c.issued_at_ms || now >= c.expires_at_ms
+    // The issue time is the server's: a clock behind refuses none.
+    if !e.matches(grant) || now >= c.expires_at_ms
         || now < grant.period_start_ms || now >= grant.period_end_ms
         || now >= grant.delegation_expires_at_ms {
         return Ok(Some("authority_changed"));

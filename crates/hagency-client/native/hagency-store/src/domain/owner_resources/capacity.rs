@@ -1316,7 +1316,7 @@ fn check_command_authority(
         )
         || authorize_resource(tx, &e.profile, &e.resource_id).is_err()
         || resource_revision(tx, &e.resource_id)? != e.resource_revision
-        || now < c.issued_at_ms
+        // The issue time is the server's: a clock behind refuses none.
         || now >= c.expires_at_ms
         || now < g.period_start_ms
         || now >= g.period_end_ms

@@ -870,3 +870,13 @@ fn v12_reserve_contract_keeps_digest_and_authority_validation() {
     command.room_id="!broken_hash".into();
     assert!(command.validate("@owner:example.test").is_err());
 }
+#[tokio::test]
+async fn managed_agent_reservation_issued_ahead_of_this_clock_is_taken() {
+    let f = fixture().await;
+    // Issued by the server now; this computer's clock is 20 seconds behind.
+    let c = agent(&f, "behind", 100);
+    let _behind = f.registry.skew_clock(-20_000).await;
+    let saved = reserve(&f, c).await;
+    assert_eq!((saved.state.as_str(), saved.reason), ("reserved", None));
+    f.registry.shutdown().await.unwrap();
+}

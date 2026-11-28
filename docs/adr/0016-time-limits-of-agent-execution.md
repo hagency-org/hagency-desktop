@@ -54,10 +54,13 @@ come to this:
 
    The Matrix sign-in is a protocol of its own, and the daemon's custody of
    it sorts its failures where they happen. A decided one ends the session:
-   the homeserver refusing the token as unknown or missing, the sign-in
-   server refusing the refresh (an invalid grant or client), a sign-in of
-   another account or device, or a sign-in server that is not this server's.
-   A timeout, or any other failure, is without an answer and waits.
+   the homeserver refusing the token as unknown or missing; a session that
+   holds no refresh token, or whose client the sign-in server has not
+   registered or not signed in; the sign-in server refusing the refresh
+   (an invalid grant, an invalid client, or a client it does not allow); a
+   sign-in of another account or device; or a sign-in server that is not
+   this server's. A timeout, or any other failure, is without an answer and
+   waits.
 
    A refusal ends no more than its own message. The daemon saves each start
    of an Agent's process before it asks for it, and a saved start holds the
@@ -129,6 +132,25 @@ come to this:
    the computer sleeps (the counted time does not). The earlier of the two
    ends the lease. The wall clock may only end a lease early: it extends none
    and refuses none.
+
+   The same holds for each command the server offers for a managed Agent:
+   the start of its process (the first one, and each one after it, before
+   and under an applied budget), the check of its Matrix account, the start
+   of its runtime in the protocol before shared execution, its reservation,
+   a project's reservation of capacity, a raise of its budget and the
+   renewal of its period. The store checks a command when it is delivered
+   and again in the transaction that takes it, against two ends: the end
+   of its delivery, counted from the request that fetched it with the time
+   in the server's answer, and the command's own end (`expiresAtMs`) on the
+   wall clock. The earlier one ends it. The time the server issued it
+   (`issuedAtMs`), written with the server's clock, is never read against
+   this computer's, so a computer whose clock is behind takes a fresh
+   command for the whole of its delivery, and a clock ahead only ends one
+   early. The checks are in the store's `managed_agents/custody/`
+   (`shared_execution/claim.rs`, `shared_execution/attempt.rs`,
+   `shared_execution/budget_attempt.rs`, `matrix_check.rs`, `runtime.rs`
+   and `budget/writer.rs`), in `managed_agents/reserve.rs` and
+   `managed_agents/periods.rs`, and in `capacity.rs`.
 
    In review (Desktop #246): an Agent's execution lease and the
    authorization of each reply of an owned Agent are counted from their
@@ -371,6 +393,19 @@ describes. "Send again" is what the sender has until it is decided.
   more than 30 seconds, and asked again every second; in review (Desktop
   #246) the session runs at the default window of 30 seconds instead,
   whatever window the server would grant (rule 4).
+- A computer whose clock is behind takes the commands of its managed Agents
+  for the whole of their delivery: none waits for this computer's clock to
+  reach the time the server issued it (rule 4), so a pooled Agent's work
+  does not depend on how far the clock is behind. The wall clock still
+  refuses two things from below. The renewal of an Agent's period is taken
+  only once this computer's clock has reached the start of the new period,
+  which the owner's calendar sets: until then the store refuses it
+  (`management_access_required`), and on a clock behind by some seconds the
+  new period begins that many seconds late here, when the renewal is
+  offered again. The commands of the coordinator protocol (an Agent's stop,
+  start, retirement, cleanup or rename, and a project's setup) are still
+  refused while the time they were issued is ahead of this computer's
+  clock.
 - An Agent's execution lease that its daemon did not release stays with
   that daemon for up to 120 seconds from its last renewal. The same device
   under the same sign-in takes it back at once. Another device, or this one
@@ -392,14 +427,20 @@ describes. "Send again" is what the sender has until it is decided.
   refuses to open it ("state format is corrupt or newer than this
   binary"): no Agent on that computer runs again until a build at least as
   new is installed. A host is rolled back by a newer build that undoes the
-  change, never by installing an older one. #252's, #256's and #259's place
-  records (schemas 114, 115 and 116) are such steps, and so is every store
+  change, never by installing an older one. A store migration has two
+  numbers: the one its file name starts with, which pull requests use, and
+  the schema version it raises the store to, which the store's messages
+  use ("store migration N" below). They need not be equal, and for the
+  recent migrations the file's number is two higher; this record gives
+  both. #252's, #256's and #259's place records (files 116, 117 and 118,
+  schema versions 114, 115 and 116) are such steps, and so is every store
   migration in review here. A store migration is known by its file name and
   the SHA-256 of its SQL, not by its number alone. The store records both
   for each migration it runs, and every start compares them with the
   build's own list. A store that ran another build's migration of the same
-  number, such as an earlier draft's, is refused by name ("store migration
-  N was made by another build") before any later migration runs over it.
+  schema version, such as an earlier draft's, is refused by name ("store
+  migration N was made by another build") before any later migration runs
+  over it.
   A store from before these records takes the build's own for the versions
   it has, once: released builds come from the main branch, where a
   migration's number, name and SQL never change once it lands. A store
@@ -458,7 +499,7 @@ point is in the release notes. Pull requests named "in review" are open.
 | 3. A refused start gives its place back when its message ends | implemented (Desktop #252); for an Agent with an applied budget, implemented (Desktop #256) |
 | 3. No new start in the protocol before the budget for an Agent with an applied budget; a start the server refused for that budget gives its place back at once | implemented (Desktop #259) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
-| 4. The wall clock only ends a lease early | holds for a ticket and a start window; not yet for the session's proof, whose wall-clock end is in review (Desktop #246). For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
+| 4. The wall clock only ends a lease early | holds for a ticket, a start window and every command of a managed Agent, none of which is refused for a clock behind (Desktop #268); a period's renewal still waits for its start on the wall clock. Not yet for the session's proof, whose wall-clock end is in review (Desktop #246). For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
 | 1. The window is asked for under the header that a server granting more than 30 seconds reads (`x-hagency-authorization-window-v2-ms`), and under the older one | implemented (Desktop #262, server #110); that server grants builds that send only the older header 30 seconds |
 | 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112) |
 | 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | implemented (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112) |
