@@ -319,6 +319,39 @@ describes. "Send again" is what the sender has until it is decided.
   the draft's. A build from a draft pull request therefore runs only on a
   daemon home made for it and thrown away afterwards.
 
+## Bringing a longer window into service
+
+The window is a longer end, so the server's rule of readers before writers
+applies: it is granted only to a computer that can hold it. Every renewal of
+the session asks for the window under two headers, with the same value, two
+minutes: `x-hagency-authorization-window-v2-ms` and the older
+`x-hagency-authorization-window-ms`. Sending the v2 header also says that
+the computer keeps one local session for each server session, as every
+build since Desktop #239 does. A build that makes one local session per
+call reaches its limit of 16 under a longer window and refuses its own
+calls, so a server that knows the v2 header grants more than 30 seconds
+only to a renewal that carries it. A server from before that change reads
+the older header and grants the window to it; this build still sends it for
+that reason.
+
+- A computer that does not send the v2 header (0.5.0-rc.19, and every build
+  before this change) is granted the default window, 30 seconds, by a
+  server that knows the v2 header, whatever window that server is
+  configured to grant. It runs as it did before the window was raised.
+- The server's change and this one can land in either order, and neither
+  order grants the window to a computer that cannot hold it. This change
+  alone changes nothing: a server without the server's change reads the
+  older header as before. The server's change alone changes nothing for a
+  build that sends the v2 header. A build from Desktop #239 up to this
+  change, none of which was released, shares its local session but does
+  not say so, and is granted 30 seconds by such a server until it is
+  updated.
+- The window is raised, in the server's configuration, only on a server
+  that has the change; until then a computer that still makes one local
+  session per call would be granted it too. It takes effect as each
+  session is next renewed, for each computer that sends the v2 header.
+  Lowering it again shortens nothing that was given (the server's rule 2).
+
 ## State
 
 "Implemented" means merged into the main branch. Which release carries a
