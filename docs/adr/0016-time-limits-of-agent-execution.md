@@ -240,6 +240,21 @@ again, whether or not its process had been given it:
   the process and shows the retry; the stop of a turn it recorded leaves
   the message with that process. When the server shows the retry, the
   daemon releases its binding of the work and starts the retry.
+- The server's decision rests on one premise about the computer: it begins
+  a turn only when the answer to its start request says that the server's
+  record of the start was made now. The daemon meets it in three places.
+  The start step of shared execution (`context_io::start`, and the same
+  step for an Agent with a budget) can ask only with the attempt that the
+  store gives out after it has saved that the start was asked for, and the
+  store gives out no second attempt for the same work. The store's issue
+  of a shared call (`issue_shared_call`) issues the call only for an
+  answer that says the record was made now (`newlyStarted`), for the same
+  activity and work, and saves that answer before it hands the call back.
+  The issued call (`SharedCallCustody`) is the only thing that sends a
+  turn's text to the CLI, for Codex, Claude and Octos alike. An answer for
+  a record made earlier, or no answer at all, therefore leaves the call
+  unissued: nothing reaches the CLI, and the work's outcome stays unknown.
+  A store test reads the sources and fails when any of this changes.
 - For work the process had been given, this takes a second binding of one
   message on both sides. Each side keeps the first binding as a released
   copy, and released work is never bound again.

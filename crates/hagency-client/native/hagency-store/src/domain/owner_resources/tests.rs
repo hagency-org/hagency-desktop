@@ -32,6 +32,8 @@ mod parent;
 mod provenance_history;
 #[path = "readmission_tests.rs"]
 mod readmission;
+#[path = "shared_turn_start_tests.rs"]
+mod shared_turn_start;
 
 /// A database notes that it was created empty, under the name the server
 /// will know it by. Only that database can claim the note, and it stops
