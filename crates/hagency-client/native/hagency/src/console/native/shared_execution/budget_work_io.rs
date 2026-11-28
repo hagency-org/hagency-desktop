@@ -48,7 +48,23 @@ struct RefusalReply { refusal: Option<SharedBudgetWorkRefusalRecord> }
 
 /// After an uncertain pre-issue failure, ask for a canonical never-started
 /// fence. Failure leaves the original hold; no error is interpreted as zero use.
+///
+/// The server answers a refusal it has recorded with that record, and the
+/// local row is the same for the same record, so the step is asked again for
+/// a short while when it could not be asked or got no answer. What sends it
+/// here is often such a failure, and one attempt then left the work without
+/// the reason it ended.
 pub(super) async fn refuse_unissued(
+    io:&Io,r:&OwnerResourceRegistry,c:&SharedBudgetAttemptCommand,w:&SharedWorkItem,input:Option<&SharedPreparedInput>,
+)->Result<Option<SharedWorkReceipt>,NativeError>{
+    let result=io.settled_shortly(||refuse_once(io,r,c,w,input)).await;
+    match &result {
+        Ok(refusal)=>tracing::info!(recorded=refusal.is_some(),"Unissued pooled work refusal asked"),
+        Err(error)=>tracing::warn!(status=error.status,code=%error.code,said=?error.said(),"Unissued pooled work refusal was not recorded"),
+    }
+    result
+}
+async fn refuse_once(
     io:&Io,r:&OwnerResourceRegistry,c:&SharedBudgetAttemptCommand,w:&SharedWorkItem,input:Option<&SharedPreparedInput>,
 )->Result<Option<SharedWorkReceipt>,NativeError>{
     let b=io.bound().await?;

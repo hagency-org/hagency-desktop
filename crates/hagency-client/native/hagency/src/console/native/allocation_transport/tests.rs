@@ -157,6 +157,9 @@ struct State {
     fail_source_at_projects: Option<Arc<AtomicBool>>,
     /// The server refuses the saved owner session; the SDK account is unchanged.
     refuse_renewal: bool,
+    /// The server does not answer a renewal: neither a grant nor a refusal.
+    unanswered_renewal: bool,
+    renewals_unanswered: usize,
     invalidate_at_contribution: bool,
     invalidate_at_result: bool,
     lose_before_publication: bool,
@@ -462,7 +465,11 @@ async fn server(state: Arc<Mutex<State>>) -> (String, tokio::task::JoinHandle<()
                             json!({"deviceId":"device","token":"b".repeat(64),"generation":state.lock().unwrap().generation.max(1),"validUntilMs":at+30000})
                         }
                         "/hagency/api/v1/sessions/current/renew" => {
-                            if state.lock().unwrap().refuse_renewal {
+                            let mut state = state.lock().unwrap();
+                            if state.unanswered_renewal {
+                                state.renewals_unanswered += 1;
+                                json!({"code":"server_unavailable","fixtureStatus":503})
+                            } else if state.refuse_renewal {
                                 json!({"code":"sign_in_required","fixtureStatus":401})
                             } else {
                                 json!({"validUntilMs":at+30000})
@@ -1549,5 +1556,101 @@ async fn native_run_control_disabled_before_journal() {
         assert_eq!(m.central(command).await.unwrap_err().code,"shared_intake_disabled");
     }
     assert!(m.saved_commands().await.unwrap().is_empty());
+    f.stop().await;
+}
+
+/// A renewal the server does not answer is not a refusal. The proof in hand
+/// is good until its own end, so the work that came in under it is leased,
+/// done and reported; nothing is ended and nothing is called unknown.
+#[tokio::test]
+async fn native_allocation_transport_works_under_the_proof_in_hand_while_renewal_is_unanswered() {
+    let f = Fixture::new().await;
+    let command = f.allocation();
+    {
+        let mut s = f.state.lock().unwrap();
+        s.allocation = Some(command.clone());
+        s.unanswered_renewal = true;
+    }
+    let login = &f.owner.test_console().0.server_login;
+    // The next use of the proof asks the server again, and gets no answer.
+    login.forget_recent_check().await;
+    f.transport.poll_allocation(&f.registry, None).await.unwrap();
+    assert_eq!(f.state.lock().unwrap().result_writes, 1);
+    assert!(f.state.lock().unwrap().renewals_unanswered >= 1);
+    assert!(matches!(
+        f.transport
+            .recover_allocation(&f.registry, command.command_id.clone(), digest(&command).unwrap())
+            .await
+            .unwrap(),
+        AllocationProgress::Recorded { .. }
+    ));
+    // The server answers again: the same session goes on, with no new sign-in.
+    f.state.lock().unwrap().unanswered_renewal = false;
+    login.forget_recent_check().await;
+    f.transport.scope(Permission::ExecuteAllocations).await.unwrap();
+    f.stop().await;
+}
+
+/// After a request that may have committed, an authority check that cannot be
+/// made (here: no free management session) is made again while the scope
+/// stands, and is not turned into an unknown outcome.
+#[tokio::test]
+async fn native_allocation_transport_waits_out_a_check_that_cannot_be_made_after_a_request() {
+    let f = Fixture::new().await;
+    let scope = f.transport.scope(Permission::ExecuteAllocations).await.unwrap();
+    // Fifteen other packages each hold a session: with the scope's own, the
+    // host has its sixteen.
+    let mut others = Vec::new();
+    for instance in 100..115 {
+        let manager = f.owner.management(package(instance)).await.unwrap();
+        let held = manager.authorized().await.unwrap();
+        others.push((manager, held));
+    }
+    // A renewed proof ends later, so the next check needs a session of its
+    // own, and there is none free.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    // Before anything is sent the check is asked again only for a short
+    // while, and is then reported as it is.
+    let started = Instant::now();
+    let before = f.transport.check_scope(&scope, false).await.unwrap_err();
+    assert_eq!((before.status, before.code.as_str()), (503, "management_capacity"));
+    assert!(started.elapsed() >= Duration::from_secs(4));
+    assert!(started.elapsed() < Duration::from_secs(8));
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        drop(others);
+    });
+    let started = Instant::now();
+    f.transport.check_scope(&scope, true).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(1000));
+    release.await.unwrap();
+    f.stop().await;
+}
+
+/// Before anything is sent, an authority check that cannot be made (here: no
+/// free management session) is asked again for a moment instead of failing
+/// the step that needed it: a run that ends on this error would otherwise
+/// end because sixteen sessions were held for half a second.
+#[tokio::test]
+async fn native_allocation_transport_asks_again_when_a_check_before_sending_cannot_be_made() {
+    let f = Fixture::new().await;
+    let scope = f.transport.scope(Permission::ExecuteAllocations).await.unwrap();
+    let mut others = Vec::new();
+    for instance in 100..115 {
+        let manager = f.owner.management(package(instance)).await.unwrap();
+        let held = manager.authorized().await.unwrap();
+        others.push((manager, held));
+    }
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    f.owner.test_console().0.server_login.forget_recent_check().await;
+    let release = tokio::spawn(async move {
+        tokio::time::sleep(Duration::from_millis(1200)).await;
+        drop(others);
+    });
+    let started = Instant::now();
+    f.transport.check_scope(&scope, false).await.unwrap();
+    assert!(started.elapsed() >= Duration::from_millis(1000));
+    release.await.unwrap();
     f.stop().await;
 }

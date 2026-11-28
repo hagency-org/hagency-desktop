@@ -100,13 +100,7 @@ async fn request(
     let result = console
         .owner_api_pinned(&pin, OwnerOperation::Management(operation))
         .await;
-    let (current, live) = m.authorized().await.map_err(|e| {
-        if mutation && result.is_ok() {
-            failure(409, "management_outcome_unknown")
-        } else {
-            e
-        }
-    })?;
+    let (current, live) = m.authorized_after(mutation && result.is_ok()).await?;
     if current != context {
         return Err(failure(
             409,

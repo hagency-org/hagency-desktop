@@ -96,23 +96,47 @@ impl Authority {
         until: Instant,
         observation: SharedTextProcessObservation,
     ) -> Result<(SharedActivityLease, u64, Instant), NativeError> {
-        let b = io.bound().await?;
-        io::binding(&b.scope, self.root(), true)?;
+        // The process is recorded once; sending its receipt is what is asked
+        // again. Nothing has started yet, and the server answers an exact
+        // replay of this receipt with the lease it already made. So a scope
+        // that could not be taken, or a reply that was lost, sends the same
+        // receipt again under a fresh scope, as the other drivers do. Taken as
+        // a failure it ended a process that had not begun, and the server then
+        // cancelled the message that process was started for.
+        let root = self.root();
         match self {
             Self::Root(s, d) => {
                 let receipt = s.record(observation).await.map_err(store)?;
-                let (ack, at, sent) = run::upload_process(&b, d, until, &receipt).await?;
+                let (ack, at, sent) = io
+                    .settled(until, || async {
+                        let b = io.bound().await?;
+                        io::binding(&b.scope, root, true)?;
+                        run::upload_process(&b, d, until, &receipt).await
+                    })
+                    .await?;
                 Ok((ack.activity.ok_or_else(invalid)?, at, sent))
             }
             Self::Attempt(s, d) => {
                 let receipt = s.record(observation).await.map_err(store)?;
-                let (ack, at, sent) = attempt_run::upload_process(&b, d, until, &receipt).await?;
+                let (ack, at, sent) = io
+                    .settled(until, || async {
+                        let b = io.bound().await?;
+                        io::binding(&b.scope, root, true)?;
+                        attempt_run::upload_process(&b, d, until, &receipt).await
+                    })
+                    .await?;
                 Ok((ack.activity.ok_or_else(invalid)?, at, sent))
             }
             #[cfg(feature = "shared-budget-execution")]
             Self::Budget(s, d) => {
                 let receipt = s.record(observation).await.map_err(store)?;
-                let (ack, at, sent) = budget_run::upload_process(&b, d, until, &receipt).await?;
+                let (ack, at, sent) = io
+                    .settled(until, || async {
+                        let b = io.bound().await?;
+                        io::binding(&b.scope, root, true)?;
+                        budget_run::upload_process(&b, d, until, &receipt).await
+                    })
+                    .await?;
                 Ok((ack.activity.ok_or_else(invalid)?, at, sent))
             }
         }
@@ -169,17 +193,26 @@ impl Authority {
         r: &OwnerResourceRegistry,
         state: &Lease,
     ) -> Result<(Bound, VerifiedSharedActivity), NativeError> {
-        let b = io.bound().await?;
-        let e = b.enrollment(r, self.root(), true).await?;
-        let deadline = state.until.min(b.scope.deadline);
-        let proof = match self {
-            Self::Root(s, _) => s.authorize_activity(e, &state.lease, deadline),
-            Self::Attempt(s, _) => s.authorize_activity(e, &state.lease, deadline),
-            #[cfg(feature = "shared-budget-execution")]
-            Self::Budget(s, _) => s.authorize_activity(e, &state.lease, deadline),
-        }
-        .map_err(store)?;
-        Ok((b, proof))
+        // Read-only until it answers: a scope, the enrollment under it and a
+        // local comparison. A check that could not be made (no free session,
+        // a credential being refreshed) is waited out while the lease lasts,
+        // as the other drivers do: taken as a failure it ended the process,
+        // and the message it had just accepted was never answered. A real
+        // revocation is not retried.
+        io.settled(state.until, || async {
+            let b = io.bound().await?;
+            let e = b.enrollment(r, self.root(), true).await?;
+            let deadline = state.until.min(b.scope.deadline);
+            let proof = match self {
+                Self::Root(s, _) => s.authorize_activity(e, &state.lease, deadline),
+                Self::Attempt(s, _) => s.authorize_activity(e, &state.lease, deadline),
+                #[cfg(feature = "shared-budget-execution")]
+                Self::Budget(s, _) => s.authorize_activity(e, &state.lease, deadline),
+            }
+            .map_err(store)?;
+            Ok((b, proof))
+        })
+        .await
     }
     pub fn work_poll(&self, a: SharedActivityRef) -> Action {
         #[cfg(feature = "shared-budget-execution")]
@@ -276,7 +309,7 @@ impl Active {
         lease: SharedActivityLease,
         observed: (u64, Instant),
     ) -> Result<Self, NativeError> {
-        let b = io.bound().await?;
+        let b = io.bound_running().await?;
         let state = Lease::new(&authority, lease, observed.0, observed.1, &b)?;
         process.install_renewable_shared_activity(state.lease.authority.epoch, state.until).map_err(|_| invalid())?;
         let control = process.shared_activity_control().map_err(|_| invalid())?;
@@ -294,7 +327,7 @@ impl Active {
         lease: SharedActivityLease,
         observed: (u64, Instant),
     ) -> Result<Self, NativeError> {
-        let b = io.bound().await?;
+        let b = io.bound_running().await?;
         let state = Lease::new(&authority, lease, observed.0, observed.1, &b)?;
         process
             .install_renewable_shared_activity(state.lease.authority.epoch, state.until)

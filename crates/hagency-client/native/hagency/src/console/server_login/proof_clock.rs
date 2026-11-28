@@ -86,6 +86,15 @@ impl ProofClock {
     }
 }
 
+/// Where a proof's stated end falls on the local clock, for an answer whose
+/// bounds could not be taken: now, when that end has passed. It only ever
+/// serves to cut a proof in hand, never to extend one.
+pub(super) fn local_end(body: &Value) -> Option<Instant> {
+    let until = body["validUntilMs"].as_u64()?;
+    let local_ms = SystemTime::now().duration_since(UNIX_EPOCH).ok()?.as_millis() as u64;
+    Some(Instant::now() + Duration::from_millis(until.saturating_sub(local_ms)))
+}
+
 /// The longest window the proof that ends at `until` may have. Only the
 /// server's own date can show a window longer than the default one: an undated
 /// proof is read with the local clock alone and keeps the default bound.
@@ -132,6 +141,17 @@ fn remaining_ms(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_stated_end_that_has_passed_falls_on_now() {
+        let now_ms = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+        let before = Instant::now();
+        let passed = local_end(&serde_json::json!({"validUntilMs": now_ms - 5_000})).unwrap();
+        assert!(passed >= before && passed <= Instant::now());
+        let ahead = local_end(&serde_json::json!({"validUntilMs": now_ms + 10_000})).unwrap();
+        assert!(ahead > before + Duration::from_secs(9) && ahead <= Instant::now() + Duration::from_secs(10));
+        assert!(local_end(&serde_json::json!({})).is_none());
+    }
 
     #[test]
     fn fresh_dated_proof_is_bounded_by_both_clocks_and_the_request_start() {

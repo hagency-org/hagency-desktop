@@ -502,6 +502,7 @@ async fn work(
     {
         Ok(issued) => issued,
         Err(error) => {
+            super::io::ended_before_its_turn("issue", &error);
             #[cfg(feature = "shared-budget-execution")]
             if let Authority::Budget(_, delivery) = live.authority.as_ref()
                 && let Ok(Some(receipt)) = super::budget_work_io::refuse_unissued(

@@ -421,10 +421,12 @@ impl Io {
         let settle = Instant::now() + RUNNING_CHECK_SETTLE;
         self.settled(settle, || self.bound()).await
     }
-    /// Runs one authority step of a running process and waits out a transient
-    /// boundary failure until `until` (the activity lease, at the latest).
-    /// The step is run again from its start, so it must not have persisted or
-    /// uploaded anything when it fails with such a code.
+    /// Runs one authority step of a running process and asks it again, until
+    /// `until` (the activity lease, at the latest), while its failure is not a
+    /// refusal. The step is run again from its start and may already have
+    /// reached the server, so it has to be one whose exact replay is harmless:
+    /// it reads, records the same local row under the same id, or uploads
+    /// something the server answers again with what it already did.
     pub(super) async fn settled<T, F>(
         &self,
         until: Instant,
@@ -434,6 +436,15 @@ impl Io {
         F: std::future::Future<Output = Result<T, NativeError>>,
     {
         settle(until, |error| self.transient(error), step).await
+    }
+    /// `settled` for a step that no lease bounds: it is asked again for as
+    /// long as a running process waits out a check.
+    #[cfg(feature = "shared-budget-execution")]
+    pub(super) async fn settled_shortly<T, F>(&self, step: impl FnMut() -> F) -> Result<T, NativeError>
+    where
+        F: std::future::Future<Output = Result<T, NativeError>>,
+    {
+        self.settled(Instant::now() + RUNNING_CHECK_SETTLE, step).await
     }
     /// Hosting stopping, or this management package retired or expired, is a
     /// real revocation: no retry, the run stops now.
@@ -467,7 +478,10 @@ impl Io {
             if !self.transient(&error) || Instant::now() + RETRY_GAP >= until {
                 return Err(error);
             }
-            tracing::info!(code = %error.code, "Shared activity renewal resubmitting the same renewal");
+            tracing::info!(code = %error.code, said = ?error.said(), "Shared activity renewal resubmitting the same renewal");
+            // The scope that failed is given back before the wait: a waiter
+            // holds no management session.
+            drop(b);
             tokio::time::sleep(RETRY_GAP).await;
             b = match self.bound().await {
                 Ok(fresh) => fresh,
@@ -483,6 +497,19 @@ impl Io {
 
 pub(super) const RETRY_GAP: std::time::Duration = std::time::Duration::from_secs(2);
 
+/// The one line for work that ends before its turn began: the step it ended
+/// at and what the failure said (`NativeError::said`). Step names and codes
+/// only, never identifiers.
+pub(super) fn ended_before_its_turn(stage: &'static str, error: &NativeError) {
+    tracing::warn!(
+        stage,
+        status = error.status,
+        code = %error.code,
+        said = ?error.said(),
+        "Pooled work ended before its turn began"
+    );
+}
+
 /// The retry rule behind `Io::settled`, apart from `Io` so it can be tested:
 /// a failure `transient` accepts is retried after `RETRY_GAP` while one more
 /// gap still fits before `until`; any other result is returned as it is.
@@ -497,7 +524,7 @@ where
     loop {
         match step().await {
             Err(error) if transient(&error) && Instant::now() + RETRY_GAP < until => {
-                tracing::info!(code = %error.code, "Shared run authority step retrying");
+                tracing::info!(code = %error.code, said = ?error.said(), "Shared run authority step retrying");
                 tokio::time::sleep(RETRY_GAP).await;
             }
             result => return result,
@@ -508,22 +535,12 @@ where
 /// How long a running process waits out a transient authority failure.
 const RUNNING_CHECK_SETTLE: std::time::Duration = std::time::Duration::from_secs(20);
 
-/// The service could not acquire the domain writer within its admission window.
-pub(super) fn writer_busy(error: &NativeError) -> bool {
-    error.status == 503 && error.code == "domain_writer_busy"
-}
-
-/// A renewable management scope or a temporarily occupied domain writer.
+/// A failure that was not a refusal (`NativeError::said`): the step could not
+/// be asked, its scope was replaced, or it was sent and got no answer. A
+/// driver asks such a step again. Every step it does that with reads, or is
+/// answered by the server a second time with what it already did.
 fn transient_boundary(error: &NativeError) -> bool {
-    writer_busy(error) || matches!(
-        error.code.as_str(),
-        "management_scope_changed"
-            | "management_outcome_unknown"
-            | "management_access_required"
-            | "owner_authorization_required"
-            | "matrix_authorization_unavailable"
-            | "management_unavailable"
-    )
+    error.passes()
 }
 impl Bound {
     /// Preparation only inspects provider configuration. Pin all its checks to
@@ -854,6 +871,31 @@ mod settle_tests {
         assert!(transient_boundary(&failure(503, "domain_writer_busy")));
         assert!(!transient_boundary(&failure(403, "domain_writer_busy")));
         assert!(!transient_boundary(&failure(503, "shared_room_send_authority_changed")));
+    }
+
+    /// A request that left and got no answer was not refused. The step is
+    /// asked again, as it is after a check that could not be made: taken as a
+    /// refusal, one broken exchange ended the run it belonged to.
+    #[tokio::test(start_paused = true)]
+    async fn an_exchange_without_an_answer_is_asked_again() {
+        for code in ["server_unavailable", "storage_unavailable"] {
+            let calls = AtomicU32::new(0);
+            let until = Instant::now() + Duration::from_secs(20);
+            let answered = settle(until, transient_boundary, || async { flaky(&calls, 2, code) })
+                .await
+                .unwrap();
+            assert_eq!(answered, 3, "{code}");
+        }
+        // A refusal is returned at once.
+        let calls = AtomicU32::new(0);
+        let until = Instant::now() + Duration::from_secs(20);
+        let error = settle(until, transient_boundary, || async {
+            flaky(&calls, 2, "shared_activity_expired_or_changed")
+        })
+        .await
+        .unwrap_err();
+        assert_eq!(error.code, "shared_activity_expired_or_changed");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test(start_paused = true)]

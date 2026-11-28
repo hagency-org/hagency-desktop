@@ -27,7 +27,7 @@ pub(super) fn management(path: &str, body: &Value, s: &mut super::super::State) 
     }
     if path.ends_with("/refuse-unissued") {
         s.shared.budget_attempts.refusals+=1;
-        return Some(json!({"fixtureStatus":409,"error":"shared_budget_head_unchanged"}));
+        return Some(json!({"fixtureStatus":409,"code":"shared_budget_head_unchanged"}));
     }
     let at = now();
     let start = path.ends_with("/budget-attempts/start");

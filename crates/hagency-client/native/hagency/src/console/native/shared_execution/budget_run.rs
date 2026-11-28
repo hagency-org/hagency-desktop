@@ -362,9 +362,18 @@ pub(super) async fn run(
             .await
             .map_err(|_| failure(409, "shared_execution_identity_failed"))?;
         let receipt = sink.record(observation).await.map_err(store)?;
-        let b = io.bound().await?;
-        io::binding(&b.scope, &d.command.original_runtime_command, true)?;
-        let (ack, at, sent) = upload_process(&b, &d, until, &receipt).await?;
+        // Nothing has started yet, and the server answers an exact replay of
+        // this receipt with the lease it already made. So a boundary check
+        // that could not be made, or a lost reply, sends the same receipt
+        // again under a fresh scope instead of ending a run that never began.
+        let (b, (ack, at, sent)) = io
+            .settled(until, || async {
+                let b = io.bound().await?;
+                io::binding(&b.scope, &d.command.original_runtime_command, true)?;
+                let sent = upload_process(&b, &d, until, &receipt).await?;
+                Ok((b, sent))
+            })
+            .await?;
         let lease = ack
             .activity
             .ok_or_else(|| failure(409, "shared_execution_activity_missing"))?;
@@ -624,6 +633,7 @@ async fn work_loop(
     {
         Ok(custody) => custody,
         Err(error) => {
+            io::ended_before_its_turn("issue", &error);
             if let Ok(Some(receipt)) =
                 budget_work_io::refuse_unissued(io, r, sink.command(), &work, Some(&input)).await
             {

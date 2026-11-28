@@ -168,7 +168,7 @@ impl AllocationTransport {
             .console
             .authorized_device()
             .await
-            .map_err(|_| failure(401, "owner_authorization_required"))?;
+            .map_err(super::management::device_failure)?;
         device
             .bearer()
             .map_err(|_| failure(401, "owner_authorization_required"))?;
@@ -213,7 +213,44 @@ impl AllocationTransport {
         scope: &Scope,
         uncertain: bool,
     ) -> Result<(), NativeError> {
-        let result = async {
+        let unsent = Instant::now() + super::management::UNSENT_CHECK_PATIENCE;
+        let result = loop {
+            match self.check_scope_once(scope).await {
+                // This check could not be made: no free session, or the
+                // service or the server did not answer. That is not a
+                // refusal. When the request may have committed, ask again
+                // while the scope itself stands, before the outcome is
+                // called unknown. Before anything was sent, ask again for a
+                // short while: waiting changes nothing then, and a caller
+                // that ends its run on this error would end it for a moment
+                // without a free session. After that the check is reported
+                // as it is, and its caller decides whether to come back.
+                Err(error)
+                    if super::management::unanswered(&error)
+                        && Instant::now() + super::management::UNANSWERED_CHECK_GAP
+                            < if uncertain {
+                                scope.deadline
+                            } else {
+                                scope.deadline.min(unsent)
+                            } =>
+                {
+                    tokio::time::sleep(super::management::UNANSWERED_CHECK_GAP).await;
+                }
+                result => break result,
+            }
+        };
+        result.map_err(|error| {
+            if uncertain {
+                // The request may have committed; the specific cause is logged above.
+                tracing::info!(code = %error.code, "Management boundary failed after a possibly committed request");
+                failure(409, "management_outcome_unknown")
+            } else {
+                error
+            }
+        })
+    }
+    async fn check_scope_once(&self, scope: &Scope) -> Result<(), NativeError> {
+        async {
             scope.check()?;
             // authorized() performs the fresh SDK account/token check. Do it
             // once per boundary instead of issuing the same network-backed
@@ -238,22 +275,15 @@ impl AllocationTransport {
                 .console
                 .authorized_device()
                 .await
-                .map_err(|_| scope.failed("device_unavailable", failure(401, "owner_authorization_required")))?;
+                .map_err(|error| {
+                    scope.failed("device_unavailable", super::management::device_failure(error))
+                })?;
             if DeviceIdentity::from(&device) != DeviceIdentity::from(&scope.device) {
                 return Err(scope.failed("device_changed", failure(401, "management_scope_changed")));
             }
             scope.check()
         }
-        .await;
-        result.map_err(|error| {
-            if uncertain {
-                // The request may have committed; the specific cause is logged above.
-                tracing::info!(code = %error.code, "Management boundary failed after a possibly committed request");
-                failure(409, "management_outcome_unknown")
-            } else {
-                error
-            }
-        })
+        .await
     }
     pub(super) async fn request<T: serde::de::DeserializeOwned>(
         &self,

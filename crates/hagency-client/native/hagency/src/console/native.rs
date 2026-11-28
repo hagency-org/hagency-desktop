@@ -471,6 +471,340 @@ fn failure(status: u16, code: &str) -> NativeError {
         code: code.into(),
     }
 }
+/// What a failure says about the step that returned it.
+///
+/// This is the one table of it. Whoever decides to wait, to send again, to
+/// take another route or to give up reads the failure here, so that a
+/// condition that passes is the same condition everywhere.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Said {
+    /// The step could not be asked: nothing of it was sent or kept.
+    NotAsked,
+    /// The scope the step ran under no longer stands, as around a credential
+    /// refresh. Under a fresh scope the step can be asked again; if the
+    /// authority is really gone, taking that scope is what says so.
+    ScopeReplaced,
+    /// The step was sent and no answer came back, or the server answered
+    /// that it could not serve the request. Whether it took effect is not
+    /// known.
+    NoAnswer,
+    /// The step was decided: refused, or failed in a way that is its own. Its
+    /// code says which, and whoever ran the step reads it.
+    Decided,
+}
+impl NativeError {
+    pub(crate) fn said(&self) -> Said {
+        match self.code.as_str() {
+            "management_capacity"
+            | "management_unavailable"
+            | "matrix_authorization_unavailable" => Said::NotAsked,
+            "domain_writer_busy" if self.status == 503 => Said::NotAsked,
+            "management_scope_changed"
+            | "management_access_required"
+            | "owner_authorization_required" => Said::ScopeReplaced,
+            "server_unavailable"
+            | "storage_unavailable"
+            | "server_request_failed"
+            | "invalid_server_response"
+            | "management_outcome_unknown" => Said::NoAnswer,
+            // The time this request was given ran out before an answer came:
+            // a ticket, like every offer, is asked for again.
+            "allocation_ticket_expired" => Said::NoAnswer,
+            // What this host makes itself with a status of 500 or more. Each
+            // is the failure of a step of its own and is handled where it is
+            // made. They are named so that the rule below is about the
+            // server only; `every_failure_made_on_the_pooled_path_is_read`
+            // fails when one is made and not named.
+            "invalid_allocation_response"
+            | "invalid_shared_execution_response"
+            | "management_drain_unavailable"
+            | "management_state_unavailable"
+            | "native_random_unavailable"
+            | "shared_crypto_device_unavailable"
+            | "shared_encrypted_send_pending"
+            | "shared_history_unavailable"
+            | "shared_message_delivery_pending"
+            | "shared_message_storage_unavailable"
+            | "shared_native_history_unavailable"
+            | "shared_question_answers_unavailable"
+            | "shared_question_device_pending"
+            | "shared_question_event_unavailable"
+            | "shared_question_send_pending"
+            | "shared_room_keys_pending"
+            | "shared_room_send_authority_changed" => Said::Decided,
+            // What the server answers while its policy does not serve a
+            // route. It gives these a status of 503, and they are decisions
+            // all the same: asked again, it says the same. This is how an
+            // operator ends pooled work (a renewal is refused and the run
+            // closes with its usage), and how a host learns that a route is
+            // not offered and takes the other one.
+            //
+            // The list is the server's, whole: every code it returns as
+            // unavailable right after a predicate of its management policy,
+            // and the one for a server with no such policy. It is kept by
+            // hand, as the server is another repository. One that is missing
+            // is read by the rule below: asked again for a bounded while,
+            // never taken for a refusal that was not made.
+            "agent_admission_unavailable"
+            | "agent_budget_issuance_unavailable"
+            | "agent_executor_unavailable"
+            | "agent_matrix_provisioning_unavailable"
+            | "agent_runtime_provisioning_unavailable"
+            | "calendar_grants_unavailable"
+            | "management_not_configured"
+            | "parent_settlement_unavailable"
+            | "pool_agents_unavailable"
+            | "pool_grant_succession_unavailable"
+            | "pool_publication_first_unavailable"
+            | "project_reservations_unavailable"
+            | "project_setup_unavailable"
+            | "shared_budget_execution_issuance_unavailable"
+            | "shared_demand_issuance_unavailable"
+            | "shared_demand_retry_unavailable"
+            | "shared_durable_intake_unavailable"
+            | "shared_encryption_unavailable"
+            | "shared_execution_issuance_unavailable"
+            | "shared_execution_unavailable"
+            | "shared_successor_issuance_unavailable"
+            | "shared_thread_context_issuance_unavailable" => Said::Decided,
+            // Any other failure with such a status is the server's: it did
+            // not serve the request. Its codes are its own and change with
+            // it (its database, a restart, a full queue), so they are read
+            // by their status.
+            _ if self.status >= 500 => Said::NoAnswer,
+            _ => Said::Decided,
+        }
+    }
+    /// Whether the step may be asked again: it was not decided. Asking again
+    /// is right only for a step whose exact replay is harmless: one that reads,
+    /// or one the server answers a second time with what it already did.
+    pub(crate) fn passes(&self) -> bool {
+        self.said() != Said::Decided
+    }
+}
+#[cfg(test)]
+mod said_tests {
+    use super::{Said, failure};
+    #[test]
+    fn a_failure_is_read_in_one_place() {
+        for code in ["management_capacity", "management_unavailable", "matrix_authorization_unavailable"] {
+            assert_eq!(failure(503, code).said(), Said::NotAsked, "{code}");
+        }
+        assert_eq!(failure(503, "domain_writer_busy").said(), Said::NotAsked);
+        assert_eq!(failure(403, "domain_writer_busy").said(), Said::Decided);
+        for code in ["management_scope_changed", "management_access_required", "owner_authorization_required"] {
+            assert_eq!(failure(401, code).said(), Said::ScopeReplaced, "{code}");
+        }
+        // A request that was sent and got no answer is not a refusal either.
+        for code in ["server_unavailable", "storage_unavailable", "server_request_failed", "management_outcome_unknown"] {
+            assert_eq!(failure(503, code).said(), Said::NoAnswer, "{code}");
+            assert!(failure(503, code).passes(), "{code}");
+        }
+        // Nor is an answer of the server that it could not serve the request,
+        // whatever it calls the reason.
+        for (status, code) in [(503, "database_unavailable"), (503, "worker_stopping"), (500, "internal")] {
+            assert_eq!(failure(status, code).said(), Said::NoAnswer, "{code}");
+        }
+        // What the server answers while its policy does not serve a route is
+        // a decision, though it gives it that status: asked again, it says
+        // the same.
+        for code in [
+            "agent_admission_unavailable",
+            "agent_budget_issuance_unavailable",
+            "agent_executor_unavailable",
+            "agent_matrix_provisioning_unavailable",
+            "agent_runtime_provisioning_unavailable",
+            "calendar_grants_unavailable",
+            "management_not_configured",
+            "parent_settlement_unavailable",
+            "pool_agents_unavailable",
+            "pool_grant_succession_unavailable",
+            "pool_publication_first_unavailable",
+            "project_reservations_unavailable",
+            "project_setup_unavailable",
+            "shared_budget_execution_issuance_unavailable",
+            "shared_demand_issuance_unavailable",
+            "shared_demand_retry_unavailable",
+            "shared_durable_intake_unavailable",
+            "shared_encryption_unavailable",
+            "shared_execution_issuance_unavailable",
+            "shared_execution_unavailable",
+            "shared_successor_issuance_unavailable",
+            "shared_thread_context_issuance_unavailable",
+        ] {
+            assert_eq!(failure(503, code).said(), Said::Decided, "{code}");
+            assert!(!failure(503, code).passes(), "{code}");
+        }
+        // An answer with no code in it was not made by the server's own
+        // handlers, which give every refusal one. Whatever its status, it
+        // decides nothing.
+        assert_eq!(failure(409, "server_request_failed").said(), Said::NoAnswer);
+        // The same status on a failure this host makes for a step of its own
+        // says nothing: an authority that changed is an answer.
+        assert_eq!(failure(503, "shared_room_send_authority_changed").said(), Said::Decided);
+        assert_eq!(failure(401, "sign_in_required").said(), Said::Decided);
+        assert_eq!(failure(409, "a_code_of_the_server").said(), Said::Decided);
+        assert!(!failure(409, "shared_execution_expired").passes());
+    }
+
+    /// What a failure says when it is not decided, by code and status as this
+    /// host makes it on the pooled path, with the three that are made
+    /// elsewhere (by the server, or where a request is sent).
+    const READ: &[(&str, u16, Said)] = &[
+        ("allocation_ticket_expired", 409, Said::NoAnswer),
+        ("domain_writer_busy", 403, Said::Decided),
+        ("domain_writer_busy", 503, Said::NotAsked),
+        ("invalid_server_response", 502, Said::NoAnswer),
+        ("management_access_required", 401, Said::ScopeReplaced),
+        ("management_capacity", 503, Said::NotAsked),
+        ("management_outcome_unknown", 409, Said::NoAnswer),
+        ("management_scope_changed", 401, Said::ScopeReplaced),
+        ("management_scope_changed", 409, Said::ScopeReplaced),
+        ("management_unavailable", 503, Said::NotAsked),
+        ("matrix_authorization_unavailable", 503, Said::NotAsked),
+        ("owner_authorization_required", 401, Said::ScopeReplaced),
+        ("server_request_failed", 500, Said::NoAnswer),
+        ("server_unavailable", 503, Said::NoAnswer),
+        ("storage_unavailable", 503, Said::NoAnswer),
+    ];
+    /// Codes that decide their step, with whatever status. Each has its own
+    /// handling where it is made.
+    const DECIDED: &[&str] = &[
+        "agent_executor_ledger_retired", "allocation_acknowledgement_conflict",
+        "allocation_enrollment_changed", "allocation_receipt_conflict",
+        "call_timed_out", "device_setup_required",
+        "empty_device_already_active", "encrypted_approval_device_changed",
+        "grant_publication_receipt_missing", "invalid_allocation_response",
+        "invalid_management_arguments", "invalid_management_revision",
+        "invalid_shared_execution_response",
+        "management_agent_control_local_stop_pending", "management_backing_changed",
+        "management_change_cancelled", "management_drain_outcome_unknown",
+        "management_drain_unavailable", "management_model_unqualified", "management_not_found",
+        "management_permission_required", "management_profile_mismatch",
+        "management_resource_edit_changed", "management_resource_edit_not_available",
+        "management_resource_in_use", "management_resource_name_changed",
+        "management_resource_source_changed", "management_revision_conflict",
+        "management_saved_command_not_found", "management_state_unavailable",
+        "management_stopped_not_resolvable", "management_stopped_review_expired",
+        "management_task_revision_changed", "management_workspace_active",
+        "management_workspace_inspection_required", "matrix_account_mismatch",
+        "native_allocation_receipt_missing", "native_context_protocol_required",
+        "native_grant_not_publishable", "native_grant_receipt_conflict",
+        "native_grant_receipt_required", "native_random_unavailable", "not_found",
+        "owner_grant_predecessor_required", "owner_grant_publication_history_unavailable",
+        "owner_local_custody_required", "owner_stop_local_custody_required",
+        "provider_account_changed", "provider_identity_unavailable",
+        "question_device_unavailable", "shared_budget_protocol_unavailable",
+        "shared_callback_capacity", "shared_claude_container_unavailable",
+        "shared_claude_sandbox_unsupported", "shared_claude_turn_policy_invalid",
+        "shared_claude_version_unsupported", "shared_claude_workspace_unavailable",
+        "shared_crypto_device_unavailable", "shared_crypto_storage_unavailable",
+        "shared_demand_changed", "shared_demand_original_missing",
+        "shared_encrypted_send_pending", "shared_execution_activity_missing",
+        "shared_execution_closed", "shared_execution_disabled",
+        "shared_execution_enrollment_changed", "shared_execution_event_unknown",
+        "shared_execution_expired", "shared_execution_identity_failed",
+        "shared_execution_initialize_failed", "shared_execution_launch_unavailable",
+        "shared_execution_matrix_unavailable", "shared_execution_namespace_unavailable",
+        "shared_execution_outcome_unknown", "shared_execution_resource_changed",
+        "shared_execution_thread_unknown", "shared_execution_ticket_expired",
+        "shared_file_response_failed", "shared_file_tool_unavailable",
+        "shared_history_response_failed", "shared_history_tool_unavailable",
+        "shared_history_unavailable", "shared_intake_disabled",
+        "shared_intake_protocol_unavailable", "shared_message_delivery_pending",
+        "shared_message_storage_unavailable", "shared_native_history_unavailable",
+        "shared_octos_duration_reached", "shared_octos_shell_cleanup_unknown",
+        "shared_question_answer_failed", "shared_question_answers_unavailable",
+        "shared_question_device_pending", "shared_question_device_unavailable",
+        "shared_question_event_unavailable", "shared_question_send_pending",
+        "shared_room_keys_pending", "shared_room_send_authority_changed",
+        "shared_run_control_unknown", "shared_successor_capacity_unavailable",
+        "shared_successor_original_missing", "shared_successor_preparation_changed",
+        "shared_successors_disabled",
+    ];
+
+    /// Every `<status>, "<code>"` in the sources of the pooled path: what
+    /// `failure(..)` is given there, directly or as a pair.
+    fn made_on_the_pooled_path() -> std::collections::BTreeSet<(u16, String)> {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/console/native");
+        let mut files = vec![
+            root.join("allocation_transport.rs"),
+            root.join("management.rs"),
+            root.join("shared_execution.rs"),
+        ];
+        let mut directories = vec![root.join("shared_execution"), root.join("allocation_transport")];
+        while let Some(directory) = directories.pop() {
+            for entry in std::fs::read_dir(directory).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    directories.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        let mut made = std::collections::BTreeSet::new();
+        for file in files {
+            let name = file.file_name().unwrap().to_str().unwrap();
+            if !name.ends_with(".rs")
+                || name.ends_with("tests.rs")
+                || file.components().any(|part| part.as_os_str() == "tests")
+            {
+                continue;
+            }
+            let text = std::fs::read_to_string(&file).unwrap();
+            let bytes = text.as_bytes();
+            for at in 0..bytes.len().saturating_sub(3) {
+                let digits = &bytes[at..at + 3];
+                if !digits.iter().all(u8::is_ascii_digit)
+                    || (at > 0 && (bytes[at - 1].is_ascii_alphanumeric() || bytes[at - 1] == b'_'))
+                {
+                    continue;
+                }
+                let rest = text[at + 3..].trim_start();
+                let Some(rest) = rest.strip_prefix(',') else { continue };
+                let Some(rest) = rest.trim_start().strip_prefix('"') else { continue };
+                let Some((code, _)) = rest.split_once('"') else { continue };
+                if !code.is_empty()
+                    && code.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
+                {
+                    made.insert((text[at..at + 3].parse().unwrap(), code.to_owned()));
+                }
+            }
+        }
+        made
+    }
+
+    /// Every failure this host makes on the pooled path is listed above with
+    /// what it says. A code that is added without being read here fails this
+    /// test, so that nothing is decided, or passes, by being left out.
+    #[test]
+    fn every_failure_made_on_the_pooled_path_is_read() {
+        let made = made_on_the_pooled_path();
+        assert!(made.len() > 100, "the scan found the pooled path: {}", made.len());
+        let mut unread = Vec::new();
+        for (status, code) in &made {
+            let listed = READ
+                .iter()
+                .find(|(read, at, _)| read == code && at == status)
+                .map(|(_, _, said)| *said)
+                .or_else(|| DECIDED.contains(&code.as_str()).then_some(Said::Decided));
+            match listed {
+                Some(said) => assert_eq!(failure(*status, code).said(), said, "{status} {code}"),
+                None => unread.push((status, code)),
+            }
+        }
+        assert!(unread.is_empty(), "made on the pooled path and not read: {unread:?}");
+        for (code, status, said) in READ {
+            assert_eq!(failure(*status, code).said(), *said, "{status} {code}");
+            assert!(!DECIDED.contains(code), "{code} is listed twice");
+        }
+        // A listed code that is no longer made is taken off the list.
+        for code in DECIDED {
+            assert!(made.iter().any(|(_, made)| made == code), "{code} is not made any more");
+        }
+    }
+}
 /// The one rule for an Agent space's shared project folder name, the same as
 /// the server's: 1 to 64 characters, no control characters, none of `/`, `\` or
 /// `:`, no leading `.`, and no leading or trailing whitespace.
