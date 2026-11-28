@@ -160,7 +160,11 @@ For the room:
    ended without a turn and is offered like the others. Nor is it offered
    for a run whose outcome is unknown, which may have acted or cost
    something and has its review instead, nor for a message that is still
-   waiting.
+   waiting. The review of the original task records is shown only to a
+   reader whom the status allows to read them (`viewerCanReview`: the
+   Agent's manager, or the administrator of its project or pool); anyone
+   else reads that the Agent's owner can review them, and from a server
+   that does not say, every reader has the review as before.
 
    When the status says why a message that ended without a turn is not
    offered to its sender (`notOfferedBecause`), the notice says so. For an
@@ -428,5 +432,6 @@ point is in the release notes. Pull requests named "in review" are open.
 | 3. No new start in the protocol before the budget for an Agent with an applied budget; a start the server refused for that budget gives its place back at once | implemented (Desktop #259) |
 | 1. Leases follow the server's lease | Agent execution leases do. A session's end only grows, and an Agent is fenced only when its session is revoked (server #98, #103); each fence is recorded with its reason (server #100). Activity leases follow the window in review (Desktop #243, server #97). What is offered keeps 30 seconds |
 | 4. The wall clock only ends a lease early | holds for a ticket and a start window; not yet for the session's proof, whose wall-clock end is in review (Desktop #246). For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
-| 1. The window is asked for under the header that a server granting more than 30 seconds reads (`x-hagency-authorization-window-v2-ms`), and under the older one | in review (Desktop #262); a server with that change grants builds that send only the older header 30 seconds |
-| 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | in review (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` |
+| 1. The window is asked for under the header that a server granting more than 30 seconds reads (`x-hagency-authorization-window-v2-ms`), and under the older one | implemented (Desktop #262, server #110); that server grants builds that send only the older header 30 seconds |
+| 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112, in review) |
+| 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | in review (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112, in review) |

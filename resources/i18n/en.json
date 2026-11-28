@@ -3309,6 +3309,7 @@
   "The original room may already exist. Check your rooms first. This archives the saved intent without deleting the room; a later Create starts a separate request.": "The original room may already exist. Check your rooms first. This archives the saved intent without deleting the room; a later Create starts a separate request.",
   "Run outcome is unknown. External actions or charges may already exist. Review the original message and task records before starting a separate request.": "Run outcome is unknown. External actions or charges may already exist. Review the original message and task records before starting a separate request.",
   "Review original task records": "Review original task records",
+  "The Agent's owner can review the original task records.": "The Agent's owner can review the original task records.",
   "Unknown is not failed. Check tool receipts, files and external systems on the execution device before starting a separate request.": "Unknown is not failed. Check tool receipts, files and external systems on the execution device before starting a separate request.",
   "Read selected Agent history": "Read selected Agent history",
   "Open original message": "Open original message",
