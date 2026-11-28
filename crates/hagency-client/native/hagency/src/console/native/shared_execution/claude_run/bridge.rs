@@ -93,12 +93,7 @@ impl claude_turn::Host for Host {
         let tool = tool.strip_prefix("claude.").unwrap_or(&tool);
         // These modes come from the resource owner's signed successor policy.
         // Every refusal is logged with codes and the tool's name only.
-        if let Err(e) = self
-            .live
-            .io
-            .check_running(self.live.authority.root())
-            .await
-        {
+        if let Err(e) = self.live.check_held().await {
             tracing::warn!(tool, status = e.status, code = %e.code, "Shared Claude tool request refused: the run's authority check failed");
             return ToolAnswer::Deny;
         }
@@ -541,7 +536,7 @@ async fn serve_room(
         let result = tokio::select! {biased;
             _=pending.closed()=>continue,
             result=tokio::time::timeout(Duration::from_secs(60),async{
-                if live.io.check_running(live.authority.root()).await.is_err(){return RoomReply::unavailable();}
+                if live.check_held().await.is_err(){return RoomReply::unavailable();}
                 let Some(history)=history.as_mut()else{return RoomReply::unavailable()};
                 let text=match &operation{
                     RoomOperation::History{cursor}=>match history.read(cursor.as_deref()).await{Ok(v)=>v,Err(_)=>return RoomReply::unavailable()},
@@ -599,7 +594,7 @@ async fn serve_questions(
             pending=receiver.recv()=>{
                 let Some(pending)=pending else{break};
                 if pending.scope!=*scope||pending.dispatch!=work.id||pending.is_closed(){continue;}
-                if live.io.check_running(live.authority.root()).await.is_err() {
+                if live.check_held().await.is_err() {
                     let _ = pending.reply(Default::default());
                     continue;
                 }
@@ -609,7 +604,7 @@ async fn serve_questions(
             },
             _=poll.tick()=>{
                 host.settle();
-                if live.io.check_running(live.authority.root()).await.is_err() {
+                if live.check_held().await.is_err() {
                     host.questions.close();
                     break;
                 }
@@ -627,7 +622,7 @@ async fn serve_controls(live: &Live, card: &Arc<CardHost>, sender: &controls::Se
     let Some(device) = crate::console::owned_runtime::run_controls::open_while_running(
         Duration::from_secs(10),
         || async move {
-            live.io.check_running(live.authority.root()).await?;
+            live.check_held().await?;
             let b = live.io.bound().await?;
             super::super::e2ee::device(&live.io, &b, &live.authority.root().assignment_id).await
         },
@@ -648,7 +643,7 @@ async fn serve_controls(live: &Live, card: &Arc<CardHost>, sender: &controls::Se
         card.drain_receipts(false);
         let _ = card.publish().await;
         for (event, action) in card.actions().await.unwrap_or_default() {
-            if live.io.check_running(live.authority.root()).await.is_err() {
+            if live.check_held().await.is_err() {
                 let _ = card.receipt(&event.event_id, &event.sender, "unavailable", false);
                 continue;
             }

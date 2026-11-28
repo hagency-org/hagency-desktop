@@ -282,6 +282,18 @@ impl Live {
     pub fn state(&self) -> Lease {
         self.lease.borrow().clone()
     }
+    /// The check of a step the bridge answers for the turn (a tool's
+    /// permission, a room call, a question, a run control) under the lease
+    /// the run holds now: `Io::check_held`, which reads that lease on the
+    /// wall clock first, as the Codex drivers' room calls do. The renewal
+    /// runs beside the turn and ends it by the next renewal moment; with this
+    /// check, no tool is allowed meanwhile.
+    pub async fn check_held(&self) -> Result<(), NativeError> {
+        let state = self.state();
+        self.io
+            .check_held(self.authority.root(), state.until, state.lease.expires_at_ms)
+            .await
+    }
     pub async fn proof(&self) -> Result<(Bound, VerifiedSharedActivity, Lease), NativeError> {
         let state = self.state();
         let (b, p) = self
