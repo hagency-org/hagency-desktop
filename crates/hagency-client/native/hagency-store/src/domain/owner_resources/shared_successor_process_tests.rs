@@ -494,7 +494,7 @@ async fn shared_successor_queued_observer_retirement_rolls_back_qualification_an
 
 #[cfg(feature = "shared-budget-execution")]
 #[path = "shared_budget_process_tests.rs"]
-mod budget_execution;
+pub(super) mod budget_execution;
 
 #[tokio::test]
 #[ignore = "requires HAGENCY_TEST_RUNTIME_PROBE; real supervised offline successor, no provider"]

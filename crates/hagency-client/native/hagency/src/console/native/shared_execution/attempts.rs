@@ -361,8 +361,9 @@ impl SharedExecutionTransport {
             if let Some(latest) = &local {
                 if latest.ledger_revision > saved.ledger_revision && latest.reason.is_some() {
                     // A time-bound end is accepted only on a cleanup ticket;
-                    // otherwise a later cleanup poll reports it.
-                    if !cleaning || !attempt_run::upload_end(&b, &d, until, latest).await? {
+                    // otherwise a later cleanup poll reports it. Its decided
+                    // route (retry v2) applies on every resend.
+                    if !cleaning || !attempt_run::upload_stop(&b, r, &d, until, latest).await? {
                         return Ok(SharedExecutionProgress::HistoricalEvidenceMissing {
                             command_id: c.command_id.clone(),
                         });
@@ -425,7 +426,8 @@ impl SharedExecutionTransport {
             }
             // Report actual stop independently before accounting recovery: an
             // old work upload failure must not hide known process termination.
-            if !attempt_run::upload_end(&b, &d, until, &local).await? {
+            // A claimed attempt's stop goes on its decided route (retry v2).
+            if !attempt_run::upload_stop(&b, r, &d, until, &local).await? {
                 return Ok(SharedExecutionProgress::HistoricalEvidenceMissing {
                     command_id: c.command_id.clone(),
                 });

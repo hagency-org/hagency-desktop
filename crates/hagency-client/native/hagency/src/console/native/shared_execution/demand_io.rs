@@ -81,8 +81,10 @@ pub(super) struct WorkBinding {
 pub(super) struct BindingReply {
     pub demand: Option<WorkBinding>,
 }
-/// The executor's not_started evidence for a demand's latest attempt, with its
-/// request to run the same event again in place (ADR-193 amendment).
+/// The executor's not_started evidence for a demand's latest attempt, or
+/// (retry v2) the stop of its claimed attempt, with its request to run the
+/// same event again in place (ADR-193 amendment). For a stop the server
+/// decides, by its record of the turn's start, whether the event runs again.
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub(super) struct RetryInput {
@@ -108,6 +110,10 @@ pub(super) struct BlockInput {
     /// Sent only to a server that advertises retries (ADR-193 amendment).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub retries: bool,
+    /// Sent only to a server that lists retry v2: this executor reads a
+    /// message given back at its start's fence as waiting again.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub reoffers: bool,
 }
 pub(super) enum DemandAction {
     Discovery,
@@ -119,15 +125,19 @@ pub(super) enum DemandAction {
         input: SharedDemandStopInput,
     },
     /// `retries`: this executor runs retries and the server advertises them;
-    /// only then may a status carry them (ADR-193 amendment).
+    /// only then may a status carry them (ADR-193 amendment). `reoffers`:
+    /// the server lists retry v2, and a message given back at its start's
+    /// fence is shown waiting again rather than ended.
     Poll {
         after: Option<String>,
         retries: bool,
+        reoffers: bool,
     },
     Recover {
         id: String,
         digest: String,
         retries: bool,
+        reoffers: bool,
     },
     Binding {
         work: String,
@@ -165,14 +175,20 @@ impl DemandAction {
                     return Err(invalid());
                 }
             }
-            Self::Poll { after, .. } => {
+            Self::Poll { after, retries, reoffers } => {
                 if let Some(id) = after {
                     super::super::key(id)?;
                 }
+                if *reoffers && !*retries {
+                    return Err(invalid());
+                }
             }
-            Self::Recover { id, digest, .. } => {
+            Self::Recover { id, digest, retries, reoffers } => {
                 super::super::key(id)?;
                 hash(digest)?;
+                if *reoffers && !*retries {
+                    return Err(invalid());
+                }
             }
             Self::Binding {
                 work,
@@ -188,6 +204,7 @@ impl DemandAction {
                 hash(&input.demand_digest)?;
                 if input.expected_control_revision == 0
                     || input.expected_control_revision > 9_007_199_254_740_991
+                    || input.reoffers && !input.retries
                     || !matches!(
                         input.reason.as_str(),
                         "budget_blocked" | "usage_unrepresentable"
@@ -202,10 +219,15 @@ impl DemandAction {
                 hash(&input.demand_digest)?;
                 hash(&input.result.command_digest)?;
                 hash(&input.result.token)?;
+                // not_started evidence (retry v1), or a claimed attempt's stop
+                // (retry v2), begun or not: the server decides.
                 if input.expected_control_revision == 0
                     || input.expected_control_revision > 9_007_199_254_740_991
                     || !(1..=MAX_DEMAND_RETRIES + 1).contains(&input.retry)
-                    || input.result.receipt.state != "not_started"
+                    || !matches!(
+                        input.result.receipt.state.as_str(),
+                        "not_started" | "stopped"
+                    )
                 {
                     return Err(invalid());
                 }
@@ -222,13 +244,13 @@ impl DemandAction {
             Self::Stop { assignment, input } => {
                 (format!("assignments/{assignment}/control"), json!(input))
             }
-            Self::Poll { after, retries } => (
+            Self::Poll { after, retries, reoffers } => (
                 "demands/poll".into(),
-                if retries { json!({"after":after,"retries":true}) } else { json!({"after":after}) },
+                opted(json!({"after":after}), retries, reoffers),
             ),
-            Self::Recover { id, digest, retries } => (
+            Self::Recover { id, digest, retries, reoffers } => (
                 format!("demands/{id}/recover"),
-                if retries { json!({"demandDigest":digest,"retries":true}) } else { json!({"demandDigest":digest}) },
+                opted(json!({"demandDigest":digest}), retries, reoffers),
             ),
             Self::Binding {
                 work,
@@ -242,6 +264,17 @@ impl DemandAction {
             Self::Retry { id, input } => (format!("demands/{id}/retry"), json!(input)),
         }
     }
+}
+/// A poll or recover body with the retry opt-ins this executor sends; each is
+/// omitted when false, so the bytes for an older server are unchanged.
+fn opted(mut body: Value, retries: bool, reoffers: bool) -> Value {
+    if retries {
+        body["retries"] = Value::Bool(true);
+    }
+    if reoffers {
+        body["reoffers"] = Value::Bool(true);
+    }
+    body
 }
 impl From<DemandAction> for Action {
     fn from(v: DemandAction) -> Self {
@@ -312,9 +345,67 @@ pub(super) async fn retries(b: &Bound) -> Result<bool, NativeError> {
     }
     Ok(d.capabilities.iter().any(|c| c == "shared-demand-retry-v1"))
 }
+/// Retry v2 in a bounded discovery answer: the server also takes back the
+/// work of a stopped demand attempt whose turn it never recorded as begun,
+/// and retries its event in place.
+pub(super) fn retry_v2_in(d: &Discovery) -> Option<bool> {
+    if d.capabilities.len() > 64 || d.capabilities.iter().any(|c| c.len() > 128) {
+        return None;
+    }
+    let has = |name: &str| d.capabilities.iter().any(|c| c == name);
+    Some(has("shared-demand-retry-v1") && has("shared-demand-retry-v2"))
+}
+/// Whether the server advertises retry v2 now.
+pub(super) async fn retries_v2(b: &Bound) -> Result<bool, NativeError> {
+    Ok(retry_protocol(b).await?.1)
+}
+/// Retry v1 and retry v2 as one bounded discovery answer lists them.
+pub(super) async fn retry_protocol(b: &Bound) -> Result<(bool, bool), NativeError> {
+    let d = b.demand_discovery().await?;
+    let v2 = retry_v2_in(&d).ok_or_else(invalid)?;
+    Ok((d.capabilities.iter().any(|c| c == "shared-demand-retry-v1"), v2))
+}
 pub(super) async fn require_pair(b: &Bound) -> Result<(), NativeError> {
     if !paired(b).await? {
         return Err(failure(409, "shared_intake_protocol_unavailable"));
     }
     Ok(())
+}
+
+#[cfg(all(test, feature = "shared-intake"))]
+mod reoffer_tests {
+    use super::*;
+
+    #[test]
+    fn retry_v2_opt_ins_go_out_only_when_listed_and_keep_older_bytes() {
+        let body = |a: DemandAction| {
+            a.validate().unwrap();
+            a.body().1
+        };
+        let poll = |retries, reoffers| DemandAction::Poll { after: None, retries, reoffers };
+        assert_eq!(body(poll(false, false)), json!({"after": null}));
+        assert_eq!(body(poll(true, false)), json!({"after": null, "retries": true}));
+        assert_eq!(body(poll(true, true)), json!({"after": null, "retries": true, "reoffers": true}));
+        assert!(poll(false, true).validate().is_err(), "retry v2 is listed only beside v1");
+        let digest = "a".repeat(64);
+        let recover = |retries, reoffers| DemandAction::Recover { id: "demand".into(), digest: digest.clone(), retries, reoffers };
+        assert_eq!(body(recover(true, false)), json!({"demandDigest": digest, "retries": true}));
+        assert_eq!(body(recover(true, true)), json!({"demandDigest": digest, "retries": true, "reoffers": true}));
+        let block = |retries, reoffers| BlockInput {
+            demand_digest: digest.clone(),
+            expected_control_revision: 1,
+            reason: "budget_blocked".into(),
+            budget: None,
+            retries,
+            reoffers,
+        };
+        assert_eq!(serde_json::to_value(block(true, false)).unwrap().get("reoffers"), None);
+        assert_eq!(serde_json::to_value(block(true, true)).unwrap()["reoffers"], true);
+        assert!(DemandAction::Block { id: "demand".into(), input: block(false, true) }.validate().is_err());
+        let listed = |caps: &[&str]| retry_v2_in(&Discovery { capabilities: caps.iter().map(|c| (*c).to_owned()).collect() });
+        assert_eq!(listed(&["shared-durable-demand-v1", "shared-demand-retry-v1"]), Some(false));
+        assert_eq!(listed(&["shared-demand-retry-v2"]), Some(false));
+        assert_eq!(listed(&["shared-demand-retry-v1", "shared-demand-retry-v2"]), Some(true));
+        assert_eq!(listed(&[&"x".repeat(129)]), None);
+    }
 }

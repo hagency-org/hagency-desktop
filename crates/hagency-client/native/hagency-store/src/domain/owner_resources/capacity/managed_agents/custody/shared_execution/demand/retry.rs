@@ -2,8 +2,11 @@
 //! in place. The demand, its offer and its FIFO place stay. A retry is one new
 //! start intent, whose id derives from the demand and the retry number, that
 //! names the demand's never-started attempt. Proof is local and immutable:
-//! every earlier start of the event has an unclaimed fence and no claim.
-//! Nothing here starts a process, a call or a model turn.
+//! every earlier start of the event has an unclaimed fence and no claim, or
+//! (retry v2) a claimed process whose stop asked for exactly this retry
+//! (`release.rs`), which the server shows only after it gave that process's
+//! work back; such a retry names that stopped process and releases its
+//! binding here. Nothing here starts a process, a call or a model turn.
 use super::*;
 
 /// Retries per event; the server enforces the same cap.
@@ -93,9 +96,11 @@ pub(in super::super) fn own_start(
     Ok(())
 }
 
-/// Every earlier start of the event is provably unstarted on this
-/// installation, and the latest one is the never-started head. Returns that
-/// head's command id.
+/// Every earlier start of the event provably never ran this event here: it
+/// was never claimed, or (retry v2) its claimed process stopped and its stop
+/// asked for exactly the next retry, which the server opens only for work
+/// whose turn it never recorded. The latest start is the head: the
+/// never-started head, or the newest process. Returns that head's command id.
 fn proven_unstarted(
     db: &Connection,
     profile: &str,
@@ -105,6 +110,7 @@ fn proven_unstarted(
 ) -> Result<String, Error> {
     let child = &original.agent_reservation_id;
     let mut previous = String::new();
+    let mut claimed_head = false;
     for k in 0..n {
         let start = saved_start(db, profile, child, saved, k)?;
         let claimed: bool = db.query_row(
@@ -112,9 +118,19 @@ fn proven_unstarted(
             [&start.start_intent_id],
             |r| r.get(0),
         )?;
+        claimed_head = claimed;
         if claimed {
-            // A claimed attempt may have run: never another turn for this event.
-            return Err(Error::LocalAuthority);
+            // A claimed attempt may have run: another turn for this event only
+            // when its stop route, decided beside its stop, asked for it.
+            previous = db
+                .query_row(
+                    "SELECT a.id FROM owner_shared_successor_attempts a JOIN owner_shared_stop_routes s ON s.attempt_id=a.id WHERE a.start_intent_id=?1 AND a.child_id=?2 AND a.profile=?3 AND s.route='retry' AND s.demand_id=?4 AND s.retry=?5",
+                    params![start.start_intent_id, child, profile, saved.offer.demand_id, k + 1],
+                    |r| r.get(0),
+                )
+                .optional()?
+                .ok_or(Error::LocalAuthority)?;
+            continue;
         }
         previous = db
             .query_row(
@@ -125,8 +141,23 @@ fn proven_unstarted(
             .optional()?
             .ok_or(Error::Conflict)?;
     }
-    let head = attempt_unstarted::head(db, profile, original)?.ok_or(Error::Conflict)?;
-    if head.command_id() != previous {
+    let unstarted = attempt_unstarted::head(db, profile, original)?;
+    if claimed_head {
+        // The stopped process is still the newest one, with no never-started
+        // attempt after it.
+        let latest: Option<String> = db
+            .query_row(
+                "SELECT id FROM owner_shared_successor_attempts WHERE child_id=?1 ORDER BY process_attempt DESC LIMIT 1",
+                [child],
+                |r| r.get(0),
+            )
+            .optional()?;
+        if unstarted.is_some() || latest.as_deref() != Some(previous.as_str()) {
+            return Err(Error::Conflict);
+        }
+        return Ok(previous);
+    }
+    if unstarted.ok_or(Error::Conflict)?.command_id() != previous {
         return Err(Error::Conflict);
     }
     Ok(previous)
@@ -141,7 +172,10 @@ pub enum SharedDemandRetry {
 impl OwnerResourceRegistry {
     /// Create or recover retry `n` of a saved demand whose earlier starts all
     /// provably never started here. A replay returns the same start intent; no
-    /// process, call or model turn is started.
+    /// process, call or model turn is started. Retry v2: the retry says
+    /// `reoffers` when its event opted in and `proof` came from a poll or
+    /// recover that sent it; this is fixed when the retry is first prepared
+    /// and every replay returns the same bytes.
     pub async fn prepare_shared_demand_retry(
         &self,
         proof: VerifiedSharedDemand,
@@ -181,12 +215,12 @@ impl OwnerResourceRegistry {
                 return Err(Error::Conflict);
             }
             journal::control(&tx, &profile.digest, &child, proof.offer.control_revision)?;
-            let finished: bool = tx.query_row(
-                "SELECT EXISTS(SELECT 1 FROM owner_shared_demand_bindings WHERE demand_id=?1) OR EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals WHERE demand_id=?1)",
+            let (ended, bound): (bool, bool) = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals WHERE demand_id=?1),EXISTS(SELECT 1 FROM owner_shared_demand_bindings WHERE demand_id=?1)",
                 [&proof.offer.demand_id],
-                |r| r.get(0),
+                |r| Ok((r.get(0)?, r.get(1)?)),
             )?;
-            if finished {
+            if ended {
                 return Err(Error::LocalAuthority);
             }
             let exists: bool = tx.query_row(
@@ -194,7 +228,18 @@ impl OwnerResourceRegistry {
                 [&id],
                 |r| r.get(0),
             )?;
+            let mut lapsed = false;
             let start = if exists {
+                // The retry's own work is bound: the event is finished here.
+                if bound {
+                    return Err(Error::LocalAuthority);
+                }
+                // A retry the server refused for the Agent's budget is never
+                // sent again (schema 116); it waits, as when another start
+                // holds the place below.
+                if refused(&tx, &id)? {
+                    return Err(Error::Conflict);
+                }
                 // Replay of the same retry: its saved bytes, never a new start.
                 saved_start(&tx, &profile.digest, &child, &saved, n)?
             } else {
@@ -203,9 +248,10 @@ impl OwnerResourceRegistry {
                     return Err(Error::Conflict);
                 };
                 // No other start (manual or another event) holds this head's
-                // slot in the current period (owner_shared_start_intent_period).
+                // place in the current period (owner_shared_start_intent_place);
+                // a start the server never made, of an event it ended, holds none.
                 let competing: bool = tx.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND id<>?4)",
+                    "SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND period_id IS ?3 AND id<>?4 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=owner_shared_start_intents.id))",
                     params![child, canonical::digest(&serde_json::to_value(c)?)?, periods::current_id(&tx, &child)?, id],
                     |r| r.get(0),
                 )?;
@@ -237,17 +283,45 @@ impl OwnerResourceRegistry {
                     proof.check()?;
                     return Ok(SharedDemandRetry::Blocked(description));
                 }
-                start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?.input
+                // Retry v2: this retry's `reoffers` is fixed here, by the
+                // server that showed it. Going out without it although the
+                // event opted in ends the opt-in, saved before the intent.
+                if release::reoffering(&tx, &saved)? && !proof.reoffers {
+                    release::lapse(&tx, &proof.offer.demand_id)?;
+                    lapsed = true;
+                }
+                // This computer has applied a budget to the Agent: its place
+                // is the budget lane's, and the retry waits as when another
+                // start holds the place above. Nothing of this transaction is
+                // kept then: no retry went out without `reoffers`, so the
+                // event's opt-in holds until a retry is saved without it, and
+                // the stopped head's binding stays.
+                let start = start_intent::prepare_in_transaction(&tx, e, original.clone(), predecessor.clone(), id)?
+                    .ok_or(Error::Conflict)?
+                    .input;
+                // Retry v2: the server showed this retry, so it gave the
+                // stopped head's work back; its binding here is released.
+                if bound {
+                    release::release(&tx, &proof.offer.demand_id, &head)?;
+                }
+                start
             };
             let input = SharedDemandStartInput {
                 demand_digest: proof.offer.digest()?,
                 expected_control_revision: proof.offer.control_revision,
                 start,
                 retry: Some(n),
+                // As fixed when the intent was saved, on a replay too.
+                reoffers: release::said_reoffers(&tx, &saved, n)?,
             };
             input.validate_for(&proof.offer)?;
             proof.check()?;
             tx.commit()?;
+            // From here no stop of this event asks for a retry; say so.
+            if lapsed {
+                tracing::warn!(demand_id = %proof.offer.demand_id, retry = n,
+                    "Shared demand retry prepared without reoffers: its event is no longer handed back");
+            }
             proof.check().map_err(|_| Error::OutcomeUnknown)?;
             Ok(SharedDemandRetry::Start(SharedDemandSubmission::new(
                 registry, proof, original, input,

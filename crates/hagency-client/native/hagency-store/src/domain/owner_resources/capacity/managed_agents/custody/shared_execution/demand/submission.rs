@@ -180,7 +180,13 @@ impl OwnerResourceRegistry {
                 if tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_budget_demand_terminals WHERE demand_id=?1)", [&proof.offer.demand_id], |r| r.get::<_, bool>(0))? {
                     return Err(Error::LocalAuthority);
                 }
+                // Its saved bytes, `reoffers` included, on every resend.
                 let input = saved.input.ok_or(Error::Capacity)?;
+                // A start the server refused for the Agent's budget is never
+                // sent again (schema 116).
+                if refused(&tx, &input.start.start_intent_id)? {
+                    return Err(Error::LocalAuthority);
+                }
                 let start = start_selection::saved_start(&tx, &p, &input.start.start_intent_id)?;
                 if canonical::digest(&serde_json::to_value(start.original())?)?
                     != canonical::digest(&serde_json::to_value(&original)?)?

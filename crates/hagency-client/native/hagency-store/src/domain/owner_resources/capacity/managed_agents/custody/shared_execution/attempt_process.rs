@@ -101,7 +101,7 @@ impl SharedAttemptProcessSink {
         let registry = custody.registry.clone();
         let value=registry.store.call(32*1024,move|db|{
             if qualified && custody.registry.closed.load(Ordering::Acquire) {return Err(Error::LocalAuthority)}
-            let tx=db.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut tx=db.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             bound(&tx,&custody)?;
             if qualified {
                 custody.check()?;attempt_fence::require_unfenced(&tx,&custody.command)?;
@@ -122,7 +122,13 @@ impl SharedAttemptProcessSink {
             receipt.validate_for(&custody.command)?;
             bounded_row(&tx,"owner_shared_successor_observations","id",&id,100_000)?;
             tx.execute("INSERT INTO owner_shared_successor_observations VALUES(?1,?2,?3,?4,?5)",params![id,custody.command.command_id,canonical::encode(&serde_json::to_value(&receipt)?)?,canonical::digest(&serde_json::to_value(&receipt)?)?,revision])?;
-            if stopping {observations::close_stopped_calls(&tx,&custody.command.agent_reservation_id)?;}
+            if stopping {
+                observations::close_stopped_calls(&tx,&custody.command.agent_reservation_id)?;
+                // Retry v2: the stop route is decided once, beside the stop. A
+                // failed decision never loses the stop: its first upload decides.
+                let route=tx.savepoint()?;
+                if demand::decide_stop_route(&route,&custody.enrollment.profile.digest,&custody.command,&id).is_ok() {route.commit()?;}
+            }
             if qualified {custody.check()?;if !source.is_live(){return Err(Error::LocalAuthority)}}
             tx.commit()?;
             if qualified {custody.check().map_err(|_|Error::OutcomeUnknown)?;if !source.is_live(){return Err(Error::OutcomeUnknown)}}

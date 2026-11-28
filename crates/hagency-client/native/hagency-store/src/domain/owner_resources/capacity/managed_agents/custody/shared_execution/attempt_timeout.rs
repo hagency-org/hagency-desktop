@@ -24,7 +24,7 @@ impl OwnerResourceRegistry {
         let registry = self.0.clone();
         let value = self.0.store.call(64 * 1024, move |db| {
             authority.check(&registry)?;
-            let tx = db.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+            let mut tx = db.db.transaction_with_behavior(TransactionBehavior::Immediate)?;
             authority::cleanup(&tx, &authority)?;
             let digest = canonical::digest(&serde_json::to_value(&command)?)?;
             let claim: Option<(String, String, String, String)> = tx.query_row(
@@ -76,6 +76,14 @@ impl OwnerResourceRegistry {
                 params![id, command.command_id, canonical::encode(&serde_json::to_value(&receipt)?)?, canonical::digest(&serde_json::to_value(&receipt)?)?, revision],
             )?;
             observations::close_stopped_calls(&tx, &command.agent_reservation_id)?;
+            // Retry v2: the route is decided once, beside the stop; a failed
+            // decision never loses the stop (its first upload decides).
+            {
+                let route = tx.savepoint()?;
+                if demand::decide_stop_route(&route, &authority.enrollment.profile.digest, &command, &id).is_ok() {
+                    route.commit()?;
+                }
+            }
             authority.check(&registry)?;
             tx.commit()?;
             authority.check(&registry).map_err(|_| Error::OutcomeUnknown)?;

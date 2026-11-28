@@ -1115,6 +1115,7 @@ mod claude_protocol_tests {
                 2 => super::super::demand_io::DemandAction::Poll {
                     after: Some("original_cursor".into()),
                     retries: true,
+                    reoffers: true,
                 }
                 .into(),
                 #[cfg(feature = "shared-budget-execution")]

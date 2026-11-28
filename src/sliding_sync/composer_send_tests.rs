@@ -334,3 +334,17 @@ fn click_and_return_post_one_event_each_without_logging_the_body() {
     std::fs::write(profile.join("delivered"), b"ok").unwrap();
     worker.abort();
 }
+
+#[test]
+fn a_message_sent_again_mentions_only_the_agents_it_names_and_is_no_reply() {
+    let agent = ruma::user_id!("@agent:example.org").to_owned();
+    let other = ruma::user_id!("@other:example.org").to_owned();
+    let mut first = RoomMessageEventContent::text_plain("@agent @other hello");
+    first.mentions = Some(ruma::events::Mentions::with_user_ids([agent.clone(), other]));
+    let again = addressed_again(first.msgtype.clone(), vec![agent.clone()]);
+    assert_eq!(again.body(), "@agent @other hello");
+    assert!(again.relates_to.is_none());
+    let mentions = again.mentions.unwrap();
+    assert_eq!(mentions.user_ids.into_iter().collect::<Vec<_>>(), vec![agent]);
+    assert!(!mentions.room);
+}

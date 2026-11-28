@@ -143,268 +143,203 @@ pub struct DomainRepository {
     _legacy_writer: Option<hagency_platform::legacy_writer::LegacyWriterAdmission>,
 }
 /// Current domain schema version (the last sequential migration).
-pub const DOMAIN_SCHEMA_VERSION: i32 = 113;
-const DOMAIN_MIGRATIONS: &[(i32, &str)] = &[
-    (2, include_str!("migrations/002-role-publication.sql")),
-    (3, include_str!("migrations/003-task-dispatch.sql")),
-    (4, include_str!("migrations/004-message-inputs.sql")),
-    (5, include_str!("migrations/005-task-intents.sql")),
-    (6, include_str!("migrations/006-internal-conversations.sql")),
-    (7, include_str!("migrations/007-peer-inputs.sql")),
-    (8, include_str!("migrations/008-recovery-reports.sql")),
-    (9, include_str!("migrations/009-conversation-lifecycle.sql")),
-    (10, include_str!("migrations/010-task-graphs.sql")),
-    (11, include_str!("migrations/011-final-replies.sql")),
-    (12, include_str!("migrations/012-verified-ingress.sql")),
-    (13, include_str!("migrations/013-owner-approvals.sql")),
-    (14, include_str!("migrations/014-notice-custody.sql")),
-    (15, include_str!("migrations/015-matrix-transport.sql")),
-    (
-        16,
-        include_str!("migrations/016-owned-task-completions.sql"),
-    ),
-    (17, include_str!("migrations/017-usage-ledger.sql")),
-    (18, include_str!("migrations/018-attachment-visibility.sql")),
-    (19, include_str!("migrations/019-file-uploads.sql")),
-    (20, include_str!("migrations/020-file-deliveries.sql")),
-    (21, include_str!("migrations/021-received-files.sql")),
-    (22, include_str!("migrations/022-approval-responses.sql")),
-    (23, include_str!("migrations/023-managed-accounts.sql")),
-    (24, include_str!("migrations/024-ceiling-alerts.sql")),
-    (25, include_str!("migrations/025-alert-transitions.sql")),
-    (26, include_str!("migrations/026-corpus-retention.sql")),
-    (27, include_str!("migrations/027-peer-corpus-retention.sql")),
-    (
-        28,
-        include_str!("migrations/028-account-login-readiness.sql"),
-    ),
-    (
-        29,
-        include_str!("migrations/029-account-logout-receipt.sql"),
-    ),
-    (30, include_str!("migrations/030-engagement-retention.sql")),
-    (31, include_str!("migrations/031-execution-retention.sql")),
+pub const DOMAIN_SCHEMA_VERSION: i32 = 117;
+/// A domain migration by its version and its file in `migrations/`. A store
+/// records both the name and its SQL's digest, and refuses another build's
+/// migration of a number it ran.
+macro_rules! migration {
+    ($version:literal, $file:literal) => {
+        database::Migration {
+            version: $version,
+            name: $file,
+            sql: include_str!(concat!("migrations/", $file)),
+        }
+    };
+}
+const DOMAIN_MIGRATIONS: &[database::Migration] = &[
+    migration!(2, "002-role-publication.sql"),
+    migration!(3, "003-task-dispatch.sql"),
+    migration!(4, "004-message-inputs.sql"),
+    migration!(5, "005-task-intents.sql"),
+    migration!(6, "006-internal-conversations.sql"),
+    migration!(7, "007-peer-inputs.sql"),
+    migration!(8, "008-recovery-reports.sql"),
+    migration!(9, "009-conversation-lifecycle.sql"),
+    migration!(10, "010-task-graphs.sql"),
+    migration!(11, "011-final-replies.sql"),
+    migration!(12, "012-verified-ingress.sql"),
+    migration!(13, "013-owner-approvals.sql"),
+    migration!(14, "014-notice-custody.sql"),
+    migration!(15, "015-matrix-transport.sql"),
+    migration!(16, "016-owned-task-completions.sql"),
+    migration!(17, "017-usage-ledger.sql"),
+    migration!(18, "018-attachment-visibility.sql"),
+    migration!(19, "019-file-uploads.sql"),
+    migration!(20, "020-file-deliveries.sql"),
+    migration!(21, "021-received-files.sql"),
+    migration!(22, "022-approval-responses.sql"),
+    migration!(23, "023-managed-accounts.sql"),
+    migration!(24, "024-ceiling-alerts.sql"),
+    migration!(25, "025-alert-transitions.sql"),
+    migration!(26, "026-corpus-retention.sql"),
+    migration!(27, "027-peer-corpus-retention.sql"),
+    migration!(28, "028-account-login-readiness.sql"),
+    migration!(29, "029-account-logout-receipt.sql"),
+    migration!(30, "030-engagement-retention.sql"),
+    migration!(31, "031-execution-retention.sql"),
     // The number follows landing order: base head 31 + 1.
     // Integration renumbers again if another slice lands first.
-    (
-        32,
-        include_str!("migrations/032-approval-denial-reason.sql"),
-    ),
+    migration!(32, "032-approval-denial-reason.sql"),
     // PC-C1 landed first and holds 32 (integration 3580f3bb);
     // MA-S2 takes the next free number, 033, by landing order.
-    (33, include_str!("migrations/033-dispatch-park-reason.sql")),
-    (
-        34,
-        include_str!("migrations/034-owned-stop-inspections.sql"),
-    ),
-    (35, include_str!("migrations/035-outcome-resolutions.sql")),
-    (36, include_str!("migrations/036-dispatch-discussion.sql")),
-    (
-        37,
-        include_str!("migrations/037-runner-attempt-evidence.sql"),
-    ),
-    (38, include_str!("migrations/038-agent-fences.sql")),
-    (39, include_str!("migrations/039-attempt-over-budget.sql")),
+    migration!(33, "033-dispatch-park-reason.sql"),
+    migration!(34, "034-owned-stop-inspections.sql"),
+    migration!(35, "035-outcome-resolutions.sql"),
+    migration!(36, "036-dispatch-discussion.sql"),
+    migration!(37, "037-runner-attempt-evidence.sql"),
+    migration!(38, "038-agent-fences.sql"),
+    migration!(39, "039-attempt-over-budget.sql"),
     // Task #13's migration number is 046 (the board's
     // assignment); the walker requires the next sequential
     // list version, so the file keeps 046 and the tuple
     // carries 40. Integration renumbers on merge.
-    (40, include_str!("migrations/046-side-registrations.sql")),
-    (41, include_str!("migrations/040-command-notices.sql")),
+    migration!(40, "046-side-registrations.sql"),
+    migration!(41, "040-command-notices.sql"),
     // Integration of lane/agentctl: its board-assigned number
     // was 049; it lands as the next sequential tuple 42 (file
     // name kept).
-    (42, include_str!("migrations/049-agent-lifecycle.sql")),
+    migration!(42, "049-agent-lifecycle.sql"),
     // Integration of lane/taskmgmt: its board-assigned number
     // was 044; it lands as the next sequential tuple 43 (file
     // name kept).
-    (43, include_str!("migrations/044-operator-tasks.sql")),
+    migration!(43, "044-operator-tasks.sql"),
     // Integration of lane/offers: its board-assigned number
     // was 043; its 040-042 reserved placeholders are deleted
     // (the board instruction) and the real migration lands as
     // the next sequential tuple 44 (file name kept).
-    (
-        44,
-        include_str!("migrations/043-offers-whitelist-agent-definitions.sql"),
-    ),
+    migration!(44, "043-offers-whitelist-agent-definitions.sql"),
     // Integration of lane/alerts: its board-assigned number
     // was 045 (already the next sequential tuple; landing
     // order made them coincide).
-    (45, include_str!("migrations/045-alert-parity.sql")),
+    migration!(45, "045-alert-parity.sql"),
     // Integration of ../nav task/20: its board-assigned number
     // was 061; it lands as the next sequential tuple 46 (file
     // name kept).
-    (46, include_str!("migrations/061-side-allocations.sql")),
+    migration!(46, "061-side-allocations.sql"),
     // Integration of ../firstres task/27: its board-assigned
     // number was 040; it lands as the next sequential tuple 47
     // (file name kept).
-    (
-        47,
-        include_str!("migrations/040-workspace-dirty-release.sql"),
-    ),
+    migration!(47, "040-workspace-dirty-release.sql"),
     // Integration of lane/verdict: its board-assigned number
     // was 047; its 040-046 walker placeholders are deleted
     // (the board instruction) and the real migration lands as
     // the next sequential tuple 48 (file name kept).
-    (
-        48,
-        include_str!("migrations/047-engagement-verdict-audit.sql"),
-    ),
+    migration!(48, "047-engagement-verdict-audit.sql"),
     // Integration of ../regissue task/12: its board-assigned
     // number was 060; it lands as the next sequential tuple 49
     // (file name kept).
-    (49, include_str!("migrations/060-pending-invites.sql")),
+    migration!(49, "060-pending-invites.sql"),
     // Integration of lane/sidelife: the addition notice named
     // migration 042; the branch file carries 040 — it lands as
     // the next sequential tuple 50 (file name kept).
-    (50, include_str!("migrations/040-side-credentials.sql")),
+    migration!(50, "040-side-credentials.sql"),
     // Integration of ../provision task/53: its board-assigned
     // number was 066; it lands as the next sequential tuple 51
     // (file name kept).
-    (51, include_str!("migrations/066-reminders.sql")),
+    migration!(51, "066-reminders.sql"),
     // Integration of lane/activity task/1: its board-assigned
     // number was 040; it lands as the next sequential tuple 52
     // (file name kept).
-    (52, include_str!("migrations/040-dispatch-activity.sql")),
+    migration!(52, "040-dispatch-activity.sql"),
     // Task #80's migration number is 073 (the board's
     // assignment); the walker requires the next sequential
     // list version, so the file keeps 073 and the tuple
     // carries 53.
-    (53, include_str!("migrations/073-room-trust.sql")),
+    migration!(53, "073-room-trust.sql"),
     // Task #73's migration number is 069 (the board's
     // assignment); the walker requires the next sequential
     // list version, so the file keeps 069 and the tuple
     // carries 54.
-    (54, include_str!("migrations/069-thread-directives.sql")),
+    migration!(54, "069-thread-directives.sql"),
     // Board #49's migration number is 067 (the board's
     // assignment); integrated as the next sequential tuple 55.
     // The file keeps its assigned 067 name.
-    (
-        55,
-        include_str!("migrations/067-agent-message-leftovers.sql"),
-    ),
+    migration!(55, "067-agent-message-leftovers.sql"),
     // Task #61's migration number is 065 (the board's
     // assignment); the walker requires the next sequential
     // list version, so the file keeps 065 and the tuple
     // carries 56.
-    (
-        56,
-        include_str!("migrations/065-final-reply-incidental.sql"),
-    ),
+    migration!(56, "065-final-reply-incidental.sql"),
     // ADR-186 §A: no board number; the file carries its list
     // version.
-    (57, include_str!("migrations/057-engagement-allocation.sql")),
+    migration!(57, "057-engagement-allocation.sql"),
     // ADR-186 §B: no board number; the file carries its list
     // version.
-    (58, include_str!("migrations/058-quota-holds.sql")),
+    migration!(58, "058-quota-holds.sql"),
     // ADR-187 §C: owner anchors pinned on first use.
-    (59, include_str!("migrations/059-owner-anchors.sql")),
+    migration!(59, "059-owner-anchors.sql"),
     // ADR-188: rooms an agent joined by invitation.
-    (60, include_str!("migrations/074-joined-rooms.sql")),
-    (
-        61,
-        include_str!("migrations/075-coordinator-engagements.sql"),
-    ),
-    (
-        62,
-        include_str!("migrations/062-coordinator-deliveries.sql"),
-    ),
-    (
-        63,
-        include_str!("migrations/063-coordinator-delegations.sql"),
-    ),
-    (64, include_str!("migrations/064-coordinator-refusals.sql")),
-    (
-        65,
-        include_str!("migrations/065-coordinator-settlements.sql"),
-    ),
-    (
-        66,
-        include_str!("migrations/066-coordinator-agent-profiles.sql"),
-    ),
-    (
-        67,
-        include_str!("migrations/067-coordinator-project-setup.sql"),
-    ),
-    (
-        68,
-        include_str!("migrations/068-coordinator-legacy-adoption.sql"),
-    ),
+    migration!(60, "074-joined-rooms.sql"),
+    migration!(61, "075-coordinator-engagements.sql"),
+    migration!(62, "062-coordinator-deliveries.sql"),
+    migration!(63, "063-coordinator-delegations.sql"),
+    migration!(64, "064-coordinator-refusals.sql"),
+    migration!(65, "065-coordinator-settlements.sql"),
+    migration!(66, "066-coordinator-agent-profiles.sql"),
+    migration!(67, "067-coordinator-project-setup.sql"),
+    migration!(68, "068-coordinator-legacy-adoption.sql"),
     // ADR-193: no board number; the file carries its list
     // version.
-    (69, include_str!("migrations/069-octos-usage-sources.sql")),
-    (70, include_str!("migrations/070-management-commands.sql")),
-    (71, include_str!("migrations/071-management-intents.sql")),
-    (
-        72,
-        include_str!("migrations/072-owner-resource-registry.sql"),
-    ),
-    (
-        73,
-        include_str!("migrations/073-owner-capacity-reservations.sql"),
-    ),
-    (
-        74,
-        include_str!("migrations/076-owner-parent-settlements.sql"),
-    ),
-    (75, include_str!("migrations/077-owner-managed-agents.sql")),
-    (76, include_str!("migrations/078-owner-managed-custody.sql")),
-    (77, include_str!("migrations/079-owner-managed-fences.sql")),
-    (
-        78,
-        include_str!("migrations/080-owner-resource-adoptions.sql"),
-    ),
-    (79, include_str!("migrations/081-owner-managed-runtime.sql")),
-    (
-        80,
-        include_str!("migrations/082-owner-shared-execution.sql"),
-    ),
-    (
-        81,
-        include_str!("migrations/083-owner-shared-successors.sql"),
-    ),
-    (
-        82,
-        include_str!("migrations/084-owner-shared-start-intents.sql"),
-    ),
-    (
-        83,
-        include_str!("migrations/085-owner-resource-display-names.sql"),
-    ),
-    (84, include_str!("migrations/086-owner-operator-tasks.sql")),
-    (85, include_str!("migrations/087-owner-shared-demands.sql")),
-    (
-        86,
-        include_str!("migrations/088-owner-shared-stop-intents.sql"),
-    ),
-    (87,include_str!("migrations/089-owner-shared-context.sql")),
-    (88, include_str!("migrations/090-owner-operator-task-transfer.sql")),
-    (89, include_str!("migrations/091-owner-managed-budget.sql")),
-    (90, include_str!("migrations/092-owner-shared-budget-execution.sql")),
-    (91, include_str!("migrations/093-management-account-profiles.sql")),
-    (92, include_str!("migrations/094-owner-resource-namespaces.sql")),
-    (93, include_str!("migrations/095-owner-resource-provenance.sql")),
-    (94, include_str!("migrations/096-approval-binding-incarnations.sql")),
-    (95, include_str!("migrations/097-owned-dispatch-execution-policy.sql")),
-    (96, include_str!("migrations/098-owner-operator-graph-archives.sql")),
-    (97, include_str!("migrations/099-owner-operator-graph-journal.sql")),
-    (98, include_str!("migrations/100-owner-operator-graph-recipients.sql")),
-    (99, include_str!("migrations/101-owner-web-catalog-settings.sql")),
-    (100, include_str!("migrations/102-owner-pool-agents.sql")),
-    (101, include_str!("migrations/103-owner-shared-tool-policy.sql")),
-    (102, include_str!("migrations/104-owner-unstarted-shared-attempts.sql")),
-    (103, include_str!("migrations/105-owner-shared-long-replies.sql")),
-    (104, include_str!("migrations/106-owner-capacity-grant-succession.sql")),
+    migration!(69, "069-octos-usage-sources.sql"),
+    migration!(70, "070-management-commands.sql"),
+    migration!(71, "071-management-intents.sql"),
+    migration!(72, "072-owner-resource-registry.sql"),
+    migration!(73, "073-owner-capacity-reservations.sql"),
+    migration!(74, "076-owner-parent-settlements.sql"),
+    migration!(75, "077-owner-managed-agents.sql"),
+    migration!(76, "078-owner-managed-custody.sql"),
+    migration!(77, "079-owner-managed-fences.sql"),
+    migration!(78, "080-owner-resource-adoptions.sql"),
+    migration!(79, "081-owner-managed-runtime.sql"),
+    migration!(80, "082-owner-shared-execution.sql"),
+    migration!(81, "083-owner-shared-successors.sql"),
+    migration!(82, "084-owner-shared-start-intents.sql"),
+    migration!(83, "085-owner-resource-display-names.sql"),
+    migration!(84, "086-owner-operator-tasks.sql"),
+    migration!(85, "087-owner-shared-demands.sql"),
+    migration!(86, "088-owner-shared-stop-intents.sql"),
+    migration!(87, "089-owner-shared-context.sql"),
+    migration!(88, "090-owner-operator-task-transfer.sql"),
+    migration!(89, "091-owner-managed-budget.sql"),
+    migration!(90, "092-owner-shared-budget-execution.sql"),
+    migration!(91, "093-management-account-profiles.sql"),
+    migration!(92, "094-owner-resource-namespaces.sql"),
+    migration!(93, "095-owner-resource-provenance.sql"),
+    migration!(94, "096-approval-binding-incarnations.sql"),
+    migration!(95, "097-owned-dispatch-execution-policy.sql"),
+    migration!(96, "098-owner-operator-graph-archives.sql"),
+    migration!(97, "099-owner-operator-graph-journal.sql"),
+    migration!(98, "100-owner-operator-graph-recipients.sql"),
+    migration!(99, "101-owner-web-catalog-settings.sql"),
+    migration!(100, "102-owner-pool-agents.sql"),
+    migration!(101, "103-owner-shared-tool-policy.sql"),
+    migration!(102, "104-owner-unstarted-shared-attempts.sql"),
+    migration!(103, "105-owner-shared-long-replies.sql"),
+    migration!(104, "106-owner-capacity-grant-succession.sql"),
     // Board migration number 107 (track C) lands as the next sequential tuple 105.
-    (105, include_str!("migrations/107-owner-resource-ceiling-amendments.sql")),
-    (106, include_str!("migrations/108-owner-shared-decrypted-inputs.sql")),
-    (107, include_str!("migrations/109-owner-agent-periods.sql")),
-    (108, include_str!("migrations/110-owner-resource-calendars.sql")),
-    (109, include_str!("migrations/111-owner-period-starts.sql")),
-    (110, include_str!("migrations/112-owner-unstarted-runtimes.sql")),
-    (111, include_str!("migrations/113-owner-shared-native-sessions.sql")),
-    (112, include_str!("migrations/114-owner-octos-profiles.sql")),
-    (113, include_str!("migrations/115-owner-octos-model-resources.sql")),
+    migration!(105, "107-owner-resource-ceiling-amendments.sql"),
+    migration!(106, "108-owner-shared-decrypted-inputs.sql"),
+    migration!(107, "109-owner-agent-periods.sql"),
+    migration!(108, "110-owner-resource-calendars.sql"),
+    migration!(109, "111-owner-period-starts.sql"),
+    migration!(110, "112-owner-unstarted-runtimes.sql"),
+    migration!(111, "113-owner-shared-native-sessions.sql"),
+    migration!(112, "114-owner-octos-profiles.sql"),
+    migration!(113, "115-owner-octos-model-resources.sql"),
+    migration!(114, "116-owner-shared-start-releases.sql"),
+    migration!(115, "117-owner-shared-budget-start-releases.sql"),
+    migration!(116, "118-owner-shared-start-refusals.sql"),
+    migration!(117, "119-owner-shared-demand-work-release.sql"),
 ];
 
 impl DomainRepository {
@@ -1398,6 +1333,15 @@ impl DomainRepository {
                     "SELECT id,child_id,profile,device_id,device_generation,event_id,offer_payload,offer_digest,ledger_revision FROM owner_shared_demands LIMIT 0",
                     "SELECT demand_id,disposition,start_intent_id,input_payload,input_digest,budget_payload,ledger_revision FROM owner_shared_demand_decisions LIMIT 0",
                     "SELECT demand_id,work_id,binding_payload,binding_digest,ledger_revision FROM owner_shared_demand_bindings LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_start_releases LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_start_releasable LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_budget_start_releases LIMIT 0",
+                    "SELECT start_intent_id,demand_id FROM owner_shared_budget_start_releasable LIMIT 0",
+                    "SELECT demand_id,payload,digest,ledger_revision FROM owner_shared_demand_second_terminals LIMIT 0",
+                    "SELECT start_intent_id,demand_id,code,input_digest,ledger_revision FROM owner_shared_start_refusals LIMIT 0",
+                    "SELECT work_id,demand_id,binding_payload,binding_digest,ledger_revision,released_revision,released_at_ms FROM owner_shared_demand_released_bindings LIMIT 0",
+                    "SELECT attempt_id,child_id,profile,observation_id,route,demand_id,retry,ledger_revision FROM owner_shared_stop_routes LIMIT 0",
+                    "SELECT demand_id,ledger_revision FROM owner_shared_demand_reoffer_lapses LIMIT 0",
                     "SELECT child_id,command_id,command_payload,command_digest,fence_revision FROM owner_managed_runtime_stops LIMIT 0",
                     "SELECT id,child_id,command_id,payload,digest,ledger_revision FROM owner_managed_runtime_observations LIMIT 0",
                     "SELECT actor_scope,command_id,operation,digest,result FROM management_commands LIMIT 0",
@@ -1509,8 +1453,9 @@ impl DomainRepository {
                 Some(stored) if stored != profile => return Err(Error::LocalAuthority),
                 Some(_) => {}
                 None => {
-                    let tables = tx.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'management_identity'")?
-                        .query_map([], |r| r.get::<_, String>(0))?
+                    // The migration records describe the store, not a profile's data.
+                    let tables = tx.prepare("SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' AND name<>'management_identity' AND name<>?1")?
+                        .query_map([crate::database::MIGRATION_RECORDS], |r| r.get::<_, String>(0))?
                         .collect::<Result<Vec<_>, _>>()?;
                     for table in tables {
                         let quoted = table.replace('"', "\"\"");

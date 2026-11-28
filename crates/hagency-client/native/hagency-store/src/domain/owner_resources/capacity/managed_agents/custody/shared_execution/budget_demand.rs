@@ -119,7 +119,10 @@ impl OwnerResourceRegistry {
             let old=demand::journal::load(&tx,&e.profile.digest,child,&proof.offer.demand_id)?;
             if let Some(old)=&old {
                 if old.offer().digest()?!=proof.offer.digest()? {return Err(Error::Conflict)}
-                if matches!(old.disposition(),SharedDemandDisposition::StartPrepared|SharedDemandDisposition::HeadChanged){return Err(Error::LocalAuthority)}
+                // The plain lane's start of this message may have been made,
+                // unless the server refused it for this budget (schema 116).
+                let refused=match old.input() {Some(i)=>demand::refused(&tx,&i.start.start_intent_id)?,None=>false};
+                if matches!(old.disposition(),SharedDemandDisposition::HeadChanged)||matches!(old.disposition(),SharedDemandDisposition::StartPrepared)&&!refused{return Err(Error::LocalAuthority)}
                 if let Some(b)=old.budget() {
                     if b.state!="exhausted" {return Err(Error::LocalAuthority)}
                     let expected=canonical::digest(&json!({"demandDigest":proof.offer.digest()?,"expectedControlRevision":proof.offer.control_revision,"reason":"budget_blocked","budget":b.observation}))?;
@@ -149,7 +152,8 @@ impl OwnerResourceRegistry {
                     result.disposition=SharedDemandDisposition::BudgetBlocked;result.block=Some(block);
                 }else{
                     let id=format!("sbdstart_{}",&canonical::digest(&json!({"registry":registry.id,"profile":e.profile.digest,"demandDigest":proof.offer.digest()?,"budgetDigest":applied.budget_digest}))?[..40]);
-                    let competing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE child_id=?1 AND predecessor_digest=?2) OR EXISTS(SELECT 1 FROM owner_shared_budget_start_intents WHERE child_id=?1 AND predecessor_digest=?2 AND id<>?3)",params![child,hash,id],|r|r.get(0))?;
+                    // A start the server never made, of an event it ended, holds no place.
+                    let competing:bool=tx.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents i WHERE i.child_id=?1 AND i.predecessor_digest=?2 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=i.id)) OR EXISTS(SELECT 1 FROM owner_shared_budget_start_intents i WHERE i.child_id=?1 AND i.predecessor_digest=?2 AND i.id<>?3 AND NOT EXISTS(SELECT 1 FROM owner_shared_budget_start_releases r WHERE r.start_intent_id=i.id))",params![child,hash,id],|r|r.get(0))?;
                     if !competing {
                         let start=budget_start::prepare_for_demand(&tx,e,original.clone(),id,proof.offer.control_revision)?;
                         let input=SharedBudgetDemandStartInput{demand_digest:proof.offer.digest()?,expected_control_revision:proof.offer.control_revision,original_block:status.original_block,start:start.input};
@@ -205,9 +209,16 @@ impl OwnerResourceRegistry {
 
 #[cfg(feature="shared-budget-execution")]
 impl OwnerResourceRegistry {
-    /// Persist an authenticated terminal for this exact offer. It only releases
-    /// FIFO queue position; no work, model-call or capacity history is changed.
+    /// Persist an authenticated terminal for this exact offer. It releases
+    /// FIFO queue position, and the place after its predecessor of the event's
+    /// start when the server never made it; no work, model-call or capacity
+    /// history is changed.
     pub async fn retain_shared_budget_demand_terminal(&self,v:VerifiedSharedBudgetDemand,original:SharedRuntimeCommand)->Result<(),Error>{
+        // The server makes no start of an ended event, and its status names
+        // the event's start when it made one. The event's start gives its
+        // place back when the status names none and this computer holds no
+        // claim or fence of it (schema 115).
+        const RELEASE: &str = "INSERT INTO owner_shared_budget_start_releases(start_intent_id,demand_id) SELECT start_intent_id,demand_id FROM owner_shared_budget_start_releasable WHERE demand_id=?1";
         v.proof.check()?;original.validate(&v.proof.enrollment.profile.account)?;
         if !matches!(v.status.state.as_str(),"expired"|"cancelled"|"head_changed"){return Err(Error::LocalAuthority)}
         let profile=v.proof.enrollment.profile.clone();let expires=v.proof.expires;let registry=self.0.clone();
@@ -221,12 +232,14 @@ impl OwnerResourceRegistry {
             let Some(old)=old else{return Ok(())};
             if old.offer().digest()?!=v.status.demand_digest{return Err(Error::Conflict)}
             let saved:Option<String>=tx.query_row("SELECT payload FROM owner_shared_budget_demand_terminals WHERE demand_id=?1",[&v.status.offer.demand_id],|r|r.get(0)).optional()?;
-            if let Some(saved)=saved {
-                if !demand::same_terminal(&saved,&v.status.offer,&v.status.state)?{return Err(Error::Conflict)}
-                return Ok(())
-            }
+            // An end the plain lane read first keeps this one beside it.
+            let table=match saved {
+                None=>"owner_shared_budget_demand_terminals",
+                Some(saved)=>{if !demand::second_terminal(&tx,&saved,false,&v.status.offer,&v.status.state)?{return Ok(())}"owner_shared_demand_second_terminals"}
+            };
             let payload=canonical::encode(&serde_json::to_value(&v.status)?)?;let digest=canonical::digest(&serde_json::to_value(&v.status)?)?;let revision=revision(&tx)?;
-            tx.execute("INSERT INTO owner_shared_budget_demand_terminals VALUES(?1,?2,?3,?4)",params![v.status.offer.demand_id,payload,digest,revision])?;
+            tx.execute(&format!("INSERT INTO {table} VALUES(?1,?2,?3,?4)"),params![v.status.offer.demand_id,payload,digest,revision])?;
+            tx.execute(RELEASE,[&v.status.offer.demand_id])?;
             v.proof.check()?;tx.commit()?;v.proof.check().map_err(|_|Error::OutcomeUnknown)
         }).await
     }

@@ -80,6 +80,14 @@ impl OwnerResourceRegistry {
             if let Some(old) = tx.query_row("SELECT binding_digest FROM owner_shared_demand_bindings WHERE demand_id=?1", [&offer.demand_id], |r| r.get::<_, String>(0)).optional()? {
                 return if old == digest { Ok(()) } else { Err(Error::Conflict) };
             }
+            // Retry v2: work the server gave back is never bound again; a
+            // `bound` answer read before it showed the retry is history. A
+            // stop that asked for a retry of work whose turn began is
+            // answered `bound` and saved here.
+            if release::handed_back(&tx, &binding)? {
+                authority.check(&registry)?;
+                return Ok(());
+            }
             let (payload, original_digest): (String, String) = tx.query_row(
                 "SELECT command_payload,command_digest FROM owner_shared_runtime_lifetimes WHERE child_id=?1 AND profile=?2",
                 params![authority.child, authority.enrollment.profile.digest], |r| Ok((r.get(0)?, r.get(1)?)),

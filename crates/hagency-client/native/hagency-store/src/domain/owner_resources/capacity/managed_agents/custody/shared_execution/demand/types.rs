@@ -52,6 +52,13 @@ pub struct SharedDemandStartInput {
     /// so the original start bytes are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub retry: Option<u64>,
+    /// Retry v2: the server gives the event's message back when this start's
+    /// process is fenced before the work it was given began. Fixed when the
+    /// start is first prepared and sent as fixed every time (the server
+    /// refuses other bytes for the same start), and omitted when false, so a
+    /// start without it keeps its bytes.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reoffers: bool,
 }
 impl SharedDemandStartInput {
     pub fn validate_for(&self, offer: &SharedDemandOffer) -> Result<(), Error> {
@@ -161,6 +168,11 @@ pub struct VerifiedSharedDemand {
     pub(in super::super) enrollment: VerifiedManagementEnrollment,
     pub(in super::super) offer: SharedDemandOffer,
     pub(in super::super) expires: Instant,
+    /// The poll or recover that showed this offer sent `reoffers` (its
+    /// server lists retry v2). A start first prepared from this proof, the
+    /// original or a retry, says `reoffers` only then (a retry also only
+    /// while its event's opt-in stands); a saved start keeps its bytes.
+    pub(in super::super) reoffers: bool,
 }
 impl VerifiedSharedDemand {
     pub fn new(
@@ -186,9 +198,15 @@ impl VerifiedSharedDemand {
             enrollment,
             offer,
             expires,
+            reoffers: false,
         };
         value.check()?;
         Ok(value)
+    }
+    /// `reoffers` as the poll or recover that showed this offer sent it.
+    pub fn with_reoffers(mut self, reoffers: bool) -> Self {
+        self.reoffers = reoffers;
+        self
     }
     pub(in super::super) fn check(&self) -> Result<(), Error> {
         self.enrollment.check()?;

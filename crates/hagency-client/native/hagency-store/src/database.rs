@@ -1,11 +1,28 @@
 //! Shared private-file and SQLite startup policy for explicitly named stores.
 use crate::{Error, private};
-use rusqlite::{Connection, TransactionBehavior};
-use std::{fs::File, path::Path, time::Duration};
+use rusqlite::{Connection, TransactionBehavior, params};
+use sha2::{Digest, Sha256};
+use std::{
+    collections::{BTreeMap, HashMap},
+    fs::File,
+    path::Path,
+    sync::{Mutex, OnceLock, PoisonError},
+    time::Duration,
+};
 
 pub(crate) struct Database {
     pub connection: Connection,
     pub ownership: File,
+}
+
+/// One numbered migration: the schema version it brings a store to, its file
+/// name and its SQL. Once a migration lands on main, its number, name and SQL
+/// never change (ADR 0016, Known bounds).
+#[derive(Clone, Copy)]
+pub(crate) struct Migration {
+    pub version: i32,
+    pub name: &'static str,
+    pub sql: &'static str,
 }
 
 pub(crate) struct Schema {
@@ -15,7 +32,112 @@ pub(crate) struct Schema {
     pub version: i32,
     pub sql: &'static str,
     pub verify: &'static [&'static str],
-    pub migrations: &'static [(i32, &'static str)],
+    pub migrations: &'static [Migration],
+}
+
+/// The runner's own record of each numbered migration a store ran. No
+/// migration creates it, so it takes no number: the runner creates it before
+/// it applies anything, in every store whatever its version.
+pub(crate) const MIGRATION_RECORDS: &str = "hagency_store_migrations";
+const RECORDS: &str = "CREATE TABLE IF NOT EXISTS hagency_store_migrations(version INTEGER PRIMARY KEY NOT NULL CHECK(version>=2),name TEXT NOT NULL CHECK(length(name) BETWEEN 1 AND 255),sql_sha256 TEXT NOT NULL CHECK(length(sql_sha256)=64))";
+
+/// The SHA-256 of a migration's SQL, in lowercase hex. Each text is hashed
+/// once per process, so opening an up-to-date store reads its records and
+/// compares them, nothing more. The repository keeps migration files at LF
+/// line ends on every system (`.gitattributes`), so every build of one file
+/// has the same digest.
+fn sql_sha256(sql: &'static str) -> String {
+    static DIGESTS: OnceLock<Mutex<HashMap<(usize, usize), String>>> = OnceLock::new();
+    // A 'static text's address and length name its bytes.
+    let key = (sql.as_ptr() as usize, sql.len());
+    let digests = DIGESTS.get_or_init(Default::default);
+    if let Some(digest) = digests.lock().unwrap_or_else(PoisonError::into_inner).get(&key) {
+        return digest.clone();
+    }
+    let digest = format!("{:x}", Sha256::digest(sql.as_bytes()));
+    digests
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .insert(key, digest.clone());
+    digest
+}
+
+fn migration(migrations: &[Migration], version: i32) -> Result<&Migration, Error> {
+    let mut matching = migrations.iter().filter(|m| m.version == version);
+    match (matching.next(), matching.next()) {
+        (Some(migration), None) => Ok(migration),
+        _ => Err(Error::Schema),
+    }
+}
+
+fn identity(name: &str, sha256: &str) -> String {
+    format!("{name} (sha256 {})", sha256.get(..12).unwrap_or(sha256))
+}
+
+/// The records of the migrations a store ran, by version; `None` for a store
+/// from before the records.
+fn recorded(db: &Connection) -> Result<Option<BTreeMap<i32, (String, String)>>, Error> {
+    let table: bool = db.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name=?1)",
+        [MIGRATION_RECORDS],
+        |r| r.get(0),
+    )?;
+    if !table {
+        return Ok(None);
+    }
+    let mut rows = db.prepare("SELECT version,name,sql_sha256 FROM hagency_store_migrations")?;
+    let rows = rows
+        .query_map([], |r| Ok((r.get(0)?, (r.get(1)?, r.get(2)?))))?
+        .collect::<Result<_, _>>()?;
+    Ok(Some(rows))
+}
+
+/// Every record must be this build's migration of its number, and a store
+/// with records has one for each version it is at. A store records its
+/// migrations in the transaction that runs them, so a version without a
+/// record was reached by a build that keeps none, past a build that does:
+/// it is refused as well.
+fn check(
+    recorded: &BTreeMap<i32, (String, String)>,
+    migrations: &[Migration],
+    version: i32,
+) -> Result<(), Error> {
+    let expected = |number| {
+        migration(migrations, number)
+            .map(|m| identity(m.name, &sql_sha256(m.sql)))
+            .unwrap_or_else(|_| "none".into())
+    };
+    for (&number, (name, sha256)) in recorded {
+        let same = migration(migrations, number)
+            .is_ok_and(|m| m.name == name && sql_sha256(m.sql) == *sha256);
+        if !same {
+            return Err(Error::MigrationMadeByAnotherBuild {
+                version: number,
+                stored: identity(name, sha256),
+                expected: expected(number),
+            });
+        }
+    }
+    if !recorded.is_empty()
+        && let Some(number) = (2..=version).find(|number| !recorded.contains_key(number))
+    {
+        return Err(Error::MigrationMadeByAnotherBuild {
+            version: number,
+            stored: "a migration it has no record of".into(),
+            expected: expected(number),
+        });
+    }
+    Ok(())
+}
+
+fn record(tx: &Connection, migration: &Migration) -> Result<(), Error> {
+    // A record already there was checked against this build's list above;
+    // only a test that rewinds `user_version` leaves one past the version.
+    tx.execute(
+        "INSERT OR IGNORE INTO hagency_store_migrations(version,name,sql_sha256) VALUES(?1,?2,?3)",
+        params![migration.version, migration.name, sql_sha256(migration.sql)],
+    )?;
+    Ok(())
 }
 pub(crate) fn open(directory: &Path, definition: Schema) -> Result<Database, Error> {
     let Schema {
@@ -80,8 +202,26 @@ pub(crate) fn open(directory: &Path, definition: Schema) -> Result<Database, Err
         }
         version
     };
-    if version < expected_version {
+    // A newer store was refused above, as before the records. Every record
+    // is checked before anything is applied.
+    let recorded = if new { None } else { recorded(&db)? };
+    if let Some(recorded) = &recorded {
+        check(recorded, migrations, version)?;
+    }
+    // A store from before the records takes this build's for the versions it
+    // has, once. That is trusted because released builds come from main,
+    // where a migration's number, name and SQL never change once it lands; a
+    // store a draft build migrated (never released) cannot be told apart and
+    // is to be discarded. The verification queries below still run.
+    let backfill = version >= 2 && recorded.as_ref().is_none_or(BTreeMap::is_empty);
+    if version < expected_version || recorded.is_none() || backfill {
         let tx = db.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute_batch(RECORDS)?;
+        if backfill {
+            for number in 2..=version {
+                record(&tx, migration(migrations, number)?)?;
+            }
+        }
         let mut current = version;
         if new {
             tx.execute_batch(schema)?;
@@ -89,16 +229,10 @@ pub(crate) fn open(directory: &Path, definition: Schema) -> Result<Database, Err
             current = 1;
         }
         while current < expected_version {
-            let next = current + 1;
-            let matching: Vec<_> = migrations
-                .iter()
-                .filter(|(version, _)| *version == next)
-                .collect();
-            if matching.len() != 1 {
-                return Err(Error::Schema);
-            }
-            tx.execute_batch(matching[0].1)?;
-            current = next;
+            let next = migration(migrations, current + 1)?;
+            tx.execute_batch(next.sql)?;
+            record(&tx, next)?;
+            current = next.version;
         }
         for query in verify_sql {
             tx.prepare(query).map_err(|_| Error::Schema)?;
@@ -129,7 +263,8 @@ pub(crate) fn open(directory: &Path, definition: Schema) -> Result<Database, Err
 #[cfg(test)]
 mod tests {
     use super::*;
-    fn definition(version: i32, migrations: &'static [(i32, &'static str)]) -> Schema {
+    use std::fmt::Write;
+    fn definition(version: i32, migrations: &'static [Migration]) -> Schema {
         Schema {
             name: "fixture.sqlite3",
             lock: "fixture.lock",
@@ -145,10 +280,11 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let state = root.path().join("state");
         drop(open(&state, definition(1, &[])).unwrap());
-        let failing = &[(
-            2,
-            "ALTER TABLE probe ADD COLUMN upgraded INTEGER; INSERT INTO missing_table VALUES(1);",
-        )];
+        let failing = &[Migration {
+            version: 2,
+            name: "002-upgraded.sql",
+            sql: "ALTER TABLE probe ADD COLUMN upgraded INTEGER; INSERT INTO missing_table VALUES(1);",
+        }];
         assert!(open(&state, definition(2, failing)).is_err());
         let db = open(&state, definition(1, &[])).unwrap();
         assert_eq!(
@@ -165,10 +301,11 @@ mod tests {
             1
         );
         drop(db);
-        let success = &[(
-            2,
-            "ALTER TABLE probe ADD COLUMN upgraded INTEGER; UPDATE probe SET upgraded=7;",
-        )];
+        let success = &[Migration {
+            version: 2,
+            name: "002-upgraded.sql",
+            sql: "ALTER TABLE probe ADD COLUMN upgraded INTEGER; UPDATE probe SET upgraded=7;",
+        }];
         let mut later_verification_failure = definition(2, success);
         later_verification_failure.verify = &[
             "SELECT id, upgraded FROM probe LIMIT 0",
@@ -217,7 +354,7 @@ mod tests {
         }
         // The already-current path must check every statement too, without
         // relying on a new migration to discover a malformed schema.
-        let mut invalid_reopen = definition(2, &[]);
+        let mut invalid_reopen = definition(2, success);
         invalid_reopen.verify = &[
             "SELECT id FROM probe LIMIT 0",
             "SELECT missing_column FROM probe LIMIT 0",
@@ -266,5 +403,180 @@ mod tests {
                 .roles
                 .contains(&"coding".into())
         );
+        // The domain store recorded each migration it ran, by its own list.
+        let raw = Connection::open(old.join("domain.sqlite3")).unwrap();
+        assert_eq!(
+            raw.query_row(
+                "SELECT count(*),min(version),max(version) FROM hagency_store_migrations",
+                [],
+                |r| Ok((r.get::<_, i32>(0)?, r.get::<_, i32>(1)?, r.get::<_, i32>(2)?)),
+            )
+            .unwrap(),
+            (
+                crate::domain::DOMAIN_SCHEMA_VERSION - 1,
+                2,
+                crate::domain::DOMAIN_SCHEMA_VERSION
+            )
+        );
+    }
+
+    const FIRST: Migration = Migration {
+        version: 2,
+        name: "002-upgraded.sql",
+        sql: "ALTER TABLE probe ADD COLUMN upgraded INTEGER;",
+    };
+    const SECOND: Migration = Migration {
+        version: 3,
+        name: "003-second.sql",
+        sql: "CREATE TABLE second(id INTEGER PRIMARY KEY);",
+    };
+    /// Another build's migration 2: the same file name with other SQL, as an
+    /// earlier draft of it had.
+    const DRAFT: Migration = Migration {
+        version: 2,
+        name: "002-upgraded.sql",
+        sql: "CREATE TABLE draft(id INTEGER PRIMARY KEY);",
+    };
+    /// Another build's migration 2 by another name, with the same SQL.
+    const RENAMED: Migration = Migration {
+        version: 2,
+        name: "002-renamed.sql",
+        sql: "ALTER TABLE probe ADD COLUMN upgraded INTEGER;",
+    };
+
+    fn records(db: &Connection) -> Vec<(i32, String, String)> {
+        db.prepare("SELECT version,name,sql_sha256 FROM hagency_store_migrations ORDER BY version")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+    fn expected(migrations: &[Migration]) -> Vec<(i32, String, String)> {
+        migrations
+            .iter()
+            .map(|m| {
+                let sha256 = Sha256::digest(m.sql.as_bytes()).iter().fold(
+                    String::new(),
+                    |mut hex, byte| {
+                        write!(hex, "{byte:02x}").unwrap();
+                        hex
+                    },
+                );
+                (m.version, m.name.to_owned(), sha256)
+            })
+            .collect()
+    }
+    fn user_version(db: &Connection) -> i32 {
+        db.pragma_query_value(None, "user_version", |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_fresh_store_records_every_migration_and_opens_again_without_a_write() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        let db = open(&state, definition(3, &[FIRST, SECOND])).unwrap();
+        assert_eq!(records(&db.connection), expected(&[FIRST, SECOND]));
+        drop(db);
+        for _ in 0..2 {
+            let db = open(&state, definition(3, &[FIRST, SECOND])).unwrap();
+            // An up-to-date store with its records is only read at open.
+            assert_eq!(db.connection.total_changes(), 0);
+            assert_eq!(records(&db.connection), expected(&[FIRST, SECOND]));
+            assert_eq!(user_version(&db.connection), 3);
+        }
+        // A newer store is still refused as before, not by its records.
+        assert!(matches!(
+            open(&state, definition(2, &[FIRST])),
+            Err(Error::Schema)
+        ));
+    }
+
+    #[test]
+    fn a_store_that_ran_another_builds_migration_of_a_number_is_refused_by_name() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        drop(open(&state, definition(2, &[DRAFT])).unwrap());
+        // At the same version and with a later migration to run: neither
+        // runs over the draft's tables.
+        for (version, migrations) in [(2, &[FIRST][..]), (3, &[FIRST, SECOND][..])] {
+            let refused = match open(&state, definition(version, migrations)) {
+                Err(error) => error,
+                Ok(_) => panic!("another build's migration 2 was accepted"),
+            };
+            let Error::MigrationMadeByAnotherBuild {
+                version: 2,
+                stored,
+                expected: this_build,
+            } = &refused
+            else {
+                panic!("unexpected refusal {refused:?}");
+            };
+            assert_ne!(stored, this_build);
+            assert!(stored.starts_with("002-upgraded.sql (sha256 "));
+            assert!(
+                refused
+                    .to_string()
+                    .starts_with("store migration 2 was made by another build")
+            );
+        }
+        let raw = Connection::open(state.join("fixture.sqlite3")).unwrap();
+        assert_eq!(user_version(&raw), 2);
+        assert!(raw.prepare("SELECT id FROM second").is_err());
+        assert!(raw.prepare("SELECT upgraded FROM probe").is_err());
+        assert_eq!(records(&raw), expected(&[DRAFT]));
+        drop(raw);
+        // The same SQL by another name is another migration too.
+        let renamed = root.path().join("renamed");
+        drop(open(&renamed, definition(2, &[RENAMED])).unwrap());
+        assert!(matches!(
+            open(&renamed, definition(2, &[FIRST])),
+            Err(Error::MigrationMadeByAnotherBuild { version: 2, .. })
+        ));
+    }
+
+    #[test]
+    fn a_store_from_before_the_records_takes_this_builds_once() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        drop(open(&state, definition(2, &[FIRST])).unwrap());
+        // A store from before the records has neither the table nor rows.
+        let raw = Connection::open(state.join("fixture.sqlite3")).unwrap();
+        raw.execute_batch("DROP TABLE hagency_store_migrations").unwrap();
+        drop(raw);
+        let db = open(&state, definition(2, &[FIRST])).unwrap();
+        assert_ne!(db.connection.total_changes(), 0);
+        assert_eq!(records(&db.connection), expected(&[FIRST]));
+        drop(db);
+        let db = open(&state, definition(2, &[FIRST])).unwrap();
+        assert_eq!(db.connection.total_changes(), 0);
+        drop(db);
+        // One from before the records and behind this build: its versions
+        // take this build's records, and the next migration is recorded as
+        // it runs.
+        let raw = Connection::open(state.join("fixture.sqlite3")).unwrap();
+        raw.execute_batch("DROP TABLE hagency_store_migrations").unwrap();
+        drop(raw);
+        let db = open(&state, definition(3, &[FIRST, SECOND])).unwrap();
+        assert_eq!(records(&db.connection), expected(&[FIRST, SECOND]));
+        assert_eq!(user_version(&db.connection), 3);
+    }
+
+    #[test]
+    fn a_version_reached_without_a_record_is_refused() {
+        let root = tempfile::tempdir().unwrap();
+        let state = root.path().join("state");
+        drop(open(&state, definition(2, &[FIRST])).unwrap());
+        // A build that keeps no records ran a migration 3 past a build that
+        // does.
+        let raw = Connection::open(state.join("fixture.sqlite3")).unwrap();
+        raw.execute_batch("CREATE TABLE unknown(id INTEGER); PRAGMA user_version=3;")
+            .unwrap();
+        drop(raw);
+        assert!(matches!(
+            open(&state, definition(3, &[FIRST, SECOND])),
+            Err(Error::MigrationMadeByAnotherBuild { version: 3, .. })
+        ));
     }
 }

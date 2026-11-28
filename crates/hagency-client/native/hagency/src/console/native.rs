@@ -645,6 +645,14 @@ mod said_tests {
         assert_eq!(failure(401, "sign_in_required").said(), Said::Decided);
         assert_eq!(failure(409, "a_code_of_the_server").said(), Said::Decided);
         assert!(!failure(409, "shared_execution_expired").passes());
+        // A start the server no longer takes (a retry after the wait for it
+        // was over) and the retry route's own refusals are decisions too:
+        // nothing sends them again, and the next read of the demand says how
+        // its event ended.
+        for (status, code) in [(409, "shared_demand_not_current"), (400, "invalid_shared_demand_retry")] {
+            assert_eq!(failure(status, code).said(), Said::Decided, "{code}");
+            assert!(!failure(status, code).passes(), "{code}");
+        }
     }
 
     /// What a failure says when it is not decided, by code and status as this
