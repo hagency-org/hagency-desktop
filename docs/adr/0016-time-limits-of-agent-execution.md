@@ -338,12 +338,15 @@ describes. "Send again" is what the sender has until it is decided.
   process then ends at its first lease. After a sleep through a lease's
   end, the turn ends by its next renewal moment, at most ten seconds of
   awake time (plus up to three seconds while a Claude turn is
-  interrupted), whether or not the server answers: every step of the turn
-  that asks the server under the lease (its proof and renewal, the check
+  interrupted), whether or not the server answers: the steps of the turn
+  that ask the server under the lease (its proof and renewal, the check
   of a room call, the scope of the idle pass of a turn with owner
-  approvals, and an approval's registration and reading) first reads the
-  lease on the wall clock, and is refused once that clock has ended it.
-  If the computer slept while such a request was under way, that request
+  approvals, an approval's registration and reading, and on the Claude
+  path a tool's permission, a question and a run control) first read the
+  lease on the wall clock, and are refused once that clock has ended it.
+  A run control of a Codex turn is checked against the counted end only,
+  and so is bounded by that renewal moment as well. If the computer slept
+  while such a request was under way, that request
   finishes first (it gives up after 15 seconds), and the next one is
   refused. The store refuses its records, and the commit gate its
   messages, from the wall-clock end on. On main, such a computer still
