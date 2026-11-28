@@ -58,22 +58,25 @@ fn a_copy_names_its_first_message_wherever_a_timeline_shows_it() {
 fn a_failure_another_try_can_fix_offers_the_message_again_and_one_no_try_can_does_not() {
     let _turn = resend_offers::test_turn();
     let room = room_id!("!send-again-failures:x");
-    let (later, never) = (event_id!("$fails_for_now"), event_id!("$fails_for_good"));
+    let (later, unloaded, never) = (event_id!("$fails_for_now"), event_id!("$fails_until_loaded"), event_id!("$fails_for_good"));
     test_read_copies(room.as_str(), None);
-    let read = json!({"executions":[
-        {"roomId":room.as_str(),"threadRoot":later.as_str(),"eventId":later.as_str(),"agentMxid":"@first:x","canSendAgain":true},
-        {"roomId":room.as_str(),"threadRoot":never.as_str(),"eventId":never.as_str(),"agentMxid":"@first:x","canSendAgain":true},
-    ]});
-    assert!(resend_offers::merge_read(resend_offers::TEST_READER, room.as_str(), "", &read));
-    // Pressed: neither is offered while its copy is being made.
-    note_sent_again(room, later);
-    note_sent_again(room, never);
-    assert!(resend_offers::for_event(room.as_str(), later.as_str()).is_none());
-    // Not loaded or not readable yet, the room's encryption not confirmed,
-    // an Agent's device not ready, the send refused: offered again.
+    assert!(resend_offers::merge_read(resend_offers::TEST_READER, room.as_str(), "", &offered(room, &[later, unloaded, never])));
+    // Pressed: none is offered while its copy is being made.
+    for pressed in [later, unloaded, never] {
+        note_sent_again(room, pressed);
+        assert!(resend_offers::for_event(room.as_str(), pressed.as_str()).is_none());
+    }
+    // Not readable yet, the room's encryption not confirmed, an Agent's
+    // device not ready, the send refused, or all that not done in time:
+    // offered again.
     assert_eq!(send_again_failed(room, later, &SendAgain::Later), "Could not send the message again. Try again in a moment.");
     assert!(!sent_again(room, later));
     assert!(resend_offers::for_event(room.as_str(), later.as_str()).is_some());
+    // Not loaded by its timeline, which waiting does not change: offered
+    // again, and its sender reads how to load it.
+    assert_eq!(send_again_failed(room, unloaded, &SendAgain::Unloaded), "Scroll to the message to send it again.");
+    assert!(!sent_again(room, unloaded));
+    assert!(resend_offers::for_event(room.as_str(), unloaded.as_str()).is_some());
     // Not the sender's message, or removed: not offered again while this
     // client runs.
     assert_eq!(send_again_failed(room, never, &SendAgain::Never), "This message can no longer be sent again.");
@@ -146,6 +149,28 @@ async fn copies_are_read_from_a_timelines_first_items_and_from_the_send_queue() 
 fn offered(room: &RoomId, events: &[&EventId]) -> Value {
     json!({"executions": events.iter().map(|event| json!({"roomId":room.as_str(),"threadRoot":event.as_str(),
         "eventId":event.as_str(),"agentMxid":"@first:x","canSendAgain":true})).collect::<Vec<_>>()})
+}
+
+/// A press whose new message is not ready in time, as when the request for
+/// the room's encryption hangs, ends at its deadline and is taken back: the
+/// message is offered again, and nothing went out.
+#[tokio::test]
+async fn a_press_not_ready_by_its_deadline_is_taken_back() {
+    let _turn = resend_offers::test_turn();
+    let room = room_id!("!send-again-deadline:x");
+    let first = event_id!("$never_ready");
+    test_read_copies(room.as_str(), None);
+    assert!(resend_offers::merge_read(resend_offers::TEST_READER, room.as_str(), "", &offered(room, &[first])));
+    note_sent_again(room, first);
+    assert!(resend_offers::for_event(room.as_str(), first.as_str()).is_none());
+    // A step that never answers.
+    let again = within(Duration::from_millis(20), std::future::pending::<Result<(), SendAgain>>()).await.unwrap_err();
+    assert_eq!(again, SendAgain::Later);
+    assert_eq!(send_again_failed(room, first, &again), "Could not send the message again. Try again in a moment.");
+    assert!(resend_offers::for_event(room.as_str(), first.as_str()).is_some());
+    // Steps done in time keep what they made, and their own failure.
+    assert_eq!(within(SEND_AGAIN_DEADLINE, async { Ok::<_, SendAgain>(7) }).await, Ok(7));
+    assert_eq!(within(SEND_AGAIN_DEADLINE, async { Err::<(), _>(SendAgain::Never) }).await, Err(SendAgain::Never));
 }
 
 #[test]
@@ -264,8 +289,9 @@ async fn a_message_not_loaded_or_not_readable_can_be_sent_later_and_one_not_the_
     let timeline = client.get_room(room_id).unwrap().timeline_builder().build().await.unwrap();
     // The user's own message, as shown.
     assert!(matches!(message_to_send_again(&timeline, event_id!("$mine")).await, Ok(MessageType::Text(_))));
-    // Not loaded, or its key may still arrive: another try may work.
-    assert_eq!(message_to_send_again(&timeline, event_id!("$absent")).await.err(), Some(SendAgain::Later));
+    // Not loaded: a try works once it is. Its key may still arrive: another
+    // try may work.
+    assert_eq!(message_to_send_again(&timeline, event_id!("$absent")).await.err(), Some(SendAgain::Unloaded));
     let locked = timeline.item_by_event_id(event_id!("$locked")).await.expect("the encrypted message is shown");
     assert!(locked.content().is_unable_to_decrypt());
     assert_eq!(message_to_send_again(&timeline, event_id!("$locked")).await.err(), Some(SendAgain::Later));

@@ -3699,8 +3699,23 @@ pub struct SendAgainFailed {
 enum SendAgain {
     /// Nothing went out now; another try may work.
     Later,
+    /// Its timeline has not loaded the message: a try works once it has,
+    /// which waiting alone does not bring about.
+    Unloaded,
     /// The message itself cannot be sent again: it is gone, or not the user's.
     Never,
+}
+
+/// How long a press of "Send again" may take to make its new message ready:
+/// the timeline, the message as shown, the room's encryption and the
+/// Agents' devices. Past it nothing goes out and the press is taken back
+/// (`SendAgain::Later`), so a request that hangs never leaves the message
+/// with neither an offer nor an error.
+const SEND_AGAIN_DEADLINE: Duration = Duration::from_secs(30);
+
+/// What `prepared` makes, if it is done within `deadline`.
+async fn within<T>(deadline: Duration, prepared: impl std::future::Future<Output = Result<T, SendAgain>>) -> Result<T, SendAgain> {
+    tokio::time::timeout(deadline, prepared).await.unwrap_or(Err(SendAgain::Later))
 }
 
 /// A message that this client knows to have been sent again. Two things keep
@@ -3932,6 +3947,10 @@ fn send_again_failed(room_id: &RoomId, event_id: &EventId, again: &SendAgain) ->
             forget_sent_again(room_id, event_id);
             "Could not send the message again. Try again in a moment."
         }
+        SendAgain::Unloaded => {
+            forget_sent_again(room_id, event_id);
+            "Scroll to the message to send it again."
+        }
         SendAgain::Never => "This message can no longer be sent again.",
     }
 }
@@ -3955,26 +3974,33 @@ async fn send_again_to_agents(
         Some(root) => TimelineKind::Thread { room_id: room_id.clone(), thread_root_event_id: root.clone() },
         None => TimelineKind::MainRoom { room_id: room_id.clone() },
     };
-    let (timeline, _sender) = get_timeline_and_sender(&timeline_kind).await.ok_or(SendAgain::Later)?;
-    let message = addressed_again(message_to_send_again(&timeline, event_id).await?, agents);
-    crate::room_encryption::confirmed_state(timeline.room()).await.map_err(|_| SendAgain::Later)?;
-    #[cfg(feature = "agent_chat")]
-    crate::agent_chat::encrypted_send::ensure_ready(timeline.room(), &message).await.map_err(|_| SendAgain::Later)?;
-    let mut extra = crate::agent_access::routing::room_only(&crate::agent_access::current(), current_user_id().as_deref(), room_id, &message).unwrap_or_default();
-    // The new message names the one it is sent for, so that no device of the
-    // sender offers that one again once it has the new one.
-    extra.extend(crate::hagency::resend_offers::marker(event_id.as_str()));
-    let content: AnyMessageLikeEventContent = match thread_root {
-        Some(root) => {
-            let reply = Reply {
-                event_id: root,
-                enforce_thread: matrix_sdk::room::reply::EnforceThread::Threaded(ruma::events::room::message::ReplyWithinThread::No),
-                add_mentions: ruma::events::room::message::AddMentions::No,
-            };
-            timeline.room().make_reply_event(message.into(), reply).await.map_err(|_| SendAgain::Later)?.into()
-        }
-        None => message.into(),
-    };
+    // Every step before the send has one deadline together.
+    let (timeline, content, extra) = within(SEND_AGAIN_DEADLINE, async {
+        let (timeline, _sender) = get_timeline_and_sender(&timeline_kind).await.ok_or(SendAgain::Later)?;
+        let message = addressed_again(message_to_send_again(&timeline, event_id).await?, agents);
+        crate::room_encryption::confirmed_state(timeline.room()).await.map_err(|_| SendAgain::Later)?;
+        #[cfg(feature = "agent_chat")]
+        crate::agent_chat::encrypted_send::ensure_ready(timeline.room(), &message).await.map_err(|_| SendAgain::Later)?;
+        let mut extra = crate::agent_access::routing::room_only(&crate::agent_access::current(), current_user_id().as_deref(), room_id, &message).unwrap_or_default();
+        // The new message names the one it is sent for, so that no device of
+        // the sender offers that one again once it has the new one.
+        extra.extend(crate::hagency::resend_offers::marker(event_id.as_str()));
+        let content: AnyMessageLikeEventContent = match thread_root {
+            Some(root) => {
+                let reply = Reply {
+                    event_id: root,
+                    enforce_thread: matrix_sdk::room::reply::EnforceThread::Threaded(ruma::events::room::message::ReplyWithinThread::No),
+                    add_mentions: ruma::events::room::message::AddMentions::No,
+                };
+                timeline.room().make_reply_event(message.into(), reply).await.map_err(|_| SendAgain::Later)?.into()
+            }
+            None => message.into(),
+        };
+        Ok::<_, SendAgain>((timeline, content, extra))
+    }).await?;
+    // Put into the room's send queue, outside the deadline: a new message
+    // cut off halfway into the queue could go out while the first one is
+    // offered again.
     timeline.send_with_extra_content(content, Some(extra)).await.map_err(|_| SendAgain::Later)?;
     log!("Queued a message sent again for {timeline_kind}.");
     Ok(())
@@ -3985,7 +4011,7 @@ async fn send_again_to_agents(
 /// sent from the room's stored event, which would be the text before any
 /// edit; the offer stays, and works once the message is on screen.
 async fn message_to_send_again(timeline: &Timeline, event_id: &EventId) -> Result<MessageType, SendAgain> {
-    let item = timeline.item_by_event_id(event_id).await.ok_or(SendAgain::Later)?;
+    let item = timeline.item_by_event_id(event_id).await.ok_or(SendAgain::Unloaded)?;
     if !item.is_own() { return Err(SendAgain::Never); }
     // Not decrypted yet: its key may still arrive.
     if item.content().is_unable_to_decrypt() { return Err(SendAgain::Later); }
