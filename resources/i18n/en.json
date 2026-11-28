@@ -1767,6 +1767,7 @@
   "Some Rooms could not start. The service will retry automatically.": "Some Rooms could not start. The service will retry automatically.",
   "Runtime authorization or its lease was lost. Stop the service, check your account and device assignment, then start again.": "Runtime authorization or its lease was lost. Stop the service, check your account and device assignment, then start again.",
   "The runtime could not reach the server. Check the connection; the service will retry automatically.": "The runtime could not reach the server. Check the connection; the service will retry automatically.",
+  "The Agent's lease ran out while this computer was asleep or its clock was changed. The service will retry automatically.": "The Agent's lease ran out while this computer was asleep or its clock was changed. The service will retry automatically.",
   "The previous runtime is still stopping. The service will retry automatically.": "The previous runtime is still stopping. The service will retry automatically.",
   "A Room worker stopped before becoming ready. The service will retry automatically.": "A Room worker stopped before becoming ready. The service will retry automatically.",
   "Retry in": "Retry in",

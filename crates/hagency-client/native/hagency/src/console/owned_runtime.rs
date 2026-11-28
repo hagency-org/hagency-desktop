@@ -1331,6 +1331,26 @@ const CLOCK_BEHIND: &str = "execution_clock_behind";
 /// computer's clock ahead by the whole authorization window. It is decided as
 /// a clock behind is, and the runtime stops with this code.
 const CLOCK_AHEAD: &str = super::CLOCK_AHEAD_FAILURE.1;
+/// An execution lease that the wall clock ended while its count still had
+/// more than `LEASE_COUNT_SLACK` to run: the computer slept through its end,
+/// or its clock was set forward. Nothing failed to reach the server, so the
+/// runtime stops with this code, not as a transport failure; the service
+/// starts it again.
+const LEASE_ELAPSED: &str = "execution_lease_elapsed";
+/// How far apart the wall clock's end of a lease and its counted end may lie
+/// before the wall clock is said to have ended it: less is the rounding of
+/// the two readings, not a sleep.
+const LEASE_COUNT_SLACK: Duration = Duration::from_secs(1);
+/// Why the heartbeat found `lease` over at `now`: the wall clock ended it
+/// ahead of its count (`LEASE_ELAPSED`), or it ran out with no renewal in
+/// time.
+fn lease_over(lease: &Lease, now: Instant) -> &'static str {
+    if lease.held_until.is_some_and(|held| held > now + LEASE_COUNT_SLACK) {
+        LEASE_ELAPSED
+    } else {
+        "lease_deadline_elapsed"
+    }
+}
 async fn operation<T: Transport>(
     console: &T,
     receiver: &mut watch::Receiver<bool>,
@@ -1383,7 +1403,7 @@ async fn heartbeat(
     let mut refresh_unanswered: Option<Instant> = None;
     let reason = loop {
         let Ok(expiry) = deadline(&lease) else {
-            break "lease_deadline_elapsed";
+            break lease_over(&lease, Instant::now());
         };
         // The old snapshot pins identity only. The RPC obtains a fresh proof;
         // expiry of an earlier snapshot must not prevent same-device recovery.
@@ -1469,6 +1489,8 @@ async fn heartbeat(
         3
     } else if reason == CLOCK_AHEAD {
         4
+    } else if reason == LEASE_ELAPSED {
+        5
     } else if terminal {
         1
     } else {
@@ -1875,14 +1897,15 @@ async fn run_host(
     heartbeat_result(heartbeat_failed.load(std::sync::atomic::Ordering::Acquire), result)
 }
 /// What a runtime ends with, given how its heartbeat stopped (see
-/// `heartbeat`): a refusal, no answer, or this computer's clock behind or
-/// ahead.
+/// `heartbeat`): a refusal, no answer, this computer's clock behind or
+/// ahead, or a lease the wall clock ended ahead of its count.
 fn heartbeat_result(failed: u8, result: Result<(), RuntimeError>) -> Result<(), RuntimeError> {
     match failed {
         1 => Err(RuntimeError::Authorization),
         2 => Err(RuntimeError::Transport),
         3 => Err(RuntimeError::Execution(CLOCK_BEHIND)),
         4 => Err(RuntimeError::Execution(CLOCK_AHEAD)),
+        5 => Err(RuntimeError::Execution(LEASE_ELAPSED)),
         _ => result,
     }
 }
@@ -6598,10 +6621,39 @@ for raw in sys.stdin:
         assert_eq!(code(1), Some("authorization_or_lease_lost"));
         assert_eq!(code(2), Some("device_transport_unavailable"));
         assert_eq!(code(3), Some("execution_clock_behind"));
+        assert_eq!(code(5), Some("execution_lease_elapsed"));
         assert!(matches!(
             heartbeat_result(0, Err(RuntimeError::Stopped)),
             Err(RuntimeError::Stopped)
         ));
+    }
+    #[test]
+    fn a_lease_the_wall_clock_ended_ahead_of_its_count_is_named_as_elapsed() {
+        let now = Instant::now();
+        let lease = |expires_at_ms: i64, held_until: Option<Instant>| Lease {
+            agent_id: "agent-a".into(),
+            owner_user_id: "uid".into(),
+            device_id: "device-a".into(),
+            device_generation: 1,
+            epoch: 1,
+            expires_at_ms,
+            held_until,
+        };
+        // After a sleep through its end: the wall clock has passed it, while
+        // the count, kept on a clock that stops in sleep, has 20 s to run.
+        let slept = lease(1_100_000, Some(now + Duration::from_secs(20)));
+        assert!(lease_deadline(&slept, now, 1_100_500).is_err());
+        assert_eq!(lease_over(&slept, now), "execution_lease_elapsed");
+        // A lease whose count ran out, as when its renewals got no answer, is
+        // not: the server may not have been reached.
+        let unrenewed = lease(1_100_000, Some(now));
+        assert!(lease_deadline(&unrenewed, now, 1_100_000).is_err());
+        assert_eq!(lease_over(&unrenewed, now), "lease_deadline_elapsed");
+        // Nor within the second the two readings may differ, nor without a
+        // count at all.
+        let rounded = lease(1_100_000, Some(now + Duration::from_millis(900)));
+        assert_eq!(lease_over(&rounded, now), "lease_deadline_elapsed");
+        assert_eq!(lease_over(&lease(1_100_000, None), now), "lease_deadline_elapsed");
     }
     #[test]
     fn a_clock_ahead_of_the_server_stops_the_runtime_with_its_name() {

@@ -903,25 +903,51 @@ fn renewal_error(code: &str) -> Error {
 /// of `renewal_error` say that the session is gone, and end it. Any other
 /// decision is about the request: the server still trusts the proof in hand
 /// to its end, so it is kept, as it is after a request that got no answer;
-/// a session is never cut by a refusal that is not about it. What was not
-/// decided keeps it too, so an answer with no code of the server's in it,
-/// such as a 401 from something on the way, signs no one out.
-fn renewal_refused(refusal: NativeError) -> Error {
+/// a session is never cut by a refusal that is not about it. Such a refusal
+/// (a request the server cannot read or route, a fault of its configuration)
+/// reads the same each time it is asked, so once that proof has ended
+/// (`proof_ended`) it ends the session too: one shared with the Matrix
+/// sign-in is resumed, and any other asks for a sign-in, where it was asked
+/// again every second without end. What was not decided keeps the session,
+/// so an answer with no code of the server's in it, such as a 401 from
+/// something on the way, signs no one out.
+fn renewal_refused(refusal: NativeError, proof_ended: bool) -> Error {
     match refusal.said() {
         Said::Decided if matches!(refusal.status, 401 | 403) => Error::Unauthorized,
         Said::Decided => {
             let read = renewal_error(&refusal.code);
-            if matches!(read, Error::Unavailable) {
+            if !matches!(read, Error::Unavailable) {
+                read
+            } else if proof_ended {
+                tracing::warn!(
+                    stage = "owner_renewal",
+                    status = refusal.status,
+                    code = %refusal.code,
+                    "The server refused a renewal for a reason of the request and the proof in hand has ended; the session ends"
+                );
+                Error::Unauthorized
+            } else {
                 tracing::warn!(
                     stage = "owner_renewal",
                     status = refusal.status,
                     code = %refusal.code,
                     "The server refused a renewal for a reason of the request; the proof in hand is kept to its end"
                 );
+                read
             }
-            read
         }
         Said::NotAsked | Said::ScopeReplaced | Said::NoAnswer => Error::Unavailable,
+    }
+}
+impl RemoteSession {
+    /// Whether the proof this session held has ended, by either of its two
+    /// ends. A session being restored holds none yet, which its stated end of
+    /// zero says (see `sdk_resume`): a refusal of its first renewal fails the
+    /// restore, which keeps its record, as before.
+    fn proof_ended(&self) -> bool {
+        self.authorized_until_ms != 0
+            && (self.authorized_until <= Instant::now()
+                || wall_now_ms() >= self.authorized_until_ms)
     }
 }
 /// A failure of a renewal step that this host makes itself.
@@ -1036,8 +1062,9 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             renewal_response.status().as_u16()
         );
     }
-    let (renewed, clock) =
-        proof_answer(request_started, renewal_response).await.map_err(renewal_refused)?;
+    let (renewed, clock) = proof_answer(request_started, renewal_response)
+        .await
+        .map_err(|refusal| renewal_refused(refusal, session.proof_ended()))?;
     // The next renewal asks for the window this answer could show.
     session.server_clock = if clock.dated() {
         ServerClock::Dated
@@ -1098,6 +1125,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 &session.binding.client_id,
                 source.as_ref(),
                 requested_window_ms(session),
+                session.proof_ended(),
             )
             .await
             {
@@ -1130,7 +1158,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
             code = %refusal.code,
             "Owner renewal failed"
         );
-        renewal_refused(refusal)
+        renewal_refused(refusal, session.proof_ended())
     })?;
     if !identity_matches(&identity, &session.binding) || identity["userId"] != session.user_id {
         return Err(Error::Unauthorized);
@@ -1245,7 +1273,9 @@ pub(crate) fn proof_refused<E>(
     }
 }
 /// Has the SDK refresh its token and renews the proof with the new one, asking
-/// for `window_ms`: its bounds, and the end the server stated for it.
+/// for `window_ms`: its bounds, and the end the server stated for it. A
+/// refusal is read with `proof_ended`, whether the proof in hand has ended
+/// (see `renewal_refused`).
 async fn renew_with_refreshed_token(
     client: &Client,
     server: &Url,
@@ -1253,6 +1283,7 @@ async fn renew_with_refreshed_token(
     client_id: &str,
     source: &dyn super::native::MatrixTokenSource,
     window_ms: u64,
+    proof_ended: bool,
 ) -> Result<(Instant, Duration, u64), Error> {
     let refreshed = source.refresh_access_token().await.map_err(|error| {
         let code = super::native::sdk_source_failure(error);
@@ -1287,8 +1318,9 @@ async fn renew_with_refreshed_token(
             response.status().as_u16()
         );
     }
-    let (refreshed, clock) =
-        proof_answer(request_started, response).await.map_err(renewal_refused)?;
+    let (refreshed, clock) = proof_answer(request_started, response)
+        .await
+        .map_err(|refusal| renewal_refused(refusal, proof_ended))?;
     let (until, taken) = clock.bounds(&refreshed).map_err(unusable_proof)?;
     Ok((until, taken, stated_end(&[&refreshed])))
 }
@@ -2949,7 +2981,10 @@ mod renewal_reading_tests {
 
     #[test]
     fn a_renewal_failure_is_read_by_said_and_only_a_revocation_ends_the_session() {
-        let read = |status: u16, code: &str| renewal_refused(renewal_failure(status, code));
+        let read_with = |status: u16, code: &str, ended: bool| {
+            renewal_refused(renewal_failure(status, code), ended)
+        };
+        let read = |status: u16, code: &str| read_with(status, code, false);
         // A refusal of the credential, and the codes that say the session is
         // gone, whatever their status.
         for (status, code) in [
@@ -2961,17 +2996,23 @@ mod renewal_reading_tests {
         ] {
             assert!(matches!(read(status, code), Error::Unauthorized), "{status} {code}");
         }
-        // Decided, and about the request: the proof in hand is kept to its end.
+        // Decided, and about the request: the proof in hand is kept to its
+        // end. Asked again, the server answers the same, so once that proof
+        // has ended the session ends too.
         for (status, code) in [
             (400, "invalid_arguments"),
             (400, "invalid_identity_configuration"),
+            (400, "unsupported_operation"),
             (404, "not_found"),
             (409, "a_code_of_the_server"),
         ] {
             assert!(matches!(read(status, code), Error::Unavailable), "{status} {code}");
+            let ended = read_with(status, code, true);
+            assert!(matches!(ended, Error::Unauthorized), "{status} {code}");
         }
         // Not decided: no answer, the server not serving it, or an answer
-        // with no code of the server's in it, whatever its status.
+        // with no code of the server's in it, whatever its status. It is
+        // asked again, also after the proof in hand has ended.
         for (status, code) in [
             (401, "server_request_failed"),
             (403, "server_request_failed"),
@@ -2981,7 +3022,46 @@ mod renewal_reading_tests {
             (503, "management_capacity"),
         ] {
             assert!(matches!(read(status, code), Error::Unavailable), "{status} {code}");
+            let ended = read_with(status, code, true);
+            assert!(matches!(ended, Error::Unavailable), "{status} {code}");
         }
+    }
+
+    #[tokio::test]
+    async fn a_renewal_refused_for_the_request_ends_the_session_once_its_proof_has_ended() {
+        let refused = || json!({"code":"invalid_arguments"});
+        // While the proof in hand lasts, it is kept.
+        let (listener, origin) = bind().await;
+        let server = serve(listener, vec![(400, refused())]);
+        let end = Instant::now() + Duration::from_secs(20);
+        let mut session = session_at(&origin, end, wall_now_ms() + 20_000);
+        session.checked = Instant::now() - Duration::from_secs(30);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        assert_eq!(session.authorized_until, end);
+        assert_eq!(server.await.unwrap(), [RENEW]);
+        // Once it has ended, by either clock, the same refusal ends the
+        // session, where it was asked again every second without end.
+        for (until, until_ms) in [
+            (Instant::now(), wall_now_ms() + 20_000),
+            (Instant::now() + Duration::from_secs(20), wall_now_ms() - 1),
+        ] {
+            let (listener, origin) = bind().await;
+            let server = serve(listener, vec![(400, refused())]);
+            let mut session = session_at(&origin, until, until_ms);
+            assert!(session.proof_ended());
+            assert!(matches!(renew(&mut session).await, Err(Error::Unauthorized)));
+            assert_eq!(server.await.unwrap(), [RENEW]);
+        }
+        // A session being restored holds no proof yet: its first renewal,
+        // refused so, fails the restore as before.
+        let restoring = session_at(&origin, Instant::now(), 0);
+        assert!(!restoring.proof_ended());
+        // An answer that is not a decision is asked again all the same.
+        let (listener, origin) = bind().await;
+        let server = serve(listener, vec![(503, json!({"code":"storage_unavailable"}))]);
+        let mut session = session_at(&origin, Instant::now(), wall_now_ms() - 1);
+        assert!(matches!(renew(&mut session).await, Err(Error::Unavailable)));
+        assert_eq!(server.await.unwrap(), [RENEW]);
     }
 
     #[tokio::test]

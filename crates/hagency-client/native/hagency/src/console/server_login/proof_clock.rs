@@ -82,6 +82,10 @@ impl ProofClock {
     }
 
     /// The deadline of a proof of a sign-in, which asks for no longer window.
+    /// It is read as the answer to a renewal is: an undated proof that reads
+    /// longer than the default window, on a clock that is behind, is held to
+    /// it from the send (see `renewed_remaining_ms`). Only a clock ahead keeps
+    /// the code it had here.
     pub(super) fn deadline_ms(&self, until: u64) -> Result<Instant, &'static str> {
         self.bounds_ms(until, false).map(|(deadline, _)| deadline)
     }
@@ -133,11 +137,9 @@ impl ProofClock {
         {
             say_clock_lead(ahead);
         }
-        let remaining = if renewal {
-            renewed_remaining_ms(until, local_ms, self.server_second_ms, elapsed)
-        } else {
-            remaining_ms(until, local_ms, self.server_second_ms, elapsed)
-        };
+        // A sign-in and a renewal read the window by one rule; `renewal` only
+        // names a clock ahead.
+        let remaining = renewed_remaining_ms(until, local_ms, self.server_second_ms, elapsed);
         let remaining = remaining.ok_or_else(|| {
             if renewal && clock_ahead(until, local_ms, self.server_second_ms, elapsed) {
                 CLOCK_AHEAD
@@ -148,8 +150,7 @@ impl ProofClock {
         // An undated proof held to the default window leaves out the rest of
         // the window the local clock reads, up to the longest one asked for:
         // a lease the server cut to that window is read the same way.
-        let bound = if renewal
-            && self.server_second_ms.is_none()
+        let bound = if self.server_second_ms.is_none()
             && until.saturating_sub(local_ms) > MAX_WINDOW_MS
         {
             MAX_REQUESTED_WINDOW_MS
@@ -253,9 +254,10 @@ fn remaining_ms(
     (1..=bound).contains(&remaining).then_some(remaining)
 }
 
-/// `remaining_ms` for the answer to a renewal of the session. Without the
-/// server's date, a longer window that this host asked for cannot be told from
-/// this computer's clock being behind, and the undated proof that reads longer
+/// `remaining_ms` for a proof of the session, from a renewal or a sign-in.
+/// Without the server's date, a longer window that this host asked for cannot
+/// be told from this computer's clock being behind, nor can the default window
+/// a sign-in gets, and the undated proof that reads longer
 /// than the default window is not refused: it is held to the default window
 /// from the moment its request went out. The server counts the window it gave
 /// from when it handled the request, which is later, so a window of the
@@ -496,11 +498,27 @@ mod tests {
             renewed_remaining_ms(252_000, 132_200, Some(132_000), half_second),
             Some(118_500)
         );
-        // A sign-in asks for no longer window, and still refuses it.
+        // A sign-in reads it by the same rule. Its server gives the default
+        // window, which a clock 5 s behind reads as 35 s: held to 30 s from
+        // the send, where it was refused and a computer more than a second
+        // behind could not sign in.
+        for until in [now_ms + 35_000, now_ms + 120_000] {
+            let deadline = undated.deadline_ms(until).unwrap();
+            assert!(deadline >= started + Duration::from_secs(30), "{:?}", deadline - started);
+            let held = deadline - started;
+            assert!(deadline <= started + Duration::from_millis(30_001), "{held:?}");
+        }
+        // One sent too long ago has no time left, as a renewal's has none.
+        let late =
+            ProofClock { started: Instant::now() - Duration::from_secs(30), server_second_ms: None };
         assert_eq!(
-            undated.deadline_ms(now_ms + 120_000).unwrap_err(),
+            late.deadline_ms(now_ms + 35_000).unwrap_err(),
             "authorization_time_window_unavailable"
         );
+        // Within the default window, it is read with the local clock as before.
+        let within = undated.deadline_ms(now_ms + 20_000).unwrap();
+        assert!(within > Instant::now() + Duration::from_secs(19));
+        assert!(within < Instant::now() + Duration::from_secs(21));
         // Until a dated answer comes, a renewal asks for no more.
         assert_eq!(requested_window_ms(false), DEFAULT_WINDOW_MS);
         assert_eq!(requested_window_ms(true), REQUESTED_WINDOW_MS);

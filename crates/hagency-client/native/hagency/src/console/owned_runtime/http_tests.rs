@@ -1445,6 +1445,62 @@ async fn heartbeat_stops_at_once_when_this_clock_is_behind_and_says_so() {
     native.shutdown().await;
     server.abort();
 }
+/// A lease that a sleep ran past: by the wall clock it is over, while its
+/// count, kept on a clock that stops in sleep, still runs. The heartbeat stops
+/// and names it; it used to report a transport failure, though nothing failed
+/// to reach the server.
+#[tokio::test]
+async fn heartbeat_names_a_lease_that_a_sleep_ran_past() {
+    let (origin, state, server) = server(false, 0).await;
+    let root = hagency_platform::legacy_writer::test_support::initialized_tempdir().unwrap();
+    let native =
+        NativeOwner::open_with_matrix(&root.path().join("state"), &origin, OWNER, Arc::new(Source))
+            .await
+            .unwrap();
+    let console = native.test_console().clone();
+    let device = console.authorized_device().await.unwrap();
+    state.lock().unwrap().epoch = 1;
+    let lease = Lease {
+        agent_id: "agent-a".into(),
+        owner_user_id: "uid".into(),
+        device_id: "device-a".into(),
+        device_generation: 1,
+        epoch: 1,
+        expires_at_ms: wall_ms() - 1_000,
+        held_until: Some(Instant::now() + Duration::from_secs(20)),
+    };
+    let (stop, receiver) = watch::channel(false);
+    let failed = Arc::new(std::sync::atomic::AtomicU8::new(0));
+    let task = tokio::spawn(heartbeat(
+        console,
+        device,
+        lease,
+        stop.clone(),
+        receiver,
+        failed.clone(),
+    ));
+    tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .expect("a lease the wall clock ended must stop the heartbeat at once")
+        .unwrap();
+    assert!(*stop.borrow());
+    let failed = failed.load(std::sync::atomic::Ordering::Acquire);
+    assert_eq!(failed, 5);
+    assert_eq!(
+        failure_code(&heartbeat_result(failed, Ok(()))),
+        Some("execution_lease_elapsed")
+    );
+    let renewals = state
+        .lock()
+        .unwrap()
+        .paths
+        .iter()
+        .filter(|p| p.ends_with("/leases/renew"))
+        .count();
+    assert_eq!(renewals, 0, "a lease that is over is not renewed");
+    native.shutdown().await;
+    server.abort();
+}
 #[tokio::test]
 async fn heartbeat_retries_transport_failure_but_never_extends_unconfirmed_lease() {
     for recover in [true, false] {

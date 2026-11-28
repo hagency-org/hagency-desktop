@@ -1774,6 +1774,7 @@
   "Some Rooms could not start. The service will retry automatically.": "部分房间启动失败，服务将自动重试。",
   "Runtime authorization or its lease was lost. Stop the service, check your account and device assignment, then start again.": "运行授权或租约已失效。请停止服务，检查账号和设备分配后重新启动。",
   "The runtime could not reach the server. Check the connection; the service will retry automatically.": "运行器无法连接服务器。请检查网络，服务将自动重试。",
+  "The Agent's lease ran out while this computer was asleep or its clock was changed. The service will retry automatically.": "这台电脑休眠或时钟被更改期间，Agent 的租约已到期。服务将自动重试。",
   "The previous runtime is still stopping. The service will retry automatically.": "上一次运行仍在停止中，服务将自动重试。",
   "A Room worker stopped before becoming ready. The service will retry automatically.": "房间运行器在就绪前停止，服务将自动重试。",
   "Retry in": "重试倒计时",

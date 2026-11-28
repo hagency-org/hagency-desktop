@@ -157,6 +157,8 @@ fn runtime_diagnostic(code: &str) -> String {
         "agent_lease_busy" => "The previous runtime lease is still active. Wait briefly and retry.",
         "authorization_or_lease_lost" => "Runtime authorization or its lease was lost. Stop the service, check your account and device assignment, then start again.",
         "device_transport_unavailable" => "The runtime could not reach the server. Check the connection; the service will retry automatically.",
+        // The wall clock ended the lease ahead of its count: the computer slept, or its clock was set.
+        "execution_lease_elapsed" => "The Agent's lease ran out while this computer was asleep or its clock was changed. The service will retry automatically.",
         "agent_process_closing" => "The previous runtime is still stopping. The service will retry automatically.",
         "agent_execution_device_required" => "Assign this Agent to this device before starting it here.",
         // The server's date shows it; asking again cannot help until the clock is set.
@@ -4874,6 +4876,9 @@ mod tests {
             let message = runtime_diagnostic(code);
             assert!(message.contains(code) && message.contains("clock") && message.contains("date and time"), "{message}");
         }
+        // A lease a sleep ran past is not worded as a connection fault.
+        let elapsed = runtime_diagnostic("execution_lease_elapsed");
+        assert!(elapsed.contains("execution_lease_elapsed") && elapsed.contains("asleep") && !elapsed.contains("connection"), "{elapsed}");
     }
     #[test]
     fn service_detail_does_not_claim_readiness_and_preserves_action_failure() {

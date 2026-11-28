@@ -113,6 +113,17 @@ come to this:
    without one no longer signs the owner out; the proof in hand is kept and
    the renewal asked again.
 
+   A renewal that the server refuses for a reason of the request, not of
+   the session, keeps the proof in hand to its end too: the server still
+   trusts that proof. The server makes such a refusal only for a request it
+   cannot read, one that reaches no route of it, or a fault of its own
+   configuration, and it answers the same every time it is asked. On main
+   the renewal is then asked again every second for as long as it is
+   refused. In review (Desktop #246), once the proof in hand has ended, the
+   same refusal ends the session as a refusal of the session does: a
+   session shared with the Matrix sign-in is resumed with a fresh proof,
+   and any other one asks for a sign-in.
+
    In review (Desktop #246), a renewal of the session whose answer, by the
    server's date, shows this computer's clock ahead of the server's by the
    whole window, which no wait puts right, is decided too, as
@@ -134,8 +145,13 @@ come to this:
    authorization of each reply of an owned Agent are counted from their
    request with the answer's date, and the session's proof is held against
    both ends, so a proof slept through is not used for its last awake
-   seconds. Whether the token needs refreshing is decided on the end the
-   server counted, not on what the wall clock left of it. Counting takes the
+   seconds. An owned Agent's run whose execution lease the wall clock ended
+   while its counted end still lay ahead, as after a sleep through it or a
+   clock set forward, ends as `execution_lease_elapsed`; on main it ends as
+   `device_transport_unavailable`, as if the server could not be reached.
+   The service starts it again either way. Whether the token needs
+   refreshing is decided on the end the server counted, not on what the
+   wall clock left of it. Counting takes the
    time in the answer's `Date` header, which the server process or a proxy
    in front of it writes, against the end the server wrote from its database
    clock: it assumes the two clocks agree to within a second.
@@ -151,7 +167,14 @@ come to this:
    #246), until an answer carries the date again, every renewal asks for 30
    seconds only, under both headers, which a server that grants what is
    asked gives, and the next dated answer asks for the longer window again.
-   A sign-in asks for no longer window, and refuses such a proof as on main.
+   A sign-in asks for no longer window, and its server gives the default
+   one, but without the date a computer whose clock is behind reads that
+   one as longer too. On main a sign-in refuses such a proof, so behind
+   such a proxy a computer whose clock is more than a second behind cannot
+   sign in at all. In review (Desktop #246), a sign-in, and the restore of
+   a session, read their proofs as a renewal does: an undated one that
+   reads longer than the default window is held to 30 seconds from its
+   request.
 
 For the room:
 
@@ -364,13 +387,26 @@ describes. "Send again" is what the sender has until it is decided.
   computer whose clock is behind by more than a second is refused a
   full-length lease. In review (Desktop #246) the lease is counted from its
   request with the answer's date. Only an answer without a date, behind a
-  proxy that drops it, still leaves the wall clock as the only witness; on a
-  computer whose clock is behind, the run then ends as
-  `execution_clock_behind` and says that the clock is behind. Behind such a
-  proxy the session's renewal is refused on main once the server grants
-  more than 30 seconds, and asked again every second; in review (Desktop
-  #246) the session runs at the default window of 30 seconds instead,
-  whatever window the server would grant (rule 4).
+  proxy that drops it, still leaves the wall clock as the only witness,
+  and on a computer whose clock is behind it reads the lease as longer
+  than the server gave it. Behind such a proxy the session's renewal is
+  refused on main once the server grants more than 30 seconds, and asked
+  again every second; in review (Desktop #246) the session runs at the
+  default window of 30 seconds instead, whatever window the server would
+  grant (rule 4). The server cuts each lease to the session's end, so the
+  lease asked for after a renewal of the session reads as that renewal's
+  30 seconds, less the time since it, plus however far the clock is
+  behind. In review (Desktop #246), a lease, and the authorization of a
+  reply, read without the date are held no longer than the session's
+  proof that was in hand when they were asked for. That proof ends here no
+  later than the server's session does, so the lease ends here first, and
+  no other device of the owner can take it over while this one still runs
+  the Agent. A lease that reads more than a second longer than was asked
+  is refused as `execution_clock_behind`, which ends the run and says that
+  the clock is behind. On a clock behind by more than a second or two that
+  is the first lease asked for soon enough after a renewal of the session,
+  which often comes just before it: the run then ends within a few
+  renewals.
 - An Agent's execution lease that its daemon did not release stays with
   that daemon for up to 120 seconds from its last renewal. The same device
   under the same sign-in takes it back at once. Another device, or this one
@@ -463,3 +499,4 @@ point is in the release notes. Pull requests named "in review" are open.
 | 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112) |
 | 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | implemented (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112) |
 | 3, 4. A session's proof renewed without the server's date is held to 30 seconds from its request, and renewals ask for 30 seconds under both headers until a dated answer comes; a clock ahead of the server's by the whole window is decided and named (`execution_clock_ahead`) at every step that needs the session's proof | in review (Desktop #246) |
+| 3, 4. A sign-in reads a proof without the date as a renewal does; an execution lease or a reply's authorization without the date is held to the session's proof; a renewal refused for a reason of the request ends the session once the proof in hand has ended; a run whose lease the wall clock ended early is named (`execution_lease_elapsed`) | in review (Desktop #246) |
