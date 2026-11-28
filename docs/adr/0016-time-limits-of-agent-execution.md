@@ -161,9 +161,11 @@ For the room:
    message is named even when it was the only one, when the status gives
    its Matrix ID. A row without one has a line without a name, and nothing
    is offered for its Agent, which no new message could mention. A message
-   that arrived while its Agent was stopped says that the Agent is paused;
-   once the Agent runs again, its sender reads that the Agent did not
-   process it.
+   that arrived while its Agent was stopped tells its sender that the Agent
+   is stopped and that the message can be sent again once it runs (rule 6),
+   and anyone else that the Agent is paused; from a server that does not
+   say why a message is not offered, its sender reads that too. Once the
+   Agent runs again, its sender reads that the Agent did not process it.
 6. **Its sender can send it again.** "Send again" sends the same message as a
    new one that mentions only the Agents that did not process it, in the same
    thread. An Agent that already answered is not asked twice. The first
@@ -178,54 +180,74 @@ For the room:
    only to the message's sender, and only while the Agent is in the room and
    has not been stopped. A message that waits for the Agent's allowance is
    not offered while it waits: its notice says so, and shows the Agent's
-   owner or manager the pool request that would let it go on. When it has
+   manager, or its pool's administrator, the pool request that would let it
+   go on; once the message has ended, the notice shows neither. When it has
    waited a day, or when the allowance period turns first, the message has
-   ended without a turn and is offered like the others. Nor is it offered
+   ended without a turn. It is offered like the others once a copy sent
+   then could run: not while the Agent's allowance is still used up, nor,
+   in the same period, while the budget that held the message is still the
+   one applied. Until then its notice says why (below). Nor is it offered
    for a run whose outcome is unknown, which may have acted or cost
    something and has its review instead, nor for a message that is still
    waiting. The review of the original task records is shown only to a
    reader whom the status allows to read them (`viewerCanReview`: the
    Agent's manager, or the administrator of its project or pool); anyone
-   else reads that the Agent's owner can review them, and from a server
-   that does not say, every reader has the review as before.
+   else, the owner of the computer that runs the Agent included, reads who
+   can review them, and from a server that does not say, every reader has
+   the review as before.
 
    When the status says why a message that ended without a turn is not
-   offered to its sender (`notOfferedBecause`), the notice says so. For an
-   Agent that is stopped (`agent_stopped`), or that cannot take a new
-   message now for another reason (`agent_unavailable`), the line says that
-   the Agent did not process the message, that it is stopped or not
-   available now, and that the message can be sent again once the Agent
-   runs again; it names the Agent when the status gives its Matrix ID. For
-   an Agent the status does not name (`agent_unnamed`), and from a server
-   that does not say why, the line stays as rule 5 has it.
+   offered to its sender (`notOfferedBecause`), the notice says so, and
+   names the Agent when the status gives its Matrix ID. The status says it
+   only when a copy sent now could run but for its Agent, or would wait for
+   the same allowance. For an Agent that is stopped (`agent_stopped`), the
+   line says that the Agent did not process the message, that it is
+   stopped, and that the message can be sent again once the Agent runs
+   again. For one that runs but cannot take a new message in the room now
+   (`agent_unavailable`), it says that the Agent is not available now, and
+   that the message can be sent again once the Agent can take messages in
+   the room again. For one whose allowance a copy would wait for as the
+   message did (`allowance_spent`, which a server change in review adds),
+   it says that the Agent's allowance is used up, and that the message can
+   be sent again once the allowance period turns or a budget is applied.
+   For an Agent the status does not name (`agent_unnamed`), and from a
+   server that does not say why, the line stays as rule 5 has it.
 
    A message that the computer blocked because it could not count the
    Agent's earlier usage cannot run in that period, whatever anyone does.
-   When the server ends it at once (`endReason`), its notice says so, and it
-   is offered only once the Agent's next period has begun, never for an
-   Agent without periods; until then its notice says that a copy would end
-   the same way. When the server lets it wait out its time, its notice says
-   that it cannot start and that it ends within a day.
+   When the server ends it at once (`endReason`), its notice says so, and
+   says that a copy would end the same way until the Agent's next period
+   has begun, which never comes for an Agent without periods. From then on
+   it is offered as any other message that ended without a turn, and when
+   the status says why it is not offered, its notice says so, as above.
+   When the server lets it wait out its time, its notice says that it
+   cannot start and that it ends within a day.
 
    It is offered on the message itself, on every message the room's status
    lists that can be sent again, and the notice at the end of the timeline
    offers it for the newest message too. Both read the same status, so an
    earlier message keeps its offer when a newer one arrives, and a click on
    either sends once. The newest read of the status that lists a message,
-   of the room or of one of its threads, decides whether it is offered: an
-   older read of a thread does not keep an offer that a newer read of the
-   room no longer makes. A reply in a thread is offered in its thread. The
-   room's timeline does not show the reply and cannot send it again, so the
-   room's notice names the Agent and says to open the thread.
+   of the room or of one of its threads, decides whether it is offered, on
+   the card and on the notice alike: an older read of a thread does not
+   keep an offer that a newer read of the room no longer makes, nor the
+   notice's own older read one that a newer read of a thread withdrew. A
+   reply in a thread is offered in its thread. The room's timeline does not
+   show the reply and cannot send it again, so the room's notice names the
+   Agent and says to open the thread.
 
    It is never pressed by the program. Two devices of one person would each
    send it, and one message would become two runs.
 
    What is sent is the message as its sender last edited it, read from the
    room as it is shown; it is never taken from the stored first version. When
-   the new message cannot be sent now (the message is not loaded or not yet
-   readable, the room's encryption is not confirmed, the Agent's device is
-   not ready), the room says to try again in a moment and offers it again.
+   the new message cannot be sent now (the message is not yet readable, the
+   room's encryption is not confirmed, the Agent's device is not ready, or
+   these steps are not all done within 30 seconds of the press), the room
+   says to try again in a moment and offers it again. A message that its
+   timeline has not loaded can be sent once it is, which waiting does not
+   bring about: the room says to scroll to the message to send it again,
+   and offers it again.
    A message that was removed cannot be sent again: the server does not learn
    of a removal, so it is offered until its sender presses once, and the room
    then says that it can no longer be sent and stops offering it until the
@@ -241,20 +263,24 @@ For the room:
    one that arrives later, and, for a new message that has not left the
    device yet, from the device's send queue, which keeps it across a
    restart. A device that has not read the new message (it did not load
-   it, or it read the room only after the new message was removed) offers
-   the first one again; the new message stands in the room for its sender
-   to see. A new message whose sending is cancelled on its device before it
-   left keeps the first one from being offered by that window until the app
-   starts again.
+   it, cannot decrypt it yet, or read the room only after the new message
+   was removed) offers the first one again; the new message stands in the
+   room for its sender to see. A new message whose sending is cancelled on
+   its device before it left keeps the first one from being offered by that
+   window until the app starts again.
 
    The device keeps what it read apart from what was pressed on it. A press
-   whose new message could not be sent now ("try again in a moment") is
-   forgotten, and the first message is offered again, unless the device has
-   read a new message for it, from another device or an earlier press: a
-   new message it read is never forgotten that way. A timeline offers
-   nothing until it has read the new messages it starts with and those in
-   the send queue, so neither a restart nor opening a room or a thread
-   shows an offer that its new message would withdraw a moment later. A
+   whose new message could not be sent now ("try again in a moment", or
+   "scroll to the message") is forgotten, and the first message is offered
+   again, unless the device has read a new message for it, from another
+   device or an earlier press: a new message it read is never forgotten
+   that way. A timeline offers nothing until it has read the new messages
+   it starts with and those in the send queue, so neither a restart nor
+   opening a room or a thread shows an offer that a new message the device
+   already has would withdraw a moment later. A new message that reaches
+   the device later, as one that another device sent while this one slept
+   reaches it with the first sync after the wake, withdraws an offer
+   already shown; a press before it arrives sends a second one. A
    message is offered only while the timeline its new message would stand
    in is read: one of the room's own timeline only while that timeline is,
    also where its thread is open, and a reply in a thread only while its
@@ -308,16 +334,16 @@ describes. "Send again" is what the sender has until it is decided.
 - A reader who did not send a message that arrived while its Agent was
   stopped keeps reading that the Agent is paused after it runs again.
 - A message is offered while a read of the room's status lists it. Each
-  read has a scope, the room or one of its threads, and holds the 16
-  newest rows its reader is shown there, one for each Agent of a message:
-  rows of the reader's own messages and of every message to an Agent whose
-  computer is the reader's. In an encrypted room, rows of such messages
-  that wait for an outdated or absent daemon to read them count too. The
-  cut counts rows, not messages, so a message at the cut can be offered
-  for only some of its Agents. A message that ended without a turn is no
-  longer offered by a read of its scope once 16 newer rows stand above it
-  there, which for the owner of a busy Agent can be soon. A read that does
-  not list a message says nothing of it, so an offer that a read of
+  read has a scope, the room or one of its threads, and lists the 16
+  newest messages its reader is shown there, each with a row for every one
+  of its Agents: the reader's own messages and every message to an Agent
+  whose computer is the reader's. In an encrypted room, such messages that
+  wait for an outdated or absent daemon to read them count too. The cut
+  falls between messages, so a message is never listed, nor offered, for
+  only some of its Agents. A message that ended without a turn is no
+  longer offered by a read of its scope once 16 newer messages stand above
+  it there, which for the owner of a busy Agent can be soon. A read that
+  does not list a message says nothing of it, so an offer that a read of
   another scope made (a thread's read lists the message its thread starts
   from) stays until a read lists the message again.
 - What a device knows of messages sent again is kept for 1024 messages.
@@ -461,5 +487,5 @@ point is in the release notes. Pull requests named "in review" are open.
 | 4. The wall clock only ends a lease early | holds for a ticket and a start window; not yet for the session's proof, whose wall-clock end is in review (Desktop #246). For the activity lease it is in review (Desktop #243 and #251); on main the store still refuses an activity lease that reads longer than allowed by the wall clock, which a slow clock makes of every fresh lease. The Agent execution lease, the authorization of an owned Agent's reply and the session's proof: in review (Desktop #246) |
 | 1. The window is asked for under the header that a server granting more than 30 seconds reads (`x-hagency-authorization-window-v2-ms`), and under the older one | implemented (Desktop #262, server #110); that server grants builds that send only the older header 30 seconds |
 | 6. One click: a new message read on the device is kept apart from a press there, which a failure that another try can fix takes back; a timeline offers nothing before it has read the new messages it starts with and its send queue; the record keeps 1024 messages; the notice says why a message that ended without a turn is not offered | implemented (Desktop #263); the reasons need a server whose status sends `notOfferedBecause` (server #112) |
-| 6. The review of original task records only for a reader who can read them; anyone else reads that the Agent's owner can | implemented (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112) |
+| 6. The review of original task records only for a reader who can read them; anyone else reads who can | implemented (Desktop #264); needs a server whose status sends `viewerCanReview` (server #112) |
 | 3, 4. A session's proof renewed without the server's date is held to 30 seconds from its request, and renewals ask for 30 seconds under both headers until a dated answer comes; a clock ahead of the server's by the whole window is decided and named (`execution_clock_ahead`) at every step that needs the session's proof | in review (Desktop #246) |
