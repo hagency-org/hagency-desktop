@@ -118,14 +118,31 @@ struct ExecutionLine {
 impl ExecutionLine {
     fn shown(&self)->String {
         use crate::i18n::{format,tr};
-        match self.name.as_deref().or(self.agent.as_deref()) {
-            Some(agent) if self.text==UNPROCESSED=>format(UNPROCESSED_BY,&[("agent",agent.to_owned())]),
-            Some(agent)=>format("{agent}: {status}",&[("agent",agent.to_owned()),("status",tr(self.text).to_owned())]),
-            None=>tr(self.text).to_owned(),
+        match (self.name.as_deref().or(self.agent.as_deref()),named(self.text)) {
+            (Some(agent),Some(by))=>format(by,&[("agent",agent.to_owned())]),
+            (Some(agent),None)=>format("{agent}: {status}",&[("agent",agent.to_owned()),("status",tr(self.text).to_owned())]),
+            (None,_)=>tr(self.text).to_owned(),
         }
     }
 }
 const UNPROCESSED:&str="This message was not processed; it will not retry automatically.";
+/// A message that ended without a turn and is not offered to its sender,
+/// because its Agent is stopped (`notOfferedBecause: agent_stopped`).
+const STOPPED:&str="This message was not processed. Its Agent is stopped; it can be sent again once the Agent runs again.";
+const STOPPED_BY:&str="{agent} did not process this message and is stopped. It can be sent again once {agent} runs again.";
+/// The same, for an Agent that cannot take a new message now for another
+/// reason (`agent_unavailable`).
+const UNAVAILABLE:&str="This message was not processed. Its Agent is not available now; it can be sent again once the Agent runs again.";
+const UNAVAILABLE_BY:&str="{agent} did not process this message and is not available now. It can be sent again once {agent} runs again.";
+/// The line that names its Agent in its sentence, for a text that does.
+fn named(text:&str)->Option<&'static str> {
+    match text {
+        UNPROCESSED=>Some(UNPROCESSED_BY),
+        STOPPED=>Some(STOPPED_BY),
+        UNAVAILABLE=>Some(UNAVAILABLE_BY),
+        _=>None,
+    }
+}
 /// What "Send again" would send for the newest message.
 fn execution_resend(value:&Value,room:&str,thread:&str)->Option<Resend> {
     resend_offers::of_message(&execution_rows(value,room,thread))
@@ -151,7 +168,7 @@ fn execution_lines(value:&Value,room:&str,thread:&str,stopped:impl Fn(&str)->boo
     let several=rows.len()>1;
     rows.into_iter().filter_map(|row| {
         let text=row_notice(row,&stopped)?;
-        let agent=row_agent(row).filter(|_| several || text==UNPROCESSED).map(str::to_owned);
+        let agent=row_agent(row).filter(|_| several || named(text).is_some()).map(str::to_owned);
         Some(ExecutionLine {agent,name:None,text})
     }).collect()
 }
@@ -181,6 +198,14 @@ fn row_notice(row:&Value,stopped:&impl Fn(&str)->bool)->Option<&'static str> {
     // ends such a message at once says so (`endReason`). Once the Agent's next
     // period has begun it offers "Send again" (above), which then says the rest.
     if row["endReason"]=="usage_unrepresentable" {return Some("This message ended without a turn: the Agent's earlier usage could not be counted, so a copy sent now would end the same way.");}
+    // Ended without a turn and not offered to its sender: the server says
+    // why there is no "Send again". An Agent it does not name, and a server
+    // that does not say, keep the line below.
+    match row["notOfferedBecause"].as_str() {
+        Some("agent_stopped")=>return Some(STOPPED),
+        Some("agent_unavailable")=>return Some(UNAVAILABLE),
+        _=>{},
+    }
     // Otherwise (an older server) it waits out its time.
     if row["reason"]=="usage_unrepresentable" {return Some("This message cannot start: the Agent's earlier usage could not be counted. It ends after waiting at most a day.");}
     match row["state"].as_str()? {
@@ -313,6 +338,11 @@ impl SharedPermissionNotice {
     /// show a reply in a thread and cannot send it again: its thread can.
     fn resend_here(&self)->Option<&Resend> {
         self.resend.as_ref().filter(|r|r.thread.is_none() || !self.thread.is_empty())
+    }
+    /// What "Send again" offers from here now: only once the timeline its
+    /// copy would stand in has read the copies it holds on this client.
+    fn resend_offered(&self)->Option<&Resend> {
+        self.resend_here().filter(|r|resend_offers::copies_read(&self.room,r))
     }
     /// Shows the spinner while the Agent works or a decision is on its way.
     /// The spinner updates its retained draw call without re-running the draw
@@ -457,7 +487,7 @@ impl SharedPermissionNotice {
         self.view.button(cx,ids!(execution_review)).set_enabled(cx,self.active && !self.loading);
         // Offered with the run's state only: a waiting request or a failed
         // read has the notice, and the state it would act on is not shown.
-        let resend=self.resend_here().is_some() && self.rows.is_empty() && !self.shows_error();
+        let resend=self.resend_offered().is_some() && self.rows.is_empty() && !self.shows_error();
         self.view.widget(cx,ids!(execution_resend)).set_visible(cx,resend);
         self.view.button(cx,ids!(execution_resend)).set_enabled(cx,self.active);
         let notices=&self.room_allowances;
@@ -625,12 +655,13 @@ impl SharedPermissionNotice {
         if !active {self.room_allowances=RoomAllowances::default();self.render(cx);}
     }
     /// What some message offers changed. When the card on the message sent
-    /// this notice's message again, this offer is gone too.
+    /// this notice's message again, this offer is gone too; when a timeline
+    /// has read its copies, the offer may show.
     fn offers_changed(&mut self,cx:&mut Cx) {
         if self.resend.as_ref().is_some_and(|r|sent_again(&self.room,&r.event)) {
             self.resend=None;
-            self.render(cx);
         }
+        self.render(cx);
     }
     /// Send the decision for the request on screen, through the same store as
     /// the card on the message, so both show it.
@@ -685,7 +716,7 @@ impl Widget for SharedPermissionNotice {
                 cx.action(crate::hagency::work_review::WorkReviewAction::Open(crate::hagency::work_review::OriginalWork{session,room,event,agent:agent.into()}));
             }
             if self.view.button(cx,ids!(execution_resend)).clicked(actions) && self.active && self.rows.is_empty() && !self.shows_error()
-                && let Some(resend)=self.resend_here().cloned() {
+                && let Some(resend)=self.resend_offered().cloned() {
                 self.resend=None;
                 self.send_again(cx,resend);
             }
@@ -1000,6 +1031,8 @@ mod tests {
     }
     #[test]
     fn a_reply_in_a_thread_is_offered_in_its_thread_and_the_room_says_where() {
+        crate::sliding_sync::test_read_copies("!threads:x",Some("$thread_root"));
+        crate::sliding_sync::test_read_copies("!threads:x",None);
         let mut cx=Cx::new(Box::new(|_,_|{}));
         let widget=notice(&mut cx);
         let mut n=widget.borrow_mut().unwrap();
@@ -1063,6 +1096,7 @@ mod tests {
     #[test]
     fn the_notice_drops_its_offer_when_the_card_on_the_message_sent_it() {
         use matrix_sdk::ruma::{OwnedEventId,OwnedRoomId};
+        crate::sliding_sync::test_read_copies("!card:x",None);
         let mut cx=Cx::new(Box::new(|_,_|{}));
         let widget=notice(&mut cx);
         {
@@ -1083,6 +1117,7 @@ mod tests {
     }
     #[test]
     fn send_again_shows_with_the_run_state_and_sends_one_message_for_one_click() {
+        crate::sliding_sync::test_read_copies("!room:x",None);
         let mut cx=Cx::new(Box::new(|_,_|{}));
         let widget=notice(&mut cx);
         let mut n=widget.borrow_mut().unwrap();
@@ -1114,6 +1149,75 @@ mod tests {
         // A later message that ends the same way is offered on its own.
         n.read_status(&json!({"executions":[row("$one_click_later","@first:x","expired",None,true)]}),|_|false);
         assert_eq!(n.resend.as_ref().map(|r|r.event.as_str()),Some("$one_click_later"));
+    }
+
+    #[test]
+    fn a_message_not_offered_says_why_and_that_it_can_be_sent_again_once_its_agent_runs() {
+        let line=|r:Value|execution_lines(&json!({"executions":[r]}),"!room:x","",|_|false).remove(0);
+        let offered=|r:Value|execution_resend(&json!({"executions":[r]}),"!room:x","");
+        let not_offered=|state:&str,reason:Option<&str>,why:Option<&str>|{
+            let mut r=row("$e","@a:x",state,reason,false);
+            if let Some(why)=why {r["notOfferedBecause"]=json!(why);}
+            r
+        };
+        let unnamed=|mut r:Value|{r["agentMxid"]=Value::Null;r};
+        for (state,reason) in [("expired",None),("cancelled",Some("never_started")),("blocked",Some("retry_exhausted")),("paused",Some("paused_at_receipt"))] {
+            // The Agent is stopped: why there is no button, and when there is one.
+            let stopped=not_offered(state,reason,Some("agent_stopped"));
+            assert_eq!(line(stopped.clone()).shown(),"@a:x did not process this message and is stopped. It can be sent again once @a:x runs again.","{state}");
+            assert_eq!(line(unnamed(stopped.clone())).shown(),"This message was not processed. Its Agent is stopped; it can be sent again once the Agent runs again.","{state}");
+            assert!(offered(stopped).is_none());
+            // It cannot take a new message now for another reason.
+            let unavailable=not_offered(state,reason,Some("agent_unavailable"));
+            assert_eq!(line(unavailable.clone()).shown(),"@a:x did not process this message and is not available now. It can be sent again once @a:x runs again.","{state}");
+            assert_eq!(line(unnamed(unavailable.clone())).shown(),"This message was not processed. Its Agent is not available now; it can be sent again once the Agent runs again.","{state}");
+            assert!(offered(unavailable).is_none());
+        }
+        // An Agent the status does not name keeps the line it had, and so
+        // does a row from a server that does not say why.
+        let today=line(unnamed(not_offered("expired",None,None))).shown();
+        assert_eq!(today,"This message was not processed; it will not retry automatically.");
+        assert_eq!(line(unnamed(not_offered("expired",None,Some("agent_unnamed")))).shown(),today);
+        assert_eq!(line(not_offered("expired",None,None)).shown(),"@a:x did not process this message. It will not retry automatically.");
+        assert_eq!(line(not_offered("paused",Some("paused_at_receipt"),None)).text,"Agent is paused.");
+        // A copy sent now would end the same way: that says more than when
+        // the Agent runs.
+        let mut usage=not_offered("blocked",Some("usage_unrepresentable"),Some("agent_stopped"));
+        usage["endReason"]=json!("usage_unrepresentable");
+        assert!(line(usage).text.contains("would end the same way"));
+        // Every text has its translation.
+        for text in [STOPPED,STOPPED_BY,UNAVAILABLE,UNAVAILABLE_BY] {
+            assert_ne!(crate::i18n::text_for(crate::i18n::Language::Chinese,text),text,"{text}");
+        }
+    }
+    #[test]
+    fn the_notice_offers_once_the_timeline_its_copy_would_stand_in_has_read_its_copies() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        let mut n=widget.borrow_mut().unwrap();
+        let in_room=|mut r:Value,root:&str|{r["roomId"]=json!("!copies-first:x");r["threadRoot"]=json!(root);r};
+        // A message of the room's own timeline, read in the room.
+        (n.active,n.room)=(true,"!copies-first:x".into());
+        n.read_status(&json!({"executions":[in_room(row("$copies_first","@first:x","expired",None,true),"$copies_first")]}),|_|false);
+        n.render(&mut cx);
+        // No timeline of the room has read its copies yet (a restart, a room
+        // just opened): the line is there, the button is not.
+        assert!(n.display().title.starts_with("@first:x did not process this message."));
+        assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        // Its thread is open and has read its copies, the room's timeline has
+        // not: the message, whose copy stands in the room's timeline, is not
+        // offered there either.
+        crate::sliding_sync::test_read_copies("!copies-first:x",Some("$copies_first"));
+        n.thread="$copies_first".into();
+        n.offers_changed(&mut cx);
+        assert!(!n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        // The room's timeline has read them: offered, in the room and in the thread.
+        crate::sliding_sync::test_read_copies("!copies-first:x",None);
+        n.offers_changed(&mut cx);
+        assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
+        n.thread.clear();
+        n.offers_changed(&mut cx);
+        assert!(n.view.widget(&mut cx,ids!(execution_resend)).visible());
     }
 
     #[test]
