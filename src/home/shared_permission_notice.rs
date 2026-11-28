@@ -143,6 +143,26 @@ fn named(text:&str)->Option<&'static str> {
         _=>None,
     }
 }
+/// What the notice offers for a run whose outcome is unknown, from its row.
+#[derive(Clone,Copy,Debug,PartialEq)]
+enum Review {
+    /// "Review original task records": the reader may read them, or the
+    /// server does not say (`viewerCanReview` absent), as before it did.
+    Offered,
+    /// The review would list nothing for the reader: only a line says who
+    /// can read the records.
+    ByOwner,
+}
+/// The line for a reader who cannot review the records.
+const OWNER_REVIEWS:&str="The Agent's owner can review the original task records.";
+fn review_of(row:&Value)->Option<Review> {
+    if !matches!(row["state"].as_str(),Some("unknown"|"reply_unknown")) {return None;}
+    match row["viewerCanReview"].as_bool() {
+        Some(false)=>Some(Review::ByOwner),
+        _ if row["eventId"].as_str().is_some() && row["agentId"].as_str().is_some()=>Some(Review::Offered),
+        _=>None,
+    }
+}
 /// What "Send again" would send for the newest message.
 fn execution_resend(value:&Value,room:&str,thread:&str)->Option<Resend> {
     resend_offers::of_message(&execution_rows(value,room,thread))
@@ -339,6 +359,10 @@ impl SharedPermissionNotice {
     fn resend_here(&self)->Option<&Resend> {
         self.resend.as_ref().filter(|r|r.thread.is_none() || !self.thread.is_empty())
     }
+    /// What the notice offers for the run whose outcome is unknown, if any.
+    fn review(&self)->Option<Review> {
+        self.execution_source.as_ref().and_then(review_of)
+    }
     /// What "Send again" offers from here now: only once the timeline its
     /// copy would stand in has read the copies it holds on this client.
     fn resend_offered(&self)->Option<&Resend> {
@@ -382,6 +406,11 @@ impl SharedPermissionNotice {
                 _ if self.resend.is_some() && self.resend_here().is_none() && !shows_error =>
                     tr("Open its thread to send it again.").to_owned(),
                 _=>String::new(),
+            };
+            let hint=match self.review() {
+                Some(Review::ByOwner) if !shows_error && hint.is_empty()=>tr(OWNER_REVIEWS).to_owned(),
+                Some(Review::ByOwner) if !shows_error=>format!("{hint}\n{}",tr(OWNER_REVIEWS)),
+                _=>hint,
             };
             return Display {
                 visible:!self.execution_lines.is_empty() || shows_error,
@@ -482,7 +511,7 @@ impl SharedPermissionNotice {
         self.waiting=shown.waiting;
         self.sync_animation(cx);
         self.render_recovery(cx);
-        let review=self.execution_source.as_ref().is_some_and(|r|matches!(r["state"].as_str(),Some("unknown"|"reply_unknown")) && r["eventId"].as_str().is_some() && r["agentId"].as_str().is_some());
+        let review=self.review()==Some(Review::Offered);
         self.view.widget(cx,ids!(execution_review)).set_visible(cx,review);
         self.view.button(cx,ids!(execution_review)).set_enabled(cx,self.active && !self.loading);
         // Offered with the run's state only: a waiting request or a failed
@@ -710,6 +739,7 @@ impl Widget for SharedPermissionNotice {
             }
             if self.view.button(cx,ids!(refresh)).clicked(actions){self.poll(cx,true);}
             if self.view.button(cx,ids!(execution_review)).clicked(actions) && !self.loading
+                && self.review()==Some(Review::Offered)
                 && let (Some(row),Some(client))=(self.execution_source.as_ref(),crate::sliding_sync::get_client())
                 && let (Ok(room),Some(event),Some(agent),Some(session))=(self.room.parse(),row["eventId"].as_str().and_then(|e|e.parse().ok()),row["agentId"].as_str(),crate::matrix_context::SessionPin::capture(&client))
                 && session.is_current() {
@@ -921,6 +951,40 @@ mod tests {
         assert!(text.contains("External actions or charges may already exist"));
         assert!(text.contains("original message and task records"));assert!(!text.contains("Send the message again"));
         assert!(!execution_busy(&value,"!original:test",""));
+    }
+
+    #[test]
+    fn the_review_of_original_records_is_offered_to_who_can_read_them_and_a_line_tells_anyone_else() {
+        let mut cx=Cx::new(Box::new(|_,_|{}));
+        let widget=notice(&mut cx);
+        let mut n=widget.borrow_mut().unwrap();
+        (n.active,n.room)=(true,"!review:x".into());
+        let read=|n:&mut SharedPermissionNotice,cx:&mut Cx,state:&str,can:Option<bool>|{
+            let mut row=json!({"roomId":"!review:x","eventId":"$review","threadRoot":"$review","agentId":"agent-a","agentMxid":"@a:x","state":state});
+            if let Some(can)=can {row["viewerCanReview"]=json!(can);}
+            n.read_status(&json!({"executions":[row]}),|_|false);
+            n.render(cx);
+        };
+        for state in ["unknown","reply_unknown"] {
+            // The Agent's manager, or the administrator of its project or pool.
+            read(&mut *n,&mut cx,state,Some(true));
+            assert!(n.view.widget(&mut cx,ids!(execution_review)).visible(),"{state}");
+            assert!(n.display().hint.is_empty(),"{state}");
+            // Anyone else: the review would list nothing for them.
+            read(&mut *n,&mut cx,state,Some(false));
+            assert!(!n.view.widget(&mut cx,ids!(execution_review)).visible(),"{state}");
+            assert_eq!(n.display().hint,"The Agent's owner can review the original task records.","{state}");
+            assert!(n.view.widget(&mut cx,ids!(hint)).visible(),"{state}");
+            // A server that does not say: the button, as before.
+            read(&mut *n,&mut cx,state,None);
+            assert!(n.view.widget(&mut cx,ids!(execution_review)).visible(),"{state}");
+            assert!(n.display().hint.is_empty(),"{state}");
+        }
+        // A run whose outcome is known has neither.
+        read(&mut *n,&mut cx,"failed",Some(false));
+        assert!(!n.view.widget(&mut cx,ids!(execution_review)).visible());
+        assert!(n.display().hint.is_empty());
+        assert_ne!(crate::i18n::text_for(crate::i18n::Language::Chinese,OWNER_REVIEWS),OWNER_REVIEWS);
     }
 
     /// How many timers `f` starts: `Cx` hands out timer ids in sequence.
