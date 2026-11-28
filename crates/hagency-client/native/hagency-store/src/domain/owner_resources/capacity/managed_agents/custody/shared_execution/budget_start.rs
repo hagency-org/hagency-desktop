@@ -109,7 +109,8 @@ fn prepare_new(db:&Connection,e:&VerifiedManagementEnrollment,original:SharedRun
     let rev=revision(db)?;
     let selected=budget_snapshot::snapshot(db,e,&original)?;
     if selected.budget.state!=SharedSuccessorBudgetState::Available || selected.budget.observed_ledger_revision!=rev {return Err(Error::Capacity)}
-    let collision:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents WHERE id=?1 OR (child_id=?2 AND predecessor_digest=?3))",params![start_id,original.agent_reservation_id,selected.predecessor.command_digest],|r|r.get(0))?;
+    // A v2 start whose place its ended event gave back holds none here either.
+    let collision:bool=db.query_row("SELECT EXISTS(SELECT 1 FROM owner_shared_start_intents i WHERE i.id=?1 OR (i.child_id=?2 AND i.predecessor_digest=?3 AND NOT EXISTS(SELECT 1 FROM owner_shared_start_releases r WHERE r.start_intent_id=i.id)))",params![start_id,original.agent_reservation_id,selected.predecessor.command_digest],|r|r.get(0))?;
     if collision {return Err(Error::Conflict)}
     let input=SharedBudgetAttemptStartInput {
         tool_policy: owner_tool_policy(db, &original)?,

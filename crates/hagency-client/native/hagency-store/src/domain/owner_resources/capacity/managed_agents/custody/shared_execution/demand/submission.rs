@@ -181,6 +181,11 @@ impl OwnerResourceRegistry {
                     return Err(Error::LocalAuthority);
                 }
                 let input = saved.input.ok_or(Error::Capacity)?;
+                // A start the server refused for the Agent's budget is never
+                // sent again (schema 116).
+                if refused(&tx, &input.start.start_intent_id)? {
+                    return Err(Error::LocalAuthority);
+                }
                 let start = start_selection::saved_start(&tx, &p, &input.start.start_intent_id)?;
                 if canonical::digest(&serde_json::to_value(start.original())?)?
                     != canonical::digest(&serde_json::to_value(&original)?)?

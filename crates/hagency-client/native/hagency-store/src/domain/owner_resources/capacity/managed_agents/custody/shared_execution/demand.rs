@@ -5,11 +5,13 @@ mod guard;
 pub(super) mod journal;
 mod promotion;
 mod recovery;
+mod refusal;
 mod retry;
 mod stop;
 mod submission;
 mod terminal;
 mod types;
+pub use refusal::SHARED_BUDGET_EXECUTION_REQUIRED;
 pub use retry::{MAX_DEMAND_RETRIES, SharedDemandRetry};
 pub use stop::{SharedDemandStopInput, SharedDemandStopIntent};
 pub use submission::{SharedDemandRecovery, SharedDemandSubmission};
@@ -19,5 +21,6 @@ pub(super) use guard::{
     attempt_control_revision, check_attempt_control, require_explicit_start, require_no_owner_stop,
 };
 pub(super) use promotion::check_work_control;
+pub(super) use refusal::refused;
 #[cfg(feature = "shared-budget-execution")]
-pub(super) use terminal::same_terminal;
+pub(super) use terminal::second_terminal;

@@ -1009,6 +1009,7 @@ async fn renew(session: &mut RemoteSession) -> Result<(), Error> {
                 .unwrap(),
         )
         .bearer_auth(&session.token)
+        .header(AUTHORIZATION_WINDOW_V2_HEADER, requested_window_ms(session))
         .header(AUTHORIZATION_WINDOW_HEADER, requested_window_ms(session))
         .header(ACTIVITY_WINDOW_HEADER, ACTIVITY_WINDOW_FOLLOWS_SESSION)
         .json(&json!({"accessToken":shared_token.as_ref().unwrap_or(&session.oauth_token)}))
@@ -1166,6 +1167,13 @@ const SHORTENED_PROOF: Duration = Duration::from_secs(10);
 /// that lives shorter than the window cannot be refreshed into a full proof,
 /// and is refreshed when it runs out, as before.
 const SHORTENED_PROOF_REFRESH_SPACING: Duration = Duration::from_secs(60);
+/// Asks for the window of `AUTHORIZATION_WINDOW_HEADER`, with the same value,
+/// and says that this host keeps one local session for each server session.
+/// Under a longer window a host that made one local session per call would
+/// reach its limit and refuse its own calls, so a server that knows this
+/// header grants more than thirty seconds only to a request that carries it.
+/// A server from before it reads the other header, which is sent as well.
+const AUTHORIZATION_WINDOW_V2_HEADER: &str = "x-hagency-authorization-window-v2-ms";
 /// What is left of a proof's window as the local clock reads it: the time to
 /// its deadline plus what the proof clock left out of the window.
 fn window_left(until: Instant, taken: Duration) -> Duration {
@@ -1222,6 +1230,7 @@ async fn renew_with_refreshed_token(
                 .unwrap(),
         )
         .bearer_auth(session_token)
+        .header(AUTHORIZATION_WINDOW_V2_HEADER, window_ms)
         .header(AUTHORIZATION_WINDOW_HEADER, window_ms)
         .header(ACTIVITY_WINDOW_HEADER, ACTIVITY_WINDOW_FOLLOWS_SESSION)
         .json(&json!({"accessToken":refreshed.access_token}))
@@ -2651,6 +2660,9 @@ mod scope_policy_request_tests {
 
 #[cfg(test)]
 mod shared_protocol_tests;
+
+#[cfg(test)]
+mod authorization_window_tests;
 
 #[cfg(test)]
 mod shortened_proof_tests {
